@@ -116,11 +116,25 @@ impl MemoryHandler {
             Ok(v) => v,
             Err(e) => return Ok(handled(format!("/memory why: {e}"))),
         };
+        // 23B-C3: index the previews by id so each provenance line can show
+        // WHAT the item says, not only where it came from. Found by driving
+        // this live: the command printed a uuid, a partition and a modality
+        // and never the text, so a user could see that *something* was in
+        // their prompt but not what — which is most of the question
+        // "why is this in my context window" asks.
+        let previews: std::collections::HashMap<&str, &str> = hits
+            .iter()
+            .map(|h| (h.id.as_str(), h.preview.as_str()))
+            .collect();
         let mut out = format!("/memory why: {} item(s) recalled\n", hits.len());
         for p in &report.provenance {
             out.push_str(&format!(
                 "  #{rank} {id} [{partition}/{tier}] via {modality} score={score:.5} \
-                 age={age}s {staleness}\n",
+                 age={age}s {staleness}\n      {preview}\n",
+                preview = previews
+                    .get(p.id.as_str())
+                    .copied()
+                    .unwrap_or("(no preview)"),
                 rank = p.rank,
                 id = p.id,
                 partition = p.partition.as_str(),
