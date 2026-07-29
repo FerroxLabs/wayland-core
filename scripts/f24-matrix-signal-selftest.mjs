@@ -655,6 +655,104 @@ test('R4 a dead restart (the process never came back) is INCOMPLETE, not LOSS', 
   );
 });
 
+// ── the run verdict must be able to fail on a restart LOSS ─────────────────
+//
+// THIRD INSTRUMENT DEFECT, found by RUNNING rather than by reading, and
+// repaired in this lane (LANE-BRIEF §6b-ii, §3.2).
+//
+// The first live run graded the restart probe LOSS — a real product finding —
+// while `failed.length` stayed 0, because the probe is recorded outside
+// `results`. That run exited RED anyway, but for an unrelated reason (email's
+// six legs were NOT MEASURED). So the gate looked correct while being
+// INCAPABLE OF FAILING ON THE THING IT HAD JUST FOUND: the moment email becomes
+// measurable, a silent inbound loss across a restart would exit 0 GREEN.
+//
+// The verdict is a top-level expression in the driver's entry point rather than
+// an importable function, so these assertions transcribe it — and V3 is the
+// drift guard that keeps the transcription honest.
+function verdictOf({ instrumentFault, failedLegs, ranEverything, emailProbe, restartVerdict }) {
+  const restartLoss = restartVerdict === 'LOSS';
+  const restartIncomplete = restartVerdict === 'INCOMPLETE';
+  const probeFailed = (emailProbe ?? []).some((p) => !p.ok) || restartLoss;
+  return instrumentFault || restartIncomplete
+    ? 'INCOMPLETE'
+    : failedLegs === 0 && ranEverything && !probeFailed
+      ? 'GREEN'
+      : 'RED';
+}
+
+test('V1 KNOWN-POSITIVE: a clean run with a surviving gap message is GREEN', () => {
+  eq(
+    verdictOf({
+      instrumentFault: false,
+      failedLegs: 0,
+      ranEverything: true,
+      emailProbe: [{ ok: true }],
+      restartVerdict: 'PASS',
+    }),
+    'GREEN',
+    'clean run',
+  );
+});
+
+test('V2 KNOWN-NEGATIVE: a restart LOSS turns an otherwise-perfect run RED', () => {
+  // The exact shape the first live run would have had if email were measurable:
+  // every leg passing, everything measured, and a silent inbound loss.
+  eq(
+    verdictOf({
+      instrumentFault: false,
+      failedLegs: 0,
+      ranEverything: true,
+      emailProbe: [{ ok: true }],
+      restartVerdict: 'LOSS',
+    }),
+    'RED',
+    'restart loss must redden the run',
+  );
+});
+
+test('V3 THIRD ASSERTION — the OLD verdict expression would have called that same run GREEN', () => {
+  // Kept executable so the repair is demonstrated, not asserted. This is the
+  // expression the driver actually shipped during the first live run.
+  const oldVerdict = ({ instrumentFault, failedLegs, ranEverything }) =>
+    instrumentFault ? 'INCOMPLETE' : failedLegs === 0 && ranEverything ? 'GREEN' : 'RED';
+  const obs = {
+    instrumentFault: false,
+    failedLegs: 0,
+    ranEverything: true,
+    emailProbe: [{ ok: true }],
+    restartVerdict: 'LOSS',
+  };
+  eq(oldVerdict(obs), 'GREEN', 'the old gate exits 0 on a proven silent inbound loss');
+  eq(verdictOf(obs), 'RED', 'the repaired gate does not');
+});
+
+test('V4 a restart INCOMPLETE is INCOMPLETE, never a green and never a loss', () => {
+  eq(
+    verdictOf({
+      instrumentFault: false,
+      failedLegs: 0,
+      ranEverything: true,
+      emailProbe: [{ ok: true }],
+      restartVerdict: 'INCOMPLETE',
+    }),
+    'INCOMPLETE',
+    'a probe that could not be attributed must not be graded either way',
+  );
+});
+
+test('V5 the transcription still matches the driver source (drift guard)', () => {
+  const s = fs.readFileSync(path.join(HERE, 'f24-inbound.mjs'), 'utf8');
+  for (const f of [
+    "restart.verdict === 'LOSS'",
+    "restart.verdict === 'INCOMPLETE'",
+    'failed.length === 0 && ranEverything && !probeFailed',
+    'result.instrument_fault || restartIncomplete',
+  ]) {
+    assert(s.includes(f), `driver verdict no longer contains: ${f}`);
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 4. PRODUCT CONTRACTS THIS RUN DEPENDS ON — read from source
 // ═══════════════════════════════════════════════════════════════════════════

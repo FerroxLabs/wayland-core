@@ -1067,13 +1067,34 @@ class InboundMatrix {
       );
       sleep(1000);
     }
+    // SIGKILL, then CONFIRM. The first live run hit this path — `--json-stream`
+    // did not exit within 30s of SIGTERM — and the original returned
+    // `stopped: true` the instant it sent SIGKILL, without checking. That would
+    // report "the binary was down" for a process that might still have been
+    // running, which is the one fact the gap leg depends on. The run's other
+    // control (the fixture's sync_total staying flat) happened to hold, but a
+    // probe must not rely on a second control to cover a claim it makes itself.
     try {
       child.kill('SIGKILL');
     } catch {
       /* already gone */
     }
-    this.note(`binary pid=${child.pid} did not exit within ${budgetSecs}s; SIGKILLed`);
-    return { stopped: true, secs: budgetSecs, pid: child.pid, sigkill: true };
+    let reaped = false;
+    for (let i = 0; i < 15; i += 1) {
+      try {
+        process.kill(child.pid, 0);
+      } catch {
+        reaped = true;
+        break;
+      }
+      process.stdout.write(`[inbound] waiting for SIGKILL to land: ${i}s pid=${child.pid}\n`);
+      sleep(1000);
+    }
+    this.note(
+      `binary pid=${child.pid} did not exit within ${budgetSecs}s of SIGTERM; SIGKILLed, ` +
+        `reaped=${reaped}`,
+    );
+    return { stopped: reaped, secs: budgetSecs, pid: child.pid, sigkill: true, reaped };
   }
 
   waitForWebhookHost() {
@@ -2647,9 +2668,27 @@ if (isMain) {
   // a token reached the journal in a form this driver cannot decode, so the
   // numbers are untrustworthy in BOTH directions and the run must not be read
   // as either a clean green or an honest red.
-  const verdict = result.instrument_fault
+  // THE RESTART PROBE MUST BE ABLE TO TURN THE RUN RED.
+  //
+  // INSTRUMENT DEFECT FOUND BY RUNNING, AND REPAIRED HERE (LANE-BRIEF §6b-ii).
+  // The first live run graded the restart probe LOSS — a genuine product
+  // finding — while `failed.length` stayed 0, because the probe is recorded
+  // outside `results` (as `email_admission_probe` is). That run happened to
+  // exit RED anyway, for an unrelated reason: email's six legs were NOT
+  // MEASURED. So the gate LOOKED correct while being incapable of failing on
+  // the thing it had just found. The moment email becomes measurable, a silent
+  // inbound loss across a restart would have exited 0 GREEN.
+  //
+  // That is exactly the self-passing-gate class in §3.2, and noting it without
+  // fixing the instrument is how the one measured recurrence in this program
+  // happened. Both probes now count.
+  const restart = result.matrix_restart_probe;
+  const restartLoss = restart ? restart.verdict === 'LOSS' : false;
+  const restartIncomplete = restart ? restart.verdict === 'INCOMPLETE' : false;
+  const probeFailed = (result.email_admission_probe ?? []).some((p) => !p.ok) || restartLoss;
+  const verdict = result.instrument_fault || restartIncomplete
     ? 'INCOMPLETE'
-    : failed.length === 0 && ranEverything
+    : failed.length === 0 && ranEverything && !probeFailed
       ? 'GREEN'
       : 'RED';
   process.stdout.write(
@@ -2657,6 +2696,7 @@ if (isMain) {
       `runtime=${result.runtime} ` +
       `legs=${result.results.length}/${expectedLegs} failed=${failed.length} ` +
       `not_measured=${(result.not_measured ?? []).length} accounted=${accounted}/${expectedLegs} ` +
+      `probe_failed=${probeFailed} restart_verdict=${restart?.verdict ?? 'n/a'} ` +
       `arrivals_total=${result.arrivals_total} telegram_arrivals=${result.telegram_arrivals_total} ` +
       `mail_arrivals=${result.mail_arrivals_total} matrix_arrivals=${result.matrix_arrivals_total} ` +
       `signal_arrivals=${result.signal_arrivals_total} ` +
