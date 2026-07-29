@@ -76,6 +76,37 @@ it once, on the transcription arm, and did not fix it on vision.
 is unit-assertable without a network round trip — same rationale the transcription
 resolver states for itself.
 
+## M4 — the capability is present on the wire; only our code is missing
+
+Deterministic fixture built (`evidence/27-media-intake/make-vision-fixture.py`):
+
+```
+vision-fixture.png  bytes=2843
+sha256=0115a686f37bfcb1eb2d1363562ce53bda4adbc80d8dbd7fae86f983a4ec17a3
+ground truth: token=VORTHAK  number=7492  shape=red triangle
+```
+
+Ground truth is deliberately **unguessable**. "VORTHAK" is not a word; 7492 is not a
+default. A model answering blind cannot emit either. That is what makes recovery proof of
+sight rather than proof of plausible guessing.
+
+**Raw-wire probe (curl, credential passed via `curl -K -` config on stdin so it never
+enters `argv`):**
+
+```
+POST https://api.fluxrouter.ai/v1/chat/completions   model=flux-auto   → HTTP 200
+CONTENT: The image shows the text "VORTHAK" and below it "7492" in black font on a
+         white background. To the right, there is a solid red triangle pointing upward.
+```
+
+**All three ground truths recovered.** Flux serves vision on the OpenAI chat-completions
+wire, in the exact `image_url` + base64 `data:` URL shape `OpenAiVisionBackend` already
+builds. So the backend body is already correct; **the only defect is that no code path can
+give it a Flux base URL and key.** `flux-auto` is the router alias the repo already uses
+(`openai.rs` tests, `reasoning_budget_test.rs`) and is the correct model constant.
+
+Also measured: `GET /v1/models` → HTTP 200, **77 models**. Instrument alive.
+
 ---
 
 ## Still to establish
