@@ -51,7 +51,9 @@ use std::fs::File;
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _};
-use std::path::{Component, Path, PathBuf, Prefix};
+// `Prefix` is deliberately absent: UNC classification is no longer done here.
+// It lives in `wcore_config::network_path`, reached via `is_unc_path` below.
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
