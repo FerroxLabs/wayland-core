@@ -92,8 +92,71 @@ will report that with the exact guard that blocks it rather than manufacture it.
 
 - [x] read prior lane summary + live evidence in full
 - [x] code read above
-- [ ] hetzner worktree + build
-- [ ] observation 1 (cache HIT)
-- [ ] observation 2 (compaction)
-- [ ] observation 3 (history_rewritten)
+- [x] hetzner worktree + build
+- [x] observation 1 (cache HIT)
+- [x] observation 2 (compaction fires — and FAILS 400; C4L-F1)
+- [~] observation 3 (`history_rewritten` seen, but on a FAILED compaction = false positive)
 - [ ] secret sweep + liveness control
+
+---
+
+# SESSION 2 — resumed 2026-07-29 after the first agent was killed
+
+The first agent's process died after `bc65e989`. Its five commits survive and are the
+starting point. `23B-C4-LIVE-EVIDENCE.md` **ends mid-write** at a
+`<!-- ferrox:write-continue -->` sentinel: §4 (the findings C4L-F1 / C4L-F2 that §2 and
+§3 both forward-reference) and §5 (the secret sweep) were never written. They are
+therefore NOT established, whatever the body text implies.
+
+## M3 — re-verifying the C4L-F1 diagnosis before building on it (code read, unproxied)
+
+The dead agent's commit message says *"autocompact is checked mid-tool-loop"*. That
+wording is **imprecise, and the precise mechanism matters** — a fix that works for the
+wrong reason is a coincidence. What the code actually says:
+
+- `run_compaction` is called from **three** sites (`/usr/bin/grep`, quoted glob —
+  an unquoted `--include=*.rs` was eaten by zsh on the first attempt, exactly the
+  LANE-BRIEF §3b-i trap): `engine.rs:9149` (turn-loop top, *"before each API call"*),
+  `engine.rs:10486` (`ContextOverflow` compact-and-retry) and `engine.rs:10824`
+  (length-wedge forced compaction). Liveness control in the same invocation:
+  `CompactionKind` → 14 hits.
+- `engine.rs:9112` states the loop shape outright: *"this is the turn-loop top (the
+  tool loop lives below `provider.stream` in the same iteration)"*, and 9140 says
+  *"Run multi-level compaction before each API call."* **So compaction is evaluated
+  before every API call, including the continuation calls of a tool loop** — not once
+  per user instruction.
+- The actual defect is at `engine.rs:13243`:
+  ```rust
+  let live_user_turn: Option<Message> = match self.messages.last() {
+      Some(m) if matches!(m.role, Role::User) => self.messages.pop(),
+      _ => None,
+  };
+  ```
+  It pops **any** trailing `User` message. On a tool continuation the trailing `User`
+  message is not a live instruction at all — it is the **`tool_result` carrier**.
+  Popping it strands the preceding `Assistant` turn's `tool_use` blocks with no
+  answer, and `autocompact` then appended a plain-text summary prompt where the
+  provider demands a `tool_result`. Hence the 400.
+
+That refines rather than contradicts the dead agent's diagnosis, and it predicts the
+live data: three failures at `messages.2`, `messages.4`, `messages.6` — **stepping by
+exactly 2**, one `Assistant`+`User` pair per tool round-trip — carrying 1, 2 and 2
+tool-use ids (parallel calls). Extracted unproxied from `/root/c4-live/B-show.txt`;
+liveness control in the same invocation: 8 `F23_CACHE` lines, 3 `kind=auto_failed`.
+
+The engine already knows the trailing `User` turn can carry `tool_result`s — `#285` at
+`engine.rs:13280` demotes orphaned results to text **at the post-compaction fold**. The
+uncovered gap is the *request handed to the compaction LLM*, which is exactly where
+`c0b0e18e` put `drop_unanswered_tool_calls`. Right layer.
+
+**Still to establish (nothing below is proven yet):**
+- the fix works LIVE against real Anthropic (`failed=0`, `tokens_reclaimed>0`);
+- reverting it brings the 400 back (known-negative on the fix itself);
+- `history_rewritten` on a SUCCESSFUL compaction;
+- provider read back from the product's own output on every run (§3b-ii);
+- secret sweep with a liveness control.
+
+**Residual gap already visible in the code, not yet tested:** the `PromptTooLong`
+retry path (`compact/auto.rs:246`) truncates the oldest 20% *after* sanitation, which
+can strand a `tool_result` whose `tool_use` was truncated away — the mirror-image
+violation. Recorded now so it is not lost.
