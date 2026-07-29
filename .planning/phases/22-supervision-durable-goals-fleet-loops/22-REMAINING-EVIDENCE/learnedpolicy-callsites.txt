@@ -1,0 +1,54 @@
+../../../../crates/wcore-eval-scenarios/bin/wcore-eval-fixture.rs:207:            CapabilityId::LearnedPolicy,
+../../../../crates/wcore-eval-scenarios/src/capability_honesty.rs:13:    CapabilityId::LearnedPolicy,
+../../../../crates/wcore-protocol/src/events.rs:28:    LearnedPolicy,
+../../../../crates/wcore-permissions/src/lib.rs:30:pub use learning::{EvalResult, LearnedDecision, LearnedPolicy, LearningError};
+../../../../crates/wcore-permissions/src/actor.rs:5://! this to decide whether to apply the [`crate::LearnedPolicy`] pre-filter
+../../../../crates/wcore-permissions/src/actor.rs:13://!   [`LearnedPolicy`] is configured. A deny short-circuits before the
+../../../../crates/wcore-permissions/src/actor.rs:26://! [`LearnedPolicy`]: crate::LearnedPolicy
+../../../../crates/wcore-permissions/src/actor.rs:41:    /// [`crate::LearnedPolicy`] is configured.
+../../../../crates/wcore-permissions/src/learning.rs:2://! pre-filter wave. Today no production caller constructs a LearnedPolicy
+../../../../crates/wcore-permissions/src/learning.rs:11://! be allowed. The runtime calls [`LearnedPolicy::evaluate`] for each
+../../../../crates/wcore-permissions/src/learning.rs:13://! prompts the user and feeds the answer back via [`LearnedPolicy::record`].
+../../../../crates/wcore-permissions/src/learning.rs:88:pub struct LearnedPolicy {
+../../../../crates/wcore-permissions/src/learning.rs:92:impl LearnedPolicy {
+../../../../crates/wcore-permissions/src/learning.rs:261:        let p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:267:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:277:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:290:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:316:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:331:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:346:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:358:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:370:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:384:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-permissions/src/learning.rs:394:        let loaded = LearnedPolicy::load_from(&path).unwrap();
+../../../../crates/wcore-permissions/src/learning.rs:410:        let p = LearnedPolicy::load_from(&missing).expect("missing file = empty");
+../../../../crates/wcore-permissions/src/learning.rs:416:        let mut p = LearnedPolicy::new();
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:6://! `CallActor::SubAgent` was never constructed and `LearnedPolicy` was
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:10://! `LearnedPolicy`, restore the pre-filter from `52b1ae2~..HEAD` and
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:41:use wcore_permissions::{CallActor, LearnedDecision, LearnedPolicy};
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:54:fn root_cfg(learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:58:fn sub_agent_cfg(learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:68:fn cfg(actor: CallActor, learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:88:fn deny_all_policy() -> Arc<LearnedPolicy> {
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:89:    let mut p = LearnedPolicy::new();
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:98:fn allow_all_policy() -> Arc<LearnedPolicy> {
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:99:    let mut p = LearnedPolicy::new();
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:205:    // Empty LearnedPolicy → every evaluate() returns Ask, which the
+../../../../crates/wcore-agent/tests/actor_acl_test.rs:208:    let cfg = sub_agent_cfg(Some(Arc::new(LearnedPolicy::new())));
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:4://! decision (LearnedPolicy::evaluate returned Ask), the engine calls
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:6://! menu and feeds the answer back to `LearnedPolicy::record`.
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:14:use wcore_permissions::learning::{LearnedDecision, LearnedPolicy};
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:19:    /// `LearnedPolicy::record` and then evaluates the dispatch.
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:78:/// it or call `LearnedPolicy::evaluate` to re-check.
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:82:    policy: &mut LearnedPolicy,
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:157:        let mut policy = LearnedPolicy::new();
+../../../../crates/wcore-agent/src/output/permission_prompt.rs:180:        let mut policy = LearnedPolicy::new();
+../../../../crates/wcore-agent/src/orchestration/node_executor.rs:57:use wcore_permissions::{CallActor, LearnedPolicy};
+../../../../crates/wcore-agent/src/orchestration/node_executor.rs:132:    pub learned_policy: Option<Arc<LearnedPolicy>>,
+../../../../crates/wcore-agent/src/orchestration/node_executor.rs:318:    // (CallActor::SubAgent is never constructed; LearnedPolicy::new is
+../../../../crates/wcore-agent/src/orchestration/node_executor.rs:389:// alongside the pre-filter call site above. The `LearnedPolicy` /
+../../../../crates/wcore-agent/src/orchestration/node_executor.rs:395:// procedural-memory `LearnedPolicy` into the config, restore from git
+../../../../crates/wcore-agent/src/capability_activation.rs:95:        CapabilityId::LearnedPolicy,
+../../../../crates/wcore-agent/src/capability_activation.rs:248:        for capability in [CapabilityId::LearnedPolicy, CapabilityId::DelegateIsolation] {
+../../../../crates/wcore-cli/src/tui/surfaces/diagnostics.rs:157:        CapabilityId::LearnedPolicy => "learned policy",

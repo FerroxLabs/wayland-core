@@ -1,0 +1,39 @@
+=== SWEEP A: CallActor::SubAgent construction sites (all crates, no head) ===
+crates/wcore-permissions/src/actor.rs:12://! - [`CallActor::SubAgent`] — subject to the pre-filter when a
+crates/wcore-permissions/src/actor.rs:78:        let a = CallActor::SubAgent {
+crates/wcore-permissions/src/actor.rs:92:        let a = CallActor::SubAgent {
+crates/wcore-agent/tests/actor_acl_test.rs:6://! `CallActor::SubAgent` was never constructed and `LearnedPolicy` was
+crates/wcore-agent/tests/actor_acl_test.rs:9://! path that constructs `CallActor::SubAgent` and a procedural-memory
+crates/wcore-agent/tests/actor_acl_test.rs:60:        CallActor::SubAgent {
+crates/wcore-agent/src/orchestration/node_executor.rs:318:    // (CallActor::SubAgent is never constructed; LearnedPolicy::new is
+crates/wcore-agent/src/orchestration/node_executor.rs:394:// spawn path that constructs `CallActor::SubAgent` and threads a
+--- count:
+       8
+
+=== KNOWN-POSITIVE control in same sweep shape: CallActor::Root ===
+      10
+
+=== SWEEP B: every READ of the learned_policy field (cfg.learned_policy / .learned_policy) ===
+crates/wcore-agent/tests/actor_acl_test.rs:13://! These prove that `AgentExecutorConfig::{actor, learned_policy}` are
+crates/wcore-agent/tests/actor_acl_test.rs:24://! 5. SubAgent actor without learned_policy → no pre-filter; tool runs.
+crates/wcore-agent/tests/actor_acl_test.rs:54:fn root_cfg(learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+crates/wcore-agent/tests/actor_acl_test.rs:55:    cfg(CallActor::Root, learned_policy)
+crates/wcore-agent/tests/actor_acl_test.rs:58:fn sub_agent_cfg(learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+crates/wcore-agent/tests/actor_acl_test.rs:64:        learned_policy,
+crates/wcore-agent/tests/actor_acl_test.rs:68:fn cfg(actor: CallActor, learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExecutorConfig {
+crates/wcore-agent/tests/actor_acl_test.rs:82:        learned_policy,
+crates/wcore-agent/tests/actor_acl_test.rs:216:    // SubAgent actor but no learned_policy configured → pre-filter is
+crates/wcore-agent/tests/policy_gate_wired_test.rs:170:        learned_policy: None,
+crates/wcore-agent/src/orchestration/node_executor.rs:132:    pub learned_policy: Option<Arc<LearnedPolicy>>,
+crates/wcore-agent/src/orchestration/node_executor.rs:392:// `learned_policy: None`, so the helpers were unreachable. They lived
+crates/wcore-agent/src/orchestration/node_executor.rs:420:            learned_policy: None,
+crates/wcore-agent/src/orchestration/f13_durability_tests.rs:913:        learned_policy: None,
+crates/wcore-agent/src/engine.rs:11433:                // `learned_policy` themselves.
+crates/wcore-agent/src/engine.rs:11435:                learned_policy: None,
+--- count:
+      16
+
+=== KNOWN-POSITIVE control: policy_gate field (known read at node_executor.rs:328) ===
+       0
+=== SWEEP C: cfg.learned_policy reads specifically ===
+       0

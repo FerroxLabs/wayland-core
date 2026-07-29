@@ -1,5 +1,12 @@
 # Phase 22 — verdict against its own Success Criteria
 
+> **SUPERSEDED TWICE. The governing grades are in `UPDATE — 2026-07-29` at the FOOT of this
+> file.** Everything before it is the 2026-07-26 and 2026-07-27 gradings, retained unedited
+> so the trajectory stays legible — but **do not quote them as current**. In particular the
+> 2026-07-27 section's Criterion 1, 3 and 4 rows are all now known to be wrong, and its
+> Criterion 4 claim that `Dynamic` and `EventDriven` have "no runtime enforcement" is
+> measurably false. The phase goal is still NOT ACHIEVED; the reason has changed.
+
 Tree: `2ecdfdf54ff7fda920eec7d068337006e5da4ee4` + this phase's commits.
 Graded 2026-07-26 by the executing agent. Criteria quoted verbatim from
 `.planning/ROADMAP.md`.
@@ -230,3 +237,93 @@ falsified to exit 1 and restored in the same run.
    explains why command fixtures must wait for the typed command set.
 3. **The Windows M1–M5 journal-compatibility legs** (Criterion 5), unchanged from
    the original list.
+
+---
+---
+
+# UPDATE — 2026-07-29, lane `lane/22-remaining` — THIS SECTION SUPERSEDES BOTH ABOVE
+
+Tree: `plan/f20-unified-audit-repair` @ `5457710e` (the 24-lane merge) plus this lane.
+Graded from **source and from the shipped binary**, not from any prior summary — a summary
+can itself be advertised-but-dead, which is the failure mode this phase has produced twice.
+
+**Why the 2026-07-27 section above is stale.** It was written before lanes `22-c1`,
+`22-c3` and `22-c3-goal`, all three of which are in this base. Its Criterion 1 and
+Criterion 3 grades are both out of date, and its Criterion 4 grade is wrong in a way nobody
+re-checked. Nothing above is edited, per this file's own convention.
+
+## Re-graded, against the ROADMAP text verbatim
+
+| Criterion | 2026-07-26 | 2026-07-27 | **2026-07-29** | Why |
+|---|---|---|---|---|
+| 1 — three surfaces observe **and control** identical state, and emit the producer fixtures | FAILED, not attempted | FAILED, 1 of 3 | **NOT MET — 3 of 3 observe, 0 of 3 control** | All three surfaces now exist (CLI verbs, `ProtocolEvent::Goal{Snapshot,Transition}`, TUI ingest + status segment). Two clauses fail: **no host→core Goal command exists** (`GoalResync` count **0** in `commands.rs`; known-positive `Stop` = 1), so "control" is delivered on ONE surface, the CLI; and the producer fixtures are **declared in `EVENT_SPECS` (8 references) but 0 of 49 fixture files on disk** are Goal fixtures. |
+| 2 — fleet claims survive kill/restart/reassignment | FAILED | **PASSED** | **PASSED, unchanged** | Not re-run by this lane. Linux + Windows, shipped 0.12.25, 12/12/12 effects, gate falsified in-run. |
+| 3 — five engines terminate through one canonical Goal transition, no nested owner | FAILED | FAILED, unchanged | **PARTIAL — 5/5 production paths, attachment opt-in** | The 2026-07-27 grade is stale: `22-c3` built the adapter surface and `22-c3-goal` gave all five a production path, live-proven on the shipped release. Root cause of the dead four was that `goal open` **hard-coded `GoalStrategy::Fleet`** — the product could not express four of its five strategies. Still not PASSED: attachment is **opt-in**, so an engine run with no Goal is unenforced, and **zero engine signatures changed**. |
+| 4 — fixed/dynamic/event-driven/manual loops bounded across reconnect, preemption, missed intervals, resume | FAILED, vocabulary only | PARTIAL (`Fixed` only) | **PARTIAL — and the bound is wider than 2026-07-27 recorded** | That section says "`Dynamic`, `EventDriven` and `Manual` still have no runtime enforcement." **Measured, that is false for two of the three.** `GoalAuthorityRecord::iteration_ceiling` (`goal/record.rs:143`) returns a numeric ceiling for `Once`, `Fixed`, `Dynamic` **and** `EventDriven`, and `session_journal/reducer.rs:326` refuses `GoalIterationStarted` past it **at the durable boundary**. `Manual` alone has no ceiling, by design — each advance is itself an operator action. Still PARTIAL: **reconnect, preemption and missed intervals are untouched** by anyone, and only `resume` is covered (the count lives in the chain). |
+| 5 — journal compatibility proved or migrated | PARTIAL | PARTIAL, unchanged | **PARTIAL, unchanged** | Not re-run by this lane. Linux-proved; the Windows M1–M5 legs were never taken. |
+
+**Phase goal — "users can supervise durable objectives and work graphs through one
+restart-safe lifecycle and one loop owner": STILL NOT ACHIEVED, and closer than either
+earlier grading.**
+
+The honest shape of the remaining gap has changed and is worth stating precisely, because
+"NOT ACHIEVED" has now been recorded three times and the reason is different each time:
+
+- 2026-07-26: nothing was reachable from any surface.
+- 2026-07-27: Criterion 3 was untouched — five engines terminated five ways.
+- **2026-07-29: every criterion has moved, and the goal fails on ONE word.** A user can
+  open a durable Goal, drive any of five engines through it, kill the process, restart, and
+  see exactly one termination — from a terminal. What they cannot do is **supervise** it
+  from the TUI or a host: both surfaces are **read-only**, because a host→core Goal command
+  must be answered in `crates/wcore-cli/src/main.rs`, the file every lane is fenced out of.
+  "Supervise" is not "observe". One command, in one fenced file, is the difference between
+  Criterion 1 NOT MET and MET — and, given C2 PASSED and C3/C4 PARTIAL, it is the single
+  highest-leverage item left in this phase.
+
+## What this lane changed, and the two F05 rows
+
+Both capability rows the `GOAL-*` ledger row cites as its checkable blocker are closed, one
+by measurement and one by construction. Full evidence in
+`22-REMAINING-EVIDENCE/{midflight,learnedpolicy}/RESULT.md`.
+
+- **`F05-TRUTH-2` (mid-flight monitor) was STALE, not unwired.** The shipped `0.12.25`
+  binary's own activation stream emits
+  `declared → configured → constructed → ready → reached → outcome_changed → observed`
+  plus `{"type":"mid_flight_monitor_decision","directive":"replan","reason":"repeated_error"}`.
+  **Both** columns of that row were false. One-variable negative control: taking the
+  identical-error count from 3 to 2 takes the decision and occurrence counts from 1 to 0
+  while `ready` stays 1. Both arms exit 0.
+- **`F05-TRUTH-4` (learned policy) was real, and worse than recorded.** The row said the
+  runtime path was unwired; in fact `AgentExecutorConfig` carried a `pub learned_policy`
+  field with **zero readers in the entire workspace** while its own doc comment claimed
+  `dispatch_once` consulted it. Now wired as a **narrowing-only** pre-filter (the gate is
+  consulted first and its denial is final), live-proven in one run where the parent
+  (`Root`) reads a file and the delegated child (`SubAgent`) gets
+  `Denied by sub-agent learned policy: Read matched rule `*`` — one variable, the caller
+  class. Startup truth is now `ready` from a constructed on-disk policy, else
+  `disabled_by_config`; `RuntimePathUnwired` is no longer reachable for it.
+  **The runtime-outcome-proof column is NOT closed** — see the limitation below.
+
+## Deliberately left open, named rather than quietly dropped
+
+1. **The `learned_policy` F05 outcome-proof column.** The occurrence triple is emitted on a
+   real narrowing, but `OutputSink::emit_capability_activation` is a **default no-op** that
+   only `ProtocolSink` overrides, and every spawned child gets `NullSink` (`Delegate`) or
+   `ChannelSink` (`Spawn`/workflow), neither of which overrides it. Since `Root` bypasses
+   the pre-filter by design, the occurrence can only fire inside a child, and every child
+   discards it. **Generalised: no sub-agent capability activation of any kind is observable
+   on any topology in this tree.** The fix needs a relay event and therefore a contract
+   regeneration, which this lane may not run.
+2. **Criterion 1's control half and its fixtures.** Both are fenced: the command must be
+   answered in `main.rs`, and the fixtures need the single `wcore-contract generate` pass
+   over the merged tree (seam request `SR-22-C1`, already fenced in `22-C1-SUMMARY.md` §6).
+3. **Criterion 3's structural half.** Making an engine *incapable* of terminating outside a
+   Goal means threading a token through five entry points and changing five signatures.
+   That is capability breadth against a criterion already PARTIAL on a working path, and
+   under Sean's 2026-07-29 scope cut it is not worth the blast radius before the deadline.
+4. **Criterion 4's reconnect / preemption / missed-interval clauses**, and **Criterion 5's
+   Windows M1–M5 legs** — both unchanged, both previously listed, neither attempted here.
+5. **Two further stale F05 rows found incidentally**, both `CONT-*` and neither this lane's:
+   the shipped binary reports `cooldown_tracker` **`ready`** (receipt says "no production
+   constructor") and `pricing_refresher` `unavailable / **disabled_by_config**` (receipt
+   says "no production constructor"). Reported, not edited.

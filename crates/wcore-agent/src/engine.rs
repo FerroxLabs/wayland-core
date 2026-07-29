@@ -2689,6 +2689,16 @@ pub struct AgentEngine {
     /// `AgentBootstrap` when the session config enables permission
     /// enforcement).
     policy_gate: Option<crate::policy_gate::PolicyGate>,
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22 — the caller class this
+    /// engine dispatches as. `Root` for a user session; `AgentSpawner`
+    /// stamps `SubAgent` on every child engine it builds. Read at each tool
+    /// dispatch to decide whether `learned_policy` applies.
+    call_actor: wcore_permissions::CallActor,
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22 — the sub-agent learned-policy
+    /// pre-filter source. Installed by `AgentBootstrap` when the operator has
+    /// a permissions policy on disk, and inherited by every spawned child.
+    /// `None` (the default) leaves dispatch byte-identical.
+    learned_policy: Option<std::sync::Arc<wcore_permissions::LearnedPolicy>>,
     /// v0.6.4 Task 1.2 — optional plugin-contributed `AgentRegistry`.
     /// When `Some`, bootstrap has called `set_agent_registry` after applying
     /// `InitializeOutcome` via `apply_initialize_outcome`. The registry is
@@ -3155,6 +3165,8 @@ impl AgentEngine {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -3390,6 +3402,8 @@ impl AgentEngine {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -4023,6 +4037,7 @@ impl AgentEngine {
         // channel-posture or persona-narrowed engine would delegate tools it
         // does not itself hold. `self.tools` is the parent's real, post-retain
         // registry, so the authority is exact rather than re-derived.
+        let spawner = spawner.with_learned_policy(self.learned_policy.clone());
         spawner.narrow_parent_tool_authority(self.tools.tool_names());
 
         // Bind the parent repository identity so a transient child resolves the
@@ -4102,6 +4117,30 @@ impl AgentEngine {
     /// preserve v0.6.0 open-gate behaviour.
     pub fn set_policy_gate(&mut self, gate: crate::policy_gate::PolicyGate) {
         self.policy_gate = Some(gate);
+    }
+
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22: declare this engine's caller
+    /// class. `AgentSpawner` calls this on every child engine it constructs so
+    /// a delegated turn is attributable at the dispatch boundary. A user
+    /// session never calls it and stays `Root`.
+    pub fn set_call_actor(&mut self, actor: wcore_permissions::CallActor) {
+        self.call_actor = actor;
+    }
+
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22: install the sub-agent
+    /// learned-policy pre-filter source. Only consulted when
+    /// `set_call_actor` has declared a sub-agent, and only ever to NARROW —
+    /// see `filter_tool_calls_by_policy`.
+    pub fn set_learned_policy(&mut self, policy: std::sync::Arc<wcore_permissions::LearnedPolicy>) {
+        self.learned_policy = Some(policy);
+    }
+
+    /// True when this engine can actually apply the learned-policy pre-filter
+    /// to the children it spawns — i.e. a policy is installed. Read by
+    /// bootstrap's capability report so `learned_policy` is only ever
+    /// advertised `ready` on a concrete construction, never on a flag.
+    pub(crate) fn learned_policy_constructed(&self) -> bool {
+        self.learned_policy.is_some()
     }
 
     /// v0.6.4 Task 1.3 — register plugin-contributed hooks into the engine's
@@ -6037,6 +6076,18 @@ impl AgentEngine {
                     "#280 smart handoff record_episode failed; continuing"
                 );
             }
+        }
+    }
+
+    /// Runtime outcome proof for the `learned_policy` capability. Emitted only
+    /// after the pre-filter has actually narrowed a real dispatch away — a
+    /// construction is not an outcome, which is the whole point of the F05
+    /// stage vocabulary.
+    fn emit_learned_policy_occurrence(&self) {
+        for activation in crate::capability_activation::successful_occurrence(
+            wcore_protocol::events::CapabilityId::LearnedPolicy,
+        ) {
+            self.output.emit_capability_activation(&activation);
         }
     }
 
@@ -11427,12 +11478,13 @@ impl AgentEngine {
                 // config. `PolicyGate` is `Clone` (Arc<PolicyEngine> +
                 // Actor). `None` preserves v0.6.0 open-gate behaviour.
                 policy_gate: self.policy_gate.clone(),
-                // v0.8.0 Task I (1.D.3): top-level engine dispatch is
-                // Root by default. Sub-agent spawners that drive
-                // `dispatch_once` directly set `actor` +
-                // `learned_policy` themselves.
-                actor: wcore_permissions::CallActor::Root,
-                learned_policy: None,
+                // v0.8.0 Task I (1.D.3), wired in Phase 22. A user session
+                // dispatches as `Root` and the pre-filter never applies to
+                // it; `AgentSpawner` stamps `SubAgent` + the inherited
+                // policy on each child engine, so a delegated turn arrives
+                // here already carrying both.
+                actor: self.call_actor.clone(),
+                learned_policy: self.learned_policy.clone(),
                 // AUDIT B-1 — thread a child of the session-root
                 // cancel token into tool dispatch so a host cancel
                 // reaches a running tool and the per-category dispatch
@@ -11551,6 +11603,7 @@ impl AgentEngine {
                             modifiers: vec![],
                             hook_outcomes: vec![],
                             cancelled_ids: vec![],
+                            learned_policy_denials: 0,
                         })
                     }
                 },
@@ -11575,6 +11628,15 @@ impl AgentEngine {
                     return Err(AgentError::ApiError(msg));
                 }
             };
+
+            // Phase 22 (22-02 Task 3) — `learned_policy`'s runtime outcome proof.
+            // Emitted here and only here, because this is the first point at
+            // which a REAL narrowing has already happened: the denied calls
+            // never dispatched, and their error results are in `outcome`.
+            // Construction alone never reaches this line.
+            if outcome.learned_policy_denials > 0 {
+                self.emit_learned_policy_occurrence();
+            }
 
             // Apply any context modifiers from skill executions before the next turn
             self.apply_context_modifiers(&outcome.modifiers);
@@ -15433,6 +15495,8 @@ mod set_config_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -17113,6 +17177,8 @@ mod phase6_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -17428,6 +17494,8 @@ mod compact_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -18817,6 +18885,8 @@ mod plan_mode_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -19265,6 +19335,8 @@ mod hook_integration_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -20123,6 +20195,8 @@ mod approval_bridge_engine_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
@@ -21174,6 +21248,8 @@ mod user_model_writeback_tests {
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),

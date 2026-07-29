@@ -1,0 +1,18 @@
+• The ledger's own recorded blockers: (a) through (e). New evidence resolves (a), (d) partially (observe but not control), (e) partial. But (b) and (c) unchanged: phase goal NOT ACHIEVED, requirements OPEN. The sibling's promotion test hinged on live exercise + no unwired F05 — GOAL-* now meets that. But does meeting the sibling's test suffice? The sibling had 3/4 criteria not met, so criterion incompleteness doesn't block REACHED per the ledger's own precedent. The deciding difference that the ledger stated was exactly the F05 unwired identity + live exercise — both now resolved. However, blocker (e) — the family's defining concept — was never attempted; now it's attempted but graded PARTIAL. REACHED only requires "demonstrably reached in a real run of the shipped product" — that's now demonstrated: live-proven against shipped 0.12.25 binary. So the panel should answer: REACHED.
+
+  But caution: (e) only PARTIAL — opt-in attachment, no signature change. Still, the question for REACHED is whether the capability was demonstrably reached, not whether the whole family works (that's EFFECTIVE). Live proof against shipped binary of canonical transition, delegation denial, kill -9 recovery = reached. (b)/(c) phase bookkeeping didn't block sibling. So promote.
+
+  Answer: PANEL_POSITION=REACHED, with 6-12 lines reasoning.
+
+• PANEL_POSITION=REACHED
+
+  - REACHED's definition is "demonstrably reached in a real run of the shipped product" — and the new evidence is precisely live proof against the shipped 0.12.25 release binary, on both Linux and Windows.
+  - Every verbatim blocker the ledger recorded has now been addressed: (a) is gone (row 2 was stale — the activation stream now shows declared→reached→observed with a negative control; row 4 is wired and live-proven), (d) improved to universal observation, (e) is no longer "never attempted" — all five engines have a production path to one canonical transition, live-proven.
+  - (e) is graded PARTIAL, not PASSED — but PARTIAL is not zero, and "one loop owner" now demonstrably fires in the real product. The remaining gap (opt-in attachment, unchanged signatures) is an EFFECTIVE-level concern about the whole family working uniformly, not a REACHED-level one.
+  - The ledger's own stated deciding test — the exact one used to promote sibling REACH-* — was: live two-platform product exercise on a passed criterion, plus no mapped F05 identity recorded "runtime path unwired." GOAL-* now satisfies both conjuncts: criterion 2 passed on two platforms (which the ledger itself already called "REACHED-kind on its own"), and no F05 row remains unwired.
+  - (b) and (c) (phase goal not achieved, requirements open) did not block the sibling either — REACH-* promoted with three of four criteria NOT MET. Applying the ledger's own precedent consistently, phase-bookkeeping state cannot be the tiebreaker it was never allowed to be.
+  - The alternative — holding GOAL-* at CONSTRUCTED — would require inventing a stricter test than the one the ledger itself applied to its sibling, which is panel inconsistency, not rigor.
+  - Promotion is to REACHED only: the control-surface gap (observe-but-not-control on two of three lanes) and the partial loop-owner grade legitimately keep EFFECTIVE out of reach, and nothing here argues otherwise.
+
+To resume this session: kimi -r session_f99f99b7-7bce-4520-827f-d9b038df48ba
+kimi rc=0

@@ -814,6 +814,10 @@ pub struct AgentSpawner {
     /// Child engines must never fall back to a process-global compatibility
     /// policy after the bootstrap task-local scope has exited.
     egress_policy: wcore_egress::SharedPolicy,
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22 — the parent's sub-agent
+    /// learned-policy pre-filter, inherited by every child engine this
+    /// spawner builds. `None` leaves child dispatch byte-identical.
+    learned_policy: Option<Arc<wcore_permissions::LearnedPolicy>>,
     /// Shared live posture authority for host-backed sessions. Read only when
     /// deriving a child config so runtime de-escalation applies to descendants
     /// that have not started yet.
@@ -963,6 +967,7 @@ impl AgentSpawner {
             sandbox_runtime,
             parent_workspace: None,
             egress_policy: wcore_egress::default_policy(),
+            learned_policy: None,
             approval_manager: None,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -1136,6 +1141,17 @@ impl AgentSpawner {
     /// policy, including children created after bootstrap has returned.
     pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
         self.egress_policy = policy;
+        self
+    }
+
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22: bind every spawned child to
+    /// the parent's learned-policy pre-filter. `None` is a no-op, so a session
+    /// with no policy on disk keeps byte-identical child dispatch.
+    pub fn with_learned_policy(
+        mut self,
+        policy: Option<Arc<wcore_permissions::LearnedPolicy>>,
+    ) -> Self {
+        self.learned_policy = policy;
         self
     }
 
@@ -2302,6 +2318,24 @@ impl AgentSpawner {
         engine.set_policy_gate(crate::policy_gate::PolicyGate::from_parent_tools(
             authority.iter(),
         ));
+        // v0.8.0 Task I (1.D.3), wired in Phase 22 — LAYER 3, and it is a
+        // NARROWING layer only. This is the first production construction of
+        // `CallActor::SubAgent`: before it, the caller class defaulted to
+        // `Root` everywhere, so `AgentExecutorConfig::learned_policy` had no
+        // reader anywhere in the workspace and setting it did nothing.
+        //
+        // `parent_id` is `None` deliberately. The spawner knows the child's
+        // name and the parent's call id, but not the parent AGENT's id, and
+        // `CallActor` documents `None` as "top-level dispatches that spawn
+        // directly". Putting a call id in an agent-id field to avoid a `None`
+        // would be a fabricated attribution.
+        engine.set_call_actor(wcore_permissions::CallActor::SubAgent {
+            id: launch.request.name.clone(),
+            parent_id: None,
+        });
+        if let Some(policy) = self.learned_policy.as_ref() {
+            engine.set_learned_policy(Arc::clone(policy));
+        }
         engine.set_cancel_token(child_cancel);
         engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
 
@@ -2399,6 +2433,10 @@ impl AgentSpawner {
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
             parent_workspace: self.parent_workspace.clone(),
             egress_policy: self.egress_policy.clone(),
+            // Carried for the same reason as `egress_policy`: a child spawned
+            // from a cloned spawner must inherit the same narrowing, or the
+            // fleet/parallel paths would silently drop it.
+            learned_policy: self.learned_policy.clone(),
             approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),

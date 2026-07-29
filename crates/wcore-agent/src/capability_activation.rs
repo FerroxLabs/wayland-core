@@ -16,6 +16,12 @@ pub struct StartupCapabilityInputs {
     pub midflight_monitor_constructed: bool,
     pub pricing_refresher_constructed: bool,
     pub cooldown_tracker_constructed: bool,
+    /// Phase 22 (22-02 Task 3): a `LearnedPolicy` was actually constructed
+    /// from an on-disk operator policy AND installed on the engine, so every
+    /// child this session spawns dispatches through the narrowing pre-filter.
+    /// False when no policy file exists — the pre-filter is wired but has
+    /// nothing to enforce, which is `disabled_by_config`, not readiness.
+    pub learned_policy_constructed: bool,
 }
 
 fn unavailable(
@@ -90,11 +96,23 @@ pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityAct
             CapabilityReasonCode::NoProductionConstructor,
         );
     }
-    unavailable(
-        &mut events,
-        CapabilityId::LearnedPolicy,
-        CapabilityReasonCode::RuntimePathUnwired,
-    );
+    // Phase 22 (22-02 Task 3). This row read `RuntimePathUnwired`
+    // UNCONDITIONALLY — there was no input for it, so no configuration could
+    // ever make it ready, and `AgentExecutorConfig::learned_policy` had zero
+    // readers in the workspace. The pre-filter is now consulted at
+    // `node_executor::dispatch_once` for every `CallActor::SubAgent` dispatch,
+    // and `AgentSpawner` constructs that actor for every child, so the runtime
+    // path exists. What remains conditional is whether the operator has a
+    // policy for it to apply.
+    if inputs.learned_policy_constructed {
+        ready(&mut events, CapabilityId::LearnedPolicy);
+    } else {
+        unavailable(
+            &mut events,
+            CapabilityId::LearnedPolicy,
+            CapabilityReasonCode::DisabledByConfig,
+        );
+    }
 
     if !inputs.smart_compaction_enabled || !inputs.smart_handoff_enabled {
         unavailable(
@@ -209,6 +227,7 @@ mod tests {
             midflight_monitor_constructed: false,
             pricing_refresher_constructed: false,
             cooldown_tracker_constructed: false,
+            learned_policy_constructed: false,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -234,6 +253,7 @@ mod tests {
             midflight_monitor_constructed: true,
             pricing_refresher_constructed: true,
             cooldown_tracker_constructed: true,
+            learned_policy_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -245,9 +265,21 @@ mod tests {
         ] {
             assert_eq!(statuses[&capability].stage, CapabilityStage::Ready);
         }
-        for capability in [CapabilityId::LearnedPolicy, CapabilityId::DelegateIsolation] {
-            assert_eq!(statuses[&capability].stage, CapabilityStage::Unavailable);
-        }
+        // `DelegateIsolation` is still a genuinely dormant asset. `LearnedPolicy`
+        // is NOT, as of Phase 22 (22-02 Task 3) — its pre-filter is consulted at
+        // dispatch for every `CallActor::SubAgent` — so it is asserted below on
+        // its real construction input instead of being carried here. Removing it
+        // from this list is not a weakening: `learned_policy_is_unavailable_
+        // without_a_constructed_policy` is the replacement, and it FAILS if the
+        // row ever claims readiness without one.
+        assert_eq!(
+            statuses[&CapabilityId::DelegateIsolation].stage,
+            CapabilityStage::Unavailable
+        );
+        assert_eq!(
+            statuses[&CapabilityId::LearnedPolicy].stage,
+            CapabilityStage::Ready
+        );
         assert_eq!(
             statuses[&CapabilityId::MidFlightMonitor].stage,
             CapabilityStage::Ready
@@ -262,6 +294,58 @@ mod tests {
         );
     }
 
+    /// The falsifiable half of the Phase 22 `learned_policy` wiring: readiness
+    /// is bound to a CONSTRUCTED policy, not to the pre-filter existing. Every
+    /// other input is held at its ready value, so `learned_policy_constructed`
+    /// is the single variable.
+    #[test]
+    fn learned_policy_is_unavailable_without_a_constructed_policy() {
+        let ready_inputs = StartupCapabilityInputs {
+            smart_compaction_enabled: true,
+            smart_handoff_enabled: true,
+            skills_lifecycle_enabled: true,
+            memory_constructed: true,
+            legacy_drafter_constructed: true,
+            midflight_monitor_constructed: true,
+            pricing_refresher_constructed: true,
+            cooldown_tracker_constructed: true,
+            learned_policy_constructed: true,
+        };
+        let with_policy = startup_activations(ready_inputs);
+        assert_legal_chains(&with_policy);
+        assert_eq!(
+            final_statuses(&with_policy)[&CapabilityId::LearnedPolicy].stage,
+            CapabilityStage::Ready
+        );
+
+        let without_policy = startup_activations(StartupCapabilityInputs {
+            learned_policy_constructed: false,
+            ..ready_inputs
+        });
+        assert_legal_chains(&without_policy);
+        let statuses = final_statuses(&without_policy);
+        assert_eq!(
+            statuses[&CapabilityId::LearnedPolicy].stage,
+            CapabilityStage::Unavailable,
+            "readiness must follow a constructed policy, not the pre-filter's existence"
+        );
+        assert_eq!(
+            statuses[&CapabilityId::LearnedPolicy].reason,
+            Some(CapabilityReasonCode::DisabledByConfig),
+            "the honest reason is now 'no policy configured', NOT 'runtime path unwired' — \
+             the runtime path is what Phase 22 wired"
+        );
+        // And the old reason must be gone: a row that still emits
+        // RuntimePathUnwired anywhere would mean the wiring did not land.
+        assert!(
+            !without_policy.iter().any(|event| {
+                event.capability == CapabilityId::LearnedPolicy
+                    && event.reason == Some(CapabilityReasonCode::RuntimePathUnwired)
+            }),
+            "F05-TRUTH-4's reason code must no longer be reachable for learned_policy"
+        );
+    }
+
     #[test]
     fn configured_memory_failure_is_not_reported_as_disabled_or_ready() {
         let events = startup_activations(StartupCapabilityInputs {
@@ -273,6 +357,7 @@ mod tests {
             midflight_monitor_constructed: true,
             pricing_refresher_constructed: true,
             cooldown_tracker_constructed: true,
+            learned_policy_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -300,6 +385,7 @@ mod tests {
             midflight_monitor_constructed: true,
             pricing_refresher_constructed: false,
             cooldown_tracker_constructed: true,
+            learned_policy_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);

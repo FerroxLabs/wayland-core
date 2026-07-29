@@ -1,0 +1,43 @@
+You are auditing a capability-maturity ledger for a Rust AI-agent CLI. Answer with a single
+line "PANEL_POSITION=CONSTRUCTED" or "PANEL_POSITION=REACHED", then 6-12 lines of reasoning.
+
+Maturity enum: ABSENT -> SOURCE -> CONFIGURED -> CONSTRUCTED -> REACHED -> EFFECTIVE ->
+OPERATOR_COMPLETE -> PACKAGED_PROVEN. "REACHED" means the capability was demonstrably reached
+in a real run of the shipped product. "EFFECTIVE" would claim the whole family works.
+
+The row is GOAL-* (durable Goal / Task / Wait / Fleet / loop ownership). It currently reads
+CONSTRUCTED. The ledger recorded, verbatim, what blocks it from REACHED:
+
+  (a) "this row's own mapped F05 evidence still records TWO capabilities 'Unavailable:
+      runtime path unwired'";
+  (b) the phase goal is NOT ACHIEVED;
+  (c) every phase requirement is OPEN;
+  (d) success criterion 1 failed on two of three surfaces;
+  (e) success criterion 3 -- "one loop owner", the family's defining concept -- was NEVER
+      ATTEMPTED; five engines still returned five different result types.
+
+The ledger ALSO stated the deciding test it used to promote a SIBLING row (REACH-*) to
+REACHED while that sibling still had three of four success criteria NOT MET:
+  "The deciding difference from GOAL-*: this family carries two-platform live product
+   exercise on the criterion that passed and -- unlike GOAL-* -- has no mapped F05 identity
+   recorded 'runtime path unwired'."
+
+New evidence since:
+  1. (a) is GONE. F05 row 2 was STALE, not unwired: the shipped 0.12.25 binary's own
+     capability-activation stream emits mid_flight_monitor declared->configured->constructed
+     ->ready->reached->outcome_changed->observed plus a mid_flight_monitor_decision event,
+     with a one-variable negative control that takes it to zero. F05 row 4 was real and is
+     now wired and live-proven: same run, same on-disk policy, the parent (Root) reads a file
+     and the delegated child (SubAgent) gets "Denied by sub-agent learned policy".
+  2. (e) is FALSE now: all five engines have a production path to one canonical Goal
+     transition, live-proven against the shipped release binary. Grade PARTIAL, not PASSED,
+     because attachment is opt-in and no engine signature changed.
+  3. (d) improved: all three surfaces now OBSERVE; zero of three (bar the CLI) can CONTROL,
+     because the host->core command must be answered in a file that lane is fenced out of.
+  4. Criterion 2 already PASSED on BOTH Linux and Windows against the shipped release binary
+     (kill -9 mid-fanout, 12/12/12 effects, counting gate falsified in the same run). The
+     ledger itself already called this "REACHED-kind on its own".
+  5. (b) and (c) are unchanged: the phase goal is still NOT ACHIEVED (now graded so a third
+     time) and the requirements are still OPEN.
+
+Question: does GOAL-* now promote from CONSTRUCTED to REACHED, or does it stay CONSTRUCTED?

@@ -1,0 +1,57 @@
+=== engine fields that could identify a delegated child ===
+
+=== spawner: where the child engine is built ===
+44:pub use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+75:    pub async fn spawn_child(&self, config: SubAgentConfig) -> SubAgentResult {
+92:    request: SubAgentConfig,
+110:    request: SubAgentConfig,
+632:/// the dep would reverse the crate-dep graph if hung off `SubAgentConfig`.
+838:    /// per-spawn `SubAgentConfig.provider` spec into a keyed provider. `None`
+1105:    pub async fn spawn_host_child(&self, sub_config: SubAgentConfig) -> SubAgentResult {
+1228:    /// Crucible — attach a [`ProviderResolver`] so a `SubAgentConfig.provider`
+1449:    fn provider_for(&self, sub: &SubAgentConfig) -> Result<Arc<dyn LlmProvider>, SubAgentResult> {
+1456:        sub: &SubAgentConfig,
+1493:        request: SubAgentConfig,
+1629:        request: SubAgentConfig,
+1685:        request: SubAgentConfig,
+1840:    pub async fn spawn_one(&self, sub_config: SubAgentConfig) -> SubAgentResult {
+1848:        sub_config: SubAgentConfig,
+1866:    pub async fn spawn_parallel(&self, sub_configs: Vec<SubAgentConfig>) -> Vec<SubAgentResult> {
+1879:        sub_configs: Vec<SubAgentConfig>,
+1888:        sub_configs: Vec<SubAgentConfig>,
+1924:    /// hierarchical sharding. Each `SubAgentConfig` becomes one
+1937:        sub_configs: Vec<SubAgentConfig>,
+1953:        tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
+2044:        tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
+2052:        tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
+2093:        sub_config: SubAgentConfig,
+2103:        sub_config: SubAgentConfig,
+2141:        sub_config: SubAgentConfig,
+2245:        let mut engine = AgentEngine::new_with_provider(
+2275:        // `Arc` at `AgentEngine::new_with_provider`, with no production path
+2292:        // This is also the first production caller of `set_policy_gate` on the
+2302:        engine.set_policy_gate(crate::policy_gate::PolicyGate::from_parent_tools(
+2347:    fn child_config(&self, sub_config: &SubAgentConfig) -> Config {
+2557:        sub_config: SubAgentConfig,
+2571:        sub_config: SubAgentConfig,
+2761:        AgentSpawner, SpawnTaskSet, SpawnerBudgetGovernance, SubAgentConfig, SubAgentResult,
+2879:    fn bounded_child(name: &str) -> SubAgentConfig {
+2880:        SubAgentConfig {
+3344:        let mut engine = crate::engine::AgentEngine::new_with_provider(
+3382:        let child = SubAgentConfig {
+3422:    //! `SubAgentConfig.provider` must resolve to *that* provider (not the
+3441:    use super::{AgentSpawner, DurableSessionAuthority, ForkOverrides, SubAgentConfig};
+3501:    fn sub(name: &str, provider: Option<&str>) -> SubAgentConfig {
+3502:        SubAgentConfig {
+3829:        request: &SubAgentConfig,
+3947:        SpawnExtras, SubAgentConfig,
+4018:    fn child(name: &str) -> SubAgentConfig {
+4019:        SubAgentConfig {
+4619:    /// (`AgentEngine::govern_transient_spawner`) and the three standalone ones
+4904:    use super::{AgentSpawner, ForkOverrides, SubAgentConfig, build_tool_registry};
+5202:        let config = SubAgentConfig {
+5244:    use super::{AgentSpawner, SubAgentConfig};
+5293:    fn sub_config() -> SubAgentConfig {
+5294:        SubAgentConfig {
+5616:    /// `SubAgentConfig` that supplies an explicit `system_prompt` must equal that
+5627:        let sub = SubAgentConfig {

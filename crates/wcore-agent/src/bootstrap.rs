@@ -2339,6 +2339,11 @@ impl AgentBootstrap {
         // `AgentSpawner::new`, is shared by `Arc` across every clone taken below,
         // and is narrowed once the registry is final. It is the single source
         // both child-authority layers read. See the narrowing call further down.
+        // Phase 22 (22-02 Task 3) — the sub-agent learned-policy pre-filter
+        // source. See `load_learned_policy`: a missing file yields `None`, NOT
+        // an empty policy, so the F05 capability report cannot advertise
+        // `ready` on a construction that would narrow nothing.
+        let learned_policy = load_learned_policy();
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
@@ -2349,6 +2354,7 @@ impl AgentBootstrap {
                 effective_execution_policy.clone(),
             )?
             .with_sandbox_runtime(registry.sandbox_runtime())
+            .with_learned_policy(learned_policy.clone())
             // Bind the parent repository identity so every child launch resolves
             // its shared/isolated workspace against this exact session root
             // instead of a process-global cwd. Mutating children allocate their
@@ -2932,6 +2938,12 @@ impl AgentBootstrap {
             engine.push_decay_handle(handle);
         }
 
+        // Install the pre-filter source on the engine BEFORE the capability
+        // report is computed, so the report reads the engine's real state
+        // rather than the intent that produced it.
+        if let Some(policy) = learned_policy.as_ref() {
+            engine.set_learned_policy(Arc::clone(policy));
+        }
         let capability_activations = crate::capability_activation::startup_activations(
             crate::capability_activation::StartupCapabilityInputs {
                 smart_compaction_enabled,
@@ -2940,6 +2952,7 @@ impl AgentBootstrap {
                 memory_constructed,
                 legacy_drafter_constructed: engine.skill_drafter().is_some(),
                 midflight_monitor_constructed: engine.midflight_monitor_constructed(),
+                learned_policy_constructed: engine.learned_policy_constructed(),
                 pricing_refresher_constructed,
                 cooldown_tracker_constructed: true,
             },
@@ -4184,6 +4197,57 @@ fn drop_revoked_auto_draft_seeds_with(
             !blocked
         })
         .collect()
+}
+
+/// Phase 22 (22-02 Task 3) — resolve the sub-agent learned-policy pre-filter
+/// source from disk.
+///
+/// **A missing file returns `None`, not an empty policy, and that distinction
+/// is the whole reason this is a function.** `LearnedPolicy::load_from`
+/// deliberately treats a missing file as an empty policy (a reasonable API
+/// choice), but an empty policy narrows nothing — so constructing one
+/// unconditionally would let the F05 capability report advertise
+/// `learned_policy: ready` on every machine on earth, including every machine
+/// where the pre-filter can never deny anything. That is precisely the
+/// advertised-but-dead shape this task exists to remove, so the readiness
+/// claim is bound to a policy that actually exists.
+///
+/// A file that exists but does not parse is a WARN and `None`: an operator who
+/// wrote a malformed permissions file must not silently get "no restrictions".
+fn load_learned_policy() -> Option<Arc<wcore_permissions::LearnedPolicy>> {
+    let path = match wcore_permissions::LearnedPolicy::default_path() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::debug!(
+                target: "wcore_agent::permissions",
+                %error,
+                "no home directory; sub-agent learned policy not loaded"
+            );
+            return None;
+        }
+    };
+    if !path.exists() {
+        return None;
+    }
+    match wcore_permissions::LearnedPolicy::load_from(&path) {
+        Ok(policy) => {
+            tracing::info!(
+                target: "wcore_agent::permissions",
+                path = %path.display(),
+                "sub-agent learned-policy pre-filter loaded"
+            );
+            Some(Arc::new(policy))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "wcore_agent::permissions",
+                path = %path.display(),
+                %error,
+                "sub-agent learned policy failed to parse; pre-filter NOT installed"
+            );
+            None
+        }
+    }
 }
 
 /// `F23A-C1-M1` — the auto-draft router-seed resurrection guard.
