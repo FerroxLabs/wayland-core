@@ -1134,6 +1134,58 @@ mod tests {
         );
     }
 
+    /// macOS only, deliberately: `afplay` is the program the PRODUCTION
+    /// player resolves to on Darwin and it exists on no other platform,
+    /// so this is the one arm that exercises the shipped macOS playback
+    /// path itself rather than the same machinery driving a stand-in.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn darwin_real_afplay_playback_is_cut_by_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("bargein-tone.wav");
+        // 6 s of quiet 440 Hz so an interrupt is unmistakable against it.
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        for n in 0..(SAMPLE_RATE as usize * 6) {
+            let t = n as f32 / SAMPLE_RATE as f32;
+            w.write_sample((2000.0 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()) as i16)
+                .unwrap();
+        }
+        w.finalize().unwrap();
+
+        // Control: confirm this host really does resolve to afplay, so a
+        // pass cannot come from silently having taken another branch.
+        assert_eq!(
+            CpalAudioPlayer::os_shell_command(&wav).unwrap().0,
+            "afplay",
+            "control: Darwin must resolve to afplay"
+        );
+
+        let player = StdArc::new(CpalAudioPlayer::new());
+        let bg = player.clone();
+        let path = wav.clone();
+        let started = Instant::now();
+        let handle = tokio::spawn(async move { bg.play(&path).await });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        player.stop().await;
+        let played = handle.await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            !played,
+            "an interrupted afplay must not report playback success"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stop() must cut a 6s afplay in flight; it took {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn stop_is_idempotent_and_prompt_when_nothing_is_playing() {
         let player = CpalAudioPlayer::new();
