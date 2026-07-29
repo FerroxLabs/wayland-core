@@ -1,0 +1,34 @@
+=== F26 SC2 quarantine known-negative ===
+repo:  /root/wayland-26sc2
+cargo: /root/.cargo/bin/cargo
+
+--- M0 baseline: the suite must be green BEFORE the mutation ---
+M0 test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 48.28s
+M0 executed: 33 passed
+
+--- M1 mutation: classify_skill_body always returns Data ---
+M1 APPLIED: yes (8 changed lines)
+
+--- M2/M3: build the mutant, then read the test result back ---
+M2 COMPILED: yes
+M3 test result: FAILED. 23 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+M3 failed under mutation: 10
+M3 the tests that went red:
+    test t1_skill_with_a_shell_directive_is_executable_via_the_enforced_detector ... FAILED
+    test t11_selecting_a_subset_imports_exactly_that_subset_by_published_identity ... FAILED
+    test t12_excluding_a_subset_imports_everything_else ... FAILED
+    test t16_export_import_round_trip_preserves_provenance_and_does_not_launder_quarantine ... FAILED
+    test t19_live_negative_leg_quarantined_payload_does_not_execute ... FAILED
+    test t20_live_positive_control_same_payload_executes_once_promoted ... FAILED
+    test t2_skill_without_a_directive_is_data_and_needs_no_promotion ... FAILED
+    test t5_quarantined_content_is_absent_from_what_the_agent_would_load ... FAILED
+    test t6_nothing_the_imported_content_carries_can_promote_it ... FAILED
+    test t8_quarantining_is_reported_in_both_the_plan_and_the_apply_report ... FAILED
+M3 REQUIRED-RED t5_quarantined_content_is_absent_from_what_the_agent_would_load: FAILED (as required)
+M3 REQUIRED-RED t19_live_negative_leg_quarantined_payload_does_not_execute: FAILED (as required)
+
+--- M4/M5: restore and re-prove ---
+M4 RESTORED: yes (byte-identical to the pre-mutation file)
+M5 test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.85s
+
+KNOWN-NEGATIVE: PASS — containment removed makes the security tests fail
