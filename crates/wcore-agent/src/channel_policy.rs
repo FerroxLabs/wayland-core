@@ -276,13 +276,16 @@ mod tests {
     use wcore_channels::config::ChannelConfig;
 
     fn config(name: &str, posture: ChannelToolPosture, root: Option<&str>) -> ChannelConfig {
-        let mut inbound = InboundPolicy::default();
-        inbound.tools = posture;
-        inbound.tool_workspace_root = root.map(|r| r.to_string());
-        // The admission-relevant difference from the fail-closed default. Set
-        // on every fixture so a facet-1 assertion is about who may send, not
-        // incidentally about the posture fields that also live on this struct.
-        inbound.dm_allowlist = vec![format!("sender-for-{name}")];
+        let inbound = InboundPolicy {
+            tools: posture,
+            tool_workspace_root: root.map(|r| r.to_string()),
+            // The admission-relevant difference from the fail-closed default.
+            // Set on every fixture so a facet-1 assertion is about who may
+            // send, not incidentally about the posture fields that also live
+            // on this struct.
+            dm_allowlist: vec![format!("sender-for-{name}")],
+            ..Default::default()
+        };
         ChannelConfig {
             name: name.to_string(),
             platform: "slack".to_string(),
