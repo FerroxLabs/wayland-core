@@ -1,0 +1,31 @@
+[base-r3] donor archive: donor.tar.gz
+[base-r3] prefilling memory.db to ~300 MiB ...
+[base-r3] prefill done in 1.8s, memory.db = 307.7 MiB
+[base-r3] waiting for writers: 0/3 started (iter 0, 1785344411)
+[base-r3] waiting for writers: 3/3 started (iter 1, 1785344412)
+[base-r3] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[base-r3] pre-restore committed high-water marks: {'w0': 1351, 'w1': 1428, 'w2': 1478}
+[base-r3] restore --replace launched pid=267720
+[base-r3] preserved=True after 0.91s op_id=1785344412249-267720
+[base-r3] post-capture committed high-water marks: {'w0': 3452, 'w1': 3408, 'w2': 3649}
+[base-r3] commits during capture window: w0=+2101, w1=+1980, w2=+2171
+[base-r3] restore killed, reaped rc=-9
+[base-r3] open journal records after kill: 1
+[base-r3] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785344412249-267720
+[base-r3] home entries after rollback: ['config.toml', 'memory.db', 'memory.db-shm', 'memory.db-wal']
+---- RESULT ----
+ARM: concurrent
+WRITERS: 3
+CAPTURE-SECONDS: 0.91
+PRE-RESTORE-COMMITTED: 4257
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: ['memory.db-shm', 'memory.db-wal']
+INTEGRITY-CHECK: wrong # of entries in index sqlite_autoindex_rows_committed_1
+INTEGRITY-PROBLEM-LINES: 1
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: FAIL

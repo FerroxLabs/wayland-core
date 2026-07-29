@@ -1,0 +1,31 @@
+[base-c2] donor archive: donor.tar.gz
+[base-c2] prefilling memory.db to ~300 MiB ...
+[base-c2] prefill done in 1.8s, memory.db = 307.7 MiB
+[base-c2] waiting for writers: 0/3 started (iter 0, 1785344146)
+[base-c2] waiting for writers: 3/3 started (iter 1, 1785344147)
+[base-c2] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[base-c2] pre-restore committed high-water marks: {'w0': 2318, 'w1': 2286, 'w2': 2224}
+[base-c2] restore --replace launched pid=175662
+[base-c2] waiting for preserved=true (iter 20, 1.0s, records=1)
+[base-c2] preserved=True after 1.01s op_id=1785344147305-175662
+[base-c2] post-capture committed high-water marks: {'w0': 4823, 'w1': 4570, 'w2': 4509}
+[base-c2] commits during capture window: w0=+2505, w1=+2284, w2=+2285
+[base-c2] restore killed, reaped rc=-9
+[base-c2] open journal records after kill: 1
+[base-c2] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785344147305-175662
+[base-c2] home entries after rollback: ['config.toml', 'memory.db', 'memory.db-shm', 'memory.db-wal']
+---- RESULT ----
+ARM: concurrent
+WRITERS: 3
+CAPTURE-SECONDS: 1.01
+PRE-RESTORE-COMMITTED: 6828
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: ['memory.db-shm', 'memory.db-wal']
+INTEGRITY-CHECK: *** in database main ***
+INTEGRITY-PROBLEM-LINES: 100
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: FAIL

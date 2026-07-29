@@ -1,0 +1,32 @@
+[base-rseq] donor archive: donor.tar.gz
+[base-rseq] prefilling memory.db to ~300 MiB ...
+[base-rseq] prefill done in 2.0s, memory.db = 307.7 MiB
+[base-rseq] waiting for writers: 0/3 started (iter 0, 1785344420)
+[base-rseq] waiting for writers: 3/3 started (iter 1, 1785344421)
+[base-rseq] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[base-rseq] all 3 writers exited; home is at rest
+[base-rseq] pre-restore committed high-water marks: {'w0': 21677, 'w1': 22498, 'w2': 21739}
+[base-rseq] restore --replace launched pid=273398
+[base-rseq] waiting for preserved=true (iter 20, 1.0s, records=1)
+[base-rseq] preserved=True after 1.06s op_id=1785344430216-273398
+[base-rseq] post-capture committed high-water marks: {'w0': 21677, 'w1': 22498, 'w2': 21739}
+[base-rseq] restore killed, reaped rc=-9
+[base-rseq] open journal records after kill: 1
+[base-rseq] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785344430216-273398
+[base-rseq] home entries after rollback: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: sequenced
+WRITERS: 3
+CAPTURE-SECONDS: 1.06
+PRE-RESTORE-COMMITTED: 65914
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: PASS

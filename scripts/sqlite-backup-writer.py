@@ -71,14 +71,22 @@ def main() -> int:
         sys.argv[3],
         float(sys.argv[4]),
     )
+    # Optional 5th argument: the journal mode to demand. Defaults to WAL, which
+    # is what every existing caller means. `truncate` is the mode
+    # `wcore_config::sqlite_journal` selects on a NETWORK FILESYSTEM, where WAL's
+    # shared-memory wal-index is unavailable — so it is the arm that exercises
+    # the `-journal` sidecar rather than the `-wal`/`-shm` pair.
+    want = (sys.argv[5] if len(sys.argv) > 5 else "wal").lower()
 
     conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None)
-    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    mode = conn.execute(f"PRAGMA journal_mode={want}").fetchone()[0]
     with open(os.path.join(markers, f"JOURNALMODE-{wid}"), "w") as fh:
         fh.write(str(mode))
-    if str(mode).lower() != "wal":
-        # Do NOT write START. A writer that is not in WAL is not the experiment.
-        sys.stderr.write(f"writer {wid}: journal_mode={mode}, refusing to run\n")
+    if str(mode).lower() != want:
+        # Do NOT write START. A writer in the wrong mode is not the experiment.
+        sys.stderr.write(
+            f"writer {wid}: journal_mode={mode}, wanted {want}, refusing to run\n"
+        )
         return 3
 
     conn.execute("PRAGMA synchronous=NORMAL")
