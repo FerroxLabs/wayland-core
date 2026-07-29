@@ -213,3 +213,9 @@ pub mod sandbox_cmd;
 // testable under `cargo test -p wcore-cli --lib`, while the end-to-end proof
 // drives the real binary and reads its stdout as the host does.
 pub mod startup_error;
+
+// 23A-C1: governed skill promotion, revocation and rollback, on the binary the
+// release actually ships. The capability existed in `wcore-skills` and in a
+// `wcore-skill-govern` helper that is packaged by nothing, so no installed copy of
+// the product could reach it.
+pub mod skill_govern;

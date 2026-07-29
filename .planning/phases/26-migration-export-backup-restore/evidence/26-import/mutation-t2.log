@@ -1,0 +1,24 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-26-import/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.33s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/migrate_quarantine.rs (target/debug/deps/migrate_quarantine-a78c814d7c92d058)
+
+running 1 test
+test t2_skill_without_a_directive_is_data_and_needs_no_promotion ... FAILED
+
+failures:
+
+---- t2_skill_without_a_directive_is_data_and_needs_no_promotion stdout ----
+
+thread 't2_skill_without_a_directive_is_data_and_needs_no_promotion' (535047) panicked at crates/wcore-cli/tests/migrate_quarantine.rs:263:5:
+a data skill must be WRITTEN into the Wayland home, not merely counted; home held: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    t2_skill_without_a_directive_is_data_and_needs_no_promotion
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-cli --test migrate_quarantine`

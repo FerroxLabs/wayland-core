@@ -203,11 +203,278 @@ jobs:
             artifacts/wayland-core-*.tar.gz
             artifacts/wayland-core-*.zip
 
+      # ── SR-29-9 — the signed release manifest ─────────────────────────────
+      # `self-update` verifies a signed release manifest against the trust root
+      # bundled in the shipped binary, and installs NOTHING without one. Until
+      # this existed, every release published seven assets and none of them was
+      # a manifest, so the updater refused every install and fell back to npm
+      # (open HIGH F29-03-01). The manifest is what the attestation structurally
+      # cannot say: that this release is NEWER than the one running, that the
+      # view is current rather than a frozen mirror, that the version has not
+      # been revoked, and that the key vouching for it has not been retired.
+      #
+      # Ordering is load-bearing. `manifest-build` digests EVERY file in the
+      # artifacts directory, so the SBOM must land before the checksums, the
+      # checksums before the manifest, and the SIGNED manifest only afterwards —
+      # a manifest cannot digest itself.
+      - name: Checkout source (for the release-manifest tooling)
+        uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          # Into a subdirectory: `actions/checkout` cleans its target, and the
+          # release artifacts are already sitting in ./artifacts.
+          path: source
+
+      - name: Guard — release-acceptance signing seed present
+        id: manifest_guard
+        shell: bash
+        env:
+          WAYLAND_RELEASE_ACCEPTANCE_SEED: ${{ secrets.WAYLAND_RELEASE_ACCEPTANCE_SEED }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WAYLAND_RELEASE_ACCEPTANCE_SEED:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No signed release manifest::WAYLAND_RELEASE_ACCEPTANCE_SEED \
+          is not set, so this release publishes NO *-release-manifest.json asset. \
+          \`wayland-core self-update\` will REFUSE to install this release and will direct \
+          users to the provenance-backed npm route instead. This is fail-closed, not a \
+          security hole, but the update path is broken until the secret is restored."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same set the `build` job installs for Linux. `wayland-release` pulls in
+      # `wcore-config`, which pulls `keyring`; a missing system library here
+      # would fail the tool build and take the whole release with it, so this
+      # mirrors the proven list rather than guessing a smaller one.
+      - name: Install Linux system deps
+        if: steps.manifest_guard.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+
+      - name: Setup vx (installs Rust from vx.toml)
+        if: steps.manifest_guard.outputs.skip == 'false'
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Cache cargo
+        if: steps.manifest_guard.outputs.skip == 'false'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+          shared-key: release-manifest
+
+      - name: Build the release-manifest tool
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          cargo build --release -p wcore-eval-scenarios --bin wayland-release
+          ./target/release/wayland-release --help > /dev/null
+          echo "wayland-release built"
+
+      # Both scripts gate the manifest, so both must be proved working BEFORE
+      # they are trusted with it. Each self-test carries a known-positive, a
+      # known-negative, and a third assertion showing the obvious-but-wrong
+      # implementation would answer differently — without that third one, a
+      # self-test passes on a broken instrument.
+      - name: Self-test the release-manifest scripts
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_manifest_sequence.py --self-test
+          python3 .github/scripts/extract_bundled_trust_root.py --self-test
+
+      # A real, byte-deterministic CycloneDX SBOM over the LOCKED dependency
+      # graph. Bound into the manifest by digest, so `sbom` records
+      # `Observed`. The other two clean-room results are deliberately OMITTED:
+      # no dependency-policy verdict is produced in this pipeline and no second
+      # clean-room build happens here, and `Evidence` models an omission as
+      # "no result was produced" rather than "the result was fine". Recording
+      # an unearned pass for either would be worse than recording their
+      # absence. Closing them is SR-29-13's and SR-29-6's business.
+      - name: Generate SBOM
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd source
+          cargo metadata --locked --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          ./target/release/wayland-release sbom \
+            --metadata "${RUNNER_TEMP}/cargo-metadata.json" \
+            --output "../artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+
       - name: Generate checksums
         shell: bash
         run: |
           cd artifacts
           sha256sum wayland-core-* > wayland-core-checksums.txt
+
+      # `sequence` IS the client's freeze protection: `decide_update` refuses a
+      # manifest at or below the highest sequence the machine has already
+      # installed. A repeat or a decrease does not merely annoy — it disables
+      # the check, silently, on the client. So it is derived from the very
+      # artifacts the client compares against: the max over EVERY manifest ever
+      # published, plus one. That survives a deleted or re-run release, which a
+      # "count the releases" or "latest + 1" rule would not.
+      - name: Derive the manifest sequence from every published manifest
+        id: sequence
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          previous="${RUNNER_TEMP}/previous-manifests"
+          mkdir -p "${previous}"
+
+          # Instrument-aliveness first. "No manifest has ever been published" is
+          # an ABSENCE claim, and an absence is what a broken query, a wrong
+          # repo or a silently-empty response all return for free. So count the
+          # releases and their assets too: zero manifests is only believable
+          # alongside a non-zero asset count from the same query.
+          gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[].tag_name' \
+            > "${RUNNER_TEMP}/releases.txt"
+          gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[].assets[].name' \
+            > "${RUNNER_TEMP}/assets.txt"
+          releases=$(wc -l < "${RUNNER_TEMP}/releases.txt")
+          assets=$(wc -l < "${RUNNER_TEMP}/assets.txt")
+          echo "query saw ${releases} release(s) carrying ${assets} asset(s)"
+          if [ "${releases}" -gt 0 ] && [ "${assets}" -eq 0 ]; then
+            echo "::error::The release query returned ${releases} releases but zero assets. \
+          That is not a believable state for this repository and almost certainly means the \
+          query is broken. Refusing to derive a sequence from it, because a broken query \
+          would yield sequence=1 and silently disable client freeze protection."
+            exit 1
+          fi
+
+          gh api "repos/${REPOSITORY}/releases" --paginate \
+            --jq '.[].assets[] | select(.name | endswith("-release-manifest.json")) | .browser_download_url' \
+            > "${RUNNER_TEMP}/manifest-urls.txt"
+          index=0
+          while IFS= read -r url; do
+            [ -n "${url}" ] || continue
+            index=$((index + 1))
+            curl -fsSL "${url}" -o "${previous}/${index}.json"
+          done < "${RUNNER_TEMP}/manifest-urls.txt"
+          echo "downloaded ${index} previously published manifest(s)"
+
+          python3 source/.github/scripts/release_manifest_sequence.py \
+            --manifests-dir "${previous}" | tee "${RUNNER_TEMP}/sequence.txt"
+          grep -E '^(sequence|previous_max|considered)=' "${RUNNER_TEMP}/sequence.txt" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Build and sign the release manifest
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          # STDIN ONLY. `wayland-release` has no flag that accepts a seed and no
+          # subcommand that prints one; an argv-passed secret would appear in
+          # process listings and in any command trace. `set -x` is deliberately
+          # NOT enabled anywhere in this step.
+          WAYLAND_RELEASE_ACCEPTANCE_SEED: ${{ secrets.WAYLAND_RELEASE_ACCEPTANCE_SEED }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          SEQUENCE: ${{ steps.sequence.outputs.sequence }}
+        run: |
+          set -euo pipefail
+          tool="source/target/release/wayland-release"
+
+          # The trust root the SHIPPED binary bundles, lifted from the constant
+          # it actually reads. Any other copy could drift from it, and then this
+          # verification would prove the wrong thing.
+          python3 source/.github/scripts/extract_bundled_trust_root.py \
+            --source source/crates/wcore-cli/src/update_trust.rs \
+            --output "${RUNNER_TEMP}/bundled-trust-root.json"
+
+          # The key id comes from that root rather than a literal here, so a
+          # rotation cannot leave the two disagreeing.
+          key_id=$(jq -r '[.keys[] | select(.role == "release_acceptance") | .key_id] | unique | .[]' \
+            "${RUNNER_TEMP}/bundled-trust-root.json")
+          if [ "$(printf '%s\n' "${key_id}" | grep -c .)" -ne 1 ]; then
+            echo "::error::The bundled trust root holds $(printf '%s\n' "${key_id}" | grep -c .) \
+          release_acceptance keys. Exactly one must be active for a release run to know which \
+          seed the CI secret is."
+            exit 1
+          fi
+          echo "signing with key id ${key_id}"
+
+          "${tool}" manifest-build \
+            --artifacts artifacts \
+            --output "${RUNNER_TEMP}/manifest.json" \
+            --release-id "${RELEASE_TAG}" \
+            --source-commit "${GITHUB_SHA}" \
+            --sequence "${SEQUENCE}" \
+            --issued-at "$(date -u +%s)" \
+            --sbom "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+
+          # The suffix is not cosmetic: `update_trust::RELEASE_MANIFEST_ASSET_SUFFIX`
+          # is what the updater scans the release's assets for, and a near-miss
+          # filename fails SILENTLY — the updater simply reports that the release
+          # publishes no manifest and refuses, exactly as if the step had never
+          # run. Asserted below rather than trusted to this format string.
+          signed="artifacts/wayland-core-${RELEASE_TAG}-release-manifest.json"
+
+          printf '%s' "${WAYLAND_RELEASE_ACCEPTANCE_SEED}" | "${tool}" manifest-sign \
+            --manifest "${RUNNER_TEMP}/manifest.json" \
+            --output "${signed}" \
+            --key-id "${key_id}"
+
+          case "${signed}" in
+            *-release-manifest.json) ;;
+            *) echo "::error::${signed} does not end in the suffix the updater scans for"; exit 1 ;;
+          esac
+          test -s "${signed}"
+          echo "signed manifest: $(basename "${signed}")"
+
+      # THE GATE THAT MATTERS. `manifest-sign` signs with whatever seed it is
+      # given. If the CI secret has drifted from the bundled public key — a
+      # rotation applied on one side only, a seed pasted from the wrong key
+      # file, a key retired in the root — the release still publishes, and every
+      # user's `self-update` then refuses with "signature does not verify", days
+      # later, with a green release run behind it. Verifying here turns that
+      # into a failed release step.
+      - name: Verify the signed manifest against the SHIPPED trust root
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          source/target/release/wayland-release manifest-verify \
+            --manifest "artifacts/wayland-core-${RELEASE_TAG}-release-manifest.json" \
+            --trust-root "${RUNNER_TEMP}/bundled-trust-root.json" \
+            --role release_acceptance \
+            --now "$(date -u +%s)"
+
+      # The tooling checkout must not become a release asset. `Upload release
+      # assets` globs artifacts/*, and ./source is a sibling, but this asserts
+      # rather than assumes — and it re-asserts the manifest is present, so a
+      # silently skipped manifest step cannot reach publish unnoticed.
+      - name: Assert the asset set before publishing
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          manifests=$(find artifacts -maxdepth 1 -name '*-release-manifest.json' | wc -l)
+          if [ "${manifests}" -ne 1 ]; then
+            echo "::error::expected exactly one *-release-manifest.json in artifacts, found ${manifests}"
+            exit 1
+          fi
+          test -f "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+          test ! -e artifacts/source
+          echo "asset set:"
+          ls -1 artifacts
 
       - name: Upload release assets
         shell: bash

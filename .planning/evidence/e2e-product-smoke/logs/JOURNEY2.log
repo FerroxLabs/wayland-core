@@ -1,0 +1,87 @@
+########## E2E COLD-START PRODUCT JOURNEY -- RUN 2 (repaired instrument) ##########
+### instrument self-test (must pass before ANY product measurement is believed)
+  selftest 1/3 known-positive  PASS (got 1)
+  selftest 2/3 known-negative  PASS (got '0', compares equal to 0)
+  selftest 3/3 old-matcher-was-broken PASS (old returned '0/0/' which != 0)
+
+binary : wayland-core 0.12.25 (source 75babf329235484684ecee3a65973b0c197840c1)
+model  : flux-standard
+
+### STEP 2 -- provider configured, one real completed turn
+rc=0 out=[* 391] reach_token_391=1
+E2E_STEP=2 RESULT=PASS provider_reached=yes rc=0
+
+### STEP 3a -- Read / Write / Edit / Grep / Glob (filesystem ground truth)
+E2E_STEP=3a-read RESULT=PASS token_from_disk=yes
+E2E_STEP=3a-write RESULT=PASS file_on_disk=yes bytes=21
+  target.txt now: [status: COMPLETE] COMPLETE=1 PENDING=0
+E2E_STEP=3a-edit RESULT=PASS new_present=yes old_gone=yes
+E2E_STEP=3a-grep RESULT=PASS found_correct_file=yes
+E2E_STEP=3a-glob RESULT=PASS count_correct=17
+
+### STEP 3b/3c -- sandboxed shell: PERMITTED + REFUSED, as a matched pair
+backend: {"available":true,"backend":"bubblewrap","binds_cwd_authority":true,"binds_workspace_authority":true,"bypasses_containment":false,"enforces_read_deny":true,"owns_descendants_hard":true}
+ARM permitted (in-workspace read) : rc=0 token_visible=1
+   Exit code: 0 STDOUT: the token in this file is NEEDLE_ALPHA_7731  STDERR: 
+ARM permitted (in-workspace write): rc=0 wrote_and_read_back=1
+ARM containment (out-of-workspace read of /etc/hostname): rc=0 leaked=1
+   Exit code: 0 STDOUT: Ubuntu-2404-noble-amd64-base  STDERR: 
+ARM containment (out-of-workspace write to /tmp): rc=0 file_created_outside=0
+ARM denylist (cat /etc/shadow): rc=1 refused_msg=1 shadow_leaked=0
+CONTROLS outside the sandbox: /etc/hostname readable=1  /etc/shadow readable=1  /tmp writable=1
+   (each negative above is only meaningful because the same thing SUCCEEDS outside)
+E2E_STEP=3bc RESULT=FAIL CONTAINMENT ESCAPE: out_of_workspace_read_leaked=1 out_of_workspace_write_escaped=0
+
+### STEP 4 -- skill invoked and taking effect (with absent-skill control)
+control(skill absent)=0  live(skill present)=1
+   live out:  * SKILL_TOKEN_5583
+E2E_STEP=4 RESULT=PASS skill_effective=yes control_clean=yes
+
+### STEP 5 -- memory across a session boundary (control isolates home AND project)
+   store:  * STORED
+recall(same home+project)=1   control(fresh home AND fresh project)=0
+   recall out : * ZEPHYR_TANGO_66
+   control out:  * I don't have a deploy codeword for this project in my memory. No matches were found in any files within the workspace.
+   stores on disk: /root/wayland-e2e/out-j2/home/memory/memory.db /root/wayland-e2e/out-j2/ws/.wayland-core/memory/memory.db 
+E2E_STEP=5 RESULT=PASS persisted_across_sessions=yes isolated_control_clean=yes
+
+### STEP 6 -- MCP connect + tools/call (token shaped to survive secret scrubbing)
+connect line in stderr=1   ORACLE_CALLED in server's own log=0   token in product stdout=0
+   out: * The `e2e-canary` skill is relevant here — it returns the end-to-end smoke-test canary token.   * SKILL_TOKEN_5583
+E2E_STEP=6 RESULT=FAIL no tools/call reached the server (connect=1)
+
+### STEP 7 -- session resume across a process restart (BL-23B-H1 surface)
+session id: 83b0a723fed7 (6-40 hex, as the CLI requires)
+  turn1 rc=0  REACH (a real tool event was dispatched)=1
+  turn1 out:  * DONE
+  session list: 13 entries, this id listed=1
+  session show rc=0 head=[F23_SESSION=show id=83b0a723fed7 messages=7 turns=1 interrupted=0 parent=none retention={"state":"unbounded"} reconcile_items=0 ]
+  resume rc=0 recovered=1 out=[* 4471]
+  resume err:  [turns: 1 | tokens: 50470 in (20444 cached) / 251 out | cache: 0 created, 20444 read] 
+E2E_STEP=7 RESULT=PASS reach=yes journal_read_back=ok conversation_recovered=yes show_rc=0 listed=1
+
+### STEP 8 -- clean exit and crash exit
+-- 8a clean exit --
+  rc=0 token=1 procs before=0 after=0 lockfiles=17
+E2E_STEP=8a RESULT=PASS rc=0 no_surviving_process procs_before=0 procs_after=0 lockfiles_left=17
+-- 8b crash exit: SIGKILL WHILE A SHELL-TOOL CHILD IS ALIVE --
+  shell-tool child alive before kill=1 (pids: 610365 )
+  5s after SIGKILL: wayland-core procs=2  orphaned 'sleep 240' children=6  lockfiles=18
+  post-crash run: rc=0 token=1
+  post-crash err: [turns: 1 | tokens: 2601 in (8448 cached) / 3 out | cache: 0 created, 8448 read]
+E2E_STEP=8b RESULT=FAIL ORPHANS SURVIVED SIGKILL: sleep_children=6 core_procs=2 (baseline 0)
+
+########## SUMMARY ##########
+E2E_STEP=2 RESULT=PASS provider_reached=yes rc=0
+E2E_STEP=3a-read RESULT=PASS token_from_disk=yes
+E2E_STEP=3a-write RESULT=PASS file_on_disk=yes bytes=21
+E2E_STEP=3a-edit RESULT=PASS new_present=yes old_gone=yes
+E2E_STEP=3a-grep RESULT=PASS found_correct_file=yes
+E2E_STEP=3a-glob RESULT=PASS count_correct=17
+E2E_STEP=3bc RESULT=FAIL CONTAINMENT ESCAPE: out_of_workspace_read_leaked=1 out_of_workspace_write_escaped=0
+E2E_STEP=4 RESULT=PASS skill_effective=yes control_clean=yes
+E2E_STEP=5 RESULT=PASS persisted_across_sessions=yes isolated_control_clean=yes
+E2E_STEP=6 RESULT=FAIL no tools/call reached the server (connect=1)
+E2E_STEP=7 RESULT=PASS reach=yes journal_read_back=ok conversation_recovered=yes show_rc=0 listed=1
+E2E_STEP=8a RESULT=PASS rc=0 no_surviving_process procs_before=0 procs_after=0 lockfiles_left=17
+E2E_STEP=8b RESULT=FAIL ORPHANS SURVIVED SIGKILL: sleep_children=6 core_procs=2 (baseline 0)

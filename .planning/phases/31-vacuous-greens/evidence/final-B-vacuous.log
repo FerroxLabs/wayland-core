@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+────────────
+ Nextest run ID 942bf46f-0997-41bc-ae5d-d36f93b5cf1f with nextest profile: default
+    Starting 0 tests across 1 binary
+────────────
+     Summary [   0.006s] 0 tests run: 0 passed, 0 skipped
+error: no tests to run
+WLRC=4
