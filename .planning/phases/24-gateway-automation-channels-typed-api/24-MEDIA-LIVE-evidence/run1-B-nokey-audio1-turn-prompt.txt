@@ -1,0 +1,5 @@
+f24ml probe B-nokey-audio1
+
+[attachments received with this message:
+  1. Audio (audio/wav) — transcript: [Inbound audio received but NOT transcribed: no transcription backend is configured, so the assistant cannot hear this audio. To enable transcription, set GROQ_API_KEY or OPENAI_API_KEY.]]
+Current date: 2026-07-29

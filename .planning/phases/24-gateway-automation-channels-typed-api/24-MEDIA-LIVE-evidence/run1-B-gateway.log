@@ -1,0 +1,85 @@
+[2m2026-07-29T05:39:44.644942Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T05:39:48.383211Z[0m [32m INFO[0m migrated existing plaintext credentials into the encrypted vault [3mcount[0m[2m=[0m1
+[2m2026-07-29T05:39:48.384033Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24ml [3mplatform[0m[2m=[0mtelegram
+[gateway] channels registered=1
+[2m2026-07-29T05:39:48.384682Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T05:39:48.384717Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-29T05:39:48.388621Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m3049143 [3mdir[0m[2m=[0m/tmp/f24ml-B-nokey-audio1-1vEOna/channels
+[2m2026-07-29T05:39:50.243259Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=3049143 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T05:39:50.494594Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-29T05:39:50.498520Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-29T05:39:50.498616Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-29T05:39:50.499123Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T05:39:50.499847Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-29T05:39:50.499884Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-29T05:39:50.499902Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-29T05:39:50.499919Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-29T05:39:50.499935Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-29T05:39:50.499951Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-29T05:39:50.499966Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-29T05:39:50.499985Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-29T05:39:50.500021Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+[2m2026-07-29T05:39:50.500046Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T05:39:50.500260Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T05:39:50.500281Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-29T05:39:50.500302Z[0m [33m WARN[0m tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY. Tool hidden.
+[2m2026-07-29T05:39:50.500793Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T05:39:50.500886Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T05:39:50.501938Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-29T05:39:50.557036Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-29T05:39:50.557206Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T05:39:50.557227Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T05:39:50.561295Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T05:39:50.562874Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T05:39:50.715680Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-29T05:39:50.716416Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/tmp/f24ml-B-nokey-audio1-1vEOna/cron
+[2m2026-07-29T05:39:50.743316Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m79
+[2m2026-07-29T05:39:50.766015Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T05:39:50.993435Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m134
+[2m2026-07-29T05:39:51.243738Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m226
+[2m2026-07-29T05:39:51.493781Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m103
+[2m2026-07-29T05:39:51.743599Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m83
+[2m2026-07-29T05:39:51.993300Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m76
+[2m2026-07-29T05:39:52.243344Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m195
+[2m2026-07-29T05:39:52.493572Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m75
+[2m2026-07-29T05:39:52.744434Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m275
+[2m2026-07-29T05:39:52.993812Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m195
+[2m2026-07-29T05:39:53.243508Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m336
+[2m2026-07-29T05:39:53.493406Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m236
+[2m2026-07-29T05:39:53.743426Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m260
+[2m2026-07-29T05:39:53.993688Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m245
+[2m2026-07-29T05:39:54.243438Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m232
+[2m2026-07-29T05:39:54.493485Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m225
+[2m2026-07-29T05:39:54.744147Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m280
+[2m2026-07-29T05:39:54.993441Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m46
+[2m2026-07-29T05:39:55.243793Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m230
+[2m2026-07-29T05:39:55.493222Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m106
+[2m2026-07-29T05:39:55.743379Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m199
+[2m2026-07-29T05:39:55.994053Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m272
+[2m2026-07-29T05:39:56.243490Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m120
+[2m2026-07-29T05:39:56.493625Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m97
+[2m2026-07-29T05:39:56.743459Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m140
+[2m2026-07-29T05:39:56.993401Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m131
+[2m2026-07-29T05:39:57.243412Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m301
+[2m2026-07-29T05:39:57.493616Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m238
+[2m2026-07-29T05:39:57.743561Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m25
+[2m2026-07-29T05:39:57.993435Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m139
+[2m2026-07-29T05:39:58.243558Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m351
+[2m2026-07-29T05:39:58.259446Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"together" [3mmodel[0m[2m=[0m"f24ml-fixture"
+[2m2026-07-29T05:39:58.259479Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"together" [3mmodel[0m[2m=[0m"f24ml-fixture"
+[2m2026-07-29T05:39:58.259488Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"together" [3mmodel[0m[2m=[0m"f24ml-fixture"
+[2m2026-07-29T05:39:58.276163Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"together" [3mmodel[0m[2m=[0m"f24ml-fixture"
+[2m2026-07-29T05:39:58.278526Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"together" [3mmodel[0m[2m=[0m"f24ml-fixture"
+[2m2026-07-29T05:39:58.310711Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 952 files while I was thinking (`/root/wayland-24-media-live/docs`, `/root/wayland-24-media-live/docs/design`, `/root/wayland-24-media-live/docs/design/flux-282-reference`, `/root/wayland-24-media-live/docs/decisions`, `/root/wa…[truncated]
+[2m2026-07-29T05:39:58.363173Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T05:39:58.436608Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24ml [3merror[0m[2m=[0mchannel error: decode: missing field `chat` at line 1 column 39
+[2m2026-07-29T05:39:58.493578Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m341
+[2m2026-07-29T05:39:58.743397Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m101
+[2m2026-07-29T05:39:58.993428Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m32
+[2m2026-07-29T05:39:59.243184Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m177
+[2m2026-07-29T05:39:59.493388Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m330
+[2m2026-07-29T05:39:59.743575Z[0m [33m WARN[0m inbound broadcast lagged; events dropped before admission [3mskipped[0m[2m=[0m124
+[gateway] shutdown signal received
+[gateway] drain Clean: observations=1 abandoned=0 flushed=true

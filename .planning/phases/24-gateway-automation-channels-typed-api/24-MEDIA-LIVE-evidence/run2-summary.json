@@ -1,0 +1,152 @@
+{
+  "generated_at": "2026-07-29T05:42:04.233Z",
+  "out_dir": "/root/24ml-run2",
+  "binary": "/root/wayland-24-media-live/target/debug/wayland-core",
+  "legs": [
+    {
+      "label": "A-key-audio1",
+      "with_key": true,
+      "audio": "a1.wav",
+      "turn_ran": true,
+      "capture_alive": true,
+      "prompt_bytes": 199,
+      "notice_present": false,
+      "failed_notice_present": false,
+      "a1_hits": [
+        "quantum",
+        "ferret",
+        "audited",
+        "crimson",
+        "bicycles",
+        "thursday",
+        "morning"
+      ],
+      "a2_hits": [],
+      "get_file_calls": 1,
+      "download_calls": 1,
+      "download_bytes": 133028,
+      "poll_count": 12905,
+      "replies": 1,
+      "enriched_log_line": true,
+      "transcription_resolver_line": "transcription: using FluxRouter flux-voice-fast (FLUX_API_KEY found)"
+    },
+    {
+      "label": "B-nokey-audio1",
+      "with_key": false,
+      "audio": "a1.wav",
+      "turn_ran": true,
+      "capture_alive": true,
+      "prompt_bytes": 321,
+      "notice_present": true,
+      "failed_notice_present": false,
+      "a1_hits": [],
+      "a2_hits": [],
+      "get_file_calls": 0,
+      "download_calls": 0,
+      "download_bytes": 0,
+      "poll_count": 11701,
+      "replies": 1,
+      "enriched_log_line": false,
+      "transcription_resolver_line": "transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden"
+    },
+    {
+      "label": "C-key-audio2",
+      "with_key": true,
+      "audio": "a2.wav",
+      "turn_ran": true,
+      "capture_alive": true,
+      "prompt_bytes": 200,
+      "notice_present": false,
+      "failed_notice_present": false,
+      "a1_hits": [],
+      "a2_hits": [
+        "velvet",
+        "lighthouses",
+        "inspected",
+        "marmalade",
+        "orchestra",
+        "winter"
+      ],
+      "get_file_calls": 1,
+      "download_calls": 1,
+      "download_bytes": 136820,
+      "poll_count": 16766,
+      "replies": 1,
+      "enriched_log_line": true,
+      "transcription_resolver_line": "transcription: using FluxRouter flux-voice-fast (FLUX_API_KEY found)"
+    }
+  ],
+  "gates": [
+    {
+      "id": "G1",
+      "clause": "media (positive)",
+      "kind": "POSITIVE",
+      "pass": true,
+      "measured": {
+        "turn_ran": true,
+        "capture_alive": true,
+        "download_calls": 1,
+        "download_bytes": 133028,
+        "a1_hits": [
+          "quantum",
+          "ferret",
+          "audited",
+          "crimson",
+          "bicycles",
+          "thursday",
+          "morning"
+        ],
+        "a1_hit_count": 7,
+        "required": 5,
+        "notice_present": false
+      }
+    },
+    {
+      "id": "G2",
+      "clause": "media (negative control)",
+      "kind": "NEGATIVE CONTROL",
+      "pass": true,
+      "measured": {
+        "turn_ran": true,
+        "capture_alive": true,
+        "notice_present": true,
+        "a1_hits": []
+      }
+    },
+    {
+      "id": "G3",
+      "clause": "media (anti-echo)",
+      "kind": "POSITIVE",
+      "pass": true,
+      "measured": {
+        "c_a2_hits": [
+          "velvet",
+          "lighthouses",
+          "inspected",
+          "marmalade",
+          "orchestra",
+          "winter"
+        ],
+        "c_a2_hit_count": 6,
+        "required": 5,
+        "c_a1_crosshits": [],
+        "a_a2_crosshits": [],
+        "prompts_differ": true
+      }
+    },
+    {
+      "id": "G4",
+      "clause": "media (connector fetch)",
+      "kind": "POSITIVE",
+      "pass": true,
+      "measured": {
+        "a_get_file_calls": 1,
+        "a_download_calls": 1,
+        "a_download_bytes": 133028,
+        "c_download_calls": 1,
+        "a_enriched_log_line": true
+      }
+    }
+  ],
+  "all_pass": true
+}
