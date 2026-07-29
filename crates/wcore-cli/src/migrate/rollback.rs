@@ -53,8 +53,34 @@ use anyhow::{Context, Result, bail};
 use crate::backup::journal;
 
 /// The complete production write set of `migrate`'s apply, relative to the
-/// Wayland home. Kept next to the guard that uses it so the two cannot drift.
-pub const MIGRATE_SCOPE: [&str; 2] = [crate::migrate::quarantine::QUARANTINE_DIR, "config.toml"];
+/// Wayland home.
+///
+/// # This list grew once already, and the probe is why we know
+///
+/// It started as two entries — the quarantine store and `config.toml` — because
+/// that WAS the whole write set when this was written. A concurrently-landing
+/// lane then added [`crate::migrate::content`], which imports data skills into
+/// the LIVE `skills/` directory and stages personas and memory notes under
+/// `migrate-imported/`. Two of the four entries below did not exist a few hours
+/// before they were needed.
+///
+/// That is the argument for [`OUT_OF_SCOPE_PROBE`] in one paragraph: a scope
+/// list is a claim about someone else's code, it goes stale silently, and a
+/// stale one makes the rollback quietly partial — the operation would still
+/// report success while leaving behind exactly the writes the undo store never
+/// covered. `the_declared_scope_covers_every_store_that_writes_into_the_home`
+/// pins the list to the stores themselves so a third store cannot be added
+/// without this failing.
+///
+/// `skills/` in particular is a live user directory, which is the shape that
+/// produced `F23A-C1-H3` in `wcore-skills` — a restore writing straight into
+/// live state with no staging and no undo. Here the journal is what closes it.
+pub const MIGRATE_SCOPE: [&str; 4] = [
+    crate::migrate::quarantine::QUARANTINE_DIR,
+    crate::migrate::content::IMPORT_STAGE_DIR,
+    "skills",
+    "config.toml",
+];
 
 /// Set to `1` to make a run verify that it wrote nothing outside
 /// [`MIGRATE_SCOPE`]. Costs a full tree walk of the home, twice.
@@ -243,18 +269,49 @@ mod tests {
     /// spells it. A literal `"quarantine"` here would silently scope the journal
     /// to a directory that does not exist, and every rollback would be a no-op
     /// that reported success.
+    /// Every store that writes into the home must be covered by the scope, and
+    /// the check asks the STORES where they write rather than restating paths.
+    ///
+    /// This is the test that would have caught the drift when `content.rs`
+    /// landed: `ImportedContentStore` writes to `skills/` and
+    /// `migrate-imported/`, neither of which was in the original two-entry
+    /// scope. A rollback would have reported success while leaving imported
+    /// skills in a live directory it had never preserved.
     #[test]
-    fn the_declared_scope_is_the_stores_real_directory_name() {
-        assert_eq!(MIGRATE_SCOPE[0], "migrate-quarantine");
-        assert_eq!(MIGRATE_SCOPE[1], "config.toml");
-        let store = crate::migrate::quarantine::QuarantineStore::new(
-            Path::new("/tmp/home").join(crate::migrate::quarantine::QUARANTINE_DIR),
+    fn the_declared_scope_covers_every_store_that_writes_into_the_home() {
+        let home = Path::new("/tmp/home");
+
+        let quarantine = crate::migrate::quarantine::QuarantineStore::new(
+            home.join(crate::migrate::quarantine::QUARANTINE_DIR),
         );
-        assert_eq!(
-            store.root().file_name().unwrap().to_string_lossy(),
-            MIGRATE_SCOPE[0],
-            "the journal scope and the quarantine store have drifted apart"
-        );
+        let content = crate::migrate::content::ImportedContentStore::new(home);
+
+        // Every root, asked of the store itself.
+        let roots = [
+            quarantine.root().to_path_buf(),
+            content.skills_root().to_path_buf(),
+            content.stage_root().to_path_buf(),
+            home.join("config.toml"),
+        ];
+        for root in &roots {
+            let rel = root
+                .strip_prefix(home)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                MIGRATE_SCOPE.contains(&rel.as_str()),
+                "'{rel}' is written into the home but is NOT in MIGRATE_SCOPE {MIGRATE_SCOPE:?}; \
+                 a rollback would report success while leaving those writes behind"
+            );
+        }
+        // And nothing in the scope is dead weight — every entry is a real root.
+        for entry in MIGRATE_SCOPE {
+            assert!(
+                roots.iter().any(|r| r == &home.join(entry)),
+                "MIGRATE_SCOPE names '{entry}', which no store writes to"
+            );
+        }
     }
 
     #[test]
