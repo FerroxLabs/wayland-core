@@ -118,9 +118,7 @@ pub(crate) fn drop_unanswered_tool_calls(messages: &[Message]) -> Vec<Message> {
                 next.content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::ToolResult { tool_use_id, .. } => {
-                            Some(tool_use_id.as_str())
-                        }
+                        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
                         _ => None,
                     })
                     .collect()
@@ -469,14 +467,12 @@ mod tests {
     fn violates_anthropic_pairing(messages: &[Message]) -> bool {
         messages.iter().enumerate().any(|(i, m)| {
             m.content.iter().any(|b| match b {
-                ContentBlock::ToolUse { id, .. } => !messages
-                    .get(i + 1)
-                    .is_some_and(|next| {
-                        next.content.iter().any(|nb| {
-                            matches!(nb, ContentBlock::ToolResult { tool_use_id, .. }
+                ContentBlock::ToolUse { id, .. } => !messages.get(i + 1).is_some_and(|next| {
+                    next.content.iter().any(|nb| {
+                        matches!(nb, ContentBlock::ToolResult { tool_use_id, .. }
                                 if tool_use_id == id)
-                        })
-                    }),
+                    })
+                }),
                 _ => false,
             })
         })
@@ -553,9 +549,15 @@ mod tests {
             vec![text("I will read the file"), tool_use("t9")],
         )];
         let out = drop_unanswered_tool_calls(&raw);
-        assert_eq!(out.len(), 1, "the turn carried text, so it must not be dropped");
+        assert_eq!(
+            out.len(),
+            1,
+            "the turn carried text, so it must not be dropped"
+        );
         assert_eq!(out[0].content.len(), 1);
-        assert!(matches!(&out[0].content[0], ContentBlock::Text { text } if text == "I will read the file"));
+        assert!(
+            matches!(&out[0].content[0], ContentBlock::Text { text } if text == "I will read the file")
+        );
     }
 
     #[test]
