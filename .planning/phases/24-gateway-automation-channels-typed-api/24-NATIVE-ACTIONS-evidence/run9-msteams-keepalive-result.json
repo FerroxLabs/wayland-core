@@ -1,0 +1,109 @@
+{
+  "adapter": "msteams",
+  "label": "K-keepalive",
+  "ack": "both",
+  "declares": {
+    "react": false,
+    "typing": true,
+    "react_site": "TRAIT DEFAULT (Err(Unsupported)) — wcore-channels/src/lib.rs:294",
+    "typing_site": "wcore-channel-msteams/src/lib.rs:381"
+  },
+  "ready": true,
+  "turn_ran": true,
+  "turn_prompt": "probe f24na-msteams-K-keepalive\nCurrent date: 2026-07-29",
+  "prompt_carries_probe": true,
+  "reactions_total": 0,
+  "reaction_emojis": [],
+  "typing_total": 3,
+  "typing_at_ms": [
+    1785308481834,
+    1785308486854,
+    1785308491856
+  ],
+  "reaction_at_ms": [],
+  "keepalive": {
+    "gradeable": true,
+    "during": 3,
+    "after": 0,
+    "watch_ms_after_end": 14170,
+    "loop_ran": true,
+    "aborted": true
+  },
+  "replies_total": 1,
+  "affordances": {
+    "a1_receipt": "not-supported",
+    "a2_typing": "fired",
+    "a3_terminal": "not-supported",
+    "emojis": [],
+    "typing_count": 3
+  },
+  "gateway_log_bytes": 8921,
+  "fixture_journal": [
+    {
+      "kind": "token",
+      "at": "2026-07-29T07:01:21.580Z"
+    },
+    {
+      "kind": "openid",
+      "at": "2026-07-29T07:01:21.587Z"
+    },
+    {
+      "kind": "jwks",
+      "at": "2026-07-29T07:01:21.587Z"
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T07:01:21.834Z",
+      "conv": "/amer/v3/conversations/19%3Af24na%40thread.v2/activities"
+    },
+    {
+      "kind": "activity_out",
+      "at": "2026-07-29T07:01:21.834Z",
+      "type": "typing",
+      "raw_len": 17
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T07:01:26.854Z",
+      "conv": "/amer/v3/conversations/19%3Af24na%40thread.v2/activities"
+    },
+    {
+      "kind": "activity_out",
+      "at": "2026-07-29T07:01:26.854Z",
+      "type": "typing",
+      "raw_len": 17
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T07:01:31.856Z",
+      "conv": "/amer/v3/conversations/19%3Af24na%40thread.v2/activities"
+    },
+    {
+      "kind": "activity_out",
+      "at": "2026-07-29T07:01:31.856Z",
+      "type": "typing",
+      "raw_len": 17
+    },
+    {
+      "kind": "reply",
+      "at": "2026-07-29T07:01:34.442Z",
+      "text": "F24NA-REPLY f24na-msteams-K-keepalive"
+    },
+    {
+      "kind": "activity_out",
+      "at": "2026-07-29T07:01:34.442Z",
+      "type": "message",
+      "raw_len": 86
+    }
+  ],
+  "notes": [
+    "llm fixture at http://127.0.0.1:35581 (delay=12000ms)",
+    "msteams BF fixture at http://127.0.0.1:35599",
+    "readiness=true",
+    "msteams webhook POST -> 200",
+    "delivered inbound (\"f24na-activity-1\")",
+    "turn_ran=true after dispatch",
+    "post-guard-drop marker observed=true",
+    "keepalive verdict: during=3 after=0 loop_ran=true aborted=true (watched 14s past the guard drop)"
+  ]
+}

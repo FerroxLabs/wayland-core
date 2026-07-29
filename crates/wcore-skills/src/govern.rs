@@ -42,34 +42,6 @@
 //! is gone with nothing suppressing it, so the next trigger recreates it — i.e. revocation
 //! violated by precisely the failure mode governance exists to handle.
 //!
-//! `rollback` needs the mirror-image property, and originally did not have it (F23A-C1-H3).
-//! It restored with a bare recursive copy **into the live skills directory**, so a kill
-//! anywhere between the first and last file left a directory that was present, loadable, and
-//! missing content — a skill the user never asked for, in a state they cannot see. That the
-//! defect sat on the *recovery* verb made it worse: it is the verb reached for when something
-//! has already gone wrong. So a restore now publishes through a single `rename(2)`:
-//!
-//! ```text
-//!   1. copy the payload into <parent>/.wl-rollback-<id>.partial   (invisible: see below)
-//!   2. fsync every restored file, then the staging directory
-//!   3. rename(2) staging -> source_dir                            (atomic; the publish)
-//!   4. fsync <parent> so the rename itself survives a power loss
-//!   5. remove the tombstone, then append the journal event
-//! ```
-//!
-//! The staging directory lives *beside* the target rather than in the governance store
-//! because `rename(2)` requires one filesystem, and the governance root is deliberately
-//! resolved from `dirs::data_dir()` — a different volume on plenty of real machines, where a
-//! cross-device rename fails with `EXDEV`. Staging beside the target puts it inside the
-//! skills root, where the loader would otherwise discover it, so `loader::collect_skill_md`
-//! skips the [`ROLLBACK_STAGING_PREFIX`] by name. That skip is narrow on purpose: a blanket
-//! "ignore dotted directories" rule would silently change which skills load for users who
-//! have nothing to do with governance.
-//!
-//! Step 5 stays after step 3 for the same reason the original ordering did: clearing
-//! suppression before the bytes are back would let the drafter regenerate from scratch and
-//! orphan the retained copy.
-//!
 //! # Identity
 //!
 //! A tombstone records **both** the drafter's content signature (read from `manifest.json`)
@@ -96,13 +68,8 @@ const TOMBSTONES: &str = "tombstones";
 const JOURNAL: &str = "journal.jsonl";
 /// Payload subdirectory inside a generation.
 const PAYLOAD: &str = "payload";
-
-/// Name prefix of the directory a rollback stages a restore into before its final
-/// `rename(2)`. It sits inside the skills root (see the module docs on `EXDEV`), so
-/// `loader::collect_skill_md` skips entries carrying this prefix — a staging directory is
-/// by definition an incomplete copy and must never be discovered as a skill, whether it is
-/// mid-restore or left behind by a kill inside one.
-pub const ROLLBACK_STAGING_PREFIX: &str = ".wl-rollback-";
+/// Subdirectory holding promotion grants. One file per promoted artifact.
+pub(crate) const PROMOTIONS: &str = "promotions";
 
 /// Hard cap on a single snapshot, so a pathological skill directory cannot fill the
 /// user's disk during what is supposed to be a *remedial* operation.
@@ -137,14 +104,11 @@ pub enum GovernError {
     #[error("refusing to snapshot {path}: {reason}")]
     RefusedSnapshot { path: String, reason: String },
 
-    #[error("cannot roll back '{name}': {path} has no parent directory to stage the restore in")]
-    NoRestoreParent { name: String, path: String },
-
     #[error("governance root could not be resolved on this platform")]
     NoRoot,
 }
 
-fn io_err(path: &Path, source: std::io::Error) -> GovernError {
+pub(crate) fn io_err(path: &Path, source: std::io::Error) -> GovernError {
     GovernError::Io {
         path: path.display().to_string(),
         source,
@@ -198,6 +162,35 @@ pub enum JournalEvent {
         skill_name: String,
         signature: Option<String>,
         revocation_id: String,
+        at: String,
+    },
+    /// 23A-C1: a skill was granted model-facing status by a governed promotion.
+    /// Carries the content digest so the record says *which bytes* were promoted,
+    /// not merely which name.
+    Promoted {
+        promotion_id: String,
+        skill_name: String,
+        signature: Option<String>,
+        procedure_id: Option<String>,
+        content_digest: String,
+        authority: String,
+        target_dir: PathBuf,
+        at: String,
+    },
+    /// A promotion was refused. Recorded because a refusal is the governance
+    /// system doing its job, and an unlogged refusal is indistinguishable from a
+    /// promotion that was never attempted.
+    PromotionRefused {
+        skill_name: String,
+        reason: String,
+        at: String,
+    },
+    /// A promotion grant was withdrawn -- either explicitly, or because the
+    /// artifact it was bound to was revoked.
+    PromotionWithdrawn {
+        promotion_id: String,
+        skill_name: String,
+        reason: String,
         at: String,
     },
 }
@@ -304,6 +297,22 @@ impl GovernanceStore {
         create_dir_all(&tombstones)?;
         write_atomic(&tombstones.join(format!("{revocation_id}.json")), &encoded)?;
 
+        // ---- 3b. withdraw any promotion grant for this artifact. ----
+        //
+        // 23A-C1 resurrection hazard. A promotion grant is what lifts the loader's
+        // quarantine, so a grant that outlived its revocation would mean: revoke,
+        // then have the artifact return by any route at all, and it comes back
+        // **model-facing** rather than quarantined -- strictly worse than the state
+        // before the user ever revoked it. Withdrawal happens here, inside `revoke`,
+        // rather than being left to the caller, because a caller that forgets is the
+        // whole failure mode.
+        //
+        // Ordered after the tombstone so a crash between the two leaves suppression
+        // durable with a stale grant, which the loader resolves in the safe
+        // direction: `revoked` is checked before `promoted`, so the skill is dropped
+        // regardless of the grant.
+        self.withdraw_promotions_for(&skill_name, signature.as_deref(), "artifact revoked")?;
+
         // ---- 4. history ----
         self.append_journal(&JournalEvent::Revoked {
             revocation_id: revocation_id.clone(),
@@ -325,11 +334,6 @@ impl GovernanceStore {
     /// Refuses rather than overwrites if something already occupies the target: a rollback
     /// that silently clobbered a user's hand-edited skill would be the same class of defect
     /// this module exists to remove.
-    ///
-    /// The restore is **atomic**: bytes land in a staging directory, are fsync'd, and are
-    /// published by a single `rename(2)`. At no instant does `source_dir` hold a partial
-    /// copy. See the module docs (F23A-C1-H3) for the ordering and why staging lives beside
-    /// the target rather than in the governance store.
     pub fn rollback(&self, revocation_id: &str) -> Result<PathBuf, GovernError> {
         let tombstone = self.tombstones_dir().join(format!("{revocation_id}.json"));
         let record: Revocation = match std::fs::read(&tombstone) {
@@ -351,40 +355,37 @@ impl GovernanceStore {
             return Err(GovernError::NoSuchRevocation(revocation_id.to_string()));
         }
 
-        let parent = record
-            .source_dir
-            .parent()
-            .ok_or_else(|| GovernError::NoRestoreParent {
-                name: record.skill_name.clone(),
-                path: record.source_dir.display().to_string(),
-            })?;
-        create_dir_all(parent)?;
-        let staging = parent.join(format!("{ROLLBACK_STAGING_PREFIX}{revocation_id}.partial"));
-
-        // A staging directory surviving from an earlier killed attempt is garbage, not data:
-        // its contents are a strict prefix of the payload we are about to copy again. Clear
-        // it rather than merging into it, so a retry cannot inherit a half-written file.
-        if staging.exists() {
-            remove_dir_all(&staging)?;
-        }
-
         // Restore the bytes BEFORE clearing suppression. If this order were reversed a crash
         // in between would leave the draft un-suppressed and absent, so the drafter would
         // recreate it from scratch and the user's retained version would be orphaned.
         //
-        // Everything up to the rename is invisible: `source_dir` does not exist yet (checked
-        // above) and the staging name is skipped by the loader. A kill anywhere in here
-        // leaves the skill wholly absent -- the pre-rollback state -- never partial.
-        if let Err(e) = copy_tree(&payload, &staging).and_then(|_| fsync_tree(&staging)) {
-            // Best-effort: if this cleanup fails we still return the real error, and the next
-            // rollback of the same id clears the staging directory above.
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
+        // 23A-C1: the restore is **staged and renamed**, not copied straight into place.
+        //
+        // A direct `copy_tree` into `source_dir` writes the user's skills directory file by
+        // file, so a kill part-way through leaves a **partially-restored skill directory**:
+        // present, loadable, and missing content. That is the same half-written-state class
+        // this program already measured on an interrupted migration, and it sat on a shipped
+        // verb. `rename(2)` is atomic, so the restored directory either does not exist or is
+        // the complete retained tree, with no third state for a kill to land in.
+        //
+        // Staging lives outside the skills tree (see `promote::staging_root_for`) because
+        // `collect_skill_md` does not skip dot-directories -- a half-built staging directory
+        // holding a `SKILL.md` inside the skills root would be discovered and loaded.
+        let parent = record
+            .source_dir
+            .parent()
+            .ok_or_else(|| GovernError::NotFound(record.source_dir.display().to_string()))?;
+        let staging_root = crate::promote::staging_root_for(parent);
+        create_dir_all(&staging_root)?;
+        let staged = staging_root.join(uuid::Uuid::new_v4().to_string());
+        copy_tree(&payload, &staged)?;
+        crate::promote::sync_dir(&staged);
+        create_dir_all(parent)?;
+        if let Err(e) = std::fs::rename(&staged, &record.source_dir) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(io_err(&record.source_dir, e));
         }
-
-        // The publish. One metadata operation; the skill is old-or-new, never in between.
-        std::fs::rename(&staging, &record.source_dir).map_err(|e| io_err(&staging, e))?;
-        fsync_dir(parent);
+        crate::promote::sync_dir(parent);
 
         std::fs::remove_file(&tombstone).map_err(|e| io_err(&tombstone, e))?;
 
@@ -510,7 +511,7 @@ impl GovernanceStore {
             .collect())
     }
 
-    fn append_journal(&self, event: &JournalEvent) -> Result<(), GovernError> {
+    pub(crate) fn append_journal(&self, event: &JournalEvent) -> Result<(), GovernError> {
         use std::io::Write;
         create_dir_all(&self.root)?;
         let path = self.journal_path();
@@ -562,15 +563,15 @@ fn new_revocation_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn create_dir_all(p: &Path) -> Result<(), GovernError> {
+pub(crate) fn create_dir_all(p: &Path) -> Result<(), GovernError> {
     std::fs::create_dir_all(p).map_err(|e| io_err(p, e))
 }
 
-fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), GovernError> {
+pub(crate) fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), GovernError> {
     if let Some(parent) = p.parent() {
         create_dir_all(parent)?;
     }
@@ -579,63 +580,6 @@ fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), GovernError> {
 
 fn remove_dir_all(p: &Path) -> Result<(), GovernError> {
     std::fs::remove_dir_all(p).map_err(|e| io_err(p, e))
-}
-
-/// fsync every file in a freshly written tree, then the directories holding them.
-///
-/// A `rename(2)` orders metadata, not data. Without this, a power loss just after the rename
-/// can leave the skill directory present with zero-length files inside it -- which is the
-/// very partial state the rename exists to prevent, arriving by a different route. A process
-/// kill alone does not need this (the page cache outlives the process), so this is the part
-/// of the fix that the kill harness *cannot* prove; it is here on the argument, not on the
-/// measurement, and this comment says so rather than letting the harness imply otherwise.
-///
-/// Recursion is bounded because the tree was just written by `copy_tree`, which enforces
-/// [`MAX_SNAPSHOT_DEPTH`].
-fn fsync_tree(root: &Path) -> Result<(), GovernError> {
-    let entries = std::fs::read_dir(root).map_err(|e| io_err(root, e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| io_err(root, e))?;
-        let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| io_err(&path, e))?;
-        if meta.is_dir() {
-            fsync_tree(&path)?;
-        } else {
-            std::fs::File::open(&path)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| io_err(&path, e))?;
-        }
-    }
-    fsync_dir(root);
-    Ok(())
-}
-
-/// fsync a directory so a rename into or out of it is durable.
-///
-/// Unix only. `std::fs::File::open` on a directory fails on Windows, which has no
-/// directory-handle fsync in std; there a same-volume `MoveFileEx` is a single journalled
-/// metadata operation, so the atomicity property this function backs still holds and only the
-/// power-loss durability margin differs.
-///
-/// Best-effort by design: a failure here costs durability across a power loss, never
-/// correctness across a process kill, so it warns instead of failing a restore whose bytes
-/// are already in place.
-fn fsync_dir(dir: &Path) {
-    #[cfg(unix)]
-    {
-        if let Err(e) = std::fs::File::open(dir).and_then(|f| f.sync_all()) {
-            tracing::warn!(
-                target: "wcore_skills::govern",
-                path = %dir.display(),
-                error = %e,
-                "could not fsync directory; restore is complete but not power-loss durable"
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-    }
 }
 
 /// Copy a directory tree, refusing symlinks and enforcing size/depth caps.

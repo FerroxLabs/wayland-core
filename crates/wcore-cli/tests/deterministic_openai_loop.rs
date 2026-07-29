@@ -336,22 +336,71 @@ async fn packaged_core_blocks_a_denied_write() {
     assert_eq!(observation.requests.len(), 2);
 }
 
+/// How long the fixture holds the response stream open after the first text
+/// delta. Everything below is scaled against this: the run must finish because
+/// Core CANCELLED the stream, never because the provider ran out of things to
+/// say. Deliberately 60s (the value `f14_sigkill_recovery` already uses) so the
+/// margin over the measured ~1ms cancellation is unambiguous.
+const CANCELLATION_STALL_MS: u64 = 60_000;
+const CANCELLATION_STALL: Duration = Duration::from_millis(CANCELLATION_STALL_MS);
+
+/// Ceiling on the interval this test actually exists to bound: from the moment
+/// the harness sends `stop` (on the first text delta) to the moment the turn
+/// ends. Measured on hetzner-dsm, idle and under 48-core load: `stop_sent` and
+/// `stream_end` land in the SAME MILLISECOND of the turn trace when idle, and
+/// the worst observed turn_end under load sat 49ms after the stream started.
+/// One second is a large allowance against that, and a 60x discrimination
+/// against `CANCELLATION_STALL`.
+///
+/// Proven able to fail: with a `sleep(3s)` inserted before the engine honours
+/// `Stop`, this assertion fires — `cancellation did not abort the active stream
+/// promptly … (3.002120937s later)` — while `result.failures` was still exactly
+/// `[CostMissing]`, i.e. every OTHER assertion in this test passed. That is the
+/// three-assertion self-test LANE-BRIEF 6b-ii asks for: the old instrument
+/// would have missed a three-second cancellation stall entirely.
+const CANCELLATION_LATENCY_CEILING: Duration = Duration::from_secs(1);
+
 #[tokio::test]
 async fn packaged_core_cancels_an_active_stream() {
-    let fixture =
-        OpenAiFixtureScript::new([OpenAiStep::text_then_stall("before cancellation", 10_000)])
-            .start()
-            .await
-            .expect("start OpenAI fixture");
+    let fixture = OpenAiFixtureScript::new([OpenAiStep::text_then_stall(
+        "before cancellation",
+        CANCELLATION_STALL_MS,
+    )])
+    .start()
+    .await
+    .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
         .with_known_free_cost()
         .with_base_url(fixture.base_url());
+    // The turn and scenario budgets bound the WHOLE turn, most of which is the
+    // engine's pre-stream work — NOT the thing under test. They are set in line
+    // with this file's other packaged scenarios (10s turn / 20s scenario) and
+    // still sit far below CANCELLATION_STALL, so a stream that is not cancelled
+    // is caught by them rather than mistaken for a pass.
+    //
+    // They were 3s / 5s until 2026-07-29, and that was the entire cause of CI
+    // run 30434804220's `packaged_core_cancels_an_active_stream` failure —
+    // `OverTime { observed_secs: 3.000722258, budget_secs: 3.0 }`, `TRY 3 FAIL`.
+    // Measured on hetzner-dsm at 1097cfb3 with `WCORE_EVAL_TURN_TRACE=1`:
+    //
+    //   passing run:  t=0.000 prompt_sent … t=1.889 stream_start,
+    //                 t=1.930 text_delta, t=1.930 stop_sent,
+    //                 t=1.931 stream_end, t=1.931 turn_end
+    //   failing run:  t=3.001 TURN_TIMEOUT stop_pending=TRUE
+    //
+    // i.e. ~1.9-2.1s of engine work happens BEFORE the provider stream even
+    // starts, leaving under a second of slack; and every failure timed out with
+    // the stop still PENDING — the budget expired before the harness had a
+    // first token to cancel on. Under 48 busy cores that reproduced 15 times in
+    // 30 (`TOTAL pass=15 fail=15`), against the ~2.5% quoted in the old comment.
+    // Not one observation in 20 traced runs showed a stop that was sent and not
+    // honoured, so the old budget never measured cancellation at all.
     let scenario = Scenario::new("packaged_openai_cancellation", Category::Hardening)
-        .max_total_time(Duration::from_secs(5))
+        .max_total_time(Duration::from_secs(20))
         .turn(
             Turn::new("Start a response and wait.")
-                .max_time(Duration::from_secs(3))
+                .max_time(Duration::from_secs(15))
                 .stop_mid_turn(),
         );
     let result = run_with_binary(
@@ -363,17 +412,41 @@ async fn packaged_core_cancels_an_active_stream() {
     .expect("packaged cancellation run");
     let observation = fixture.shutdown().await.expect("fixture shutdown");
 
+    // THE assertion of this test, and the one the old 3s budget was standing in
+    // for: the turn ended because `stop` was honoured, not because the provider
+    // finished. `first_token_time` is when the harness saw the delta it cancels
+    // on; the turn's wall time is when the turn ended. The difference is the
+    // cancellation latency, and it is bounded independently of how long the
+    // engine took to reach the stream.
+    let turn = result
+        .turn_results
+        .first()
+        .expect("the cancellation scenario has exactly one turn");
+    let first_token = result
+        .execution
+        .first_token_time
+        .expect("a text delta must arrive — it is what the mid-turn stop triggers on");
+    let cancellation_latency = turn.wall_time.saturating_sub(first_token);
     assert!(
-        result.wall_time < Duration::from_secs(5),
-        "packaged candidate cancellation lifecycle exceeded the five-second bound: {:?}",
+        cancellation_latency < CANCELLATION_LATENCY_CEILING,
+        "cancellation did not abort the active stream promptly: stop was sent on the \
+         first text delta at {first_token:?} and the turn did not end until {:?} \
+         ({cancellation_latency:?} later), while the fixture still had up to \
+         {CANCELLATION_STALL:?} of stream to deliver. failures: {:?}",
+        turn.wall_time,
+        result.failures
+    );
+    assert!(
+        result.wall_time < CANCELLATION_STALL,
+        "the run must finish because the stream was CANCELLED, not because the \
+         provider stopped stalling: wall_time {:?} vs a {CANCELLATION_STALL:?} stall",
         result.wall_time
     );
     // The predicate is unchanged; only the diagnostic is added. A bare
-    // `assert!(matches!(..))` prints nothing but the source line, and this test
-    // is a measured ~2.5% flake in isolation (1 failure in 40 reps on an idle
-    // 96-core box) that fails more often under full-suite contention — so the
-    // one run that goes red is the only chance to see what it actually got.
-    // Without the payload every red costs another reproduction loop.
+    // `assert!(matches!(..))` prints nothing but the source line, so the one run
+    // that goes red is the only chance to see what it actually got. Without the
+    // payload every red costs another reproduction loop — and it is what made
+    // the budget diagnosis above possible.
     assert!(
         matches!(result.failures.as_slice(), [Failure::CostMissing]),
         "expected exactly [CostMissing] after a mid-turn cancellation, got {:?}. \
@@ -384,6 +457,12 @@ async fn packaged_core_cancels_an_active_stream() {
         result.final_text
     );
     assert_eq!(result.final_text, "before cancellation");
+    // NOTE: this one cannot fail. `cancellation_requested` is set from
+    // `scenario.turns.iter().any(|t| t.stop_mid_turn)` on the normal path
+    // (runner.rs) and hardcoded `true` on both failure paths, so it echoes this
+    // test's own configuration rather than observing the engine. Kept because it
+    // documents the intent; the load-bearing evidence is the latency assertion
+    // above.
     assert!(result.execution.cancellation_requested);
     assert_eq!(
         result.execution.cleanup_verified, result.execution.containment_authoritative,

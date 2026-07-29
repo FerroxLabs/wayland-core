@@ -312,13 +312,47 @@ fn disabled_err() -> WebOutcome {
     }
 }
 
-/// Pick the best available vision backend from env keys.
+/// Vision arm for the **active OpenAI-wire provider** when that provider is
+/// FluxRouter. `flux-auto` is the router's own alias (the same one the
+/// completion path uses); a live round-trip proved it serves
+/// `/chat/completions` with an `image_url` base64 `data:` block in exactly the
+/// shape [`OpenAiVisionBackend`] already builds, recovering three independent
+/// ground truths from a fixture image.
+pub const FLUX_ROUTER_VISION_MODEL: &str = "flux-auto";
+
+/// Vision arm for native OpenAI (and the `OPENAI_API_KEY` fallback).
+pub const OPENAI_VISION_MODEL: &str = "gpt-4o";
+
+/// Pick the best available vision backend.
 ///
-/// Order:
+/// Order (first match wins):
 /// 1. `ANTHROPIC_API_KEY` → Claude vision
 /// 2. `OPENAI_API_KEY` → GPT-4o vision
 /// 3. `GEMINI_API_KEY` → Gemini 2.5 Flash vision
-pub fn build_vision_backend() -> Option<Arc<dyn VisionBackend>> {
+/// 4. **Active OpenAI-wire provider** (native OpenAI or FluxRouter) — resolved
+///    key + `base_url` from `Config`, so a configured
+///    `[providers.flux-router].base_url` is honoured and the key is never sent
+///    to the wrong host (the #310 class of bug).
+/// 5. `FLUX_API_KEY` → FluxRouter at its default base URL, for the case where
+///    the key is in the environment but FluxRouter is not the active provider.
+///
+/// **Arms 4 and 5 close `BL-F24-C3-H7`.** Before this, the resolver took no
+/// `&Config` at all and read only the three env keys, so inbound vision was
+/// unreachable for a FluxRouter user by **code absence, not capability
+/// absence** — the capability was measured present on the wire. Worse, the
+/// obvious workaround (`OPENAI_API_KEY=<flux key>`) was actively unsafe,
+/// because [`OpenAiVisionBackend`] hardcoded `api.openai.com`: it would have
+/// **misdirected the credential to a third party** rather than failing closed.
+/// Arms 4 and 5 resolve key and host together, so that substitution is never
+/// the user's only option.
+///
+/// **Why 4 and 5 are appended rather than given priority**, mirroring
+/// [`build_transcription_backend`] exactly: arms 1-3 are the pre-existing
+/// resolution order, and putting the active provider first would silently move
+/// every existing Anthropic/OpenAI/Gemini vision user onto a different (and
+/// possibly billed) arm. **Arms 4 and 5 are strictly additive — no
+/// previously-resolving configuration changes backend.**
+pub fn build_vision_backend(config: &Config) -> Option<Arc<dyn VisionBackend>> {
     if let Some(key) = read_env_key("ANTHROPIC_API_KEY") {
         tracing::info!("vision: using Anthropic (ANTHROPIC_API_KEY found)");
         return Some(Arc::new(AnthropicVisionBackend::new(key)));
@@ -331,10 +365,62 @@ pub fn build_vision_backend() -> Option<Arc<dyn VisionBackend>> {
         tracing::info!("vision: using Gemini (GEMINI_API_KEY found)");
         return Some(Arc::new(GeminiVisionBackend::new(key)));
     }
+    // 4. Active OpenAI-wire provider (native OpenAI or FluxRouter).
+    if let Some(backend) = vision_backend_from_config(config) {
+        tracing::info!(
+            "vision: using {} at {} (active OpenAI-wire provider)",
+            backend.model(),
+            backend.endpoint()
+        );
+        return Some(Arc::new(backend));
+    }
+    // 5. FLUX_API_KEY in the environment without FluxRouter being active.
+    if let Some(key) = read_env_key("FLUX_API_KEY") {
+        tracing::info!("vision: using FluxRouter {FLUX_ROUTER_VISION_MODEL} (FLUX_API_KEY found)");
+        return Some(Arc::new(OpenAiVisionBackend::with_endpoint(
+            key,
+            shared::join_openai_endpoint(
+                wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
+                "chat/completions",
+            ),
+            FLUX_ROUTER_VISION_MODEL.to_string(),
+            "flux-router",
+        )));
+    }
     tracing::warn!(
-        "vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden"
+        "vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / \
+         FLUX_API_KEY, and no OpenAI-wire provider configured) — vision tool will be hidden"
     );
     None
+}
+
+/// Arm 4 of [`build_vision_backend`] — the active OpenAI-wire provider (native
+/// OpenAI or FluxRouter), resolved from `Config`.
+///
+/// Returns the concrete backend (not a trait object) so the resolved endpoint
+/// and model are unit-assertable without a network round-trip, mirroring
+/// [`transcription_backend_from_config`]. That matters more here than for
+/// transcription: the property under test is "the credential leaves with the
+/// host it belongs to", which is exactly what a network-free endpoint
+/// assertion checks.
+pub(crate) fn vision_backend_from_config(config: &Config) -> Option<OpenAiVisionBackend> {
+    if config.api_key.trim().is_empty() {
+        return None;
+    }
+    let base = shared::openai_wire_media_base(config)?;
+    let (model, backend_id) = match config.provider {
+        ProviderType::FluxRouter => (FLUX_ROUTER_VISION_MODEL, "flux-router"),
+        _ => (OPENAI_VISION_MODEL, "openai"),
+    };
+    // `WAYLAND_VISION_MODEL` keeps working as the operator override on this
+    // arm too, matching `OpenAiVisionBackend::new`.
+    let model = read_env_key("WAYLAND_VISION_MODEL").unwrap_or_else(|| model.to_string());
+    Some(OpenAiVisionBackend::with_endpoint(
+        config.api_key.clone(),
+        shared::join_openai_endpoint(&base, "chat/completions"),
+        model,
+        backend_id,
+    ))
 }
 
 /// Speech-to-text arm used when the **active OpenAI-wire provider is
@@ -657,6 +743,136 @@ mod tests {
             ..Config::default()
         };
         assert!(transcription_backend_from_config(&empty).is_none());
+    }
+
+    // -- Vision config seam (BL-F24-C3-H7) -------------------------------
+
+    /// The defect this closes: `build_vision_backend()` took **no `&Config`**
+    /// and read only ANTHROPIC / OPENAI / GEMINI, so inbound vision was
+    /// unreachable for a FluxRouter user by code absence — while the capability
+    /// was live on the wire (HTTP 200, three ground truths recovered).
+    #[test]
+    fn flux_router_config_resolves_a_vision_backend() {
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux".into(),
+            base_url: String::new(), // Tier-2 newtype supplies the default
+            ..Config::default()
+        };
+        let backend = vision_backend_from_config(&cfg)
+            .expect("a FluxRouter config with a key must resolve a vision backend");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.fluxrouter.ai/v1/chat/completions"
+        );
+        assert_eq!(backend.backend_id(), "flux-router");
+    }
+
+    /// **The misdirection guard.** This is the assertion that matters most in
+    /// this file. `OpenAiVisionBackend` used to hardcode
+    /// `https://api.openai.com/v1/chat/completions` while taking a
+    /// caller-supplied key, so pointing it at FluxRouter would have shipped a
+    /// FluxRouter credential to OpenAI — a third party — rather than failing
+    /// closed. Key and host must now always be resolved together: a Flux key
+    /// must never resolve an `openai.com` endpoint.
+    ///
+    /// Checkable with no network, which is the point — the property is about
+    /// where the credential is *addressed*, not whether the call succeeds.
+    #[test]
+    fn a_flux_credential_never_resolves_an_openai_host() {
+        for base in [
+            "",
+            "https://api.fluxrouter.ai/v1",
+            "https://flux.internal/v1",
+        ] {
+            let cfg = Config {
+                provider: ProviderType::FluxRouter,
+                api_key: "sk-flux-secret".into(),
+                base_url: base.into(),
+                ..Config::default()
+            };
+            let backend = vision_backend_from_config(&cfg).expect("must resolve");
+            assert!(
+                !backend.endpoint().contains("openai.com"),
+                "a FluxRouter credential resolved endpoint {} — that would misdirect the key \
+                 to a third party (BL-F24-C3-H7)",
+                backend.endpoint()
+            );
+        }
+    }
+
+    /// A configured `base_url` must be honoured rather than the key being sent
+    /// to a hardcoded host (the #310 bug class, now closed for vision too).
+    #[test]
+    fn vision_honours_a_configured_base_url() {
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux".into(),
+            base_url: "https://flux.internal.example/v1".into(),
+            ..Config::default()
+        };
+        let backend = vision_backend_from_config(&cfg).expect("must resolve");
+        assert_eq!(
+            backend.endpoint(),
+            "https://flux.internal.example/v1/chat/completions"
+        );
+    }
+
+    /// Native OpenAI keeps `gpt-4o` and its own host; only FluxRouter gets the
+    /// flux arm. Proves arm 4 did not smear one provider's model onto another.
+    #[test]
+    fn openai_wire_config_keeps_gpt4o() {
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-o".into(),
+            base_url: "https://api.openai.com".into(),
+            ..Config::default()
+        };
+        let backend = vision_backend_from_config(&cfg).expect("must resolve");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(backend.model(), OPENAI_VISION_MODEL);
+        assert_eq!(backend.backend_id(), "openai");
+    }
+
+    /// Providers that do not serve the OpenAI-wire chat route must NOT be
+    /// routed vision, and an empty key resolves nothing. Without this, arm 4
+    /// would be a credential-misrouting machine for every other provider.
+    #[test]
+    fn non_openai_wire_provider_and_empty_key_resolve_no_vision() {
+        for p in [
+            ProviderType::Anthropic,
+            ProviderType::Gemini,
+            ProviderType::Groq,
+        ] {
+            let cfg = Config {
+                provider: p,
+                api_key: "k".into(),
+                ..Config::default()
+            };
+            assert!(
+                vision_backend_from_config(&cfg).is_none(),
+                "{p:?} has no OpenAI-wire vision route"
+            );
+        }
+        let empty = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "   ".into(),
+            ..Config::default()
+        };
+        assert!(vision_backend_from_config(&empty).is_none());
+    }
+
+    /// The `OpenAiVisionBackend::new` env arm must be unchanged by the
+    /// refactor — arms 1-3 are pre-existing behaviour and this change is
+    /// strictly additive.
+    #[test]
+    fn openai_env_arm_still_targets_openai() {
+        let b = crate::tool_backends::openai_vision::OpenAiVisionBackend::new("sk-o".into());
+        assert_eq!(b.endpoint(), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(b.backend_id(), "openai");
     }
 
     #[test]

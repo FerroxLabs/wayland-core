@@ -78,7 +78,9 @@ pub async fn load_all_skills_with_bundled(
         }
         // Bundled skills prepended so they win deduplication
         all.splice(0..0, bundled_loaded);
-        return deduplicate_by_name(deduplicate(all));
+        // Governance applies in bare mode too: an isolated environment is still one a
+        // revoked skill must not execute in.
+        return apply_governance(deduplicate_by_name(deduplicate(all))).await;
     }
 
     // 1. User-level skills (highest priority)
@@ -151,7 +153,127 @@ pub async fn load_all_skills_with_bundled(
 
     // Path-based dedup first (handles symlinked duplicates), then name-based
     // dedup to enforce MCP vs. filesystem priority.
-    deduplicate_by_name(deduplicate(all))
+    apply_governance(deduplicate_by_name(deduplicate(all))).await
+}
+
+// ---------------------------------------------------------------------------
+// 23A-C1: governance enforcement
+// ---------------------------------------------------------------------------
+
+/// Apply skill governance to a fully-resolved catalog.
+///
+/// Two effects, and the order between them is the resurrection fence:
+///
+/// 1. **A revoked skill is dropped from the catalog entirely.** Not quarantined —
+///    *removed*. Quarantine only hides a skill from the model; the skill is still
+///    loaded, still resolvable by name, and still executable through the user-invocable
+///    path. A revocation that left the skill executable would not be a revocation.
+/// 2. **A promoted skill has its generated-provenance quarantine lifted**, but only
+///    while the bytes on disk still hash to the digest the grant names.
+///
+/// Revocation is checked **first and unconditionally**, so a stale promotion grant can
+/// never re-expose a revoked artifact even if withdrawal did not complete.
+///
+/// This is the single choke point for both. It sits after dedup rather than inside
+/// `load_skill_file` for two reasons: the governance state is read **once** per catalog
+/// load instead of once per skill, and one placement is auditable where a dozen call
+/// sites are not.
+///
+/// **Cost when nothing is governed is one directory read.** With no revocations and no
+/// grants — the state of every install that has never used these commands — the function
+/// returns the catalog untouched without hashing anything.
+async fn apply_governance(skills: Vec<SkillMetadata>) -> Vec<SkillMetadata> {
+    let Ok(store) = crate::govern::GovernanceStore::open_default() else {
+        // No governance root resolvable on this platform. Governance is unavailable,
+        // not violated; the catalog is unchanged.
+        return skills;
+    };
+    let (Ok(revocations), Ok(grants)) = (store.live_revocations(), store.promotions()) else {
+        // A governance read failed. Returning the catalog unchanged is the same
+        // fail-open choice `is_revoked` documents, and for the same reason: failing
+        // closed here would empty a user's whole skill catalog on one bad file.
+        tracing::error!(
+            target: "wcore_skills::loader",
+            "could not read skill governance state; catalog left ungoverned"
+        );
+        return skills;
+    };
+    if revocations.is_empty() && grants.is_empty() {
+        return skills;
+    }
+
+    let mut out = Vec::with_capacity(skills.len());
+    for mut meta in skills {
+        let Some(root) = meta.skill_root.clone() else {
+            // Bundled and MCP skills have no directory. They are not drafted, cannot
+            // be revoked by this surface, and are passed through.
+            out.push(meta);
+            continue;
+        };
+        let dir = PathBuf::from(&root);
+        let dir_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let signature = crate::govern::read_signature(&dir);
+
+        // ---- 1. revocation, first and unconditional ----
+        let revoked = revocations.iter().any(|r| {
+            r.skill_name == dir_name
+                || match (r.signature.as_deref(), signature.as_deref()) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                }
+        });
+        if revoked {
+            tracing::info!(
+                target: "wcore_skills::loader",
+                skill = %meta.name,
+                path = %dir.display(),
+                "skill is revoked; excluded from the catalog"
+            );
+            continue;
+        }
+
+        // ---- 2. promotion lifts quarantine, and only for generated drafts ----
+        //
+        // Gated on generated provenance so a promotion can never clear a
+        // `disable-model-invocation` the *author* set in frontmatter. Promotion's
+        // authority is over the quarantine this loader imposes, not over a user's
+        // explicit declaration about their own skill.
+        if meta.disable_model_invocation
+            && grants.iter().any(|g| g.skill_name == dir_name)
+            && is_generated_draft(&dir, &meta.name, &meta.content).await
+        {
+            let dir_for_check = dir.clone();
+            let store_for_check = store.clone();
+            let state = tokio::task::spawn_blocking(move || {
+                store_for_check.promotion_state(&dir_for_check)
+            })
+            .await;
+            match state {
+                Ok(Ok(s)) if s.lifts_quarantine() => {
+                    meta.disable_model_invocation = false;
+                }
+                Ok(Ok(crate::promote::PromotionState::DigestMismatch { promotion_id, .. })) => {
+                    // Explicitly logged: a promoted skill silently reverting to
+                    // quarantine after an edit is correct but surprising, and an
+                    // unexplained reversion reads as a bug.
+                    tracing::warn!(
+                        target: "wcore_skills::loader",
+                        skill = %meta.name,
+                        promotion_id = %promotion_id,
+                        "promotion grant does not match the bytes on disk; skill stays \
+                         quarantined. Re-promote it to cover the current content."
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        out.push(meta);
+    }
+    out
 }
 
 /// X1: load every skill's listing-only metadata without keeping bodies pinned.
@@ -272,22 +394,6 @@ fn collect_skill_md<'a>(
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
-
-            // F23A-C1-H3: a rollback stages the restored tree beside its target before the
-            // final rename(2), so a staging directory is either mid-restore or the remains
-            // of a kill inside one. Either way its contents are a partial copy, and
-            // discovering it would reintroduce exactly the "present, loadable, incomplete"
-            // state the atomic restore removes. Matched by explicit prefix rather than by a
-            // blanket dotted-directory rule, which would change which skills load for users
-            // who never touched governance.
-            if path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|n| n.starts_with(crate::govern::ROLLBACK_STAGING_PREFIX))
-            {
-                continue;
-            }
-
             // Follow symlinks: entry.file_type() does NOT traverse symlinks,
             // so use tokio::fs::metadata() which resolves the target type.
             let is_dir = match tokio::fs::metadata(&path).await {

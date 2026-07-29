@@ -34,6 +34,7 @@ use clap::Subcommand;
 use serde_json::json;
 
 use wcore_agent::agents::bus::{AgentBus, AgentMessage};
+use wcore_agent::goal::StrategyTermination;
 use wcore_agent::orchestration::workflow::estimate::{self, CostEstimate};
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
 use wcore_agent::spawner::AgentSpawner;
@@ -60,6 +61,12 @@ pub enum WorkflowCmd {
     Run {
         /// Saved-workflow name (the `.ron` stem under `.wayland/workflows/`).
         name: String,
+        /// Run this workflow as the ONE loop owner of a durable Goal, and
+        /// terminate it through the canonical Goal transition (F22C).
+        ///
+        /// Opt-in. Without `--goal` this is byte-for-byte the pre-F22C path.
+        #[command(flatten)]
+        goal: crate::goal_cmd::GoalAttachArgs,
     },
 }
 
@@ -68,7 +75,7 @@ pub async fn run(cmd: WorkflowCmd) -> anyhow::Result<()> {
     match cmd {
         WorkflowCmd::Validate { file } => validate(&file),
         WorkflowCmd::List => list(),
-        WorkflowCmd::Run { name } => run_workflow(&name).await,
+        WorkflowCmd::Run { name, goal } => run_workflow(&name, &goal).await,
     }
 }
 
@@ -180,7 +187,7 @@ fn governed_workflow_spawner(
 ///
 /// Wires the runner to the same provider/spawner construction path the main
 /// agent loop uses, so a `run` here is a real fleet execution — not a stub.
-async fn run_workflow(name: &str) -> anyhow::Result<()> {
+async fn run_workflow(name: &str, goal: &crate::goal_cmd::GoalAttachArgs) -> anyhow::Result<()> {
     let dir = find_workflows_dir()?;
     let path = dir.join(format!("{name}.ron"));
     let src = std::fs::read_to_string(&path)
@@ -239,14 +246,58 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     );
 
     let runner = WorkflowRunner::new(&spawner);
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // The engine invocation below is THE production one — the same
+    // `WorkflowRunner::run` over the same spawner, plan and state. Attaching a
+    // Goal does not build a second workflow path; it wraps the existing call in
+    // `GoalLoop::run_forgeflows`, whose closure return type is
+    // `StrategyTermination`, so there is no route out of it that reaches a
+    // terminal state any other way and none that terminates zero times.
+    if let Some((driver, goal_id)) = goal.resolve()? {
+        let cursor = driver
+            .run_forgeflows(&goal_id, |owner| async move {
+                match runner.run(&plan, json!({})).await {
+                    Ok(result) => {
+                        print_workflow_envelope(&plan.meta.name, &result);
+                        StrategyTermination::from_forgeflows(owner, Ok(&result))
+                    }
+                    // Carried into the terminal transition as the real error,
+                    // never swallowed into a clean terminal.
+                    Err(error) => {
+                        eprintln!("workflow '{name}' failed: {error}");
+                        StrategyTermination::from_forgeflows(owner, Err(&error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "forgeflows", &cursor);
+        return Ok(());
+    }
+
     let result = runner
         .run(&plan, json!({}))
         .await
         .map_err(|e| anyhow::anyhow!("workflow '{name}' failed: {e}"))?;
 
-    // Emit the structured outcome: per-stage records plus the final state.
+    print_workflow_envelope(&plan.meta.name, &result);
+    Ok(())
+}
+
+/// Emit the structured outcome: per-stage records plus the final state.
+///
+/// Extracted so the Goal-attached path and the unattached path print the SAME
+/// envelope. A second copy would let the two drift, and "the attached run
+/// produces the same output" is part of what makes the attachment a wrapper
+/// rather than a different workflow implementation.
+fn print_workflow_envelope(
+    name: &str,
+    result: &wcore_agent::orchestration::workflow::runner::WorkflowRunResult,
+) {
     let envelope = json!({
-        "workflow": plan.meta.name,
+        "workflow": name,
         "stages": result
             .stage_results
             .iter()
@@ -259,8 +310,10 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         "final_state": result.final_state,
     });
-    println!("{}", serde_json::to_string_pretty(&envelope)?);
-    Ok(())
+    match serde_json::to_string_pretty(&envelope) {
+        Ok(rendered) => println!("{rendered}"),
+        Err(error) => eprintln!("failed to render workflow envelope: {error}"),
+    }
 }
 
 /// Subscribe to `bus` and log sub-agent lifecycle events to stderr until the

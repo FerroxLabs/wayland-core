@@ -126,6 +126,59 @@ impl Redactor {
         }
     }
 
+    /// Learn the secret VALUES held in a TOML-ish or JSON-ish file, selected
+    /// by whether their KEY NAME marks them ([`name_marks_secret`]). Returns
+    /// how many were taken.
+    ///
+    /// # Why this is needed even though the file itself is structurally elided
+    ///
+    /// Structural elision protects the CONFIG MEMBER — `config-keys.txt`
+    /// carries `api_key  [value elided]` and the value is never read into the
+    /// bundle. It does nothing for the LOG member, which is free text written
+    /// by dozens of call sites, several of which had that same credential in
+    /// scope. Before this existed the only bulk learn was
+    /// [`Redactor::learn_from_environment`], so a secret that lived in
+    /// `config.toml` rather than in the environment was never learned, and the
+    /// scrubber passed it through the log untouched.
+    ///
+    /// That is a hole precisely where the backstop is the ONLY defence. The
+    /// values learned here are held in memory to be scrubbed FOR; they are
+    /// never written to a bundle member by this type.
+    ///
+    /// A file that cannot be read contributes nothing and is not an error —
+    /// the absence is reported by [`collect`] through `absent_sources`, which
+    /// is the one place absence is meant to surface.
+    pub fn learn_secret_values_from_file(&mut self, path: &Path) -> usize {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return 0;
+        };
+        let mut learned = 0usize;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+                continue;
+            }
+            let Some(idx) = line.find(['=', ':']) else {
+                continue;
+            };
+            // `=` and `:` are single-byte in UTF-8, so `idx + 1` is a char
+            // boundary.
+            let key = line[..idx].trim().trim_matches(['"', '\'']);
+            if !name_marks_secret(key) {
+                continue;
+            }
+            let value = line[idx + 1..]
+                .trim()
+                .trim_end_matches(',')
+                .trim()
+                .trim_matches(['"', '\'']);
+            if self.learn(value) {
+                learned += 1;
+            }
+        }
+        learned
+    }
+
     pub fn len(&self) -> usize {
         self.secrets.len()
     }
@@ -455,6 +508,72 @@ mod tests {
             "no value survives, not even a harmless-looking one — a rule with \
              exceptions is a rule nobody can check: {names}"
         );
+    }
+
+    #[test]
+    fn a_config_file_secret_is_learned_and_scrubbed_out_of_free_text() {
+        // THREE ASSERTIONS, per LANE-BRIEF §6b-ii. The third is the only one
+        // that proves the repair does anything.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[providers.anthropic]\napi_key = \"sk-config-only-SECRET-abcdefgh\"\n\
+             base_url = \"https://api.anthropic.com\"\n",
+        )
+        .unwrap();
+        // A log line written by a call site that had the credential in scope.
+        let log = "ERROR auth rejected for key sk-config-only-SECRET-abcdefgh (401)";
+
+        // (a) KNOWN-POSITIVE: the config secret is learned, and scrubbed.
+        let mut fixed = Redactor::new();
+        let learned = fixed.learn_secret_values_from_file(&cfg);
+        assert_eq!(learned, 1, "exactly the api_key value must be learned");
+        let (scrubbed, hits) = fixed.scrub(log);
+        assert_eq!(hits, 1);
+        assert!(
+            !scrubbed.contains("sk-config-only-SECRET-abcdefgh"),
+            "the config secret must not survive into free text: {scrubbed}"
+        );
+
+        // (b) KNOWN-NEGATIVE: a non-secret-named value is NOT learned, so the
+        // scrubber cannot blank ordinary text. `base_url` is present in the
+        // same file and must be ignored.
+        assert!(
+            fixed.scrub("connecting to https://api.anthropic.com").1 == 0,
+            "a non-secret-named value must not be learned, or the bundle \
+             becomes illegible and the operator disables redaction"
+        );
+
+        // (c) THE THIRD ASSERTION: the PRE-FIX redactor — environment learning
+        // only — would have MISSED this. The secret lives in config.toml and
+        // in no environment variable, so `learn_from_environment` learns
+        // nothing about it and the log line ships the credential verbatim.
+        let mut prefix = Redactor::new();
+        prefix.learn_from_environment();
+        let (unscrubbed, prefix_hits) = prefix.scrub(log);
+        assert_eq!(
+            prefix_hits, 0,
+            "the pre-fix path must be shown to make ZERO replacements here"
+        );
+        assert!(
+            unscrubbed.contains("sk-config-only-SECRET-abcdefgh"),
+            "the pre-fix path SHIPPED the credential — this is the defect the \
+             fix closes, and without this assertion the test passes on the \
+             broken instrument too"
+        );
+    }
+
+    #[test]
+    fn learning_from_a_missing_file_is_zero_rather_than_an_error() {
+        // A bundle is produced when things are broken; a missing config must
+        // not abort the collection. Absence surfaces through `absent_sources`.
+        let mut r = Redactor::new();
+        assert_eq!(
+            r.learn_secret_values_from_file(Path::new("/nonexistent/nope.toml")),
+            0
+        );
+        assert!(r.is_empty());
     }
 
     #[test]
