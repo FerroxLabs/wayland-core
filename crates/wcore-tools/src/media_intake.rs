@@ -182,9 +182,20 @@ impl IntakePolicy {
 }
 
 /// Windows UNC and `file://host/share` forms never reach the filesystem here.
-fn is_network_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.starts_with("\\\\") || s.starts_with("//")
+///
+/// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
+/// implementation. The local copy this replaces matched any `\\`/`//` prefix,
+/// so it also called `\\?\C:\Users\x` — a verbatim path to a **local disk** —
+/// a network path, and reported it as `IntakeError::NetworkPath`. That input
+/// is still refused, by `validate_user_path` on the next line, but now as
+/// `DeviceOrVerbatimPath`: the accurate reason. No input that was rejected
+/// before is accepted now.
+///
+/// Spelling, not storage: a file on a mounted share is deliberately still
+/// admitted. See `wcore_config::network_path` for why, and for the other
+/// question.
+fn is_unc_path(path: &Path) -> bool {
+    wcore_config::network_path::has_unc_prefix(path)
 }
 
 /// Admit a caller-supplied path as bytes, resolving the name EXACTLY ONCE for
@@ -200,11 +211,11 @@ fn is_network_path(path: &Path) -> bool {
 /// 6. cross-check the extension's claim against the detected class,
 /// 7. read the remainder from the same descriptor under a bounded take.
 pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, IntakeError> {
-    if is_network_path(path) {
+    if is_unc_path(path) {
         return Err(IntakeError::NetworkPath(path.to_path_buf()));
     }
     let validated = validate_user_path(path).map_err(|e| IntakeError::Path(e.to_string()))?;
-    if is_network_path(&validated) {
+    if is_unc_path(&validated) {
         return Err(IntakeError::NetworkPath(validated));
     }
 
