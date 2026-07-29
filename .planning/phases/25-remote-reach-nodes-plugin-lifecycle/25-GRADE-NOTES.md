@@ -78,3 +78,67 @@ Phase dir has: 25-01..25-04 PLAN/SUMMARY, plus 25-01-CLOUD-BACKEND-DECISION,
 - [next] Read 25-01/25-CLOUD-SUMMARY + equivalence + cloud ledger -> grade C1, with
   specific attention to whether the SSH leg was ever run at the SAME commit as the other
   three (status file itself qualifies this as "a composition across two commits").
+
+---
+
+## MEASUREMENTS (re-derived, unproxied tools)
+
+### C1 — four surfaces
+Evidence read: `25-01-SUMMARY.md`, `25-CLOUD-SUMMARY.md`, `evidence/25-01-equivalence-ledger.txt`,
+`evidence/25-cloud-ledger.txt`.
+
+- 25-01 ledger line 10 is the executor's OWN verdict: `F25-SC1-VERDICT: NOT-MET`. Three of four
+  surfaces ran (local/container/ssh), cloud NOT-RUN, credential absent.
+- 25-cloud ledger: cloud RUN PASS, receipt integrity PASS, hibernation observed as genuine
+  SUSPEND with a stop/start control on ONE machine, provenance gate passes. `F25-SC1-VERDICT: MET`.
+- **SSH not re-run at the cloud commit** — the cloud ledger states this itself
+  (`F25-SC1-SSH-AT-THIS-COMMIT: NOT RUN`). Four-surface claim is a composition across two commits
+  (`5e620ef0` and 25-01's commit).
+- **CANCELLATION ON CLOUD WAS NEVER EXERCISED — on any commit.** Criterion 1 names
+  "policy, receipts, **cancellation**, and cleanup" as the equivalence set.
+  - 25-01: `F25-SC1-CLOUD-CANCEL: NOT-RUN` (line 8), reason=no credential.
+  - 25-cloud: no CLOUD-CANCEL marker exists at all.
+  - Measured with a live-instrument control:
+    `grep -c "F25-SC1-CLOUD-RUN" evidence/25-cloud-ledger.txt` -> **1** (instrument alive)
+    `grep -c "CLOUD-CANCEL" evidence/25-cloud-ledger.txt` -> **0**
+    `grep -rn -i "cancel" evidence/25-cloud-{live-run,provenance,orphan-control}.txt` -> **0**,
+    while `grep -rc "machine" evidence/25-cloud-live-run.txt` -> **3** (instrument alive on the
+    same files).
+  - `25-CLOUD-SUMMARY.md` §"What this lane did NOT do" concedes it: "Did not exercise cloud
+    cancellation live."
+- **CLEANUP is defective on the ssh surface.** `25-HOSTS-SUMMARY.md` FINDING 5 (MEDIUM, BACKLOG,
+  UNFIXED): the ssh remote runner leaves its task root behind on failure — `set -e` aborts at
+  `wait` so `rm -rf "$root"` never runs, leaving `input.bin` (the task's INPUT BYTES) on the far
+  end. Six such roots were found on the node and purged by hand. The lane itself says this
+  "touches Criterion 1's 'cleanup'".
+- SSH leg proof quality: `F25-SC1-SSH-TARGET: CONTAINERIZED-SSHD` — same physical host, and
+  `backend.instance_id` identical across all three receipts. Honestly disclosed by 25-01.
+
+### C2 / C4 source-level verification of the two disclosed limitations
+Both verified in the actual tree, not inherited (known-positive control:
+`grep -c "" crates/wcore-cli/src/node.rs` -> **623 lines**, instrument alive):
+- FINDING 7 confirmed: `crates/wcore-cli/src/node.rs:395` -> `let _ = ad;` — the
+  `NodeAdvertisement::observe` result at line 381 is computed and DISCARDED. `node probe` never
+  refreshes the advertisement.
+- FINDING 4 confirmed: `crates/wcore-cli/src/node.rs:507` `backend_key_from`, and `:512`
+  "this host does not hold the signing key for backend '{}'" — the controller genuinely cannot
+  verify a node-minted receipt's IDENTITY.
+
+### C3 — ARITHMETIC RE-DERIVED, and the criterion does not say twelve
+Criterion 3 names: scaffolded, tested, signed, installed, approved, inspected, updated,
+rolled back, removed, published, recovered = **ELEVEN** verbs. The phase calls it a
+"twelve-verb lifecycle"; the twelfth (`verify`) is a superset addition, not a criterion item.
+- Linux ledger (`evidence/25-02-lifecycle-ledger.txt`): 12 verb lines, all PASS + 4 negative
+  cases PASS. All ELEVEN criterion-named verbs are covered.
+- Windows ledger: `F25-SC3-WIN-VERB-NEW: NOT-RUN` (cargo-generate absent) and
+  `F25-SC3-WIN-NEG-APPROVED-LOADS: PARTIAL`.
+- **DISCREPANCY FOUND:** the LINUX ledger's last line claims
+  `F25-SC3-WINDOWS: PASS ... reason=full-twelve-verb-drive-ran` — but the Windows ledger it
+  points at records 11 of 12 with `new` NOT-RUN. A ledger line overstating the evidence it
+  cites. Recording it.
+- Criterion 3 names NO platform (unlike Phase 24 SC5), so Linux-only satisfies it as written.
+
+### Still to establish
+- C3: does `plugin test` actually run tests, or exit 0 having run zero? (vacuity class)
+- C4: were all five hostile compromises INDUCED FOR REAL on both hosts?
+- Whether F25-05 (listed in ROADMAP Requirements, no criterion, no plan) is a scope gap.
