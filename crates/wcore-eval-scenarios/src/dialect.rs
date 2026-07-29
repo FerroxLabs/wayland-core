@@ -19,18 +19,27 @@
 //!
 //! # A dialect compiler is where a vendor-run benchmark would cheat. The guards:
 //!
+//! **Read the limits below before the guards.** A four-way cross-audit panel returned 4/4
+//! `CONFIRM_WITH_AMENDMENT` on this design and struck three fairness claims an earlier draft of
+//! this very comment made. What each guard does and does not prove is stated exactly.
+//!
 //! * **G1 — pre-registered vocabulary.** [`VOCABULARY_VERSION`] and every token table below are
 //!   committed BEFORE any real corpus is captured; git order is the proof, exactly as commit
 //!   ordering is what made `protocol.json` a pre-registration rather than a document.
 //!   [`vocabulary_carries_no_product_token`] asserts mechanically that no token is a product name.
+//!   **Does NOT prove:** independence from the author's prior knowledge of common tool-naming
+//!   conventions. `Write` is not a product name, so a rule keyed to it would pass this check
+//!   cleanly. G1 rules out fitting-to-captured-data and nothing more.
 //! * **G2 — identity-blind by TYPE, not by discipline.** [`ToolSchemaCorpusV1`] carries no field
 //!   naming the product it came from, and [`compile_script`] takes nothing else. The compiler
 //!   *cannot* branch on which tool it is serving. Which harness a corpus belongs to lives in a
 //!   separate manifest the compiler never receives.
-//! * **G3 — selection is a FILTER, not a ranking.** There is no score, therefore no place to put a
-//!   thumb. Exactly one declared tool must survive the gates. Zero → [`DialectRefusalV1::NoCandidate`].
-//!   Two or more → [`DialectRefusalV1::Ambiguous`]. **A refusal is never a task failure**: it makes
-//!   that leg UNPROVEN, which under `ComparativeResultV1` yields no comparison in either direction.
+//!   **Does NOT prove fairness.** The permutation test proves determinism and the absence of label
+//!   leakage. Any pure function passes it — including the maximally biased rule *"select the tool
+//!   whose name is exactly `Write`"*. G2 cannot distinguish this filter from that rule.
+//! * **G3 — selection is a FILTER, not a ranking.** There is no score, therefore no tie-break,
+//!   therefore no lever. Exactly one declared tool must survive the gates. Zero →
+//!   [`DialectRefusalV1::NoCandidate`]. Two or more → [`DialectRefusalV1::Ambiguous`].
 //! * **G4 — one compilation, digested.** [`TranslationV1`] carries `corpus_sha256` and
 //!   `translation_sha256`; [`TranslationV1::verify`] recomputes both, so a hand edit to a
 //!   translation is detected rather than trusted.
@@ -38,6 +47,23 @@
 //!   by construction. Codex's prescription, quoted in SR-30-3, is adopted literally: *"compile one
 //!   canonical semantic script into tool-native response dialects and hash all translations; do not
 //!   falsely claim byte identity."*
+//! * **G6 — the symmetric-resolution gate ([`cohort_eligibility`]), added by the panel.** An
+//!   earlier draft claimed a refusal was neutral because a comparative cannot be built without
+//!   every harness. That is true of the constructor and **false of the report**: a harness that
+//!   resolves publishes an absolute number a refusing harness cannot, and a reader draws the
+//!   inference the comparative declined to state. So a refusal by ANY harness makes that dimension
+//!   ineligible for EVERY harness, ours included. This is the guard that makes the vendor-authored
+//!   disqualifying list safe to leave in place: a list tuned to exclude a peer's tools destroys our
+//!   own leg by the same act.
+//!
+//! # What remains open, and is not fixed here
+//!
+//! The token tables are authored by the vendor. G6 makes tuning them self-defeating; it does not
+//! make them independent. Third-party ratification of the vocabulary is the real fix and is
+//! outside this module's authority. The counterfactual qualification suite in `tests` publishes the
+//! resulting blind spots — a capable-but-denylisted `edit_file`, a generic `filesystem` tool whose
+//! semantics live in its description, and the case where **adding** a valid tool flips a resolving
+//! surface to `AMBIGUOUS` — so a reader can price them rather than discover them.
 //!
 //! # Selection reads the tool NAME, never its description
 //!
