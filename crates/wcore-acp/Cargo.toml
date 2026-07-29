@@ -21,7 +21,10 @@ futures = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 wcore-egress = { workspace = true }
 bytes = "1"
-# OpenAPI 3.0.3 doc generation for the REST transport (transport::rest).
+# OpenAPI 3.1.0 doc generation for the REST transport (transport::rest).
+# Emitted 3.0.3 under utoipa 4; the 4->5 bump (RUSTSEC-2024-0370) moved it to
+# 3.1.0. The emitted version and nullable encoding are pinned by
+# tests/openapi_contract.rs against tests/fixtures/openapi/rest-openapi-shape.json.
 utoipa = { workspace = true }
 
 [dev-dependencies]
