@@ -214,3 +214,57 @@ documentation for enforcement that already existed elsewhere and was never conne
 2. Discord's platform fact ("25 MiB non-boosted upload ceiling") is **preserved in the doc
    comment** rather than deleted, so the information the 25 survives even though it is no
    longer masquerading as the intake bound.
+
+## T+70 — implemented, and the third assertion is PROVEN by mutation
+
+Shape: **one `MEDIA_BOUNDS` constant per adapter crate.** `media_bounds()` returns it and the
+crate's own fetch/inline cap is derived from it, so the advertised number and the enforced
+number are the same number by construction. Plus `ChannelManager::fetch_media_on` — the only
+production path to adapter media — checks every payload against the originating channel's
+declaration, and `ChannelMediaEnricher::enrich` applies `max_attachments`, which previously had
+no enforcement point anywhere in the workspace.
+
+Declared values are set to each adapter's already-operative cap: **no adapter's effective
+runtime limit changes.**
+
+### Build (hetzner `hz/24-media-bounds` @ `dd14ebe8`)
+
+All 10 touched crates compile: `wcore-channels`, `wcore-agent` deps, and the 9 adapters.
+
+### Suite `wcore-channels --test media_bounds_enforced` — 6 tests
+
+```
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`0 ignored` and `0 filtered out` read back explicitly (LANE-BRIEF §3.2 / §3b) — the suite ran
+6 tests, it did not exit 0 having run none. Output taken via `rtk proxy`, because plain `cargo`
+in this environment **strips those exact two fields**.
+
+### MUTATION PROOF — the third assertion, executed not asserted
+
+Reverted `fetch_media_on` to return before any bounds check (the pre-fix two-line body), at the
+identical commit, with an `assert` on the mutation anchor so a silent no-op revert could not
+produce a fake proof:
+
+| build | result |
+|---|---|
+| **pre-fix enforcement** | `FAILED. 1 passed; 5 failed; 0 ignored; 0 filtered out` |
+| **fixed enforcement** (restored, control) | `ok. 6 passed; 0 failed; 0 ignored; 0 filtered out` |
+
+**The one test that passes pre-fix is `a_payload_at_exactly_the_declared_bound_is_returned_intact`
+— the known-positive.** That is exactly correct: the liveness control must pass on both builds,
+and all five behavioural assertions must redden. If the known-positive had ALSO failed, the
+suite would have been measuring a broken harness rather than the enforcement.
+
+### Instrument defect #2 (mine) — found by the mutation run, repaired in-lane (§6b-ii)
+
+The first mutation run produced **125 MB of output**. Cause: `expect_err` on a
+`Result<Vec<u8>, _>` renders the ENTIRE vector into the panic message, and the default-bound
+case has a 26 MiB Ok payload. Every other test's result was buried — a failure I could not
+read is a failure I would have had to re-run blind, and on a slower link it would have looked
+like a hung agent (§6b).
+
+Repaired, not merely noted: every `expect_err`/`unwrap_err` on a byte-payload result now goes
+through `.map(|b| b.len())` first, so a failure prints a length. Commit `dd14ebe8`. The second
+mutation run above is the proof the repair works — same mutation, readable output.
