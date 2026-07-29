@@ -359,6 +359,18 @@ pub struct MigrationReport {
     /// `skills_imported`; reported separately so the file count and the item
     /// count can be reconciled by a reader.
     pub skills_deduplicated: usize,
+    /// Imported files whose SOURCE carried a POSIX execute bit, which this
+    /// import removed.
+    ///
+    /// Measured against the real peer trees: **68 of 349 peer skills carry a
+    /// `.sh`/`.py`/`.js` helper or an execute-bit file**, and
+    /// `classify_skill_body` reads only the SKILL.md prose, so all of them
+    /// classify `Data` and land live. Wayland does not auto-run them — its one
+    /// auto-execution surface is the `` ```! `` directive, which IS classified
+    /// and contained — but a peer script arriving at `0755` is one `./script`
+    /// away from running with no containment decision ever having been made.
+    /// So the bit is removed and the count is surfaced.
+    pub exec_bits_stripped: usize,
 }
 
 /// Running totals of what the content writer actually put on disk.
@@ -1101,6 +1113,7 @@ fn apply_plan(
         personas_imported: written.personas,
         memory_imported: written.memory,
         skills_deduplicated: written.deduplicated,
+        exec_bits_stripped: content.exec_bits_stripped(),
     };
 
     patch_global_config(|f| {
@@ -1358,6 +1371,16 @@ fn print_report(report: &MigrationReport, plan: &MigrationPlan) {
             "  ({} skill{} were byte-identical to one already imported and share its copy.)",
             report.skills_deduplicated,
             plural(report.skills_deduplicated, "", "s"),
+        );
+    }
+    if report.exec_bits_stripped > 0 {
+        println!(
+            "  {} imported file{} carried an execute bit; it was REMOVED. Measured against the\n  \
+             real peer trees, 68 of 349 peer skills ship a .sh/.py/.js helper, and a skill is\n  \
+             classified on its SKILL.md prose — so those helpers import live. They arrive inert:\n  \
+             running one is an explicit act (`sh <script>`), which goes through tool approval.",
+            report.exec_bits_stripped,
+            plural(report.exec_bits_stripped, "", "s"),
         );
     }
     if report.personas_imported > 0 || report.memory_imported > 0 {

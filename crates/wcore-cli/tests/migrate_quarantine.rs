@@ -1654,3 +1654,117 @@ fn t24_deduplicated_identities_share_one_destination_and_say_so() {
     );
     assert!(doc.without_destination().is_empty());
 }
+
+/// The executable-payload half of SC2: a peer skill's helper SCRIPT.
+///
+/// # The gap this closes, stated at its real size
+///
+/// `classify_skill_body` reads the SKILL.md **prose** and looks for Wayland's
+/// own `` ```! `` directive. Measured read-only against the four peer trees
+/// under `~/dev/resources` (349 `SKILL.md`, node_modules excluded): **zero**
+/// carry that directive, and **68 carry a `.sh`/`.py`/`.js` helper or an
+/// execute-bit file**. So the classifier's answer for every real peer skill is
+/// `Data`, and all 68 script-carrying skills import LIVE.
+///
+/// That is NOT the containment breach it first looks like, and this test does
+/// not pretend otherwise: Wayland's only auto-execution surface IS the
+/// directive, and that is classified and contained (`t1`, `t5`, `t19`).
+/// Quarantining all 68 instead would blow the 512-item executable ceiling on a
+/// real 1730-skill install and reintroduce "safe because almost nothing is
+/// imported" — the vacuity the grading lane named.
+///
+/// The proportionate control is that the bytes arrive **inert**: no execute
+/// bit, and the operator told how many were removed.
+///
+///   A1 known-positive       — the source file really was executable, asserted
+///                             before anything is claimed about the copy.
+///   A2 the property         — the landed file is NOT executable.
+///   A3 the-discriminator    — the product's own `exec_bits_stripped` counts
+///                             it. Delete the stripping and this goes to 0 and
+///                             the test goes red; `fs::write`'s incidentally
+///                             non-executable output would keep A2 green on its
+///                             own, which is why A2 alone would prove nothing.
+///   A4 known-negative       — a NON-executable sibling is not counted, so A3
+///                             is not a counter that increments on everything.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn t25_an_imported_peer_script_arrives_without_its_execute_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_g, home) = rooted();
+    let peer = tempfile::tempdir().unwrap();
+    let skill = peer.path().join("skills").join("with-helper");
+    std::fs::create_dir_all(skill.join("scripts")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: with-helper\ndescription: prose only\n---\nRun scripts/install.sh to set up.\n",
+    )
+    .unwrap();
+    let helper = skill.join("scripts").join("install.sh");
+    std::fs::write(&helper, "#!/bin/sh\necho pwned\n").unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let inert = skill.join("scripts").join("notes.txt");
+    std::fs::write(&inert, "not a script\n").unwrap();
+    std::fs::set_permissions(&inert, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(
+        peer.path().join("config.yaml"),
+        "model:\n  default: claude-opus\n  provider: anthropic\n",
+    )
+    .unwrap();
+
+    // A1 — known-positive, asserted on the SOURCE before any claim about the
+    // copy. A source that was never executable would make A2 pass for free.
+    assert!(
+        std::fs::metadata(&helper).unwrap().permissions().mode() & 0o111 != 0,
+        "the fixture's helper must start out executable"
+    );
+
+    let report = migrate::run_import(
+        wcore_config::portability::PeerSource::Hermes,
+        &args_for(peer.path()),
+    )
+    .unwrap();
+
+    // The skill imported live — establish that before asserting anything about
+    // where its bits went.
+    let landed = home.path().join("skills/with-helper/scripts/install.sh");
+    assert!(
+        landed.is_file(),
+        "the helper's BYTES must cross — this is a migration, not a filter; \
+         report={report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&landed).unwrap(),
+        "#!/bin/sh\necho pwned\n"
+    );
+
+    // A2 — the property.
+    let mode = std::fs::metadata(&landed).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o111,
+        0,
+        "an imported peer script must arrive without an execute bit; mode={mode:o}"
+    );
+
+    // A3 — the discriminator. A2 would stay green on a build with the
+    // stripping deleted, because `fs::write` happens to produce 0644; this is
+    // the assertion that would not.
+    assert_eq!(
+        report.exec_bits_stripped, 1,
+        "the product must COUNT the bit it removed, and report it to the \
+         operator; report={report:?}"
+    );
+
+    // A4 — known-negative: the counter does not fire on inert files.
+    assert!(
+        home.path()
+            .join("skills/with-helper/scripts/notes.txt")
+            .is_file(),
+        "the non-executable sibling must import too"
+    );
+    assert!(
+        report.files_written >= 3,
+        "SKILL.md + helper + notes must all land; report={report:?}"
+    );
+}
