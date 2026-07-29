@@ -113,7 +113,7 @@ impl TierConn {
         // registration don't gain the extension.
         register_sqlite_vec();
         let mut conn = Connection::open(&path).map_err(MemoryError::Db)?;
-        schema::apply_migrations(&mut conn)?;
+        schema::apply_migrations(&mut conn, Some(&path))?;
         // Restrict the DB and its WAL/SHM sidecars to owner-only. The
         // sidecars exist once WAL journaling is active (schema migrations
         // run statements, so they're present by now in practice; harden
@@ -134,7 +134,7 @@ impl TierConn {
     pub fn open_memory() -> Result<Self> {
         register_sqlite_vec();
         let mut conn = Connection::open_in_memory().map_err(MemoryError::Db)?;
-        schema::apply_migrations(&mut conn)?;
+        schema::apply_migrations(&mut conn, None)?;
         Ok(Self {
             path: PathBuf::from(":memory:"),
             conn: Mutex::new(conn),
@@ -388,6 +388,10 @@ mod tests {
         let path = dir.join("memory.db");
         let tc = TierConn::open(path.clone()).unwrap();
         // Force WAL sidecars to materialize so we can assert on them.
+        // TEST-ONLY override of the filesystem-derived journal mode: this
+        // test is about the 0600 hardening of `-wal`/`-shm`, which requires
+        // those files to exist. `tempdir()` is local, so WAL is the mode
+        // `TierConn::open` would have picked here anyway.
         {
             let conn = tc.conn.lock();
             conn.execute_batch(

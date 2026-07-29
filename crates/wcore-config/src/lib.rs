@@ -56,5 +56,8 @@ pub mod portability;
 pub mod profile;
 pub mod resolution_provenance;
 pub mod shell;
+// Filesystem-aware SQLite journal-mode selection. WAL corrupts databases on
+// network filesystems (measured); every SQLite call site selects through here.
+pub mod sqlite_journal;
 pub mod tools;
 pub mod workspace_trust;
