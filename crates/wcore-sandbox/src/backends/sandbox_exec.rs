@@ -458,6 +458,115 @@ mod tests {
         );
     }
 
+    /// 21-C3-01 cross-backend check: macOS must NOT have bubblewrap's
+    /// overlapping-deny defect.
+    ///
+    /// bubblewrap enforces a deny by MOUNTING over the denied path, so a deny
+    /// nested inside a directory deny needed a mount point in a read-only mask
+    /// and aborted the spawn (`bwrap: Can't mkdir …/.git: Read-only file
+    /// system`). SBPL has no mounts: `(deny file-read* (subpath …))` rules are
+    /// independent predicates under last-match-wins, so a nested pair should
+    /// simply be enforced twice.
+    ///
+    /// That is a claim about the OS, so it is MEASURED here rather than argued:
+    /// the profile is built by the production `build_profile` from the exact
+    /// pair `spawner.rs` hands the sandbox for an isolated-mutation child, and
+    /// run through the production `execute`. Arm 1 is the instrument control —
+    /// with no deny the probe must read BOTH secrets, otherwise a "refused"
+    /// reading in arm 2 would be free.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "sandbox-exec is macOS-only")]
+    async fn overlapping_read_deny_runs_shell_and_still_contains() {
+        let backend = SandboxExecBackend::new();
+        assert!(
+            backend.is_available(),
+            "sandbox-exec must be usable on a macOS host"
+        );
+
+        let parent = tempfile::tempdir().expect("parent workspace");
+        let parent_root = std::fs::canonicalize(parent.path()).expect("canonicalize parent");
+        std::fs::create_dir_all(parent_root.join(".git")).expect("parent .git");
+        std::fs::write(parent_root.join("secret.txt"), b"PARENTSECRET\n").expect("parent secret");
+        std::fs::write(parent_root.join(".git").join("config"), b"GITSECRET\n")
+            .expect("git secret");
+
+        // Both denies must reach the profile as independent rules — the SBPL
+        // analogue of the two bwrap mounts, minus the mount.
+        let overlapping = vec![parent_root.clone(), parent_root.join(".git")];
+        let profile = SandboxExecBackend::build_profile(&SandboxManifest {
+            fs_read_allow: vec![parent_root.clone()],
+            fs_read_deny: overlapping.clone(),
+            ..Default::default()
+        })
+        .expect("profile builds from an overlapping deny pair");
+        for path in &overlapping {
+            assert!(
+                profile.contains(&format!(
+                    "(deny file-read* (subpath \"{}\"))",
+                    path.to_string_lossy()
+                )),
+                "both nested denies must be emitted as independent SBPL rules; profile={profile}"
+            );
+        }
+
+        // The marker is joined by the shell at runtime, so only a shell that
+        // actually ran can produce it (21-C3 §6).
+        let script = format!(
+            "printf %s%s SHELL RAN; echo; \
+             cat {parent}/secret.txt 2>/dev/null; \
+             cat {parent}/.git/config 2>/dev/null; \
+             exit 0",
+            parent = parent_root.display()
+        );
+        let run = |deny: Vec<std::path::PathBuf>| {
+            let manifest = SandboxManifest {
+                fs_read_allow: vec![parent_root.clone()],
+                fs_read_deny: deny,
+                env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+                ..Default::default()
+            };
+            let script = script.clone();
+            async move {
+                SandboxExecBackend::new()
+                    .execute(
+                        &manifest,
+                        SandboxCommand {
+                            argv: vec!["/bin/sh".into(), "-c".into(), script],
+                            cwd: None,
+                        },
+                    )
+                    .await
+            }
+        };
+
+        // ── Arm 1: control. No deny — the probe MUST see both secrets. ───────
+        let control = run(Vec::new()).await.expect("control execution");
+        let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+        assert!(
+            control_stdout.contains("SHELLRAN")
+                && control_stdout.contains("PARENTSECRET")
+                && control_stdout.contains("GITSECRET"),
+            "instrument is dead: with NO deny the probe must run and read both secrets; \
+             stdout={control_stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+
+        // ── Arm 2: the overlapping pair. ─────────────────────────────────────
+        let denied = run(overlapping).await.expect("overlapping-deny execution");
+        let denied_stdout = String::from_utf8_lossy(&denied.stdout).into_owned();
+        let denied_stderr = String::from_utf8_lossy(&denied.stderr).into_owned();
+        assert!(
+            denied_stdout.contains("SHELLRAN"),
+            "sandbox-exec must run the shell under an overlapping deny pair — the bubblewrap \
+             defect must NOT have a macOS analogue; stdout={denied_stdout:?} \
+             stderr={denied_stderr:?}"
+        );
+        assert!(
+            !denied_stdout.contains("PARENTSECRET") && !denied_stdout.contains("GITSECRET"),
+            "both nested denies must still be enforced; stdout={denied_stdout:?}"
+        );
+    }
+
     // ── End Task 2 tests ──────────────────────────────────────────────────────
 
     #[test]

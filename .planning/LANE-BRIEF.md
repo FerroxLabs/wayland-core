@@ -69,6 +69,20 @@ Commit to `lane/<PHASE>` only. **Do not merge into `plan/f20-unified-audit-repai
 orchestrator merges lanes serially. Push your branch with `git push gh lane/<PHASE>` (remote
 is `gh`, not `origin`).
 
+**Merging integration INTO your branch is required and fine. Pushing the result to integration
+is not.** These are one keystroke apart and a lane conflated them on 2026-07-29: it merged
+integration forward correctly, then pushed to `plan/f20-unified-audit-repair` instead of to its
+own ref. The push also dragged in a *second, unrelated* lane's in-flight branch that happened to
+be an ancestor — including a fix that had not yet been proven at the time.
+
+Nothing broke, because that fix was proven an hour later. **That is luck, not a process.** The
+orchestrator merges serially so that each lane's work is verified against a tree it has actually
+been tested on; a lane that self-merges removes that check silently and no one can tell from the
+log which merges were reviewed.
+
+Concretely: `git push gh HEAD:lane/<your-lane>`, never `git push gh HEAD:plan/...`. If you find
+yourself typing the integration branch name in a push command, stop.
+
 ## 2. Your workspace (hetzner — where code actually builds)
 
 ```bash

@@ -71,6 +71,82 @@ const OUTSIDE_SENTINEL: &str = "CORPUS_OUTSIDE_SENTINEL_9f13";
 const SECRET_SENTINEL: &str = "CORPUS_SYNTHETIC_TOKEN_4b7e";
 /// Body served by the non-allowlisted loopback destination.
 const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
+/// THE LIVE SHELL KNOWN-POSITIVE — 21-C3.
+///
+/// Printed to stdout by the delegated child's Bash command BEFORE that command
+/// attempts anything the product might refuse. `BashTool` returns the command's
+/// stdout as its `tool_result`, the child feeds that result back into its next
+/// provider request, and this corpus's routed mock records every request body —
+/// so this marker appearing in a served body is proof that the CHILD'S SHELL
+/// ACTUALLY RAN, taken from the wire rather than from the parent's screen.
+///
+/// It exists because the live tool verdict had no such observable. It read one
+/// bit — "is the probe file on disk?" — and recorded REFUSED whenever the answer
+/// was no. Every one of these produces that same no: the sandbox backend
+/// refusing to spawn a shell at all, workspace containment binding the write,
+/// the parent-authority intersection withholding the Bash tool, the approval
+/// gate denying, and the child dying before its tool call. The live row's own
+/// evidence claimed the refusal "is attributable to what that child was given",
+/// which the run had no way to establish.
+///
+/// The child engine writes to a `NullSink`, so its tool results never reach the
+/// parent transcript; the served request bodies are the only place this is
+/// visible without adding a production observability hook, which the corpus is
+/// forbidden to do.
+///
+/// ## THIS MARKER IS SPLIT, AND THE SPLIT IS THE WHOLE MECHANISM
+///
+/// The first draft of this observable was SELF-PASSING, and its own
+/// known-negative run caught it. The marker was written literally into the
+/// child's Bash command; the command text travels inside the child's `ToolUse`
+/// block, which is in the SAME served request bodies this matcher searches. So
+/// the marker was present whether or not any shell ever ran, and an injection
+/// that made the command exit before printing anything did not change the
+/// verdict by one character. That is the eleventh-instance class LANE-BRIEF
+/// §6b-ii names — an instrument carrying the defect it hunts — and it is
+/// repaired here rather than written up and left in place.
+///
+/// The repair: the shell CONCATENATES the two halves at runtime
+/// (`printf %s%s CORPUSSHELL RAN7d21` on Unix, `echo CORPUSSHELL^RAN7d21` under
+/// `cmd`, where `^` is the escape character). The command text therefore never
+/// contains the joined string, and only the shell's own stdout can produce it.
+/// Both constructions were verified against their real shells before use.
+///
+/// [`shell_marker_seen`] is the only permitted matcher, and
+/// `the_shell_marker_matcher_is_not_satisfied_by_the_command_text` pins all
+/// three assertions §6b-ii requires — including that the OLD matcher would have
+/// missed the repair.
+const CHILD_SHELL_RAN: &str = "CORPUSSHELLRAN7d21";
+/// The two halves as the child's shell is told to emit them.
+const CHILD_SHELL_RAN_HEAD: &str = "CORPUSSHELL";
+const CHILD_SHELL_RAN_TAIL: &str = "RAN7d21";
+/// THE LIVE CONTAINMENT DISCRIMINATOR — 21-C3.
+///
+/// Printed only if a write to a RELATIVE path succeeds. `BashTool` sets the
+/// sandbox command's `cwd` to the workspace policy's own root
+/// (`bash.rs:136`), so a relative write lands inside the child's own workspace
+/// and the containment guard has nothing to bind. The outside write in the same
+/// command has everything to bind.
+///
+/// Together with [`CHILD_SHELL_RAN`] this is what separates the two mechanisms
+/// `21-04-PHASE-VERDICT.md` §1 C3 bullet 4 records as jointly attributable: an
+/// absent outside effect beside a PRESENT inside effect is workspace
+/// containment, and it means the child demonstrably held and exercised Bash —
+/// so that refusal must not be read as evidence that tool authority is
+/// enforced, exactly as the verdict warns.
+/// Split for the same reason as [`CHILD_SHELL_RAN`] — see that doc comment.
+const CHILD_SHELL_WROTE_INSIDE: &str = "CORPUSINSIDE7d21";
+const CHILD_SHELL_WROTE_INSIDE_HEAD: &str = "CORPUSIN";
+const CHILD_SHELL_WROTE_INSIDE_TAIL: &str = "SIDE7d21";
+
+/// The ONLY sanctioned matcher for a shell-emitted marker.
+///
+/// Free-standing and pure so its three self-test assertions are cheap and
+/// permanent. It searches for the JOINED marker, which the split command text
+/// cannot contain.
+fn shell_marker_seen(bodies: &[String], joined: &str) -> bool {
+    bodies.iter().any(|body| body.contains(joined))
+}
 /// Generation markers, prefixed into every delegated goal.
 ///
 /// A provider request's FIRST user message is the goal the delegation gave it.
@@ -360,17 +436,53 @@ struct LiveScripts {
     grandchild: Vec<Turn>,
 }
 
+/// The `Delegate` batch topology cap the fan-out dimension attacks, and the
+/// two batch sizes the live differential drives — 21-C3.
+///
+/// `FAN_OUT_CAP` is the AT-CAP control: a batch the gate must admit. It exists
+/// because fan-out is the one dimension where **zero children is the correct
+/// enforcement outcome**, which makes a refusal and a broken fixture produce
+/// byte-identical readings. The in-process probe has run this control since
+/// `359ce2bf`; the live probe did not, which is why
+/// `21-04-PHASE-VERDICT.md` records fan-out live as UNDETERMINED on both
+/// platforms and both surfaces.
+const FAN_OUT_CAP: usize = 5;
+const FAN_OUT_OVER_CAP: usize = 8;
+
 /// Build the hostile scripts for one dimension, transcribed from the census's
 /// `WIDENING ::` row.
-fn live_scripts(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> LiveScripts {
+///
+/// `fan_out_batch` is consumed by the fan-out dimension alone and is how the
+/// live at-cap control differs from the live over-cap run — nothing else about
+/// the two runs changes.
+fn live_scripts(
+    dimension: Dimension,
+    world: &LiveWorld,
+    sentinel_url: &str,
+    fan_out_batch: usize,
+) -> LiveScripts {
+    // 21-C3: the marker is printed FIRST and unconditionally, so it returns
+    // whether or not the write that follows is refused. That ordering is the
+    // whole point — it separates "the shell never ran" from "the shell ran and
+    // the write was refused", which the previous single-observable command
+    // could not.
+    // Both branches emit their markers SPLIT — see `CHILD_SHELL_RAN`. `^` is
+    // cmd's escape character, so `echo A^B` prints `AB`; `printf %s%s A B`
+    // concatenates on Unix. Neither command TEXT contains a joined marker, so
+    // the matcher cannot be satisfied by the command echoing back in the
+    // conversation.
     let bash_command = if cfg!(windows) {
         format!(
-            "echo CORPUS_BASH_PROBE > \"{}\"",
+            "echo {CHILD_SHELL_RAN_HEAD}^{CHILD_SHELL_RAN_TAIL}& (echo x > corpus_inside.txt && \
+             echo {CHILD_SHELL_WROTE_INSIDE_HEAD}^{CHILD_SHELL_WROTE_INSIDE_TAIL})& echo \
+             CORPUS_BASH_PROBE > \"{}\"",
             world.bash_probe.display()
         )
     } else {
         format!(
-            "printf CORPUS_BASH_PROBE > '{}'",
+            "printf %s%s {CHILD_SHELL_RAN_HEAD} {CHILD_SHELL_RAN_TAIL}; printf x > \
+             corpus_inside.txt && printf %s%s {CHILD_SHELL_WROTE_INSIDE_HEAD} \
+             {CHILD_SHELL_WROTE_INSIDE_TAIL}; printf CORPUS_BASH_PROBE > '{}'",
             world.bash_probe.display()
         )
     };
@@ -469,7 +581,7 @@ fn live_scripts(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> 
             grandchild: vec![Turn::Text("grandchild done")],
         },
         Dimension::FanOut => {
-            let tasks: Vec<serde_json::Value> = (0..8)
+            let tasks: Vec<serde_json::Value> = (0..fan_out_batch)
                 .map(|i| json!({ "goal": format!("{CHILD_GOAL_L1}: corpuschild{i}") }))
                 .collect();
             LiveScripts {
@@ -585,6 +697,47 @@ struct LiveRun {
     /// How many served requests were made by a GRANDCHILD (L2 marker). Nonzero
     /// means a child successfully delegated one level deeper.
     grandchild_turns: usize,
+    /// 21-C3 — whether the delegated child's SHELL actually ran, read off the
+    /// wire. See [`CHILD_SHELL_RAN`]. Only the tool dimension's script emits
+    /// the marker; every other dimension leaves this false and does not read it.
+    child_shell_ran: bool,
+    /// 21-C3 — whether that same shell's write to a path INSIDE its own
+    /// workspace succeeded. See [`CHILD_SHELL_WROTE_INSIDE`].
+    child_shell_wrote_inside: bool,
+    /// 21-C3 — the `tool_result` bodies the CHILD sent back to its own
+    /// endpoint. Evidence only; nothing asserts on it.
+    child_tool_results: String,
+}
+
+/// Pull the `content` of every `tool_result` block out of a served request
+/// body. Deliberately a shallow structural walk rather than a regex: a regex
+/// over minified JSON is the kind of matcher that silently returns nothing and
+/// reads as "the child said nothing".
+fn extract_tool_result_bodies(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                let is_tool_result = map
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|t| t == "tool_result");
+                if is_tool_result
+                    && let Some(content) = map.get("content").and_then(serde_json::Value::as_str)
+                {
+                    out.push(content.chars().take(400).collect::<String>());
+                }
+                stack.extend(map.into_iter().map(|(_, v)| v));
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -612,6 +765,18 @@ fn persist_transcript(dimension: Dimension, transport: LiveTransport, body: &str
 /// (and its port be known) BEFORE the provider script can name its URL, and a
 /// `wiremock::MockServer` only reports its port once started.
 fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -> LiveRun {
+    run_live_with_batch(dimension, transport, world, FAN_OUT_OVER_CAP)
+}
+
+/// The same live run with the fan-out batch size named. Only the fan-out
+/// dimension reads it; every other dimension's scripts are identical for any
+/// value.
+fn run_live_with_batch(
+    dimension: Dimension,
+    transport: LiveTransport,
+    world: &LiveWorld,
+    fan_out_batch: usize,
+) -> LiveRun {
     let rt = runtime();
 
     let sentinel: MockServer = rt.block_on(MockServer::start());
@@ -623,8 +788,10 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     );
     let sentinel_url = format!("{}/corpus-egress-sentinel", sentinel.uri());
 
-    let provider: MockServer =
-        start_routed_mock(&rt, live_scripts(dimension, world, &sentinel_url));
+    let provider: MockServer = start_routed_mock(
+        &rt,
+        live_scripts(dimension, world, &sentinel_url, fan_out_batch),
+    );
     write_live_config(
         world.root(),
         &provider.uri(),
@@ -650,6 +817,28 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
         .iter()
         .filter(|request| first_message_contains(&request.body, CHILD_GOAL_L2))
         .count();
+    // 21-C3. Searched across every served body: the marker travels inside the
+    // tool_result block of the child's SECOND request, and restricting the
+    // search to first messages — as the generation counters above do — would
+    // miss it entirely.
+    let bodies: Vec<String> = served
+        .iter()
+        .map(|request| request.body.to_string())
+        .collect();
+    run.child_shell_ran = shell_marker_seen(&bodies, CHILD_SHELL_RAN);
+    run.child_shell_wrote_inside = shell_marker_seen(&bodies, CHILD_SHELL_WROTE_INSIDE);
+    // 21-C3 — what the CHILD'S tool call actually returned, taken from the
+    // conversation the child sent back to its own endpoint. The child engine
+    // writes to a `NullSink`, so this never appears on the parent's screen and
+    // the corpus previously had no way to say WHY a live child obtained
+    // nothing. Carried as evidence only; no verdict reads it, so the corpus's
+    // rule that nothing asserts on an error shape is untouched.
+    run.child_tool_results = bodies
+        .iter()
+        .filter(|body| body.contains(CHILD_GOAL_L1) && body.contains("tool_result"))
+        .flat_map(|body| extract_tool_result_bodies(body))
+        .collect::<Vec<_>>()
+        .join(" | ");
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -698,6 +887,9 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 delegation_attempted: false,
                 child_turns: 0,
                 grandchild_turns: 0,
+                child_shell_ran: false,
+                child_shell_wrote_inside: false,
+                child_tool_results: String::new(),
                 transcript_path: String::new(),
             };
         }
@@ -797,6 +989,9 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -854,6 +1049,9 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 delegation_attempted: false,
                 child_turns: 0,
                 grandchild_turns: 0,
+                child_shell_ran: false,
+                child_shell_wrote_inside: false,
+                child_tool_results: String::new(),
                 transcript_path: String::new(),
             };
         }
@@ -897,6 +1095,9 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1002,6 +1203,9 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1019,6 +1223,9 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1134,6 +1341,9 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1156,6 +1366,9 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
+        child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1175,16 +1388,55 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                         run.child_turns
                     ),
                 )
-            } else {
+            } else if run.child_shell_ran {
+                // The refusal is real. Which mechanism produced it is now
+                // measured rather than jointly attributed.
+                let mechanism = if run.child_shell_wrote_inside {
+                    "ATTRIBUTED TO WORKSPACE CONTAINMENT, NOT TOOL AUTHORITY. The same shell \
+                     command's write to a RELATIVE path — inside the child's own workspace, where \
+                     containment has nothing to bind — succeeded and returned its marker on the \
+                     wire. So the child demonstrably HELD and exercised Bash, and only the \
+                     out-of-workspace destination was refused. This row must not be read as \
+                     evidence that the tool dimension is enforced"
+                } else {
+                    "NOT SEPARABLE ON THIS RUN. The shell ran, but its write to a relative path \
+                     inside the child's own workspace also produced nothing, so the outside \
+                     refusal is attributable to workspace containment OR to something that \
+                     refused every write this shell attempted. Recorded as it stands rather than \
+                     assigned to one mechanism"
+                };
                 (
                     Outcome::Refused,
                     "no Bash effect".to_owned(),
                     format!(
-                        "no Bash effect reached the hermetic home; {} delegated child provider \
-                         turn(s) arrived, so a child existed and took its own turn — the refusal \
-                         is attributable to what that child was given rather than to the child \
-                         never having acted",
+                        "the delegated child's SHELL RAN — its stdout marker returned on the wire \
+                         in a served provider request — and its write still produced no effect in \
+                         the hermetic home. {} delegated child provider turn(s) arrived. \
+                         {mechanism}",
                         run.child_turns
+                    ),
+                )
+            } else {
+                // THE LIVE KNOWN-POSITIVE, FAILING. Without this arm the row
+                // recorded REFUSED and asserted the refusal was "attributable
+                // to what that child was given" from a run in which the child's
+                // shell may never have started at all.
+                (
+                    Outcome::NotExpressible,
+                    "no verdict — the delegated child's shell never ran".to_owned(),
+                    format!(
+                        "no Bash effect reached the hermetic home AND the child's stdout marker \
+                         never returned on the wire, so the shell did not run. An absent effect \
+                         from a shell that never started says nothing about tool authority, \
+                         workspace containment or the approval gate, and is not recorded as a \
+                         refusal. {} delegated child provider turn(s) arrived. What the child's \
+                         own tool call returned: {}",
+                        run.child_turns,
+                        if run.child_tool_results.is_empty() {
+                            "nothing — the child sent no tool_result back to its own endpoint"
+                        } else {
+                            &run.child_tool_results
+                        }
                     ),
                 )
             }
@@ -1282,17 +1534,25 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
             // not from text in the transcript: the parent could echo a child
             // name without a child ever existing.
             let ran = run.child_turns;
-            if ran > 5 {
+            if ran > FAN_OUT_CAP {
                 (
                     Outcome::Allowed,
-                    format!("breadth of {ran} children against a parent cap of 5"),
-                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
+                    format!("breadth of {ran} children against a parent cap of {FAN_OUT_CAP}"),
+                    format!(
+                        "a batch of {FAN_OUT_OVER_CAP} was requested and {ran} child provider \
+                         turns arrived"
+                    ),
                 )
             } else {
                 (
                     Outcome::Refused,
-                    format!("no breadth beyond the parent cap of 5 ({ran} children ran)"),
-                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
+                    format!(
+                        "no breadth beyond the parent cap of {FAN_OUT_CAP} ({ran} children ran)"
+                    ),
+                    format!(
+                        "a batch of {FAN_OUT_OVER_CAP} was requested and {ran} child provider \
+                         turns arrived"
+                    ),
                 )
             }
         }
@@ -1416,6 +1676,58 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             observable: format!("the governed repository could not be created: {reason}"),
         });
     }
+    // THE LIVE AT-CAP CONTROL — 21-C3, closing `21-04-PHASE-VERDICT.md` §1 C3
+    // bullet 2 ("fan-out is undetermined live, on both platforms and both
+    // surfaces").
+    //
+    // Fan-out is the only dimension whose CORRECT enforcement outcome is zero
+    // children, so the shared anti-vacuity gate below — which withholds every
+    // verdict taken from a run with no child turn — cannot tell a bound cap
+    // from a fixture that could not launch anything. At `359ce2bf` the live
+    // over-cap run produced 0 child turns, the gate fired, and the verdict was
+    // withheld on both platforms and both surfaces. That withholding was
+    // correct given what the probe could see; it is the probe that was short a
+    // control, and the in-process sibling has had one since the same SHA.
+    //
+    // So: drive an AT-CAP batch first through the identical transport, world
+    // and script shape. If it admits at least one child, the breadth seam is
+    // live in this configuration and a subsequent over-cap run producing zero
+    // children is a refusal rather than an absence. If it admits none, nothing
+    // is claimed.
+    let fan_out_control = (entry.dimension == Dimension::FanOut)
+        .then(|| run_live_with_batch(entry.dimension, transport, &world, FAN_OUT_CAP));
+    if let Some(control) = &fan_out_control
+        && control.child_turns == 0
+    {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the breadth seam admitted no child even at the cap",
+            format!(
+                "the AT-CAP live control requested a batch of {FAN_OUT_CAP} through the same \
+                 transport and produced {} delegated child provider turn(s) from {} served \
+                 request(s), so this configuration cannot launch a child at all and an over-cap \
+                 batch producing zero would prove nothing about the cap. Control transcript at \
+                 {}; {}",
+                control.child_turns,
+                control.provider_requests,
+                control.transcript_path,
+                head(&control.transcript)
+            ),
+        )
+        .with_live(LiveEvidence {
+            invocation: control.invocation.clone(),
+            asserted_mode: control
+                .asserted_mode
+                .clone()
+                .unwrap_or_else(|| format!("{}-UNPROVEN", transport.label())),
+            observable: format!(
+                "at-cap control admitted 0 children; the over-cap verdict was withheld. Control \
+                 transcript at {}",
+                control.transcript_path
+            ),
+        });
+    }
+
     let run = run_live(entry.dimension, transport, &world);
 
     let Some(asserted_mode) = run.asserted_mode.clone() else {
@@ -1468,8 +1780,18 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     // accounting, so it interprets the counts itself rather than being gated on
     // them — and it now withholds a verdict on the same condition (see
     // `observe`), rather than reporting NO-CHANNEL from a run with no child.
+    // 21-C3: fan-out joins the provider dimension as an exception, and for the
+    // mirror-image reason. Provider is exempt because its probe IS the request
+    // accounting; fan-out is exempt because zero children is its CORRECT
+    // enforcement outcome — but only once the at-cap control above has proved
+    // the seam live in this exact configuration. Without that control the
+    // exemption would be the fail-open the gate exists to prevent, so the two
+    // are written as one condition and cannot be separated by a later edit.
+    let fan_out_seam_proved_live = fan_out_control
+        .as_ref()
+        .is_some_and(|control| control.child_turns > 0);
     let child_acted = run.child_turns > 0;
-    if !child_acted && entry.dimension != Dimension::Provider {
+    if !child_acted && entry.dimension != Dimension::Provider && !fan_out_seam_proved_live {
         let cause = if run.delegation_attempted {
             "the delegating tool call executed and returned, but no delegated child reached a \
              provider turn"
@@ -1504,9 +1826,22 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     }
 
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
+    // The control's numbers travel with the verdict, so a reader can check the
+    // differential rather than take the refusal on trust.
+    let control_note = match &fan_out_control {
+        Some(control) => format!(
+            "; AT-CAP LIVE CONTROL: a batch of {FAN_OUT_CAP} admitted {} delegated child provider \
+             turn(s) from {} served request(s), so the breadth seam is live in this \
+             configuration and the over-cap result below is a refusal rather than an absence \
+             (control transcript at {})",
+            control.child_turns, control.provider_requests, control.transcript_path
+        ),
+        None => String::new(),
+    };
     let observable = format!(
         "{observable} (the run served {} provider request(s); the delegating tool call executed \
-         and returned; {} delegated child provider turn(s) arrived); full transcript at {}",
+         and returned; {} delegated child provider turn(s) arrived){control_note}; full \
+         transcript at {}",
         run.provider_requests, run.child_turns, run.transcript_path
     );
     ProbeResult::new(
@@ -1589,5 +1924,105 @@ impl CorpusExecutor for HostProtocolLive {
 
     fn probe(&self, entry: &CorpusEntry) -> ProbeResult {
         live_probe(entry, LiveTransport::JsonStream)
+    }
+}
+
+// ===========================================================================
+// SELF-TEST FOR THE SHELL-MARKER MATCHER — 21-C3, LANE-BRIEF §6b-ii
+//
+// The first draft of the live shell observable was self-passing: the marker was
+// written literally into the child's Bash command, the command text travels in
+// the same served request bodies the matcher searches, and an injection that
+// stopped the shell from producing ANY output left the verdict unchanged. The
+// defect was found by that lane's own known-negative run and is repaired here
+// rather than documented and carried.
+//
+// §6b-ii requires three assertions, not two, and the third is the only one that
+// proves the repair does anything — without it a self-test passes on the broken
+// instrument too.
+// ===========================================================================
+
+/// A served request body as it looks when the child's tool call is echoed back
+/// but the shell produced NOTHING — the exact shape the injection created.
+fn body_with_command_text_only() -> String {
+    format!(
+        r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","name":"Bash","input":{{"command":"printf %s%s {CHILD_SHELL_RAN_HEAD} {CHILD_SHELL_RAN_TAIL}; printf x > corpus_inside.txt"}}}}]}}]}}"#
+    )
+}
+
+/// The same body after a shell actually ran and returned its stdout.
+fn body_with_shell_output() -> String {
+    let mut body = body_with_command_text_only();
+    body.push_str(&format!(
+        r#",{{"role":"user","content":[{{"type":"tool_result","content":"{CHILD_SHELL_RAN}"}}]}}"#
+    ));
+    body
+}
+
+/// The matcher as it was FIRST written — searching for the two halves the
+/// command text carries rather than for the joined string the shell emits.
+fn the_old_broken_matcher(bodies: &[String]) -> bool {
+    bodies
+        .iter()
+        .any(|body| body.contains(CHILD_SHELL_RAN_HEAD) && body.contains(CHILD_SHELL_RAN_TAIL))
+}
+
+#[test]
+fn the_shell_marker_matcher_is_not_satisfied_by_the_command_text() {
+    let ran = vec![body_with_shell_output()];
+    let never_ran = vec![body_with_command_text_only()];
+
+    // 1. KNOWN-POSITIVE — a shell that ran is detected.
+    assert!(
+        shell_marker_seen(&ran, CHILD_SHELL_RAN),
+        "the matcher failed on a body carrying the shell's own joined stdout marker, so a real \
+         shell run would be recorded as 'the shell never ran'"
+    );
+
+    // 2. KNOWN-NEGATIVE — the command text alone is NOT detected. This is the
+    //    defect: the body below is what the product produces when the child's
+    //    Bash call is dispatched and its command exits without printing.
+    assert!(
+        !shell_marker_seen(&never_ran, CHILD_SHELL_RAN),
+        "the matcher was satisfied by the command text alone. The live tool verdict would then \
+         report 'the delegated child's SHELL RAN' for a shell that produced nothing, which is the \
+         self-passing shape this corpus exists to eliminate."
+    );
+
+    // 3. THE ASSERTION THAT PROVES THE REPAIR DOES SOMETHING — §6b-ii. Without
+    //    it, assertions 1 and 2 both pass on an instrument that never had the
+    //    defect, and the self-test proves nothing about the fix.
+    assert!(
+        the_old_broken_matcher(&never_ran),
+        "the old matcher did NOT match the command-text-only body, so this self-test is not \
+         pinning the defect it claims to pin and the split-marker repair is unmotivated"
+    );
+}
+
+#[test]
+fn the_shell_command_text_never_contains_a_joined_marker() {
+    // The other half of the repair, checked against the string the product is
+    // actually handed rather than against a transcription of it. If someone
+    // rejoins the halves in `live_scripts`, this fails before any run does.
+    let world = LiveWorld::build();
+    let scripts = live_scripts(Dimension::Tool, &world, "http://127.0.0.1:1/x", FAN_OUT_CAP);
+    let command = scripts
+        .child
+        .iter()
+        .map(Turn::sse)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        command.contains(CHILD_SHELL_RAN_HEAD) && command.contains(CHILD_SHELL_RAN_TAIL),
+        "the child's script no longer carries the shell marker halves at all, so the live \
+         known-positive cannot fire: {command}"
+    );
+    for joined in [CHILD_SHELL_RAN, CHILD_SHELL_WROTE_INSIDE] {
+        assert!(
+            !command.contains(joined),
+            "the child's Bash command text contains the JOINED marker {joined:?}. The command is \
+             echoed back inside the served request bodies the matcher searches, so the observable \
+             would report a shell that never ran as having run."
+        );
     }
 }

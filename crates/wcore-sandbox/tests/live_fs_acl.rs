@@ -23,7 +23,7 @@ use wcore_sandbox::backends::appcontainer::AppContainerBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
 const MARKER: &str = "HEADROOM_R61_GRANT_OK";
-const NATIVE_ACCEPTANCE_CASES: usize = 11;
+const NATIVE_ACCEPTANCE_CASES: usize = 12;
 
 fn require_live_acceptance() {
     assert_eq!(
@@ -58,7 +58,7 @@ fn require_live_acceptance() {
 /// FAILS; adding `-- --ignored` passes and runs the real cases.
 #[test]
 fn native_acceptance_gate_marker() {
-    assert_eq!(NATIVE_ACCEPTANCE_CASES, 11);
+    assert_eq!(NATIVE_ACCEPTANCE_CASES, 12);
     if std::env::var_os("NEXTEST").is_some() {
         return;
     }
@@ -706,4 +706,125 @@ async fn normal_sid_only_grant_is_denied() {
         "a normal-SID-only grant must not disclose bytes to the sandboxed child; \
          stdout={stdout:?}"
     );
+}
+
+/// 21-C3-01 cross-backend check: Windows AppContainer must NOT have
+/// bubblewrap's overlapping-deny defect.
+///
+/// bubblewrap enforces a deny by MOUNTING over the denied path, so a deny
+/// nested inside a *directory* deny needed a mount point in a read-only mask
+/// and aborted the spawn outright (`bwrap: Can't mkdir …\.git: Read-only file
+/// system`) — a delegated mutating child could not run any command on Linux.
+/// AppContainer instead applies a protected DACL per object, so a nested pair
+/// should be two independent objects and enforce twice.
+///
+/// The finding lane explicitly did NOT measure this. It is measured here rather
+/// than inferred from the Linux behaviour, on the exact pair `spawner.rs` hands
+/// the sandbox for an isolated-mutation child: `[parent, parent\.git]`.
+///
+/// Three arms, because two questions are in play and they must not be
+/// conflated:
+///   1. CONTROL, no deny — the child must read BOTH secrets. Without this a
+///      "refused" reading is free (a wrong path, an untraversable ancestor or a
+///      dead command all produce it), and the containment half is vacuous.
+///   2. SINGLE deny on the granted directory — isolates the allow-then-deny
+///      ordering on ONE path. `canonical_intents` keys a `BTreeMap` on
+///      `(path, IntentKind)` with `Allow` ordered before `Deny`, so the deny is
+///      applied last; this proves that live rather than by reading the derive.
+///   3. OVERLAPPING pair — the bubblewrap analogue. Arm 3 vs arm 2 isolates the
+///      nesting; arm 2 vs arm 1 isolates the ordering.
+///
+/// Falsifiable in both directions: if AppContainer shared bubblewrap's defect,
+/// arm 3 would fail to run the command and the marker would be absent; if the
+/// nested deny weakened the boundary, a secret would appear in stdout.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn overlapping_directory_denies_run_the_command_and_still_contain() {
+    require_live_acceptance();
+    let (dir, _) = seed_file("deny-overlap");
+    let git_dir = dir.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("create .git");
+    std::fs::write(dir.join("secret.txt"), "PARENTSECRET").expect("write parent secret");
+    std::fs::write(git_dir.join("config"), "GITSECRET").expect("write git secret");
+
+    // `^` is cmd's escape character, so `SHELL^RAN` is assembled by cmd at
+    // runtime into `SHELLRAN` and cannot be produced by anything that merely
+    // carried the command text (21-C3 §6 — a literal marker in the command is
+    // satisfiable without the command ever running).
+    let script = format!(
+        "echo SHELL^RAN & type \"{}\" 2>nul & type \"{}\" 2>nul",
+        dir.join("secret.txt").display(),
+        git_dir.join("config").display(),
+    );
+    let backend = AppContainerBackend::new();
+    let run = |deny: Vec<PathBuf>| {
+        let manifest = SandboxManifest {
+            timeout: Some(Duration::from_secs(10)),
+            fs_read_allow: vec![dir.clone()],
+            fs_read_deny: deny,
+            ..Default::default()
+        };
+        let command = cmd_script(script.clone());
+        let backend = &backend;
+        async move { backend.execute(&manifest, command).await.expect("execute") }
+    };
+
+    // ── Arm 1: control. No deny — both secrets MUST be readable. ─────────────
+    let control = run(Vec::new()).await;
+    let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+    assert!(
+        control_stdout.contains("SHELLRAN")
+            && control_stdout.contains("PARENTSECRET")
+            && control_stdout.contains("GITSECRET"),
+        "instrument is dead: with NO deny the sandboxed child must run and read both \
+         secrets, so a REFUSED reading in arms 2/3 would prove nothing; \
+         stdout={control_stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    // ── Arm 2: one deny on the granted directory (ordering only). ────────────
+    let single = run(vec![dir.clone()]).await;
+    let single_stdout = String::from_utf8_lossy(&single.stdout).into_owned();
+    assert!(
+        single_stdout.contains("SHELLRAN"),
+        "a single directory deny must not stop the command from running; \
+         stdout={single_stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&single.stderr)
+    );
+    assert!(
+        !single_stdout.contains("PARENTSECRET") && !single_stdout.contains("GITSECRET"),
+        "a directory deny must beat the matching directory ALLOW on the same path \
+         (Allow is applied before Deny); stdout={single_stdout:?}"
+    );
+
+    // ── Arm 3: the overlapping pair — the bubblewrap analogue. ───────────────
+    let overlapping = run(vec![dir.clone(), git_dir.clone()]).await;
+    let overlapping_stdout = String::from_utf8_lossy(&overlapping.stdout).into_owned();
+    let overlapping_stderr = String::from_utf8_lossy(&overlapping.stderr).into_owned();
+    let acl_parent_after = icacls(&dir);
+    let acl_git_after = icacls(&git_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        overlapping_stdout.contains("SHELLRAN"),
+        "AppContainer must run the command under an overlapping directory-deny pair — \
+         21-C3-01 must NOT have a Windows analogue; stdout={overlapping_stdout:?} \
+         stderr={overlapping_stderr:?}"
+    );
+    assert!(
+        !overlapping_stdout.contains("PARENTSECRET") && !overlapping_stdout.contains("GITSECRET"),
+        "both nested denies must still be enforced; stdout={overlapping_stdout:?}"
+    );
+    // No permanent host ACL leak from either object of the nested pair.
+    for (label, acl) in [
+        ("parent", &acl_parent_after),
+        ("parent/.git", &acl_git_after),
+    ] {
+        let lower = acl.to_lowercase();
+        assert!(
+            !acl.contains("S-1-15-2-") && !lower.contains("wcoresandbox"),
+            "AppContainer aces on the {label} object must be revoked after the run; \
+             icacls:\n{acl}"
+        );
+    }
 }
