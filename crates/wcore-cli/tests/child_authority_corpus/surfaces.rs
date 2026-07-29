@@ -1441,7 +1441,18 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
                  child-eligible tool set, granted the mutating toolset outright, could not write a \
                  sentinel inside its own workspace and read it back. Something other than tool \
                  authority is stopping the call, so the denied arm's absence proves nothing and is \
-                 not recorded as a refusal. {shape}"
+                 not recorded as a refusal. \
+                 TWO CAUSES ARE MEASURED AND BOTH ARE CORPUS-SIDE LIMITS, NOT ENFORCEMENT: (1) the \
+                 shell leg cannot run at all — `spawner.rs:1817` gives an isolated-mutation child \
+                 the OVERLAPPING read-deny pair `[<parent>, <parent>/.git]` and `bwrap.rs:295` \
+                 renders each directory deny as `--ro-bind <empty mask> <path>`, so the second \
+                 needs a mount point inside the first's read-only mask and bubblewrap aborts \
+                 (`bwrap: Can't mkdir …/.git: Read-only file system`, reproduced standalone with \
+                 a control); and (2) the file leg cannot be targeted — `Write`/`Read` require an \
+                 ABSOLUTE path and a delegated child's isolated checkout is allocated at \
+                 `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted corpus \
+                 cannot know before the child launches. Recording NOT-EXPRESSIBLE is the honest \
+                 result; a REFUSED here would be the vacuity this corpus exists to close. {shape}"
             ),
         );
     }
