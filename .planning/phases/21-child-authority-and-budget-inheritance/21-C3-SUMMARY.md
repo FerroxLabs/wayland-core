@@ -19,8 +19,8 @@ Two real defects fell out. One is in the product; one was in this lane's own ins
 | Clause (verbatim from the verdict) | Before | After | State |
 |---|---|---|---|
 | C3-a — three of eleven dimensions have no host-protocol expression | tool / fan-out / egress all NOT-EXPRESSIBLE, and the **egress** reading had no control | unchanged as verdicts, but egress's zero-request reading now carries a **known-positive control** and the recorded cause is refined | **NOT CLOSED** — inexpressibility is a typed fact about `SubAgentConfig`; the record is now non-vacuous |
-| C3-b — fan-out is undetermined live, both platforms and both surfaces | NOT-EXPRESSIBLE on both live surfaces | **REFUSED** on both live surfaces, behind an at-cap control that admitted exactly 5 children | **CLOSED on Linux**; Windows not measured (§5) |
-| C3-c — the Windows standalone live surface has no actor | declared | not re-measured | **NOT CLOSED** (§5) |
+| C3-b — fan-out is undetermined live, both platforms and both surfaces | NOT-EXPRESSIBLE on both live surfaces, both platforms | **REFUSED** on both live surfaces on Linux and on host-protocol live on Windows, each behind an at-cap control that admitted exactly 5 children | **CLOSED on 3 of 4 platform×surface cells**; the fourth is C3-c |
+| C3-c — the Windows standalone live surface has no actor | **declared** as a platform fact | **measured**: the Windows standalone-live at-cap control admitted 0 children in the same run | **CONFIRMED BY MEASUREMENT**, not closed — the surface still has no actor |
 | C3-d — the tool REFUSED is jointly attributable to authority and containment | REFUSED, attributed to two mechanisms | **NOT-EXPRESSIBLE on all four cells**, with four measured mechanisms named and neither of the verdict's two among them | **the clause is answered, and the answer is worse than the clause** |
 
 The honest headline is that C3-d did not resolve into "REFUSED, attributed to authority". It
@@ -36,11 +36,20 @@ strictly better evidence and strictly not a met criterion.
 
 ## 2. What the proof covered before, and after
 
-Linux, `hetzner-dsm`, `/root/wayland-21c3`, at `fde83e9a`. Suite:
-**29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 84.6 s (was 27 tests; two
-are new self-tests). Counts read back from an unproxied `cargo`, with `ignored` and
-`filtered out` both present per LANE-BRIEF §3b. Evidence:
-`evidence/21-c3/21-c3-t1-linux-full.log`.
+| Platform | Host / path | SHA | Result | Evidence |
+|---|---|---|---|---|
+| Linux | `hetzner-dsm`, `/root/wayland-21c3` | `fde83e9a` | **29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 84.6 s | `evidence/21-c3/21-c3-t1-linux-full.log` |
+| Windows | `SeanD@seandesktop`, `D:\lane-21c3` | `eb71644e` | **25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 159.8 s | `evidence/21-c3/21-c3-t3-windows-full.log` |
+
+The two SHAs differ by one commit, which adds this document only:
+`git diff --stat fde83e9a eb71644e -- crates/` is **empty**, so both platforms ran identical
+code. Counts are read back from unproxied `cargo` invocations with `ignored` and `filtered
+out` both present, per LANE-BRIEF §3b — never from exit status. The Windows leg additionally
+carried `WLRC=0` and `WLDONE` sentinels (§3.2 pattern); both arrived.
+
+Linux was 27 tests before this lane and is 29 now — the two additions are the matcher
+self-tests in §6. Windows carries four fewer than Linux for the pre-existing `#[cfg(unix)]`
+reason recorded in `21-05-CRITERION3-REPAIR.md` §4.2, unchanged here.
 
 ### Verdict deltas against `359ce2bf`
 
@@ -53,7 +62,22 @@ are new self-tests). Counts read back from an unproxied `cargo`, with `ignored` 
 | tool host-protocol live | REFUSED | **NOT-EXPRESSIBLE** | child's shell never ran |
 | egress host-protocol in-process | NOT-EXPRESSIBLE (uncontrolled) | NOT-EXPRESSIBLE (**controlled**) | destination proved alive first |
 
-Every other cell is unchanged.
+### Verdict deltas on Windows
+
+| Dimension / cell | at `359ce2bf` | now | why |
+|---|---|---|---|
+| fan-out host-protocol live | NOT-EXPRESSIBLE | **REFUSED** | at-cap control admitted 5 children from 7 served requests |
+| fan-out standalone live | NOT-EXPRESSIBLE (declared) | NOT-EXPRESSIBLE (**measured**) | at-cap control admitted **0** children — C3-c, now a measurement |
+| tool, all cells | NOT-EXPRESSIBLE / REFUSED | NOT-EXPRESSIBLE with named cause | arm-granted hit the 45 s bound (the session-0 confirmer hang recorded as defect (d) in `21-05` §1.3); host-protocol live: the child's shell never ran |
+
+Every other cell is unchanged on both platforms.
+
+**C3-c, restated precisely.** The verdict declared the Windows standalone live surface actorless
+as a platform fact. The at-cap control now *measures* it inside the same run that would
+otherwise have taken a verdict from it: a batch of 5 — a batch the gate must admit — admitted
+zero children. That converts a declaration into evidence and, importantly, makes the honest
+NOT-EXPRESSIBLE on that cell **self-justifying from the row itself** rather than from a footnote
+elsewhere. The clause is not closed: the surface still has no actor.
 
 ### New controls and observables
 
@@ -203,15 +227,33 @@ RAN7d21"` → `CORPUSSHELLRAN7d21`, rc 0.
 
 ## 7. What this lane did NOT do
 
-- **Windows was not measured.** A build on `SeanD@seandesktop` under `D:\lane-21c3` was started
-  and was still compiling from cold when the lane closed. So C3-b is closed **on Linux only**,
-  and C3-c (the Windows standalone live surface has no actor) is **untouched** — it was neither
-  confirmed nor refuted, and it must not be read as either.
+- **The §3 sandbox defect was not reproduced on Windows.** It is a bubblewrap defect and
+  bubblewrap is Linux-only; the Windows tool cells fail for the two other reasons in §4. Whether
+  the AppContainer backend has an analogous overlapping-deny problem is **not measured** and must
+  not be inferred either way.
+- **A measurement error of my own, worth recording.** For roughly 35 minutes I polled
+  `Get-Process cargo,rustc` on `SeanDesktop` and read a non-zero count as "my build is
+  progressing". It was not: my `Start-Process` launch had failed silently (0-byte logs, no
+  target directory), and every process I was counting belonged to the two live CI
+  `Runner.Worker` jobs. The count was a real number attached to the wrong subject — the same
+  shape as a self-passing gate. It was caught by checking the artifact (`Test-Path
+  D:\lane-21c3-target` → `False`) rather than the proxy. The build was then re-run synchronously
+  and completed in 3m10s.
 - **No production file under `crates/*/src` was modified.** Every change is in
   `crates/wcore-cli/tests/child_authority_corpus/`.
-- **Nothing was weakened.** No `#[ignore]`, no `#[allow]`, no test deleted, renamed or re-gated.
-  The one timeout in the tool probe was kept at 45 s **per arm** rather than widened to cover
-  two arms — a widened budget dressed as a refactor is still a widened budget.
+- **Nothing was weakened, checked mechanically** against `BASE=5457710e` with unproxied `git`:
+  - `#[ignore]` under `crates/` **225 → 225**; `#[allow` **187 → 187**.
+  - `git diff BASE HEAD -- crates/ | grep '^-' | grep -E 'assert|#\[test\]|#\[ignore|#\[allow|panic!|timeout|Duration::from'`
+    returns **2 lines**, and both are accounted for: a comment line, and
+    `match run_bounded(Duration::from_secs(45), …)` which was **re-sited, not removed** — the
+    matching addition `run_bounded(Duration::from_secs(45), …)` is inside `tool_arm`, so each
+    arm keeps exactly the budget the single run had. No `Duration::from_secs` above 45 was
+    added anywhere. A widened budget dressed as a refactor is still a widened budget.
+  - Instrument-alive control for that measurement: the same diff adds **17** lines matching
+    `assert|#[test]`, so the matcher is not returning zero because it is broken.
+- **The shared fence was not touched.** `git diff BASE HEAD -- crates/wcore-cli/src/lib.rs
+  crates/wcore-cli/src/main.rs` is empty. The whole lane is 2 files, +944 / −92, both under
+  `crates/wcore-cli/tests/child_authority_corpus/`.
 - **The §3 defect was not fixed**, and no seal, merge, PR, tag or issue action was taken.
 - The tool dimension still has **no decisive verdict** on any cell. Two corpus-side limits stand
   and are recorded in the probe's own withholding text: the shell leg is blocked by §3, and the
@@ -230,4 +272,5 @@ RAN7d21"` → `CORPUSSHELLRAN7d21`, rc 0.
 | 21-C3-02 | **HIGH** | Every `corpus_tool` REFUSED in the Phase 21 record came from a tool call that never executed, via four mechanisms, none of them the two the verdict names. |
 | 21-C3-03 | MEDIUM | `ToolConfirmer` denies every delegated child's tool call under a non-TTY parent at the default `Prompt` posture. Correct fail-closed behaviour; it silently vacates any in-process child-authority test that does not allow-list its probe tool. |
 | 21-C3-04 | MEDIUM | The tool dimension is unmeasurable by a scripted corpus until a probe can learn the child's isolated checkout root (§7). |
-| 21-C3-05 | — | Windows coverage for C3-b and C3-c is outstanding (§7). |
+| 21-C3-05 | MEDIUM | On Windows the tool differential's granted arm expires on the 45 s bound — the session-0 confirmer prompts on a console nobody is attached to (`21-05` §1.3 defect (d), still open). The dimension is therefore unmeasurable on Windows for a third reason. |
+| 21-C3-06 | — | Whether the Windows AppContainer backend has an overlapping-deny analogue of 21-C3-01 is **not measured**; bubblewrap is Linux-only. |

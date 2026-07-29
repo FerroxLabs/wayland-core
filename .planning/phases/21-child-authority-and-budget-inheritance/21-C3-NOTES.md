@@ -307,3 +307,29 @@ Neither was staged. It withheld the verdict when (a) my per-arm session-id suffi
 was non-hex and `SessionManager::create_for_run` rejected it, so ARM-GRANTED launched no
 child; and (b) the fixture's fail-closed sandbox, then R2. In both cases the old probe
 would have recorded `REFUSED :: obtained no Bash effect`.
+
+### t3 — Windows, `SeanD@seandesktop`, `D:\lane-21c3`, SHA `eb71644e`
+
+**25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 159.8 s.
+`WLRC=0` and `WLDONE` both arrived. Evidence:
+`evidence/21-c3/21-c3-t3-windows-full.log`. Identical code to the Linux run —
+`git diff --stat fde83e9a eb71644e -- crates/` is empty.
+
+* **fan-out host-protocol live: NOT-EXPRESSIBLE → REFUSED.** At-cap control admitted 5
+  children from 7 served requests. C3-b now closed on 3 of 4 platform×surface cells.
+* **fan-out standalone live: C3-c measured rather than declared.** The at-cap control
+  admitted **0** children, so the row's own evidence now states why no verdict is taken.
+* **tool: NOT-EXPRESSIBLE on every cell**, for three distinct reasons — the granted arm
+  expiring on the 45 s bound (session-0 confirmer hang, `21-05` §1.3 defect (d)); the
+  standalone live run failing to prove its mode; and the host-protocol live child's shell
+  never running.
+
+**A measurement error of mine, recorded because it is the same shape as a self-passing
+gate.** For ~35 minutes I polled `Get-Process cargo,rustc` on SeanDesktop and read a
+non-zero count as my build progressing. My `Start-Process` launch had failed silently
+(0-byte logs, `Test-Path D:\lane-21c3-target` → `False`); every process counted belonged to
+the two live CI `Runner.Worker` jobs. A real number attached to the wrong subject. Caught
+by checking the ARTIFACT rather than the proxy. Re-run synchronously: 3m10s, `WLRC=0`.
+
+Cleanup: hetzner worktree `/root/wayland-21c3` and `D:\lane-21c3*` on Windows are left in
+place for the orchestrator to re-run against; both are named here so they can be pruned.
