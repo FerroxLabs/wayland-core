@@ -41,6 +41,13 @@ pub struct SkillDrafter {
     /// tempdir so the primary write is hermetic and does not race with (or
     /// pollute) the real user config dir. See #564.
     loader_root: Option<PathBuf>,
+    /// 23A-C1: override for the skill-governance root consulted before every
+    /// write. `None` in production → resolved by `governance_root()`. Pinned by
+    /// tests for the same #564 reason as `loader_root`: a suppression check that
+    /// reads a process-global path would make concurrent tests race on one real
+    /// directory, and would let a test revoke a skill in the developer's own
+    /// profile.
+    governance_root: Option<PathBuf>,
 }
 
 impl SkillDrafter {
@@ -55,6 +62,24 @@ impl SkillDrafter {
             skill_dir,
             prompt_store,
             loader_root: None,
+            governance_root: None,
+        }
+    }
+
+    /// Pin the governance root (23A-C1). Production leaves this unset and
+    /// resolves the real user-level root; tests pass a tempdir.
+    pub fn with_governance_root(mut self, root: PathBuf) -> Self {
+        self.governance_root = Some(root);
+        self
+    }
+
+    /// The governance store to consult before drafting, or `None` when no root
+    /// can be resolved on this platform (in which case drafting proceeds
+    /// un-suppressed, exactly as it did before 23A-C1).
+    fn governance(&self) -> Option<wcore_skills::govern::GovernanceStore> {
+        match &self.governance_root {
+            Some(root) => Some(wcore_skills::govern::GovernanceStore::new(root.clone())),
+            None => wcore_skills::govern::GovernanceStore::open_default().ok(),
         }
     }
 
@@ -72,6 +97,7 @@ impl SkillDrafter {
             skill_dir,
             prompt_store,
             loader_root: Some(loader_root),
+            governance_root: None,
         }
     }
 
@@ -85,6 +111,38 @@ impl SkillDrafter {
     /// hydration on next boot.
     pub fn draft(&self, trigger: &DraftTrigger) -> Result<DraftResult, DraftError> {
         let name = format!("auto-{}", trigger.signature);
+
+        // 23A-C1: a revocation is a durable statement of user intent, so it must be
+        // honoured HERE -- before any write. Without this check a revoke would only
+        // delete a file, and the next qualifying streak would silently recreate it,
+        // overriding the user's explicit decision with an automated one. That is the
+        // difference between a revocation and an `rm`.
+        //
+        // Checked against BOTH the name and the drafter signature (see
+        // `wcore_skills::govern` on why either key alone is insufficient).
+        //
+        // A store that cannot be resolved or read must not block drafting outright --
+        // that would let one unreadable file disable the learn loop entirely -- so the
+        // suppression check degrades to "not revoked" and says so loudly.
+        if let Some(store) = self.governance()
+            && store.is_revoked(&name, Some(&trigger.signature))
+        {
+            if let Err(e) = store.record_suppression(&name, Some(&trigger.signature)) {
+                tracing::warn!(
+                    target: "wcore_agent::auto_skill",
+                    error = %e,
+                    skill = %name,
+                    "could not journal draft suppression; draft still suppressed"
+                );
+            }
+            tracing::info!(
+                target: "wcore_agent::auto_skill",
+                skill = %name,
+                "draft suppressed: this skill was revoked by the user"
+            );
+            return Err(DraftError::Revoked { name });
+        }
+
         let body = compose_body(&name, trigger);
 
         // Primary write: loader-visible directory format under the config dir.
@@ -194,6 +252,13 @@ pub enum DraftError {
     Io(#[from] std::io::Error),
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+    /// 23A-C1: the user revoked this draft, so it was not recreated. A distinct
+    /// variant rather than a silent `Ok`, so a caller can tell "suppressed by an
+    /// explicit user decision" apart from "drafted successfully" and from a real
+    /// failure. Callers should treat this as a normal outcome, not an error to
+    /// surface as a fault.
+    #[error("draft '{name}' was not created: the user revoked this skill")]
+    Revoked { name: String },
 }
 
 /// Truncate at a char boundary so multibyte input doesn't panic.
@@ -260,6 +325,141 @@ mod tests {
             !legacy_root.path().join(&res.name).exists(),
             "F06 must publish one canonical draft only"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 23A-C1 — revocation must actually stop the drafter
+    // -----------------------------------------------------------------
+
+    /// The full customer journey, driven through the real `draft()` entry point:
+    /// the product writes into the user's directory, the user revokes it, the
+    /// product stops recreating it, and the user can undo the revocation and get
+    /// the exact prior bytes back.
+    ///
+    /// The positive legs matter as much as the negative one. A suppression that
+    /// simply refused everything would satisfy "it did not come back" while
+    /// destroying the feature, so this asserts drafting works BEFORE the
+    /// revocation and AFTER the rollback.
+    #[test]
+    fn revoked_draft_is_not_recreated_and_rollback_restores_it() {
+        let legacy_root = tempfile::tempdir().unwrap();
+        let loader_root = tempfile::tempdir().unwrap();
+        let gov_root = tempfile::tempdir().unwrap();
+
+        let drafter = SkillDrafter::with_loader_root(
+            legacy_root.path().to_path_buf(),
+            loader_root.path().to_path_buf(),
+            None,
+        )
+        .with_governance_root(gov_root.path().to_path_buf());
+        let store = wcore_skills::govern::GovernanceStore::new(gov_root.path().to_path_buf());
+        let trigger = fake_trigger();
+
+        // 1. Positive leg: drafting works normally.
+        let first = drafter
+            .draft(&trigger)
+            .expect("drafting must work before revocation");
+        let skill_dir = first.md_path.parent().unwrap().to_path_buf();
+        let original_body = std::fs::read_to_string(&first.md_path).unwrap();
+        assert!(skill_dir.is_dir());
+
+        // 2. The user revokes it.
+        let rec = store.revoke(&skill_dir).unwrap();
+        assert!(
+            !skill_dir.exists(),
+            "revoke must remove it from the user's directory"
+        );
+
+        // 3. Negative leg: the same trigger fires again and is suppressed.
+        let err = drafter
+            .draft(&trigger)
+            .expect_err("a revoked draft must NOT be recreated");
+        assert!(
+            matches!(err, DraftError::Revoked { .. }),
+            "expected a Revoked outcome, got {err:?}"
+        );
+        assert!(
+            !skill_dir.exists(),
+            "the revoked draft must still be absent after a re-trigger"
+        );
+
+        // The suppression is journalled, so "it did not come back" is provable
+        // rather than merely observed.
+        let suppressions = store
+            .journal()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    wcore_skills::govern::JournalEvent::DraftSuppressed { .. }
+                )
+            })
+            .count();
+        assert_eq!(suppressions, 1, "the suppression must be recorded");
+
+        // 4. Rollback returns the exact prior bytes.
+        store.rollback(&rec.revocation_id).unwrap();
+        assert!(skill_dir.is_dir(), "rollback must restore the directory");
+        assert_eq!(
+            std::fs::read_to_string(&first.md_path).unwrap(),
+            original_body,
+            "rollback must restore the exact prior bytes"
+        );
+
+        // 5. Positive leg again: drafting works once more after the rollback.
+        drafter
+            .draft(&trigger)
+            .expect("after rollback the drafter must no longer be suppressed");
+    }
+
+    /// Revoking one draft must not stop a different one being written. Without
+    /// this, a blanket "suppress everything" bug would pass the test above.
+    #[test]
+    fn revoking_one_draft_does_not_suppress_a_different_draft() {
+        let legacy_root = tempfile::tempdir().unwrap();
+        let loader_root = tempfile::tempdir().unwrap();
+        let gov_root = tempfile::tempdir().unwrap();
+
+        let drafter = SkillDrafter::with_loader_root(
+            legacy_root.path().to_path_buf(),
+            loader_root.path().to_path_buf(),
+            None,
+        )
+        .with_governance_root(gov_root.path().to_path_buf());
+        let store = wcore_skills::govern::GovernanceStore::new(gov_root.path().to_path_buf());
+
+        let first = drafter.draft(&fake_trigger()).unwrap();
+        store.revoke(first.md_path.parent().unwrap()).unwrap();
+
+        let mut other = fake_trigger();
+        other.signature = "a-completely-different-signature".to_string();
+        let second = drafter
+            .draft(&other)
+            .expect("an unrelated draft must still be written");
+
+        assert!(second.md_path.exists());
+        assert_ne!(second.name, first.name);
+    }
+
+    /// With no governance root resolvable and nothing revoked, behaviour is
+    /// exactly as it was before 23A-C1 — the check adds no new failure mode.
+    #[test]
+    fn drafting_is_unaffected_when_nothing_has_been_revoked() {
+        let legacy_root = tempfile::tempdir().unwrap();
+        let loader_root = tempfile::tempdir().unwrap();
+        let gov_root = tempfile::tempdir().unwrap();
+
+        let drafter = SkillDrafter::with_loader_root(
+            legacy_root.path().to_path_buf(),
+            loader_root.path().to_path_buf(),
+            None,
+        )
+        .with_governance_root(gov_root.path().to_path_buf());
+
+        let res = drafter.draft(&fake_trigger()).unwrap();
+        assert!(res.md_path.exists());
+        assert!(res.json_path.exists());
     }
 
     #[test]

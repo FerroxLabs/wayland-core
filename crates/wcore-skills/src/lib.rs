@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod draft;
 pub mod executor;
 pub mod frontmatter;
+pub mod govern;
 pub mod hooks;
 pub mod loader;
 pub mod mcp;

@@ -5464,6 +5464,20 @@ impl AgentEngine {
                     self.output.emit_capability_activation(&activation);
                 }
             }
+            // 23A-C1: a revoked draft is a normal, correct outcome -- the product
+            // honouring an explicit user decision -- not a fault. Logging it through
+            // the failure arm below would report "skill draft failed" for the one
+            // case where the system did exactly what it was told, and would put a
+            // warning in the user's log every time governance worked.
+            //
+            // It must also NOT emit the capability activation the `Ok` arm emits:
+            // nothing was activated.
+            Err(crate::auto_skill::DraftError::Revoked { name }) => tracing::info!(
+                target: "wcore_agent::auto_skill",
+                name = %name,
+                signature = %trigger.signature,
+                "skill draft suppressed: revoked by the user"
+            ),
             Err(e) => tracing::warn!(
                 target: "wcore_agent::auto_skill",
                 error = %e,
