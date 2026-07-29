@@ -64,6 +64,7 @@ use wcore_types::goal::{
 use crate::engine::AgentError;
 use crate::orchestration::anvil::TerminalState;
 use crate::orchestration::anvil::engine::{ClimbOutcome, EngineError};
+use crate::orchestration::council::CouncilOutcome;
 use crate::orchestration::council::driver::CouncilRunResult;
 use crate::orchestration::council::run::CouncilError;
 use crate::orchestration::workflow::runner::{WorkflowRunError, WorkflowRunResult};
@@ -258,6 +259,16 @@ pub enum FleetOutcome<'a> {
 pub enum CouncilRunOutcome<'a> {
     /// The council ran and produced a result.
     Ran(&'a CouncilRunResult),
+    /// The MANUAL council path ran, producing a bare [`CouncilOutcome`].
+    ///
+    /// A separate variant because that path has no [`AssemblyPlan`] — the
+    /// operator's configured roster IS the plan. Constructing an empty
+    /// `AssemblyPlan` just to reach [`Self::Ran`] would fabricate a decision the
+    /// assembler never made, which is the same anti-pattern as squeezing a
+    /// driver failure into an engine error. The terminal mapping is identical to
+    /// `Ran(Council { .. })`, because it is the same counting rule over the same
+    /// two fields.
+    RanManual(&'a CouncilOutcome),
     /// The council failed with its own typed error.
     Failed(&'a CouncilError),
     /// The driver failed around the council, for a stated reason.
@@ -271,6 +282,7 @@ impl std::fmt::Debug for CouncilRunOutcome<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ran(_) => f.write_str("CouncilRunOutcome::Ran(..)"),
+            Self::RanManual(_) => f.write_str("CouncilRunOutcome::RanManual(..)"),
             Self::Failed(error) => write!(f, "CouncilRunOutcome::Failed({error})"),
             Self::DriverFailed { detail } => {
                 write!(f, "CouncilRunOutcome::DriverFailed({detail})")
@@ -454,12 +466,11 @@ impl StrategyTermination {
             CouncilRunOutcome::DriverFailed { detail } => {
                 return owner.terminate(GoalTerminalState::Blocked { reason: detail });
             }
-            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. }) => {
-                GoalTerminalState::PartiallyCompleted {
-                    completed: outcome.chosen_from.len() as u64,
-                    failed: outcome.skipped.len() as u64,
-                }
-            }
+            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. })
+            | CouncilRunOutcome::RanManual(outcome) => GoalTerminalState::PartiallyCompleted {
+                completed: outcome.chosen_from.len() as u64,
+                failed: outcome.skipped.len() as u64,
+            },
             // One model's answer, no roster to count and no verification owner.
             CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
             CouncilRunOutcome::Ran(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,

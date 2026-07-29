@@ -391,9 +391,62 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
             .unwrap_or_default()
     );
 
-    let outcome = run_council(&args.task, &roster, &spawner, &base)
-        .await
-        .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // The MANUAL council path. This is a SECOND route to a council inside the
+    // same verb — `run_crucible_auto` reaches `drive_council`, this reaches
+    // `run_council` — and it is the one a plain `[crucible] proposers = [...]`
+    // config takes, i.e. the DEFAULT. Attaching only the auto path would have
+    // left the default route terminating nothing while the flag appeared to
+    // work; that is precisely the advertised-but-dead defect this criterion
+    // exists to close, and it was caught by reading the transition line rather
+    // than the exit status.
+    let attachment = crate::goal_cmd::GoalAttachArgs::default().resolve()?;
+    let outcome = match attachment {
+        Some((driver, goal_id)) => {
+            let carried: std::cell::RefCell<Option<CouncilOutcome>> = std::cell::RefCell::new(None);
+            let cursor = driver
+                .run_council(&goal_id, |owner| async {
+                    match run_council(&args.task, &roster, &spawner, &base).await {
+                        Ok(outcome) => {
+                            // The manual path produces a `CouncilOutcome`; the
+                            // adapter takes the driver's `CouncilRunResult`, so
+                            // it is wrapped in the `Council` variant WITHOUT a
+                            // plan — the manual roster IS the plan.
+                            let result = CouncilRunResult::Council {
+                                plan: AssemblyPlan::default(),
+                                outcome,
+                            };
+                            let termination = StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::Ran(&result),
+                            );
+                            if let CouncilRunResult::Council { outcome, .. } = result {
+                                *carried.borrow_mut() = Some(outcome);
+                            }
+                            termination
+                        }
+                        Err(error) => {
+                            eprintln!("crucible: council failed: {error}");
+                            StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::Failed(&error),
+                            )
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+            crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "council", &cursor);
+            match carried.into_inner() {
+                Some(outcome) => outcome,
+                None => return Ok(()),
+            }
+        }
+        None => run_council(&args.task, &roster, &spawner, &base)
+            .await
+            .map_err(|e| anyhow::anyhow!("council failed: {e}"))?,
+    };
 
     eprint!("{}", render_provenance(&outcome));
     consume_outcome(mode, &session_cfg, &args.task, &outcome.final_text).await
