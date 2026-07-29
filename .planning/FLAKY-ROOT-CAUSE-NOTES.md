@@ -194,6 +194,77 @@ recorded in BACKLOG CLASS-ENV-01 row 3 ("~20 EMFILE failures at 0.007s"), which 
 an env-mutation heading it does not belong to. **That row is a resource-exhaustion finding
 wearing an env-mutation label**, and the 18-22 counts in my brief match its magnitude.
 
+---
+
+## MEASUREMENT 3 — causal proof, both directions
+
+`/root/flaky-eviden/causal.sh`. Only `ulimit -n` and `--test-threads` vary; same worktree,
+same commit, no code change, no machine loading.
+
+**FORCE the mechanism at DEFAULT concurrency** (`ulimit -n 256`, `--test-threads` default 96):
+
+```
+run=1 rc=100 emfile=3490 execfail_try1=1841 realfail_try1=0  523 passed, 192 flaky, 1649 exec failed
+run=2 rc=100 emfile=3565 execfail_try1=1860 realfail_try1=0  467 passed, 155 flaky, 1705 exec failed
+run=3 rc=100 emfile=3527 execfail_try1=1863 realfail_try1=0  508 passed, 199 flaky, 1664 exec failed
+```
+
+**REMOVE the sharing at the concurrency that broke it** (`ulimit -n 65536`):
+
+```
+--test-threads=768 : run=1 emfile=0 execfail=0 realfail=0  2172 passed
+                     run=2 emfile=0 execfail=0 realfail=0  2172 passed
+                     run=3 emfile=0 execfail=0 realfail=0  2172 passed
+--test-threads=384 : run=1 emfile=0 execfail=0 realfail=0  2172 passed
+                     run=2 emfile=0 execfail=0 realfail=0  2172 passed
+                     run=3 emfile=0 execfail=0 realfail=0  2172 passed
+```
+
+384 and 768 are the *exact* settings that produced 96 exec-failures at `ulimit -n 1024`.
+Raising only the fd budget makes them 6/6 clean. Lowering only the fd budget reproduces the
+failure at *default* concurrency. **`realfail_try1 = 0` in every single run** — the fd budget,
+not concurrency and not any test's logic, is the controlling variable.
+
+### Quantified: peak runner fd usage vs the limit
+
+Sampled `/proc/<runner>/fd` at 0.15s intervals, `ulimit -n 1024`:
+
+| --test-threads | peak runner fds | % of 1024 | outcome |
+|---|---|---|---|
+| 96 (default) | **299** | 29% | clean |
+| 192 | **569** | 56% | clean |
+| 384 | ≥736 sampled (true peak hits the cap) | ≥72% | 31 flaky |
+
+Model: `peak ≈ 2.9 x test-threads + ~20`. The 1024 cap is crossed at **~346 test-threads**.
+
+**This is an important negative for the tidy story.** On this host at default concurrency the
+suite sits at **29%** of the fd limit — it is *not* near the edge. So EMFILE-at-spawn, though
+fully proven as *a* mechanism, does **not** by itself explain 22/18 failures at default
+concurrency, and I will not claim that it does.
+
+### Second mechanism, separate resource, separate errno path
+
+`crates/wcore-agent/src/watch.rs:101` calls `notify::recommended_watcher`, which allocates an
+**inotify instance** on Linux. Instances are capped **per-user** by
+`fs.inotify.max_user_instances` (currently **512**), and every lane on this box runs as `root`,
+so the counter is genuinely shared across lanes in a way `RLIMIT_NOFILE` is not.
+
+Exactly **3** lib tests construct one (concept search for construction sites, not the keyword
+`inotify`; `grep -rn "WatchHandle" = 0` proved the obvious name wrong, so the real type is
+`FileWatcher`):
+
+- `crates/wcore-agent/src/watch.rs:487` — `self_write_suppressed_even_when_drained_late_bug2a`,
+  `FileWatcher::new(dir.path()).unwrap()`
+- `crates/wcore-agent/src/file_watcher_notifier.rs:64` — `.expect("watcher")`
+- `crates/wcore-agent/src/file_watcher_notifier.rs:94` — `.expect("watcher")`
+
+`inotify_init` returns **EMFILE (errno 24) — the same errno as the spawn path** when the
+per-user instance cap is hit, so the two mechanisms are easy to conflate and the recorded
+`wcore-skills` sighting was filed under the wrong heading for exactly this reason. They are
+distinguishable by *where* they land: instance exhaustion panics **inside** a running test
+(`TRY 1 FAIL`), whereas fd exhaustion kills the **spawn** (`TRY 1 XFAIL`, 0.000s). Three tests
+is not 18-22, so this is a contributor, not the explanation.
+
 ## Open questions I must not paper over
 
 - Does nextest ever run more than one test per process here? (`--lib` is one binary; I
