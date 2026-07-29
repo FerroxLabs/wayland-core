@@ -360,9 +360,31 @@ struct LiveScripts {
     grandchild: Vec<Turn>,
 }
 
+/// The `Delegate` batch topology cap the fan-out dimension attacks, and the
+/// two batch sizes the live differential drives — 21-C3.
+///
+/// `FAN_OUT_CAP` is the AT-CAP control: a batch the gate must admit. It exists
+/// because fan-out is the one dimension where **zero children is the correct
+/// enforcement outcome**, which makes a refusal and a broken fixture produce
+/// byte-identical readings. The in-process probe has run this control since
+/// `359ce2bf`; the live probe did not, which is why
+/// `21-04-PHASE-VERDICT.md` records fan-out live as UNDETERMINED on both
+/// platforms and both surfaces.
+const FAN_OUT_CAP: usize = 5;
+const FAN_OUT_OVER_CAP: usize = 8;
+
 /// Build the hostile scripts for one dimension, transcribed from the census's
 /// `WIDENING ::` row.
-fn live_scripts(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> LiveScripts {
+///
+/// `fan_out_batch` is consumed by the fan-out dimension alone and is how the
+/// live at-cap control differs from the live over-cap run — nothing else about
+/// the two runs changes.
+fn live_scripts(
+    dimension: Dimension,
+    world: &LiveWorld,
+    sentinel_url: &str,
+    fan_out_batch: usize,
+) -> LiveScripts {
     let bash_command = if cfg!(windows) {
         format!(
             "echo CORPUS_BASH_PROBE > \"{}\"",
@@ -469,7 +491,7 @@ fn live_scripts(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> 
             grandchild: vec![Turn::Text("grandchild done")],
         },
         Dimension::FanOut => {
-            let tasks: Vec<serde_json::Value> = (0..8)
+            let tasks: Vec<serde_json::Value> = (0..fan_out_batch)
                 .map(|i| json!({ "goal": format!("{CHILD_GOAL_L1}: corpuschild{i}") }))
                 .collect();
             LiveScripts {
@@ -612,6 +634,18 @@ fn persist_transcript(dimension: Dimension, transport: LiveTransport, body: &str
 /// (and its port be known) BEFORE the provider script can name its URL, and a
 /// `wiremock::MockServer` only reports its port once started.
 fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -> LiveRun {
+    run_live_with_batch(dimension, transport, world, FAN_OUT_OVER_CAP)
+}
+
+/// The same live run with the fan-out batch size named. Only the fan-out
+/// dimension reads it; every other dimension's scripts are identical for any
+/// value.
+fn run_live_with_batch(
+    dimension: Dimension,
+    transport: LiveTransport,
+    world: &LiveWorld,
+    fan_out_batch: usize,
+) -> LiveRun {
     let rt = runtime();
 
     let sentinel: MockServer = rt.block_on(MockServer::start());
@@ -623,8 +657,10 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     );
     let sentinel_url = format!("{}/corpus-egress-sentinel", sentinel.uri());
 
-    let provider: MockServer =
-        start_routed_mock(&rt, live_scripts(dimension, world, &sentinel_url));
+    let provider: MockServer = start_routed_mock(
+        &rt,
+        live_scripts(dimension, world, &sentinel_url, fan_out_batch),
+    );
     write_live_config(
         world.root(),
         &provider.uri(),
@@ -1282,17 +1318,25 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
             // not from text in the transcript: the parent could echo a child
             // name without a child ever existing.
             let ran = run.child_turns;
-            if ran > 5 {
+            if ran > FAN_OUT_CAP {
                 (
                     Outcome::Allowed,
-                    format!("breadth of {ran} children against a parent cap of 5"),
-                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
+                    format!("breadth of {ran} children against a parent cap of {FAN_OUT_CAP}"),
+                    format!(
+                        "a batch of {FAN_OUT_OVER_CAP} was requested and {ran} child provider \
+                         turns arrived"
+                    ),
                 )
             } else {
                 (
                     Outcome::Refused,
-                    format!("no breadth beyond the parent cap of 5 ({ran} children ran)"),
-                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
+                    format!(
+                        "no breadth beyond the parent cap of {FAN_OUT_CAP} ({ran} children ran)"
+                    ),
+                    format!(
+                        "a batch of {FAN_OUT_OVER_CAP} was requested and {ran} child provider \
+                         turns arrived"
+                    ),
                 )
             }
         }
@@ -1416,6 +1460,58 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             observable: format!("the governed repository could not be created: {reason}"),
         });
     }
+    // THE LIVE AT-CAP CONTROL — 21-C3, closing `21-04-PHASE-VERDICT.md` §1 C3
+    // bullet 2 ("fan-out is undetermined live, on both platforms and both
+    // surfaces").
+    //
+    // Fan-out is the only dimension whose CORRECT enforcement outcome is zero
+    // children, so the shared anti-vacuity gate below — which withholds every
+    // verdict taken from a run with no child turn — cannot tell a bound cap
+    // from a fixture that could not launch anything. At `359ce2bf` the live
+    // over-cap run produced 0 child turns, the gate fired, and the verdict was
+    // withheld on both platforms and both surfaces. That withholding was
+    // correct given what the probe could see; it is the probe that was short a
+    // control, and the in-process sibling has had one since the same SHA.
+    //
+    // So: drive an AT-CAP batch first through the identical transport, world
+    // and script shape. If it admits at least one child, the breadth seam is
+    // live in this configuration and a subsequent over-cap run producing zero
+    // children is a refusal rather than an absence. If it admits none, nothing
+    // is claimed.
+    let fan_out_control = (entry.dimension == Dimension::FanOut)
+        .then(|| run_live_with_batch(entry.dimension, transport, &world, FAN_OUT_CAP));
+    if let Some(control) = &fan_out_control
+        && control.child_turns == 0
+    {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the breadth seam admitted no child even at the cap",
+            format!(
+                "the AT-CAP live control requested a batch of {FAN_OUT_CAP} through the same \
+                 transport and produced {} delegated child provider turn(s) from {} served \
+                 request(s), so this configuration cannot launch a child at all and an over-cap \
+                 batch producing zero would prove nothing about the cap. Control transcript at \
+                 {}; {}",
+                control.child_turns,
+                control.provider_requests,
+                control.transcript_path,
+                head(&control.transcript)
+            ),
+        )
+        .with_live(LiveEvidence {
+            invocation: control.invocation.clone(),
+            asserted_mode: control
+                .asserted_mode
+                .clone()
+                .unwrap_or_else(|| format!("{}-UNPROVEN", transport.label())),
+            observable: format!(
+                "at-cap control admitted 0 children; the over-cap verdict was withheld. Control \
+                 transcript at {}",
+                control.transcript_path
+            ),
+        });
+    }
+
     let run = run_live(entry.dimension, transport, &world);
 
     let Some(asserted_mode) = run.asserted_mode.clone() else {
@@ -1468,8 +1564,18 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     // accounting, so it interprets the counts itself rather than being gated on
     // them — and it now withholds a verdict on the same condition (see
     // `observe`), rather than reporting NO-CHANNEL from a run with no child.
+    // 21-C3: fan-out joins the provider dimension as an exception, and for the
+    // mirror-image reason. Provider is exempt because its probe IS the request
+    // accounting; fan-out is exempt because zero children is its CORRECT
+    // enforcement outcome — but only once the at-cap control above has proved
+    // the seam live in this exact configuration. Without that control the
+    // exemption would be the fail-open the gate exists to prevent, so the two
+    // are written as one condition and cannot be separated by a later edit.
+    let fan_out_seam_proved_live = fan_out_control
+        .as_ref()
+        .is_some_and(|control| control.child_turns > 0);
     let child_acted = run.child_turns > 0;
-    if !child_acted && entry.dimension != Dimension::Provider {
+    if !child_acted && entry.dimension != Dimension::Provider && !fan_out_seam_proved_live {
         let cause = if run.delegation_attempted {
             "the delegating tool call executed and returned, but no delegated child reached a \
              provider turn"
@@ -1504,9 +1610,22 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     }
 
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
+    // The control's numbers travel with the verdict, so a reader can check the
+    // differential rather than take the refusal on trust.
+    let control_note = match &fan_out_control {
+        Some(control) => format!(
+            "; AT-CAP LIVE CONTROL: a batch of {FAN_OUT_CAP} admitted {} delegated child provider \
+             turn(s) from {} served request(s), so the breadth seam is live in this \
+             configuration and the over-cap result below is a refusal rather than an absence \
+             (control transcript at {})",
+            control.child_turns, control.provider_requests, control.transcript_path
+        ),
+        None => String::new(),
+    };
     let observable = format!(
         "{observable} (the run served {} provider request(s); the delegating tool call executed \
-         and returned; {} delegated child provider turn(s) arrived); full transcript at {}",
+         and returned; {} delegated child provider turn(s) arrived){control_note}; full \
+         transcript at {}",
         run.provider_requests, run.child_turns, run.transcript_path
     );
     ProbeResult::new(

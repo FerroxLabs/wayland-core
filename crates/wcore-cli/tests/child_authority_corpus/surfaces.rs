@@ -426,6 +426,47 @@ fn init_git_repo(root: &Path) -> Result<(), String> {
 }
 
 pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture {
+    parent_fixture_with_allow_list(session_tag, script, Vec::new())
+}
+
+/// The same fixture with named tools placed on the session's approval
+/// ALLOW-LIST — 21-C3.
+///
+/// ## Why this parameter had to exist
+///
+/// `Config::default()` resolves to `ApprovalPolicy::Prompt`
+/// (`Config::smart_approval_policy`), `AgentSpawner::child_config` deliberately
+/// hands the child the parent's posture unchanged (audit H-7 / M-9), and
+/// `ToolConfirmer::check_for` returns `Denied` unconditionally when stdin is not
+/// a terminal. Under a CI runner that is EVERY tool call a delegated child makes.
+///
+/// The consequence was measured, not theorised. At `359ce2bf` the standalone
+/// in-process tool row recorded `REFUSED :: obtained no Bash effect` while its
+/// own evidence field carried, verbatim, *"What the child's own tool call
+/// returned: Tool execution denied by user"* — the string `confirm_call` emits
+/// on a denial. The child's Bash call never reached the tool registry, the
+/// workspace guard or the Bash tool. `21-04-PHASE-VERDICT.md` records that
+/// refusal as *"jointly attributable to tool authority and to workspace
+/// containment"*; neither of those two was exercised, and the cause that fired
+/// is not on the list.
+///
+/// The allow-list is the NARROWEST available neutraliser and is preferred over
+/// `tools.auto_approve` on purpose: `requires_confirmation_for` consults the
+/// allow-list BEFORE the policy, so the session's resolved
+/// `ApprovalPolicy` stays `Prompt` and every per-child approval observable this
+/// corpus reads keeps its real value. It states a real operator posture — "this
+/// session has already allowed Bash" — rather than removing the approval
+/// mechanism.
+///
+/// It does NOT touch tool authority: `build_tool_registry` intersects against
+/// `parent_tool_authority`, which the allow-list has no bearing on. That
+/// separation is what makes the authority differential in
+/// [`tool_widening_through_spawn_fork`] single-variable.
+pub fn parent_fixture_with_allow_list(
+    session_tag: &str,
+    script: Vec<LlmEvent>,
+    allow_list: Vec<String>,
+) -> ParentFixture {
     let home = TempDir::new().expect("tempdir");
     let root = std::fs::canonicalize(home.path()).expect("canonical workspace root");
     // The session state root lives OUTSIDE the parent workspace on purpose. The
@@ -456,6 +497,9 @@ pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture
     // absence of one from ever being read as a refusal again.
     config.provider_label = "anthropic".to_owned();
     config.model = "corpus-model".to_owned();
+    // 21-C3. Empty for every caller but the tool differential — see
+    // `parent_fixture_with_allow_list`.
+    config.tools.allow_list = allow_list;
 
     let counted = Arc::new(CountingProvider::new(script));
     let provider: Arc<dyn LlmProvider> = Arc::clone(&counted) as Arc<dyn LlmProvider>;
@@ -1027,19 +1071,12 @@ pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
     // This is a bound on the harness, not a loosened gate. Expiry records
     // NOT-EXPRESSIBLE — never REFUSED — so nothing is ever counted as a refusal
     // because it ran out of time, exactly as the live runs' budget behaves.
-    let tag = session_tag.to_owned();
-    match run_bounded(Duration::from_secs(45), move || {
-        tool_widening_through_spawn_fork_inner(&tag)
-    }) {
-        Some(probe) => probe,
-        None => ProbeResult::new(
-            Outcome::NotExpressible,
-            "no verdict — the probe did not return",
-            "the delegated child's engine reached the shipped tool confirmer, which prompts on \
-             this process's stdin; no approver exists in process, so the call never returned and \
-             no verdict could be taken from it",
-        ),
-    }
+    //
+    // 21-C3: the bound is applied PER ARM (see `tool_arm`) rather than to the
+    // whole probe. The probe now runs two arms, and widening one 45 s budget to
+    // cover both would have been a raised timeout wearing a refactor's clothes.
+    // Each arm keeps exactly the budget the single run had.
+    tool_widening_through_spawn_fork_inner(session_tag)
 }
 
 /// Run `probe` on its own thread and give up after `budget`.
@@ -1059,23 +1096,98 @@ fn run_bounded<T: Send + 'static>(
     rx.recv_timeout(budget).ok()
 }
 
-fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
+/// What one arm of the tool differential observed. Every field is a POSITIVE
+/// effect the child produced; none of them is an error string, an error kind or
+/// a status.
+struct ToolArm {
+    /// The child's own Bash stdout came back to the fixture's endpoint. This
+    /// can only be true if the Bash tool was in the child's registry, passed the
+    /// dispatch gate, passed the confirmer, and ran.
+    executed: bool,
+    /// A file landed at a path OUTSIDE the child's workspace root.
+    escaped_containment: bool,
+    child_turns: usize,
+    /// `Some(reason)` when this arm produced no observation at all.
+    withheld: Option<String>,
+    child_text: String,
+    returned: String,
+}
+
+/// The parent authority an arm runs under. This is the ONLY thing that differs
+/// between the two arms.
+enum ParentAuthority {
+    /// The parent session holds the full child-eligible set, Bash included.
+    HoldsBash,
+    /// The parent session's own registry is read-only — the hostile premise the
+    /// tool dimension has always CLAIMED and never actually established.
+    ReadOnly,
+}
+
+/// Drive one arm under the same 45 s bound the single-run probe carried, so
+/// adding a second arm does not silently double anyone's budget.
+fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
+    let tag = session_tag.to_owned();
+    let marker_owned = marker.to_owned();
+    run_bounded(Duration::from_secs(45), move || {
+        tool_arm_inner(&tag, authority, &marker_owned)
+    })
+    .unwrap_or_else(|| ToolArm {
+        executed: false,
+        escaped_containment: false,
+        child_turns: 0,
+        withheld: Some(
+            "the delegated child's engine did not return within 45 s; on a session-0 Windows \
+             context the shipped confirmer prints its prompt and blocks on a `read_line` no \
+             approver will answer"
+                .to_owned(),
+        ),
+        child_text: String::new(),
+        returned: String::new(),
+    })
+}
+
+/// Drive one arm: a delegated child scripted to run a Bash command that first
+/// prints a marker to stdout and then attempts a write outside its workspace.
+fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
     let staging = TempDir::new().expect("tempdir");
-    let probe_path = std::fs::canonicalize(staging.path())
+    let outside_path = std::fs::canonicalize(staging.path())
         .expect("canonical probe dir")
         .join("corpus_child_bash_probe.txt");
     let script = tool_call_script(
         "Bash",
-        json!({ "command": bash_probe_command(&probe_path) }),
+        json!({ "command": bash_probe_command(marker, &outside_path) }),
     );
-    let fixture = parent_fixture(session_tag, script);
+    // The confirmer is neutralised IDENTICALLY in both arms — see
+    // `parent_fixture_with_allow_list`. Holding it constant is what makes the
+    // differential single-variable.
+    let fixture = parent_fixture_with_allow_list(session_tag, script, vec!["Bash".to_owned()]);
 
     if let Some(reason) = &fixture.bind_failure {
-        return ProbeResult::new(
-            Outcome::NotExpressible,
-            "no child was launched",
-            format!("the durable session could not be bound in this fixture: {reason}"),
-        );
+        return ToolArm {
+            executed: false,
+            escaped_containment: false,
+            child_turns: 0,
+            withheld: Some(format!(
+                "the durable session could not be bound in this fixture: {reason}"
+            )),
+            child_text: String::new(),
+            returned: String::new(),
+        };
+    }
+
+    match authority {
+        // `AgentSpawner::new` seeds `ParentToolAuthority::unrestricted()`, which
+        // is what the corpus has always run under. Stated rather than left
+        // implicit, because "the fixture never narrowed" and "the parent
+        // genuinely holds everything" are the two states
+        // `declare_root_parent_tool_authority` exists to distinguish.
+        ParentAuthority::HoldsBash => fixture.spawner.declare_root_parent_tool_authority(),
+        // The hostile premise, established for the first time. `narrow_to` is
+        // monotonic and shared by `Arc`, so this binds every clone the
+        // Delegate path takes.
+        ParentAuthority::ReadOnly => fixture
+            .spawner
+            .narrow_parent_tool_authority(["Read", "Grep", "Glob"]),
     }
 
     let overrides = ForkOverrides {
@@ -1092,61 +1204,145 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
     let rt = runtime();
     let before = fixture.provider.calls();
     let result = rt.block_on(fixture.spawner.spawn_fork(config, overrides));
-    if let Some(withheld) = withhold_if_no_child_ran(
-        &fixture,
-        before,
-        "the production Delegate path (`Spawner::spawn_fork`)",
-        &result.text,
-    ) {
-        return withheld;
-    }
-
-    // What the child's own tool call RETURNED, captured at the fixture's
-    // endpoint. Carried into the evidence but deliberately NOT used as the
-    // verdict — the verdict stays on the effect, per the corpus's rule that no
-    // assertion reads an error shape. It is here because the disk effect alone
-    // cannot separate the two reasons a probe file might be missing, and a
-    // record that cannot separate them should say so rather than imply one.
+    let child_turns = fixture.provider.calls().saturating_sub(before);
     let returned = fixture.provider.tool_results().join(" | ");
-    let attribution = format!(
-        "the probe target sits outside the child's isolated-mutation checkout, so an absent effect \
-         is jointly attributable to tool authority and to workspace containment; the corpus cannot \
-         separate the two from the effect alone and does not claim to. What the child's own tool \
-         call returned: {}",
-        truncate(&returned)
-    );
 
-    if probe_path.exists() {
-        ProbeResult::new(
-            Outcome::Allowed,
-            "Bash — a tool the read-only parent does not itself hold",
-            format!(
-                "the delegated child executed a Bash command and its effect landed on disk; \
-                 parent workspace {}; child text: {}",
-                fixture.root.display(),
-                truncate(&result.text)
-            ),
+    ToolArm {
+        executed: returned.contains(marker) || result.text.contains(marker),
+        escaped_containment: outside_path.exists(),
+        child_turns,
+        // The shared in-process anti-vacuity gate, unchanged and reused rather
+        // than restated: an arm that launched no child contributes no
+        // observation to the differential.
+        withheld: withhold_if_no_child_ran(
+            &fixture,
+            before,
+            "the production Delegate path (`Spawner::spawn_fork`)",
+            &result.text,
         )
-    } else {
-        ProbeResult::new(
-            Outcome::Refused,
-            "no Bash effect — nothing the read-only parent does not hold",
-            format!(
-                "the delegated child produced no Bash effect on disk; parent workspace {}; child \
-                 text: {}; {attribution}",
-                fixture.root.display(),
-                truncate(&result.text)
-            ),
-        )
+        .map(|probe| probe.detail),
+        child_text: truncate(&result.text),
+        returned: truncate(&returned),
     }
 }
 
-fn bash_probe_command(probe: &Path) -> String {
-    let target = probe.display().to_string();
-    if cfg!(windows) {
-        format!("echo CORPUS_BASH_PROBE > \"{target}\"")
+fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
+    // ARM 1 — THE KNOWN-POSITIVE. The parent holds Bash. If the child does not
+    // execute Bash HERE, the instrument is dead and no absence measured by this
+    // probe means anything.
+    let granted = tool_arm(
+        &format!("{session_tag}-g"),
+        ParentAuthority::HoldsBash,
+        "CORPUSBASHGRANTED",
+    );
+    // ARM 2 — THE HOSTILE REQUEST. Identical in every respect except that the
+    // parent session's own authority is read-only.
+    let denied = tool_arm(
+        &format!("{session_tag}-d"),
+        ParentAuthority::ReadOnly,
+        "CORPUSBASHDENIED",
+    );
+
+    let shape = format!(
+        "TOOL-AUTHORITY DIFFERENTIAL. Two arms of the production Delegate path \
+         (`Spawner::spawn_fork`), identical in workspace, script, child config, requested \
+         toolset (`allowed_tools=[\"Bash\"]`) and approval posture (Bash allow-listed in both, so \
+         the shipped confirmer is held constant and cannot be the difference). The ONLY variable \
+         is the parent session's own tool authority. \
+         ARM-GRANTED (`declare_root_parent_tool_authority`): {} child turn(s), the child executed \
+         Bash: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
+         ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`): {} child \
+         turn(s), the child executed Bash: {}, its write escaped the workspace: {}; returned: {}; \
+         child text: {}",
+        granted.child_turns,
+        granted.executed,
+        granted.escaped_containment,
+        granted.returned,
+        granted.child_text,
+        denied.child_turns,
+        denied.executed,
+        denied.escaped_containment,
+        denied.returned,
+        denied.child_text,
+    );
+
+    // Either arm producing no child at all withholds the whole verdict. A
+    // differential with one dead arm is not a differential.
+    for (label, arm) in [("ARM-GRANTED", &granted), ("ARM-DENIED", &denied)] {
+        if let Some(reason) = &arm.withheld {
+            return ProbeResult::new(
+                Outcome::NotExpressible,
+                "no verdict — an arm of the tool differential produced no child",
+                format!("{label} was withheld: {reason}. {shape}"),
+            );
+        }
+    }
+
+    // THE KNOWN-POSITIVE GATE. This is the assertion the tool dimension has
+    // never carried, and its absence is why a REFUSED here was unattributable
+    // for three plans. A refusal is only evidence about authority if a child
+    // with authority DOES execute the tool in this exact fixture.
+    if !granted.executed {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — Bash did not execute even for a parent that holds it",
+            format!(
+                "the KNOWN-POSITIVE arm failed: a child of a parent holding the full \
+                 child-eligible tool set, granted `allowed_tools=[\"Bash\"]`, produced no Bash \
+                 stdout. Something other than tool authority is stopping the call, so the denied \
+                 arm's absence proves nothing and is not recorded as a refusal. {shape}"
+            ),
+        );
+    }
+
+    if denied.executed {
+        return ProbeResult::new(
+            Outcome::Allowed,
+            "Bash — a tool the read-only parent does not itself hold",
+            format!(
+                "the child of a READ-ONLY parent executed Bash and its stdout returned to the \
+                 session's own endpoint. The known-positive arm proves the instrument is live, so \
+                 this is a widening at the spawn seam and not an artefact. {shape}"
+            ),
+        );
+    }
+
+    // THE SEPARATION `21-04-PHASE-VERDICT.md` C3 bullet 4 asks for. Containment
+    // is measured on the GRANTED arm — where the child demonstrably held and ran
+    // Bash — so it is reported as its own fact rather than braided into the
+    // authority verdict.
+    let containment = if granted.escaped_containment {
+        "SEPARATELY OBSERVED: on the granted arm the child's Bash write DID land outside its \
+         workspace root, so workspace containment did not bind there and cannot be an alternative \
+         explanation for the denied arm"
     } else {
-        format!("printf CORPUS_BASH_PROBE > '{target}'")
+        "SEPARATELY OBSERVED: on the granted arm the child executed Bash but its write did NOT \
+         land outside its workspace root, so workspace containment bound independently of tool \
+         authority. The two mechanisms are measured apart rather than jointly attributed"
+    };
+
+    ProbeResult::new(
+        Outcome::Refused,
+        "no Bash — nothing the read-only parent does not hold",
+        format!(
+            "ATTRIBUTED TO TOOL AUTHORITY. The same request, the same confirmer posture and the \
+             same workspace produced a running Bash under a parent that holds it and no Bash at \
+             all under a parent that does not, so the refusal is the parent-authority \
+             intersection at `build_tool_registry` and not containment, not the approval gate and \
+             not an absent child. {containment}. {shape}"
+        ),
+    )
+}
+
+/// The child's Bash command. It prints `marker` to stdout FIRST — so the marker
+/// returns whether or not the write that follows succeeds — and then attempts a
+/// write outside the child's workspace. Two independent observables, one call.
+fn bash_probe_command(marker: &str, outside: &Path) -> String {
+    let target = outside.display().to_string();
+    if cfg!(windows) {
+        format!("echo {marker}& echo CORPUS_BASH_PROBE > \"{target}\"")
+    } else {
+        format!("printf {marker}; printf CORPUS_BASH_PROBE > '{target}'")
     }
 }
 
