@@ -188,6 +188,45 @@ hard criterion and no lane has attempted it.
 
 **Closing it requires**: the adapter surface over five owners in `wcore-agent/src/orchestration/`.
 `22-02-LOOP-OWNER-CENSUS.md` already specifies what each of the five produces and where Fleet binds.
+
+> **CORRECTED AGAIN 2026-07-30 by `lane/22-c3-terminal`. This row has now been stale twice, and so
+> was its own first correction.**
+>
+> - **Its falsifier is a DEAD INSTRUMENT — the inverse of a self-passing gate.** *"Grep for
+>   `GoalTerminalState` under `orchestration/` returns zero hits"* is **true and useless**: the
+>   adapter lives in `goal/strategy.rs`, so that check reports FAILED **forever**, regardless of the
+>   code. Exposed only by its known-positive — `ClimbOutcome` returns **21** hits in that same
+>   directory. **A permanently-red gate proves as little as a permanently-green one**, and this one
+>   had been driving the grade.
+> - ***"No lane has attempted it"* is false** — `goal/strategy.rs` (**41.8 KB**) plus
+>   `22-C3-SUMMARY.md`/`NOTES.md` were **already in integration**; two prior lanes worked C3. **And
+>   the 2026-07-29 correction's own claim that they were "not in the integration branch" is false
+>   too.**
+> - ***"Consumers only in `goal/{ledger,kernel}.rs` and `session_journal/model.rs`"* is false** —
+>   **24 files across 4 crates** (`wcore-agent`, `wcore-cli`, `wcore-protocol`, `wcore-types`),
+>   verified independently by the orchestrator.
+> - Anvil's `ClimbOutcome` line numbers were stale: struct `:247`, returns `:362`/`:614`.
+>
+> **The real bypass was somewhere else entirely.** `GoalKernel::terminate` is `pub`, and
+> `GoalTerminated` was refused **only while an owner was live** — justified in-comment by *"a Goal
+> that never claimed an owner … by definition no engine ran it."* **That premise is false whenever
+> attachment is opt-in**: an engine can run to completion, never claim, and record `SelfChecked` down
+> the plain path. **A sixth engine is in that state by default.** Closed with an exhaustive
+> `requires_loop_owner()` taxonomy split carrying **no wildcard arm** — a sixth category will not
+> compile — plus an unconditional reducer refusal.
+>
+> **Graded as two halves, because they are two claims:**
+> - **Half A — one canonical transition: ADVANCED, not closed.** The last *representable*
+>   engine-verdict bypass is shut at the durable boundary for 5/5 owners and any sixth, and it holds
+>   even against a hand-built journal record. **Un-goaled invocation remains opt-in.**
+> - **Half B — no nested verification/retry owner: CLOSED, and PRE-EXISTING.** The lane re-verified
+>   it (2 doctests) and explicitly does **not** claim its evidence.
+>
+> **Compile-time closure of un-goaled invocation was declined at 0/5, deliberately**: ~34 sites for
+> ForgeFlows and thousands for Direct, and a partial 2-of-5 version is the false-confidence shape a
+> cross-auditor warned against. Also open: `GoalKernel::terminate` stays `pub`, Anvil `Verified` is
+> test-only, and this is Linux only. The refusal itself is **not live-proven** — the CLI has no
+> raw-terminate verb — so the live run is a non-regression proof and is labelled as one.
 Single crate, no protocol change, no credential, no second machine.
 
 **Cost: 2–3 lane-sessions.** **Not release-blocking** — architecture consistency; no customer

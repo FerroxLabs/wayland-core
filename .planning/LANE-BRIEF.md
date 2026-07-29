@@ -548,3 +548,32 @@ default.
 
 This is the same family as the self-passing assertion: the environment you *think* you configured
 is an unverified premise, and on this box it is a **false** one.
+
+## 3b-iii. A PERMANENTLY-RED gate proves as little as a permanently-green one
+
+§3.2 warns about gates that cannot fail. The inverse is just as dangerous and was found on
+2026-07-30 driving a criterion's grade.
+
+`22-C3`'s falsifier was *"grep for `GoalTerminalState` under `orchestration/` returns zero hits"*.
+That is **true, and it is useless** — the adapter lives in `goal/strategy.rs`, so the check reports
+FAILED **forever**, no matter what anyone builds. The criterion was graded FAILED off an instrument
+that had no reachable pass state. It was caught only by a **known-positive in the same directory**:
+`ClimbOutcome` returns 21 hits there, proving the grep was alive and the *needle* was wrong.
+
+**So run the control in BOTH directions.** For every gate you rely on, ask two questions:
+
+1. Can it fail? (§3.2 — a known-negative must actually redden it.)
+2. **Can it pass?** Construct the state it claims to detect and confirm the gate goes green. If you
+   cannot describe an achievable world in which it passes, it is not measuring the criterion.
+
+A gate stuck red also **hides real progress**: two prior lanes had already built `goal/strategy.rs`
+(41.8 KB, in integration) and the row still read *"no lane has attempted it"*.
+
+The same shape appeared twice more the same night, so treat it as common, not exotic:
+
+- `21-C3`'s known-positive keyed on a `Write` sentinel that can **never** succeed (`path must be
+  absolute`), while the same output already carried a usable live differential that had gone unread
+  for days.
+- A differential harness **SKIPPED** the pairings whose dimension was `NOT-EXPRESSIBLE` instead of
+  failing them, so the one dimension with **zero running pairs** looked identical to a passing one.
+  **A skip is not a pass — count your running pairs and report the number.**
