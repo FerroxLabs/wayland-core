@@ -1,0 +1,49 @@
+Raw transcript, zombie-probe on hetzner-dsm (Ubuntu 24.04, Docker 29.2.1, 96 cores).
+Image: rust:1.95-slim-bookworm (the image ci.yml builds from).
+Container flags for ARM 1 are byte-identical to ci.yml:283 DOCKER_RUN minus the -e vars.
+
+=========== SELFTEST (native) ===========
+PID1_IS=2043111 COMM_OF_PID1=systemd
+SELFTEST A1_known_positive_live_process_reads_ALIVE: PASS
+SELFTEST A3_zombie_is_indistinguishable_from_live_for_this_probe: PASS
+SELFTEST A3 detail: /proc state=Z probe_alive=1 (a corpse the probe calls ALIVE)
+SELFTEST A2_known_negative_reaped_pid_reads_GONE: PASS
+SELFTEST SUMMARY: 3 passed, 0 failed
+DONE
+SELFTEST_RC=0
+
+=========== ARM 0: NATIVE (PID 1 = systemd) ===========
+PID1_IS=2043220 COMM_OF_PID1=systemd
+ARM=killed DESCENDANT=2043222 REPARENTED_TO=1 SELF=2043220
+ARM=killed PROBE_SAYS=GONE PROC_STATE=-
+ARM=killed VERDICT=TEST_WOULD_PASS
+DONE
+NATIVE_KILLED_RC=0
+
+=========== ARM 1: CONTAINER, CI FLAGS EXACTLY (no --init) ===========
+PID1_IS=1 COMM_OF_PID1=zombie-probe-st
+ARM=killed DESCENDANT=8 REPARENTED_TO=1 SELF=1
+ARM=killed PROBE_SAYS=ALIVE PROC_STATE=Z
+ARM=killed VERDICT=TEST_WOULD_FAIL
+DONE
+ARM1_RC=0
+
+=========== ARM 2: same + --init ===========
+PID1_IS=7 COMM_OF_PID1=docker-init
+ARM=killed DESCENDANT=9 REPARENTED_TO=1 SELF=7
+ARM=killed PROBE_SAYS=GONE PROC_STATE=-
+ARM=killed VERDICT=TEST_WOULD_PASS
+DONE
+ARM2_RC=0
+
+=========== ARM 3: CONTROL -- --init, descendant left ALIVE ===========
+PID1_IS=7 COMM_OF_PID1=docker-init
+ARM=alive DESCENDANT=9 REPARENTED_TO=1 SELF=7
+ARM=alive PROBE_SAYS=ALIVE PROC_STATE=S
+ARM=alive VERDICT=TEST_WOULD_FAIL
+DONE
+ARM3_RC=0
+
+READBACK: ARM 3 is the control that matters. Under --init a genuinely live
+descendant STILL reads ALIVE and the test STILL fails, so --init does not
+convert these 13 into tests that cannot fail.

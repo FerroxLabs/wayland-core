@@ -1,0 +1,25 @@
+Raw transcript: bubblewrap grant proof on hetzner-dsm (Ubuntu 24.04, Docker 29.2.1).
+Image = the EXACT image ci.yml now builds (CI deps + python3 + procps + bubblewrap).
+Worktree = /root/wayland-ci-image @ 0b5182ef (this lane's base commit).
+Container flags identical to ci.yml DOCKER_RUN / DOCKER_RUN_SANDBOX.
+
+/root/ci-image-probe/bwrap-proof.log:=== sanity: the three binaries are present in the proposed image ===
+/root/ci-image-probe/bwrap-proof.log:Python 3.11.2
+/root/ci-image-probe/bwrap-proof.log:ps from procps-ng 4.0.2
+/root/ci-image-probe/bwrap-proof.log:bubblewrap 0.8.0
+/root/ci-image-probe/bwrap-proof.log:     Summary [  10.290s] 100 tests run: 86 passed, 14 failed, 2 skipped
+/root/ci-image-probe/bwrap-proof.log:P1_END
+/root/ci-image-probe/bwrap-proof.log:     Summary [   1.311s] 100 tests run: 100 passed, 2 skipped
+/root/ci-image-probe/bwrap-proof.log:P2_END
+/root/ci-image-probe/bwrap-proof.log:PROOFDONE 2026-07-29T00:09:02Z
+/root/ci-image-probe/swarm-proof.log:     Summary [  52.384s] 1344 tests run: 1330 passed (1 slow), 14 failed, 14 skipped
+/root/ci-image-probe/swarm-proof.log:S1_END
+/root/ci-image-probe/swarm-proof.log:     Summary [   3.926s] 1344 tests run: 1344 passed (1 leaky), 14 skipped
+/root/ci-image-probe/swarm-proof.log:S2_END
+/root/ci-image-probe/swarm-proof.log:SWARMDONE 2026-07-29T00:11:48Z
+
+READBACK:
+  wcore-sandbox        no grant: 100 run,  86 passed, 14 failed  ->  grant: 100 run, 100 passed, 0 failed
+  wcore-swarm+tools    no grant: 1344 run, 1330 passed, 14 failed -> grant: 1344 run, 1344 passed, 0 failed
+  Zero regressions in either crate: nothing that passed WITHOUT the grant fails WITH it.
+  Both arms carry bubblewrap INSTALLED, so this isolates the grant from the package.

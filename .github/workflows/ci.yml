@@ -280,7 +280,87 @@ jobs:
       # Per-run cleanup of the cargo registry cache happens between
       # docker runs because CARGO_HOME stays in the image; only the
       # workspace target/ persists across steps via the mount.
-      DOCKER_RUN: docker run --rm --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      # `--init` (2026-07-29) is load-bearing, not hygiene. Without it PID 1 in
+      # this container is the test command itself. Nothing in crates/ sets
+      # PR_SET_CHILD_SUBREAPER, so an orphaned descendant reparents to PID 1, and
+      # Rust's Child::wait() issues waitpid(<specific pid>) -- never wait(-1) --
+      # so PID 1 can never incidentally reap an adopted orphan. The corpse stays
+      # a zombie forever, and all 13 descendant-reaping tests probe liveness with
+      # a shape a zombie satisfies: kill(pid,0) returns 0 for state Z
+      # (runner_contracts.rs:125, pty_capture.rs:783) and /proc/<pid> still
+      # exists for it (wcore-sandbox/tests/process_capture.rs:12,
+      # wcore-swarm/src/worktree_tests/linux.rs:629). 7+2+2+2 = 13, exactly the
+      # cluster. Containment genuinely SUCCEEDS -- the listener is dead and the
+      # process holds nothing -- but every probe reports it as surviving.
+      # Measured 4 ways on a near-exact runner match (Ubuntu 24.04 / Docker
+      # 29.2.1); raw transcript .planning/evidence/ci-image/c4-probe-RESULT.txt:
+      #   native (PID 1 = systemd)          -> GONE,  /proc state '-'  PASS
+      #   container, these flags, no --init -> ALIVE, /proc state 'Z'  FAIL
+      #   container + --init (docker-init)  -> GONE,  /proc state '-'  PASS
+      #   container + --init, LIVE child    -> ALIVE, /proc state 'S'  FAIL  <- control
+      # That last arm is the one that matters: --init does NOT make these tests
+      # unfailable. A genuinely surviving descendant still reds them.
+      DOCKER_RUN: docker run --rm --init --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+
+      # Same as DOCKER_RUN plus the four grants bubblewrap needs. Applied ONLY to
+      # the test step -- fmt, clippy, build and audit keep the default posture,
+      # because grant scope should track need scope.
+      #
+      # Installing the bubblewrap PACKAGE is necessary and NOT sufficient. All
+      # four flags were measured individually; each closes a distinct refusal,
+      # and removing any one puts the failure back:
+      #   apparmor=unconfined     Ubuntu 24.04 sets
+      #                           kernel.apparmor_restrict_unprivileged_userns=1
+      #                           (confirmed on the build host). Without this:
+      #                           "bwrap: No permissions to create new namespace".
+      #   seccomp=unconfined      without it, after the userns is created:
+      #                           "bwrap: loopback: Failed RTM_NEWADDR: Operation
+      #                           not permitted" (--unshare-all brings up lo).
+      #   cap-add SYS_ADMIN       without it: "bwrap: Failed to make / slave:
+      #                           Permission denied".
+      #   systempaths=unconfined  Docker masks paths under /proc; those masks are
+      #                           locked mounts, so bwrap's `--proc /proc` is
+      #                           refused with "bwrap: Can't mount proc on
+      #                           /newroot/proc: Operation not permitted".
+      #                           THIS is the flag the earlier attempt was missing:
+      #                           it diagnosed a bind-mount/propagation problem and
+      #                           removed its job. That diagnosis is REFUTED --
+      #                           running the identical bwrap argv against a
+      #                           container-internal directory instead of the
+      #                           bind-mounted /work fails identically, so the bind
+      #                           mount was never the variable. Its namespace probe
+      #                           passed only because it omitted --proc, i.e. it
+      #                           answered an easier question than the engine asks.
+      #
+      # Proof this is the right trade, measured on the build host with this exact
+      # image at this exact commit (.planning/CI-IMAGE.md):
+      #   bwrap installed, NO grant  -> 100 tests run: 86 passed, 14 failed
+      #   bwrap installed, grant     -> 100 tests run: 100 passed,  0 failed
+      # Zero regressions: nothing that passed without the grant fails with it,
+      # including the fail-closed and hard-containment cases that are the ones
+      # most sensitive to sandbox posture.
+      #
+      # On the security question: this container is a workaround for a GHA
+      # runner-agent crash (see the block above), NOT a boundary against the code
+      # under test -- the workflow already executes arbitrary repo code directly
+      # on the ephemeral runner in the macOS and Windows legs. The grant moves the
+      # Linux container TOWARD a normal Linux host, which is the environment these
+      # tests are written for; the container's extra restrictions are the anomaly.
+      # Cross-audit was 2-of-3 for granting the whole test leg, 1-of-3 (kimi) for a
+      # separate privileged job on scope-discipline grounds. That dissent is the
+      # reason this is a second variable used by one step rather than folded into
+      # DOCKER_RUN, and the reason every flag above carries its measured refusal.
+      # Do NOT copy these flags to another step without re-measuring.
+      # WCORE_REQUIRE_ENFORCING_SANDBOX=1 (anvil_forge_transaction.rs:780) is armed
+      # deliberately. Before this commit the hard-containment test qualified-and-
+      # skipped here and the leg stayed green, so a sandbox that quietly stopped
+      # enforcing was indistinguishable from one that never could. Now that the
+      # grant above makes an enforcing sandbox genuinely available, there is no
+      # remaining reason to tolerate a skip: if bwrap ever stops working in this
+      # container -- GitHub tightening userns, a base-image change, a dropped flag
+      # -- this step goes RED instead of silently skipping. Mirrors the
+      # WCORE_SMOKE_REQUIRE_PREBUILT idiom (#190).
+      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
       - uses: actions/checkout@v6
 
@@ -303,9 +383,24 @@ jobs:
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'
           FROM rust:1.95-slim-bookworm
+          # python3 / procps / bubblewrap (2026-07-29): 49 of the 68 failures the
+          # restored --no-fail-fast signal revealed were this image missing three
+          # binaries, not the product being broken. Every one of the 68 was
+          # re-measured by name on a host that HAS them: 67 passed.
+          #   python3     23 failures. crates/wcore-cli/tests/portability_hostile_corpus.rs:119
+          #               shells out to it and `.expect()`s, so its absence is fatal, not skipped:
+          #               "python3 must be available to materialise a hostile corpus:
+          #                Os { code: 2, NotFound }"
+          #   procps (ps)  6 failures. crates/wcore-exec-backend/src/orphan.rs:321 is the ONLY
+          #               call site that shells out; everything else reads /proc:
+          #               "could not run 'ps' to enumerate processes: No such file or directory"
+          #   bubblewrap  20 failures. NOTE: the package alone does NOT fix these -- measured,
+          #               see the security-opt block on the test step below. It is necessary
+          #               and not sufficient.
           RUN apt-get update -qq \
             && apt-get install -y -qq --no-install-recommends \
                  libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git \
+                 python3 procps bubblewrap \
             && rm -rf /var/lib/apt/lists/*
           RUN cargo install --locked cargo-nextest --version "^0.9"
           RUN cargo install --locked cargo-audit
@@ -347,7 +442,7 @@ jobs:
         with:
           timeout_minutes: 45
           max_attempts: 2
-          command: $DOCKER_RUN "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+          command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
@@ -371,21 +466,22 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
-      # The suite runs WITHOUT bubblewrap and without namespace privileges, so
-      # the anvil hard-containment test qualifies-and-skips here (loudly, and
-      # counted). This step surfaces the count so the skip cannot quietly
-      # become permanent. The containment guarantee is currently proven on the
-      # Linux build host only — see ".planning/CI-TRIAGE.md" section 2 for the
-      # measured reason a CI job does not yet close it, and the exact recipe.
-      - name: Report sandbox skips (NOT yet compensated by a CI job)
+      # 2026-07-29: this leg now runs WITH bubblewrap and WITH the namespace
+      # grants (see DOCKER_RUN_SANDBOX above), so the expected count here is ZERO
+      # and WCORE_REQUIRE_ENFORCING_SANDBOX=1 turns a skip into a test failure
+      # rather than a warning. The step is kept because the count is still the
+      # only channel that distinguishes "ran and enforced" from "qualified out":
+      # nextest captures a PASSING test's output, so a skip that merely prints is
+      # invisible in the run that matters — the file is the load-bearing channel.
+      - name: Report sandbox skips (none expected now that the grant is in place)
         if: always()
         run: |
           if [ -f target/sandbox-skips.txt ]; then
-            echo "::warning::sandbox-qualified skips in this leg — the hard-containment guarantee is proven on the build host, not in CI (see .planning/CI-TRIAGE.md section 2):"
+            echo "::warning::sandbox-qualified skips recorded even though this leg carries the bwrap grant — the grant has regressed; see .planning/CI-IMAGE.md:"
             cat target/sandbox-skips.txt
             echo "count=$(wc -l < target/sandbox-skips.txt)"
           else
-            echo "no sandbox-qualified skips recorded"
+            echo "no sandbox-qualified skips recorded — the enforcing sandbox was live for this leg"
           fi
 
   # ── W10A eval-gate (Linux, containerized) ─────────────────────────────
