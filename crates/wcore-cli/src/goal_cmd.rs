@@ -495,6 +495,11 @@ fn now_unix_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+// One flat parameter per `goal open` flag, mirroring `forge.rs`'s entry point:
+// these are independently supplied CLI values, and bundling them into a struct
+// would add an indirection that exists only to satisfy a lint. `--strategy` is
+// the eighth; the other seven predate this lane.
+#[allow(clippy::too_many_arguments)]
 fn open_goal(
     journal: &std::path::Path,
     goal: &str,
