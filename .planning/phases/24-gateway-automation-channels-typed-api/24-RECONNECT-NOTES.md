@@ -304,3 +304,29 @@ Captures: `24-RECONNECT-evidence/live/{run2-discord,control-no-replay,run1-not-m
 Byte counts cross-checked `/usr/bin/wc -c` vs `stat -f%z`. Secret sweep over every capture for the
 per-run minted vault passphrase: **0 hits**, with a known-positive (`sent RESUME`, 1 hit) proving
 the grep was alive.
+
+### T+3h30 — matrix, via an out-of-process TCP kill-proxy
+
+First attempt embedded the proxy in the driver and reported `sync_total=0` /
+`/sync failed; backing off — error sending request`, i.e. "the matrix adapter cannot reach its
+homeserver". **`Atomics.wait` blocks the whole event loop**, so the in-process proxy forwarded
+nothing while the driver slept. `f24-discord-inbound.mjs:55-62` documents this exact failure and
+it recurred anyway — F24-RC-I4. Repaired structurally into `f24-killproxy.mjs`.
+
+- **matrix measurement:** `PASS legs=7/7 lost=0 duplicated=0 leaked=0`. Outage proven: 2
+  connections destroyed, **3 reconnect attempts refused**, homeserver `sync_total` FROZE across
+  the window and resumed `4 → 6` after restore.
+- **matrix negative control** (link never restored): **`lost=3`**, proxy `refused=12`.
+
+Corroborated in source *after* the measurement: `sync.rs:287-294` advances the cursor only on
+`Ok` and pushes events to the inbox before `save_to`, so a failed `/sync` cannot move past an
+undelivered window.
+
+### T+3h45 — final state
+
+Fence vs captured BASE SHA `15cda12d`: **0 bytes** (`crates/wcore-cli/src/{lib,main}.rs`,
+`ci.yml`, `BACKLOG.md`), **0 Rust files**, **0 Cargo changes** — with a known-positive control in
+the same invocation (a file I did change: 9493 bytes), so the diff instrument is proven alive.
+
+Report written to `24-RECONNECT.md`. No product finding. Four instrument findings, all repaired
+in-lane. `24-C3` NOT claimed.

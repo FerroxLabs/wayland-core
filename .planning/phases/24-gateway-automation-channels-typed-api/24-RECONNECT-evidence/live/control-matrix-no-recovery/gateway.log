@@ -1,0 +1,65 @@
+[2m2026-07-29T06:04:02.558085Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T06:04:02.770473Z[0m [32m INFO[0m migrated existing plaintext credentials into the encrypted vault [3mcount[0m[2m=[0m1
+[2m2026-07-29T06:04:02.770749Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24rcmatrix [3mplatform[0m[2m=[0mmatrix
+[gateway] channels registered=1
+[2m2026-07-29T06:04:02.770943Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T06:04:02.770975Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:37017/v1/audio/transcriptions (active OpenAI-wire provider)
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-29T06:04:02.772995Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m3507497 [3mdir[0m[2m=[0m/root/f24rc-mxctl/home/channels
+[2m2026-07-29T06:04:02.878527Z[0m [32m INFO[0m no persisted /sync cursor (first start for this account); seeding from an initial sync — existing room backlog will NOT be replayed
+[2m2026-07-29T06:04:02.878600Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=3507497 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T06:04:05.130531Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-29T06:04:05.132863Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-29T06:04:05.132923Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-29T06:04:05.133107Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T06:04:05.133413Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-29T06:04:05.133440Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-29T06:04:05.133446Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-29T06:04:05.133452Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-29T06:04:05.133457Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-29T06:04:05.133463Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-29T06:04:05.133468Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-29T06:04:05.133494Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-29T06:04:05.133552Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:37017 (active OpenAI-wire provider)
+[2m2026-07-29T06:04:05.133600Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T06:04:05.133758Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T06:04:05.133799Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:37017/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T06:04:05.133907Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:37017 (active OpenAI-wire provider)
+[2m2026-07-29T06:04:05.134380Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T06:04:05.134405Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T06:04:05.135214Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-29T06:04:05.148470Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-29T06:04:05.148605Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T06:04:05.148611Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T06:04:05.150790Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T06:04:05.151517Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T06:04:05.190272Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:37017/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T06:04:05.190672Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24rc-mxctl/home/cron
+[2m2026-07-29T06:04:05.245053Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T06:04:05.673570Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.673588Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.673593Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.680217Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.681005Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.713670Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 952 files while I was thinking (`/root/wayland-24-reconnect/docs`, `/root/wayland-24-reconnect/docs/design`, `/root/wayland-24-reconnect/docs/design/flux-282-reference`, `/root/wayland-24-reconnect/docs/decisions`, `/root/waylan…[truncated]
+[2m2026-07-29T06:04:05.727126Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T06:04:05.749230Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.749244Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.749247Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.755164Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.756193Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T06:04:05.770608Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T06:04:06.117172Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:08.119465Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:12.120862Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:18.123229Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:26.125278Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:36.126932Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:04:48.129705Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:05:02.131151Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:05:18.133368Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:05:36.135451Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:05:56.136819Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:06:18.138009Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)
+[2m2026-07-29T06:06:42.140183Z[0m [33m WARN[0m /sync failed; backing off [3merror[0m[2m=[0mnetwork: error sending request for url (http://127.0.0.1:35807/_matrix/client/v3/sync?timeout=30000&since=s2)

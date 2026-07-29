@@ -1,0 +1,4 @@
+{"seq":1,"kind":"chat.completions","at":"2026-07-29T06:04:02.496Z","model":"x","stream":false,"user_text":"hello f24c3-rc-70fb19-preflight-0","correlation":"f24c3-rc-70fb19-preflight-0","reply":"F24C3-REPLY f24c3-rc-70fb19-preflight-0"}
+{"seq":2,"kind":"chat.completions","at":"2026-07-29T06:04:02.507Z","model":"x","stream":false,"user_text":"hello f24rc-70fb19-wrongshape","correlation":"no-correlation","reply":"F24C3-REPLY no-correlation"}
+{"seq":3,"kind":"chat.completions","at":"2026-07-29T06:04:05.676Z","model":"f24rc-fixture","stream":true,"user_text":"hello f24c3-rc-70fb19-before-1\nCurrent date: 2026-07-29","correlation":"f24c3-rc-70fb19-before-1","reply":"F24C3-REPLY f24c3-rc-70fb19-before-1"}
+{"seq":4,"kind":"chat.completions","at":"2026-07-29T06:04:05.751Z","model":"f24rc-fixture","stream":true,"user_text":"hello f24c3-rc-70fb19-before-2\nCurrent date: 2026-07-29","correlation":"f24c3-rc-70fb19-before-2","reply":"F24C3-REPLY f24c3-rc-70fb19-before-2"}

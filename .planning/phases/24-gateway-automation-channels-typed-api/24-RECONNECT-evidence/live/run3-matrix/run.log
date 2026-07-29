@@ -1,0 +1,25 @@
+  · homeserver fixture http://127.0.0.1:42687; binary will talk to the KILL PROXY at http://127.0.0.1:34465
+  · proxy forwards: reached the homeserver report through it (sync_total=0)
+  · preflight correlation: echoed=true wrong-shape-echoed=false (must be false)
+  · adapter syncing: sync_total=3 proxy={"up":true,"accepted":2,"refused":0,"killed":0,"bytesToUpstream":652,"bytesToClient":1031,"live":1}
+  · submitted f24c3-rc-d4b95c-before-1 (phase=before expect=reply) to the homeserver
+  · submitted f24c3-rc-d4b95c-before-2 (phase=before expect=reply) to the homeserver
+  · pre-drop control: 2/2 after ~1500ms
+PASS pre-drop-control — 2/2 produced a turn. KNOWN-POSITIVE: if this is not full, no zero elsewhere is readable.
+  · upstream KILLED: destroyed 2 live connection(s); new connections will be refused
+  · submitted f24c3-rc-d4b95c-during-3 (phase=during expect=reply) to the homeserver
+  · submitted f24c3-rc-d4b95c-during-4 (phase=during expect=reply) to the homeserver
+  · submitted f24c3-rc-d4b95c-during-decoy-5 (phase=during-decoy expect=silence) to the homeserver
+PASS upstream-drop-really-happened — destroyed 2 connection(s); proxy refused 3 reconnect attempt(s) during a 12000ms outage; homeserver sync_total FROZE at 4 -> 4 (the adapter really could not reach it). The refusal count is what proves the adapter kept TRYING rather than having quietly died.
+  · upstream RESTORED
+  awaiting post-outage syncs: sync_total=4
+PASS adapter-reconnected — homeserver sync_total 4 -> 6; proxy {"up":true,"accepted":5,"refused":3,"killed":2,"bytesToUpstream":2615,"bytesToClient":3426,"live":2}. 
+  · gap messages: 2/2 after ~500ms
+  · submitted f24c3-rc-d4b95c-after-6 (phase=after expect=reply) to the homeserver
+  · post-recovery control: 1/1 after ~1000ms
+PASS post-reconnect-control — 1/1 produced a turn. KNOWN-POSITIVE #2: the adapter is ALIVE after the outage, so a zero on the gap cannot be a dead adapter.
+PASS gap-messages-survive-the-upstream-drop — 2/2 of the messages the HOMESERVER received while our link was dead produced a turn. lost=[]. 
+PASS no-duplicate-turns-around-the-window — duplicated=[] over 5 expected-reply tokens. Matrix re-serves an event under the SAME event_id in a later batch, so a cursor that rewinds too far shows here.
+PASS decoy-and-phantom-score-zero — decoy (denied mxid, submitted INSIDE the window) and phantom (never submitted) both scored zero: leaked=[].
+
+F24RECONNECT-POLL(matrix) PASS legs=7/7 lost=0 duplicated=0 leaked=0 mode=measurement
