@@ -50,6 +50,7 @@ pub mod plan;
 // because BOTH `wcore-cli` (which writes approvals) and `wcore-agent` (whose
 // loader enforces them) must agree byte-for-byte on the digest and the verdict;
 // duplicating either would create two answers to "is this plugin approved?".
+pub mod network_path;
 pub mod plugin_governance;
 pub mod plugins_config;
 pub mod portability;

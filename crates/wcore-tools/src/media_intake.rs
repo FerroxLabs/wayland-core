@@ -182,9 +182,20 @@ impl IntakePolicy {
 }
 
 /// Windows UNC and `file://host/share` forms never reach the filesystem here.
-fn is_network_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.starts_with("\\\\") || s.starts_with("//")
+///
+/// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
+/// implementation. The local copy this replaces matched any `\\`/`//` prefix,
+/// so it also called `\\?\C:\Users\x` — a verbatim path to a **local disk** —
+/// a network path, and reported it as `IntakeError::NetworkPath`. That input
+/// is still refused, by `validate_user_path` on the next line, but now as
+/// `DeviceOrVerbatimPath`: the accurate reason. No input that was rejected
+/// before is accepted now.
+///
+/// Spelling, not storage: a file on a mounted share is deliberately still
+/// admitted. See `wcore_config::network_path` for why, and for the other
+/// question.
+fn is_unc_path(path: &Path) -> bool {
+    wcore_config::network_path::has_unc_prefix(path)
 }
 
 /// Admit a caller-supplied path as bytes, resolving the name EXACTLY ONCE for
@@ -200,11 +211,11 @@ fn is_network_path(path: &Path) -> bool {
 /// 6. cross-check the extension's claim against the detected class,
 /// 7. read the remainder from the same descriptor under a bounded take.
 pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, IntakeError> {
-    if is_network_path(path) {
+    if is_unc_path(path) {
         return Err(IntakeError::NetworkPath(path.to_path_buf()));
     }
     let validated = validate_user_path(path).map_err(|e| IntakeError::Path(e.to_string()))?;
-    if is_network_path(&validated) {
+    if is_unc_path(&validated) {
         return Err(IntakeError::NetworkPath(validated));
     }
 
@@ -496,6 +507,46 @@ mod tests {
         let p = PathBuf::from(r"\\server\share\image.png");
         assert!(matches!(
             admit_path(&p, &any()),
+            Err(IntakeError::NetworkPath(_))
+        ));
+        // The forward-slash spelling of the same share. Windows accepts it;
+        // the pre-consolidation local check happened to catch it by matching a
+        // bare `//` prefix, and the shared check catches it as an actual UNC
+        // name. Asserted so the consolidation cannot quietly narrow the guard.
+        assert!(matches!(
+            admit_path(&PathBuf::from("//server/share/image.png"), &any()),
+            Err(IntakeError::NetworkPath(_))
+        ));
+    }
+
+    /// The one input whose CLASSIFICATION the UNC consolidation changed.
+    ///
+    /// `\\?\C:\…` is a verbatim path to a **local disk**. The local
+    /// `is_network_path` this file used to carry matched any `\\` prefix, so it
+    /// called that a network path and refused it as `NetworkPath` — the right
+    /// refusal for the wrong reason. It is now correctly not-UNC, and the
+    /// refusal comes from `validate_user_path`'s device/verbatim guard instead.
+    ///
+    /// The assertion that matters is **still rejected**: a consolidation that
+    /// tightened the naming while opening a hole would be a bad trade, so the
+    /// rejection is asserted here rather than reasoned about in a comment.
+    #[test]
+    fn a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path() {
+        let p = PathBuf::from(r"\\?\C:\Users\alice\image.png");
+        let err = admit_path(&p, &any()).expect_err("verbatim paths must stay refused");
+        assert!(
+            !matches!(err, IntakeError::NetworkPath(_)),
+            "a verbatim path to a local disk is not a network path; got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("device") || err.to_string().contains("verbatim"),
+            "expected the device/verbatim refusal, got: {err}"
+        );
+
+        // And the verbatim UNC form is the opposite case: it IS a network
+        // path, and must not fall into the device/verbatim bucket.
+        assert!(matches!(
+            admit_path(&PathBuf::from(r"\\?\UNC\server\share\image.png"), &any()),
             Err(IntakeError::NetworkPath(_))
         ));
     }

@@ -162,14 +162,22 @@ fn local_image_path(image_url: &str) -> Result<Option<PathBuf>, String> {
 /// True for a Windows UNC / network path (`\\server\share`, `\\?\UNC\...`).
 /// Opening one triggers an outbound SMB connection (a NetNTLM-hash leak
 /// vector) before any content check, so the vision local-file path refuses it
-/// up front. Always `false` on Unix — those targets never produce a UNC path
-/// prefix, so this is a no-op there.
-fn is_network_path(path: &std::path::Path) -> bool {
-    use std::path::{Component, Prefix};
-    matches!(
-        path.components().next(),
-        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-    )
+/// up front.
+///
+/// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
+/// implementation. The local copy this replaces used `Component::Prefix`,
+/// which **never matches on a Unix target** — so on Linux and macOS it was a
+/// constant `false`, and the guard could not be exercised on the platform its
+/// tests actually ran on. The shared version answers identically everywhere.
+///
+/// This is a check on the path's SPELLING. A file on an SMB-mounted `Z:\` or
+/// an NFS-mounted `$HOME` is not spelled differently and is deliberately still
+/// allowed: the hazard here is the outbound dial-out that a UNC *name* causes,
+/// and an already-mounted share is admin-established access. The question "is
+/// this file stored on a network filesystem" is a different one, answered by
+/// `wcore_config::network_path::classify_path`.
+fn is_unc_path(path: &std::path::Path) -> bool {
+    wcore_config::network_path::has_unc_prefix(path)
 }
 
 /// Open a local image without following a symlink/reparse point.
@@ -290,7 +298,7 @@ fn open_local_image(path: &Path) -> Result<File, String> {
 pub fn load_local_image(image_path: &str) -> Result<(&'static str, Vec<u8>), String> {
     let path = local_image_path(image_path)?
         .ok_or_else(|| "Composer attachments must be local files".to_string())?;
-    if is_network_path(&path) {
+    if is_unc_path(&path) {
         return Err("Network/UNC image paths are not allowed".to_string());
     }
     let validated = validate_user_path(&path).map_err(|e| format!("Invalid image path: {e}"))?;
@@ -938,16 +946,25 @@ mod tests {
     }
 
     #[test]
-    fn is_network_path_flags_unc_only() {
-        // Ordinary paths are never network paths (the common case).
-        assert!(!is_network_path(std::path::Path::new("/Users/me/x.png")));
-        assert!(!is_network_path(std::path::Path::new("relative/x.png")));
-        // A UNC path is flagged on Windows; on Unix the same string carries no
-        // UNC prefix, so the platform-correct value there is `false`.
-        #[cfg(windows)]
-        assert!(is_network_path(std::path::Path::new(
-            r"\\server\share\x.png"
+    fn unc_guard_flags_unc_on_every_platform() {
+        // Ordinary paths are never UNC (the common case).
+        assert!(!is_unc_path(std::path::Path::new("/Users/me/x.png")));
+        assert!(!is_unc_path(std::path::Path::new("relative/x.png")));
+
+        // A UNC path is now flagged on EVERY platform. The previous local
+        // implementation used `Component::Prefix`, which never matches on a
+        // Unix target, so this assertion was `#[cfg(windows)]`-gated and the
+        // guard was never exercised by the Linux/macOS test runs. That gate is
+        // gone deliberately — it is the defect this consolidation removes.
+        assert!(is_unc_path(std::path::Path::new(r"\\server\share\x.png")));
+        assert!(is_unc_path(std::path::Path::new(
+            r"\\?\UNC\server\share\x.png"
         )));
+
+        // A verbatim path to a LOCAL disk is not a UNC share, and must not be
+        // refused with a message that names the wrong hazard. (It is still
+        // rejected — by `validate_user_path`, as a device/verbatim path.)
+        assert!(!is_unc_path(std::path::Path::new(r"\\?\C:\Users\me\x.png")));
     }
 
     /// End-to-end: a local image drives the backend, with the null fetcher

@@ -6,6 +6,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::network_path;
+
 /// Effective-environment field whose contents could not be used safely.
 ///
 /// The value itself is deliberately never retained: PATH-like variables often
@@ -288,7 +290,9 @@ fn resolve_executable_for(
     if platform == ExecutablePlatform::Windows && is_windows_drive_relative(program) {
         return Err(ExecutableReadinessError::InvalidExecutable { executable });
     }
-    if is_network_path(effective_cwd, platform) || is_network_path(Path::new(program), platform) {
+    if is_unc_or_verbatim_path(effective_cwd, platform)
+        || is_unc_or_verbatim_path(Path::new(program), platform)
+    {
         return Err(ExecutableReadinessError::NetworkPathUnsupported { executable });
     }
     inspect_effective_cwd(effective_cwd, &executable)?;
@@ -346,7 +350,7 @@ fn resolve_executable_for(
         return Err(ExecutableReadinessError::MissingEffectivePath { executable });
     }
     for directory in &mut search_dirs {
-        if is_network_path(directory, platform) {
+        if is_unc_or_verbatim_path(directory, platform) {
             return Err(ExecutableReadinessError::NetworkPathUnsupported { executable });
         }
         if !directory.is_absolute() {
@@ -413,7 +417,9 @@ fn resolve_windows_direct_program(
     append_direct_path_entries(&mut search_dirs, roots.parent_path.as_deref(), executable)?;
 
     for directory in &search_dirs {
-        if !directory.is_absolute() || is_network_path(directory, ExecutablePlatform::Windows) {
+        if !directory.is_absolute()
+            || is_unc_or_verbatim_path(directory, ExecutablePlatform::Windows)
+        {
             return Err(ExecutableReadinessError::UncheckedDirectSearch {
                 executable: executable.to_string(),
             });
@@ -537,12 +543,28 @@ fn is_windows_drive_relative(program: &OsStr) -> bool {
             .is_none_or(|separator| !matches!(*separator, b'/' | b'\\'))
 }
 
-fn is_network_path(path: &Path, platform: ExecutablePlatform) -> bool {
+/// Refuse to resolve an executable whose path uses one of the Windows
+/// double-separator namespaces: UNC (`\\server\share`), verbatim (`\\?\`) or
+/// device (`\\.\`).
+///
+/// **This is a check on how the path is SPELLED, not on where it is stored.**
+/// It was previously called `is_network_path`, which read as an answer to
+/// "is this executable on a network filesystem" — a question it has never
+/// answered. It cannot: an executable on an NFS-mounted `/usr/local/bin` is
+/// spelled like any other POSIX path. The rename is the point of the change;
+/// the behaviour is deliberately identical.
+///
+/// The `platform` gate is retained because this resolver *simulates* a target
+/// platform — it is routinely asked about Windows resolution semantics while
+/// running on Linux — so it must reason about the path's spelling under the
+/// platform being modelled, not the host it happens to run on. That is also
+/// why it must not call [`network_path::classify_path`]: there is no
+/// filesystem to interrogate for a simulated path.
+fn is_unc_or_verbatim_path(path: &Path, platform: ExecutablePlatform) -> bool {
     if platform != ExecutablePlatform::Windows {
         return false;
     }
-    path.to_str()
-        .is_some_and(|path| path.starts_with(r"\\") || path.starts_with("//"))
+    network_path::has_unc_prefix(path) || network_path::has_device_or_verbatim_prefix(path)
 }
 
 fn inspect_effective_cwd(
