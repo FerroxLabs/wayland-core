@@ -9,12 +9,28 @@
 //! `CronJob::effective_bound()` clamps any persisted bound to the trigger
 //! variant's `default_bound()`, one-way. Every variant's default is
 //! `max_in_flight = 1` **except `Event`, which is 2**. A job carrying a
-//! persisted `max_in_flight` of `CEILING_IN_FLIGHT` (16) therefore has an
-//! EFFECTIVE bound of 1 on `once`/`interval`/`cron`/`webhook`/`poll`/
-//! `commitment`, and 2 on `event`.
+//! persisted `max_in_flight` of `u32::MAX` therefore has an EFFECTIVE bound of
+//! 1 on `once`/`interval`/`cron`/`webhook`/`poll`/`commitment`, and 2 on
+//! `event`.
 //!
-//! **`CEILING_IN_FLIGHT = 16` is decorative**: it bounds a value that every
-//! variant default already bounds at 2 or below, so no input reaches it.
+//! ## `CEILING_IN_FLIGHT` was deleted, and why the tripwire moved here
+//!
+//! `wcore_cron::trigger::CEILING_IN_FLIGHT = 16` used to sit inside that clamp
+//! as `default.max_in_flight.min(CEILING_IN_FLIGHT)`. Since every variant
+//! default is a hardcoded 1 or 2 — no input reaches those literals — the
+//! ceiling could never be the binding operand, and `lane/small-defects`
+//! removed it (`F24-C2-M1`), unanimously backed by a three-model cross-audit
+//! against the project rule that forbids code kept for hypothetical future
+//! authors.
+//!
+//! Deleting a constant deletes the tripwire it carried, so the tripwire is
+//! restated here as behaviour instead:
+//! [`the_deleted_ceiling_changed_no_answer_for_any_variant`] runs the OLD and
+//! NEW clamp expressions side by side over every variant and a grid of
+//! persisted values, and carries its own known-negative proving the
+//! differential can detect a divergence. If a variant default ever exceeds 16
+//! the two expressions part company and that test goes red — the same warning
+//! the constant used to give, now given by something that can fail.
 //!
 //! This lane's first version of this file did not know that. It set a persisted
 //! bound of 8 on an `interval` job, never looked at the effective bound, and
@@ -48,7 +64,13 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use wcore_cron::CronJob;
 use wcore_cron::job::Target;
-use wcore_cron::trigger::{CEILING_IN_FLIGHT, Trigger, TriggerBound};
+use wcore_cron::trigger::{Trigger, TriggerBound};
+
+/// The value `CEILING_IN_FLIGHT` carried before it was deleted. Kept as a local
+/// literal so [`the_deleted_ceiling_changed_no_answer_for_any_variant`] can
+/// still replay the old expression; it is deliberately NOT re-exported from the
+/// crate, so no product code can start depending on it again.
+const DELETED_CEILING_IN_FLIGHT: u32 = 16;
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap()
@@ -109,22 +131,26 @@ fn the_effective_bound_can_never_exceed_two() {
         let kind = trigger.kind();
         let mut job = CronJob::with_trigger(trigger, slash("/probe")).unwrap();
 
-        // POSITIVE CONTROL: the persisted value really is the ceiling, so a
-        // clamped result below is the clamp acting rather than a value never
-        // written. This is the exact control whose absence produced this
-        // file's first wrong result.
-        job.bound = Some(TriggerBound::new(1, CEILING_IN_FLIGHT));
+        // POSITIVE CONTROL: the persisted value really is the widest a `u32`
+        // can express, so a clamped result below is the clamp acting rather
+        // than a value never written. This is the exact control whose absence
+        // produced this file's first wrong result.
+        //
+        // `u32::MAX` rather than the old `CEILING_IN_FLIGHT`: with the ceiling
+        // deleted, the claim is about `clamp_to(default)` alone, and the
+        // strongest input is the largest one the persisted schema can hold.
+        job.bound = Some(TriggerBound::new(1, u32::MAX));
         assert_eq!(
             job.bound.as_ref().unwrap().max_in_flight,
-            CEILING_IN_FLIGHT,
-            "{kind}: the persisted bound must really carry the ceiling"
+            u32::MAX,
+            "{kind}: the persisted bound must really carry the widest value"
         );
 
         let effective = job.effective_bound().max_in_flight;
         assert!(
             effective <= 2,
-            "{kind}: a persisted {CEILING_IN_FLIGHT} produced an EFFECTIVE \
-             bound of {effective}; no variant default permits more than 2"
+            "{kind}: a persisted u32::MAX produced an EFFECTIVE bound of \
+             {effective}; no variant default permits more than 2"
         );
     }
 }
@@ -147,19 +173,105 @@ fn only_event_permits_more_than_one_and_only_two() {
 }
 
 #[test]
-fn the_ceiling_constant_is_unreachable_by_any_input() {
+fn no_variant_default_permits_more_than_two_in_flight() {
     let widest = all_triggers()
         .iter()
         .map(|t| t.default_bound().max_in_flight)
         .max()
         .unwrap();
-    assert_eq!(widest, 2, "the widest variant default; got {widest}");
-    assert!(
-        widest < CEILING_IN_FLIGHT,
-        "CEILING_IN_FLIGHT ({CEILING_IN_FLIGHT}) bounds nothing while the \
-         widest default is {widest}. If a default ever reaches the ceiling the \
-         constant becomes live and this file's premise changes."
+    assert_eq!(
+        widest, 2,
+        "the widest variant default is expected to be 2; got {widest}. Every \
+         claim in this file rests on the variant defaults being narrower than \
+         anything a persisted job can ask for."
     );
+}
+
+/// **The third assertion (lane brief §6b-ii): the change is provably a no-op,
+/// and the probe that says so can fail.**
+///
+/// Deleting `CEILING_IN_FLIGHT` from `clamp_to` is only safe if the old and new
+/// expressions agree on every input. Asserting "the tests still pass" would not
+/// show that — the tests passed before the deletion too. So the two expressions
+/// are evaluated side by side here, over every trigger variant and a grid of
+/// persisted values spanning both sides of the deleted ceiling.
+///
+/// The known-negative is the load-bearing half: the same differential is run
+/// against a synthetic default that DOES exceed 16, where the two expressions
+/// must disagree. Without it, a differential that always returned "equal"
+/// (a typo, a collapsed loop, an empty variant list) would pass for free.
+#[test]
+fn the_deleted_ceiling_changed_no_answer_for_any_variant() {
+    /// The clamp as it was written before the deletion.
+    fn old(persisted: u32, default: u32) -> u32 {
+        persisted.min(default.min(DELETED_CEILING_IN_FLIGHT)).max(1)
+    }
+    /// The clamp as it is written now.
+    fn new(persisted: u32, default: u32) -> u32 {
+        persisted.min(default).max(1)
+    }
+
+    // Values on both sides of the deleted ceiling, including the ceiling
+    // itself and the widest the schema can hold.
+    const PERSISTED: [u32; 8] = [0, 1, 2, 3, 15, 16, 17, u32::MAX];
+
+    // (1) KNOWN-POSITIVE / the claim: over every real variant, the two
+    //     expressions agree everywhere.
+    let mut compared = 0usize;
+    for trigger in all_triggers() {
+        let kind = trigger.kind();
+        let default = trigger.default_bound().max_in_flight;
+        for persisted in PERSISTED {
+            assert_eq!(
+                old(persisted, default),
+                new(persisted, default),
+                "{kind}: deleting CEILING_IN_FLIGHT changed the answer for a \
+                 persisted {persisted} against a variant default of {default}. \
+                 The deletion is NOT behaviour-preserving and must be reverted."
+            );
+            compared += 1;
+        }
+    }
+    // The differential must actually have run. An empty variant list or an
+    // empty value grid would satisfy every assertion above having compared
+    // nothing — the vacuous-green shape this program keeps finding.
+    assert_eq!(
+        compared,
+        Trigger::KINDS.len() * PERSISTED.len(),
+        "the differential compared {compared} pairs; it must cover every \
+         variant against every probe value or it proves nothing"
+    );
+
+    // (2) KNOWN-NEGATIVE: the probe CAN detect a divergence. Against a
+    //     hypothetical variant default of 100, the deleted ceiling would have
+    //     clamped to 16 and the current code clamps to 100 — so the two
+    //     expressions must part company. If this assertion ever fails, the
+    //     differential above is dead and its zero divergences were free.
+    let wide_default = 100u32;
+    assert_eq!(old(u32::MAX, wide_default), 16);
+    assert_eq!(new(u32::MAX, wide_default), 100);
+    assert_ne!(
+        old(u32::MAX, wide_default),
+        new(u32::MAX, wide_default),
+        "the differential cannot distinguish the old expression from the new \
+         one even where they provably differ, so its agreement above is \
+         meaningless"
+    );
+
+    // (3) AND the reason (1) holds: no real variant is anywhere near the
+    //     deleted ceiling. This is the tripwire the constant used to carry.
+    //     A future variant with a wide default trips (1) and this together.
+    for trigger in all_triggers() {
+        let default = trigger.default_bound().max_in_flight;
+        assert!(
+            default < DELETED_CEILING_IN_FLIGHT,
+            "{}: variant default {default} has reached the deleted ceiling of \
+             {DELETED_CEILING_IN_FLIGHT}. A ceiling on in-flight fires may now \
+             be genuinely load-bearing — reconsider the deletion rather than \
+             relaxing this assertion.",
+            trigger.kind()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -789,10 +789,13 @@ async fn status_cmd(id: &str, store: &FileCronStore) -> Result<()> {
     //
     // In practice this line only ever fires on an EVENT job. `effective_bound`
     // clamps to the variant default and every default is 1 except `event`'s 2,
-    // so 2 is the only value above 1 the product can render — `CEILING_IN_FLIGHT`
-    // (16) is unreachable by any input. All of that is asserted in
+    // so 2 is the only value above 1 the product can render. The former
+    // `CEILING_IN_FLIGHT` (16) was deleted by `lane/small-defects` because no
+    // input could reach it — the variant defaults are strictly tighter, so it
+    // was never the binding operand. All of that is asserted in
     // `crates/wcore-cron/tests/in_flight_bound.rs`, whose census carries a
-    // known-positive control on the two sibling bound fields that ARE enforced.
+    // known-positive control on the two sibling bound fields that ARE enforced,
+    // and whose differential proves the deletion changed no answer.
     //
     // Said here rather than silently echoed, for the same reason `poll:` is now
     // refused at `add` instead of being accepted and never fired: a bound the

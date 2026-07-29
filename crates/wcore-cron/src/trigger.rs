@@ -42,11 +42,29 @@ use crate::CronError;
 /// and a job asking for less is asking for a spin loop.
 pub const FLOOR_INTERVAL_SECS: u64 = 1;
 
-/// The largest in-flight count any trigger may be given.
-///
-/// A single scheduled job with more than this outstanding is not a schedule,
-/// it is a fork bomb with a cron expression.
-pub const CEILING_IN_FLIGHT: u32 = 16;
+// `CEILING_IN_FLIGHT: u32 = 16` was removed here (`F24-C2-M1`,
+// `lane/small-defects`). It claimed to be "the largest in-flight count any
+// trigger may be given" and could never be given to anything.
+//
+// `clamp_to` is the only place a bound is narrowed, and it always narrows to
+// the trigger variant's `default_bound()` first. Every variant hardcodes
+// `max_in_flight` to 1 except `Event`, which hardcodes 2 — no input reaches
+// those literals — so `default.max_in_flight.min(16)` was `min(1_or_2, 16)`
+// forever. The ceiling was never the binding operand and no input could make
+// it one. The clamp it appeared in is strictly tighter without it.
+//
+// This was NOT the "unenforced bound" half of the finding. That half is
+// `max_in_flight` itself, which the runner references zero times; the operator
+// surface for it is annotated in `crates/wcore-cli/src/cron.rs`, and the field
+// stays because it is serialized into the persisted job schema. See
+// `tests/in_flight_bound.rs`, which pins both halves.
+//
+// Its sibling `FLOOR_INTERVAL_SECS` is non-binding for the same structural
+// reason today and is deliberately left alone: it bounds a value that IS
+// partly derived from persisted input (`Interval`/`Poll`/`Commitment` fold
+// their own parameters into the default), so it is one variant-author slip
+// away from being load-bearing, which the in-flight ceiling is not. Changing
+// it is out of this lane's scope.
 
 /// What bounds one trigger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,10 +112,7 @@ impl TriggerBound {
             // bounds-enforcement function that panics on a hostile input is a
             // denial of service in the code that exists to prevent one. The
             // min-then-max order saturates instead.
-            max_in_flight: self
-                .max_in_flight
-                .min(default.max_in_flight.min(CEILING_IN_FLIGHT))
-                .max(1),
+            max_in_flight: self.max_in_flight.min(default.max_in_flight).max(1),
             deadline: match (self.deadline, default.deadline) {
                 // The EARLIER deadline wins: a job may end sooner than its
                 // variant requires, never later.
