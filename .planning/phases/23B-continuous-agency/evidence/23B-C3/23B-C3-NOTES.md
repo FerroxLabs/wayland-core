@@ -45,6 +45,60 @@ Instrument liveness proved in each invocation by a known-positive in the same ru
   `wcore-memory/src/partition/core.rs` + `core_inference.rs`. So "user-model correction precedence"
   has somewhere concrete to land — it is not a hypothetical subsystem.
 
+## M1 — THE FINDING: every control verb misses the ONE partition that is auto-injected
+
+This is the structural reason C3 is NOT MET, and it is worse than "the outbound-body proof is
+missing". **The missing proof is exactly why nobody noticed.**
+
+**Two disjoint retrieval paths exist.**
+
+1. `PartitionDispatcher::search` (`partition/mod.rs:253-291`) = `search_basic` (**episodic**)
+   **plus** `retrieve::facts_search` (**semantic**, appended at :277).
+2. `PartitionDispatcher::search_with_provenance` (`partition/mod.rs:305-331`) =
+   `search_basic_with_provenance` — **episodic ONLY**, by its own comment at :310-313: *"those hits
+   are deliberately not reported here rather than reported wrongly."*
+
+**What actually reaches the outbound provider request body.** `AgentEngine::recall_relevant_facts`
+(`engine.rs:13334-13410`) runs on the first user turn of every session, calls path (1), and
+**keeps `Partition::Semantic` hits only** (`engine.rs:13360`: `if h.partition == Partition::Semantic`),
+then pushes them as a `<system-reminder>` user message (`:13405`). So the content auto-injected into
+the prompt is **exclusively semantic facts**.
+
+**What the seven controls act on.**
+
+- `MemoryControls::correct_episode` (`provenance.rs:244`) — `UPDATE episodes`, `Partition::Episodic`
+  hardcoded.
+- `MemoryControls::forget_episode` (`provenance.rs:290`) — `DELETE FROM episodes`,
+  `Partition::Episodic` hardcoded.
+- privacy enforcement — **exactly one call site**: `retrieve.rs:47`,
+  `read_privacy_scope(db, Partition::Episodic, q.tier)`.
+- retention enforcement — **exactly one call site**: `retrieve.rs:58`,
+  `read_retention(db, Partition::Episodic, q.tier)`.
+- provenance reporting — episodic only (above).
+
+Measured with `/usr/bin/grep -rn "read_privacy_scope|read_retention|facts_search" crates/
+"--include=*.rs"`. `facts_search` returns **2 hits** (def + the one call site) in the same
+invocation, proving the instrument alive; `read_privacy_scope` returns 4 (def, re-export,
+`MemoryControls::privacy_scope` reader, and the single **enforcement** site);
+`read_retention` likewise 4.
+
+**Consequence table — measured, not inferred:**
+
+| | reaches the outbound prompt automatically | privacy enforced | retention enforced | provenance reported | `/memory forget` reaches | `/memory correct` reaches |
+|---|---|---|---|---|---|---|
+| episodic | no (only if the model calls `session_search`) | YES | YES | YES | YES | YES |
+| **semantic facts** | **YES, every cold turn** | **NO** | **NO** | **NO** | **NO** | **NO** |
+
+So today: a user runs `/memory why <q>`, is shown episodic items, and is shown **nothing about the
+facts that are in fact in their prompt**. If they somehow learn a fact id, `/memory forget <id>`
+returns `NotFound` (the `DELETE` matches 0 rows in `episodes`). `/memory privacy semantic <reason>`
+is accepted and audited and **changes nothing about what is sent**. That last one is the
+privacy problem the dispatch names: **a control that reports success and does not act.**
+
+`facts_search` (`retrieve.rs:228`) reads
+`SELECT ... FROM facts WHERE tier=?1 AND superseded_by IS NULL AND embedding IS NOT NULL` with no
+privacy/retention predicate at all.
+
 ## Planned order (dispatch says prioritise forgetting, correction, provenance)
 
 1. G3a forgetting-in-the-prompt proof (mock provider body capture) — the criterion's legal weight.
