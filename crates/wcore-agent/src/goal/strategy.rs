@@ -466,11 +466,12 @@ impl StrategyTermination {
             CouncilRunOutcome::DriverFailed { detail } => {
                 return owner.terminate(GoalTerminalState::Blocked { reason: detail });
             }
-            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. })
-            | CouncilRunOutcome::RanManual(outcome) => GoalTerminalState::PartiallyCompleted {
-                completed: outcome.chosen_from.len() as u64,
-                failed: outcome.skipped.len() as u64,
-            },
+            // Two arms rather than an or-pattern: the driver path boxes its
+            // outcome and the manual path does not. Same counting rule.
+            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. }) => {
+                council_counts(outcome)
+            }
+            CouncilRunOutcome::RanManual(outcome) => council_counts(outcome),
             // One model's answer, no roster to count and no verification owner.
             CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
             CouncilRunOutcome::Ran(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
@@ -604,6 +605,18 @@ impl StrategyTermination {
             TerminalState::Superseded => GoalTerminalState::Superseded,
         };
         owner.terminate(terminal)
+    }
+}
+
+/// Chosen/skipped proposers, from the council's own provenance.
+///
+/// `skipped` survives as `failed`: a council answer fused from 2 of 5 proposers
+/// because 3 were keyless is not the same artifact as a unanimous one, and the
+/// difference is invisible in `final_text`.
+fn council_counts(outcome: &CouncilOutcome) -> GoalTerminalState {
+    GoalTerminalState::PartiallyCompleted {
+        completed: outcome.chosen_from.len() as u64,
+        failed: outcome.skipped.len() as u64,
     }
 }
 
