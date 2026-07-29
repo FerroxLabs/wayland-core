@@ -152,3 +152,68 @@ This is not a demo surface.
 
 **`transports: ["local","gateway"]`** on `model.run` and the whole `tts.*` family is significant:
 the same capability id runs either in-process or against the gateway daemon.
+
+---
+
+## MEASUREMENT 3 — media provider architecture: contracts in core, providers in extensions
+
+### The architecture
+
+`src/image-generation/provider-registry.ts:12` declares
+`const BUILTIN_IMAGE_GENERATION_PROVIDERS: readonly ImageGenerationProviderPlugin[] = [];`
+— **empty by design**. Every media provider is contributed through
+`resolvePluginCapabilityProviders({ key: "imageGenerationProviders", cfg })`
+(`src/plugins/capability-provider-runtime.ts`, 22.0K). Core owns the *contract*; extensions
+own the *implementation*. Same pattern for media-understanding, speech, video, music.
+
+The contract in `src/image-generation/types.ts` is unusually rich — providers declare a
+**capability matrix**, not just a function:
+`ImageGenerationProviderCapabilities = { generate, edit, geometry, output }` with
+`maxInputImages`, `maxInputImagesByModel`, `maxInputImagesByModelPrefix`, `sizesByModel`,
+`aspectRatiosByModel`, `resolutionsByModel`, `qualities`, `formats`, `backgrounds`.
+Unsupported user flags are not errors — they surface as
+`ImageGenerationIgnoredOverride { key, value }`, which is the `ignoredOverrides[]` field on the
+`CapabilityEnvelope`. **The CLI tells the user which of their flags the chosen provider dropped.**
+
+`src/media-understanding/provider-registry.ts:hydrateModelBackedMediaProvider` is the other
+half: a provider that declares `capabilities: ["image"]` but supplies no `describeImage` hook is
+auto-backed by the generic model runtime (`describeImageWithModel`). Config providers with
+image-capable models are auto-registered (`#51392`). So **vision works on any model provider
+whose catalog says the model is image-capable, with no media-specific plugin code at all.**
+
+### Near-miss on my own instrument (recording per §3b-ii)
+
+My first contract scan used `--include="package.json"` and returned **0 for all nine capability
+kinds**. That zero was *arithmetically correct and completely misleading* — manifests are
+`openclaw.plugin.json`, not `package.json`. I caught it only because I ran the known-positive
+(`"name"` in `extensions/**/package.json` → **146**) in the same pass, proving the instrument
+alive and therefore forcing the conclusion that my *query* was wrong rather than the tree empty.
+Had I skipped the known-positive I would have filed "OpenClaw ships zero media providers", which
+is the exact inverse of the truth. **Repairing the instrument (correct filename) rather than just
+noting it**: rescan below.
+
+### Provider counts (measured: `grep -rl '"<key>"' extensions --include="openclaw.plugin.json"`)
+
+148 plugin manifests total. Providers per media capability:
+
+| Capability contract | Count | Extensions |
+|---|---|---|
+| `mediaUnderstandingProviders` | **18** | anthropic, codex, deepgram, deepinfra, elevenlabs, google, groq, minimax, mistral, moonshot, openai, opencode, opencode-go, openrouter, qwen, senseaudio, xai, zai |
+| `speechProviders` (TTS) | **15** | azure-speech, deepinfra, elevenlabs, google, gradium, inworld, microsoft, minimax, openai, openrouter, tts-local-cli, volcengine, vydra, xai, xiaomi |
+| `videoGenerationProviders` | **15** | alibaba, byteplus, comfy, deepinfra, fal, google, minimax, openai, openrouter, pixverse, qwen, runway, together, vydra, xai |
+| `webSearchProviders` | **15** | brave, codex, duckduckgo, exa, firecrawl, google, minimax, moonshot, ollama, parallel, perplexity, qa-lab, searxng, tavily, xai |
+| `imageGenerationProviders` | **11** | comfy, deepinfra, fal, google, litellm, microsoft-foundry, minimax, openai, openrouter, vydra, xai |
+| `realtimeTranscriptionProviders` | **5** | deepgram, elevenlabs, mistral, openai, xai |
+| `musicGenerationProviders` | **5** | comfy, fal, google, minimax, openrouter |
+| `webFetchProviders` | **1** | firecrawl |
+| `embeddingProviders` | **1** | llama-cpp |
+| `channels` | **26** | discord, telegram, slack, signal, whatsapp, imessage, matrix, msteams, googlechat, mattermost, irc, line, sms, twitch, nostr, feishu, qqbot, zalo, zalouser, tlon, reef, raft, clickclack, nextcloud-talk, synology-chat, qa-channel |
+
+These are not stubs. `extensions/fal/image-generation-provider.ts` is **27.9K** with a **49.8K**
+test; `extensions/fal/video-generation-provider.ts` **23.3K** / 23.7K test;
+`extensions/elevenlabs/speech-provider.ts` **20.8K** / 9.8K test, plus a 10.6K
+`realtime-transcription-provider.ts`. There are also cross-extension live suites at
+`extensions/video-generation-providers.live.test.ts` (21.5K) and
+`extensions/music-generation-providers.live.test.ts` (11.4K).
+
+**`extensions/migrate-hermes/` exists** — that is priority 3, read next.
