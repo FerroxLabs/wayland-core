@@ -342,6 +342,89 @@ unreachable from config (the comment says the config field is future work).
 C3 is therefore reachable in principle on the shipped binary with a credential,
 which is what `~/.wayland-secrets/flux.env` is for. Ranked behind C2.
 
+## M-9 — THE A/B RESULT (full write-up in `evidence/27-browser-voice/AB-READINESS.md`)
+
+Same 96 MB release binary, both arms, on `hetzner-dsm` at `861d1b1a`.
+
+| flag | Arm N (natural dead box) | Arm R (`/bin/true` + `DISPLAY=:99`) |
+|---|---|---|
+| `plugins` | **true** | **true** |
+| `browser_suite` | **`<ABSENT>`** | **true** |
+| `computer_use` | **`<ABSENT>`** | **true** |
+
+- **The repair is REAL.** Arm N required no env manipulation — the box is dead
+  naturally — and both flags withdrew, with WARNs naming reason and remedy.
+  The exact state the verdict recorded as broken is fixed at this SHA.
+- **The residual is REAL.** Arm R's `true` was granted on `/bin/true` (curl to
+  the health URL: rc=7, connection refused) and on `DISPLAY=:99` with no
+  `/tmp/.X11-unix/X99` and **0** listeners on 6099 — `ss` liveness control
+  showed **110** listening sockets, so that zero is a measurement.
+- `plugins: true` in **both** arms is the anchor: the difference is liveness
+  narrowing, not plugin absence.
+
+Graded **MEDIUM**, not HIGH — reasoning in the evidence file. The dominant
+real case (headless, nothing installed) is fixed; the residual needs an
+operator to have nominated something non-functional.
+
+## M-10 — C2's OTHER HALF IS STILL OPEN: the reason never reaches the host
+
+The narrowing WARNs are on **stderr**. What does the **protocol stream** carry?
+Enumerated all 24 `capability_activation` events from the same captures:
+
+```
+pricing_refresher, mid_flight_monitor, cooldown_tracker, learned_policy,
+smart_handoff, delegate_isolation, procedure_skill_drafting,
+legacy_auto_skill_drafting          ← 8 capabilities, and that is the whole list
+```
+
+**Byte-identical in arm N and arm R.** The ladder does not react to backend
+liveness at all. Corroborated against the source, with a block-found control
+(the `sed` range yielded 10 lines, so the enum was located, so the absence is
+real):
+
+```
+pub enum CapabilityId {           // crates/wcore-protocol/src/events.rs
+    PricingRefresher, MidFlightMonitor, CooldownTracker, LearnedPolicy,
+    SmartHandoff, DelegateIsolation, ProcedureSkillDrafting,
+    LegacyAutoSkillDrafting,
+}                                  // 8 variants. No Browser. No ComputerUse. No Web.
+```
+
+**SR-27-1 has not landed.** So the verdict's sentence *"the activation ladder
+still carries no identity for browser, computer use or web"* is **still true**,
+and I have now proved it live rather than by reading source.
+
+**The consequence is sharper than the seam request states it.** The probe's doc
+comment says the WARN is how the recorded panel dissent (a silently dropped
+capability becomes an un-debuggable missing feature) is *honoured*. Measured:
+it is honoured **for an operator reading stderr, and for nobody else.** A
+Desktop host reads the protocol stream, where the capability simply stops being
+present, with no `unavailable` + reason_code — the mechanism that the same
+stream already provides for eight other capabilities, including the exactly
+analogous `runtime_path_unwired` on `learned_policy`.
+
+So C2 splits cleanly:
+- **"publish live readiness" — the FLAG: MET.** Honest, proven against a
+  natural negative, on the shipped binary.
+- **"publish live readiness" — the REASON: NOT MET.** Not published at all.
+  Fixing it is SR-27-1, which is **fenced** and not mine to make.
+
+## M-11 — the verdict's open HIGH is ALREADY CLOSED at this SHA
+
+Finding (d), `[browser]` vs `[browser.policy]`. **Do not re-fix.** At `861d1b1a`
+`crates/wcore-browser/src/tool.rs:499` no longer inlines the string; it calls
+`crate::config_hint::disabled_by_default_hint()`, and `config_hint.rs` carries
+its own guard:
+
+```rust
+assert!(!snippet.lines().any(|l| l.trim() == "[browser]"),
+        "snippet names [browser]; the loader reads [browser.policy]");
+```
+
+with a round-trip through the real loader in
+`wcore-agent/tests/browser_config_hint_roundtrip.rs`. Verified closed by
+inspection; I did not re-run the test (see deferrals).
+
 ## Log
 
 - **T+0** worktree verified, brief + verdict + MEDIA-* ledger row read.
