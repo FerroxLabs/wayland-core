@@ -233,3 +233,64 @@ Three things follow, and the third cuts against the fix looking better than it i
 shell never ran" — that cell is masked by the **confirmer** (21-C3-03), a different mechanism
 this fix does not touch. Expected, and it is the control that shows the flip above is
 specific to the bubblewrap path rather than a general loosening.
+
+## T7 — Windows: no analogue (MEASURED, not inferred)
+
+The finding lane explicitly did NOT check Windows (21-C3-06). `live_fs_acl.rs` gains
+`overlapping_directory_denies_run_the_command_and_still_contain`, three arms so that
+allow-then-deny ORDERING (arm 2) and NESTING (arm 3) cannot be conflated, behind a no-deny
+instrument control (arm 1). `NATIVE_ACCEPTANCE_CASES` 11 → 12 so the zero-execution gate
+stays honest.
+
+Run on `SeanD@seandesktop`, repo + `CARGO_TARGET_DIR` under `D:\lane-f21bwo` per LANE-BRIEF
+§6. Seed files stay under `%PUBLIC%` — that is the existing 11 cases' deliberate choice (a
+shallow AppContainer-traversable ancestor chain); moving them to `D:\` risks a false negative
+from an untraversable ancestor rather than from the deny. They are text files of a few bytes.
+
+Sentinel pattern per §3.2 — remote writes a status file, a separate ssh call reads it back,
+exit status ignored:
+
+```
+WLRC_TEST=0
+WLRC_KN=0
+WLSHA=a791979c9a6d5559428308d69613455f10725663
+WLDONE
+```
+
+Counts read back from the log, never from exit status:
+
+```
+Running tests\live_fs_acl.rs
+test overlapping_directory_denies_run_the_command_and_still_contain ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.41s
+
+Running tests\f21bwo_kn_win.rs
+KN-win as_committed : shell_ran=true parent_leak=false git_leak=false
+KN-win drop_ancestor: shell_ran=true parent_leak=true  git_leak=false
+KN-win no_deny      : shell_ran=true parent_leak=true  git_leak=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+```
+
+**Windows AppContainer TOLERATES the overlapping pair.** The command ran, both nested denies
+were enforced, and no AppContainer ace survived on either object. `apply_protected_deny`
+strips package ALLOW aces and sets `PROTECTED_DACL_SECURITY_INFORMATION` **per object**;
+there is no mount, so there is nothing to abort. Known-negatives fire identically to the
+other two platforms.
+
+**All three backends now measured. Only bubblewrap had the defect, and only because it is the
+only mount-based one.**
+
+### T7-a — two instrument defects found in my own harness during this leg (§6b-ii: repaired, not noted)
+
+1. **`\$` in a bash double-quoted ssh argument escapes the dollar.** I read
+   `"D:\lane-f21bwo\$NONCE\status.txt"` — bash left `$NONCE` literal, PowerShell then expanded
+   it as an undefined variable to empty, and the path collapsed to
+   `D:\lane-f21bwo\status.txt`: **a different, older, already-passing status file.** It
+   reported `WLRC=0 / WLDONE` and looked like my run succeeding. Repaired by building the path
+   in bash first (`DIR="D:/lane-f21bwo/${NONCE}"`) and using forward slashes. This is the
+   self-passing-instrument class exactly — a stale green from a path that was never mine.
+2. **`SeanDesktop` is shared and a sibling instance of this lane was live on it.** A
+   `status2.txt` I had just written was found carrying another writer's format. Repaired by
+   scoping every artifact to a per-run nonce directory (`D:\lane-f21bwo\r3x222112\`), which is
+   the §6a-ii `/tmp` rule applied to the Windows box. Every Windows number above comes from
+   that nonce directory and from a run whose `WLSHA` I read back and matched to my branch HEAD.
