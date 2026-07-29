@@ -92,9 +92,20 @@ HEAD (fixed): test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 fil
 
 **And at the true shipped-binary level, using the phase's own corpus rather than my
 instrument** — `cargo test -p wcore-cli --test child_authority_corpus`, the real
-`wayland-core` binary in a headless PTY: **29 passed; 0 failed; 0 ignored; 0 measured; 0
-filtered out**, reproduced twice (24.29 s and 24.13 s, independent runs). The corpus's own
-verdict text for the `corpus_tool` linux/standalone/live cell:
+`wayland-core` binary in a headless PTY. Run at **base and head**, both
+**29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** (24.23 s base; 24.29 s and
+24.13 s head, reproduced), so the corpus itself is the A/B instrument and its size is held
+constant across the comparison.
+
+The `corpus_tool` linux/standalone/live row, verbatim, **at base `eaff921d`**:
+
+> `corpus_tool :: linux :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict — the
+> delegated child's shell never ran :: no Bash effect reached the hermetic home AND the
+> child's stdout marker never returned on the wire, so the shell did not run. An absent effect
+> from a shell that never started says nothing about tool authority, workspace containment or
+> …`
+
+and the same row **at head**:
 
 > the delegated child's **SHELL RAN** — its stdout marker returned on the wire in a served
 > provider request — and its write **still produced no effect** in the hermetic home. …
@@ -175,10 +186,12 @@ My fix removes **one of the four** mechanisms 21-C3-02 found were making Phase 2
 REFUSED readings come from tool calls that never executed. Reporting it loudly, as asked:
 
 1. **The `corpus_tool` linux/standalone/live cell flipped NOT-EXPRESSIBLE → REFUSED**, and it
-   is now a real measurement rather than an absence of effect. Before: *"the delegated child's
-   shell never ran — `bwrap: Can't mkdir …/workspace/.git`"*. After: the shell runs, its marker
-   returns on the wire, a relative-path write inside its own workspace succeeds, and only the
-   out-of-workspace write is refused.
+   is now a real measurement rather than an absence of effect. **Established by running the
+   corpus at base AND at head myself** (§2), not by citing 21-C3's record: at base the row
+   reads *"obtained no verdict — the delegated child's shell never ran"*; at head the shell
+   runs, its marker returns on the wire, a relative-path write inside its own workspace
+   succeeds, and only the out-of-workspace write is refused. Both runs are 29/29 with 0
+   ignored and 0 filtered, so the flip is not a change in what the corpus executed.
 
 2. **`21-04-PHASE-VERDICT.md` was right about the mechanism and wrong that it had been
    measured.** The verdict attributed the tool REFUSED jointly to tool authority and workspace
@@ -200,6 +213,76 @@ REFUSED readings come from tool calls that never executed. Reporting it loudly, 
 
 **Two of the four masking mechanisms remain open** (21-C3-03 confirmer, 21-C3-05 Windows
 session-0 confirmer), plus 21-C3-04's checkout-root limit. Routed unchanged.
+
+### 5a. The flip is now a DIRECT A/B, not a comparison against a prior lane's record
+
+Written by a concurrent instance of this lane (see §8a). The claim in §5.1 above was
+originally supported by 21-C3's record at `fde83e9a` — a *different commit on a different
+day*. It is now supported by a same-host, same-corpus, **one-commit-apart** A/B, which is the
+stronger form and removes "something else changed in between" as an explanation:
+
+| `corpus_tool` cell (linux) | base `eaff921d` | head `a9902ed5` |
+|---|---|---|
+| standalone × **live** | **NOT-EXPRESSIBLE** | **REFUSED** |
+| host-protocol × live | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+| standalone × in-process | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+| host-protocol × in-process | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+
+**Exactly one cell of four moved, and it is the one this defect masked.** The other three are
+the specificity control §5.4 argues for, now measured rather than argued.
+
+Base cause text, verbatim from `/tmp/f21bwo-corpus-base.log` at `eaff921d`:
+
+> `corpus_tool :: linux :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict — the
+> delegated child's shell never ran :: no Bash effect reached the hermetic home AND the child's
+> stdout marker never returned on the wire, so the shell did not run. An absent effect from a
+> shell that never started says nothing about tool authority, workspace containment or the
+> approval gate, and is not recorded as a refusal. 2 delegated child provider turn(s) arrived.`
+
+Both corpus runs: **29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** (base 24.23 s,
+head 24.29 s). Note `2 delegated child provider turn(s) arrived` in BOTH — the child spawned
+and took provider turns at base too; only its shell aborted. So the base row is a genuine
+non-event, not a dead fixture.
+
+### 5b. Full-suite regression delta, base vs head, same host
+
+Unproxied `/root/.cargo/bin/cargo test -p wcore-sandbox`, 20 targets each:
+
+| commit | passed | failed | ignored |
+|---|---|---|---|
+| base `eaff921d` | 100 | 0 | 2 |
+| head `a9902ed5` | **109** | 0 | 2 |
+| lane HEAD `a45ce175` | **109** | 0 | 2 |
+
+109 − 100 = **9**, exactly the nine Linux-side test additions. Zero regressions, and the later
+macOS/Windows test commits change no Linux count (`sandbox_exec` and `live_fs_acl` are not
+compiled on Linux), which is why `a45ce175` matches `a9902ed5`.
+
+---
+
+## 8a. TWO CONCURRENT INSTANCES OF THIS LANE RAN IN ONE WORKTREE — orchestrator must know
+
+Two agent instances executed `lane/f21-bwrap-overlap` **simultaneously in the same worktree
+and on the same two remote hosts**, after a harness cut-off spawned a second without retiring
+the first. Recorded because it affects how this lane's evidence should be read, and because it
+is a coordination hazard, not an agent error:
+
+- **No work was lost and nothing is contradictory.** The production fix (`a9902ed5`), the
+  macOS test (`eab07915`) and the Windows test (`888a2b3c`) were authored by instance A and are
+  intact and ancestral at HEAD; instance B added notes T7, the merge, and the SUMMARY.
+- **The Windows leg was measured TWICE, independently, and agreed**: `1 passed; 0 failed;
+  0 ignored; 0 measured; 12 filtered out` in both runs (0.60 s and 0.41 s), with byte-identical
+  known-negative rows. Two independent confirmations of the same claim — that is a
+  strengthening, and it is the only reason the duplication was worth anything.
+- **It caused one real instrument defect.** Instance B's §T7-a defect 2 — a `status2.txt`
+  found carrying another writer's format — was instance A's file. B correctly diagnosed a
+  sibling writer and scoped to a per-run nonce; the LANE-BRIEF §6a-ii `/tmp` rule turns out to
+  apply to `SeanDesktop` and to a shared worktree, not only to hetzner.
+- **Wasted compute**: duplicate hetzner worktrees (`-m`, `-final`) and a duplicate Windows
+  build. Cleaned up by whichever instance ends last.
+
+**Both instances share one HEAD.** Any orchestrator that re-spawns a lane after a cut-off must
+either retire the first instance or give the second its own worktree.
 
 ---
 

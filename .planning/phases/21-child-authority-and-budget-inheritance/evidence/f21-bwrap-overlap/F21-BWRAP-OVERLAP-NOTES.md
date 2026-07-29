@@ -294,3 +294,49 @@ only mount-based one.**
    scoping every artifact to a per-run nonce directory (`D:\lane-f21bwo\r3x222112\`), which is
    the §6a-ii `/tmp` rule applied to the Windows box. Every Windows number above comes from
    that nonce directory and from a run whose `WLSHA` I read back and matched to my branch HEAD.
+
+---
+
+## T8 — the DIRECT corpus A/B (same host, one commit apart)
+
+T6 recorded the head corpus and compared it to 21-C3's record at `fde83e9a` — a different
+commit on a different day. Ran the corpus at **base `eaff921d`** on the same host to close
+that gap.
+
+| `corpus_tool` cell (linux) | base `eaff921d` | head `a9902ed5` |
+|---|---|---|
+| standalone × **live** | **NOT-EXPRESSIBLE** | **REFUSED** |
+| host-protocol × live | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+| standalone × in-process | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+| host-protocol × in-process | NOT-EXPRESSIBLE | NOT-EXPRESSIBLE |
+
+Exactly one of four cells moved. Base cause, verbatim: *"obtained no verdict — the delegated
+child's shell never ran … An absent effect from a shell that never started says nothing about
+tool authority, workspace containment or the approval gate, and is not recorded as a
+refusal. 2 delegated child provider turn(s) arrived."*
+
+Both runs **29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** (base 24.23 s, head
+24.29 s). `2 delegated child provider turn(s) arrived` in BOTH, so the base row is a real
+non-event and not a dead fixture.
+
+Regression delta, `cargo test -p wcore-sandbox`, 20 targets, unproxied:
+base `eaff921d` **100 passed / 0 failed / 2 ignored** → head `a9902ed5` **109 / 0 / 2** →
+lane HEAD `a45ce175` **109 / 0 / 2**. Delta 9 = exactly the nine Linux-side additions.
+
+## T9 — a second instance of this lane was running in this worktree
+
+Discovered when `git rev-parse HEAD` returned a merge commit I did not author, and a hetzner
+worktree `wayland-f21bwo-m` appeared at that SHA. Two instances of `lane/f21-bwrap-overlap`
+ran concurrently in ONE worktree and on both remote hosts after a harness cut-off spawned a
+second without retiring the first.
+
+Verified before continuing, rather than assumed: the fix (`a9902ed5`), the macOS test
+(`eab07915`) and the Windows test (`888a2b3c`) are all intact and ancestral at HEAD
+(`git show HEAD:… | grep -c` → 14 / 1 / 1). Nothing lost, nothing contradictory.
+
+The duplication produced one genuinely useful thing — the Windows leg was measured twice,
+independently, with the same counts (`1 passed … 12 filtered out`) and byte-identical
+known-negative rows — and one instrument defect, where the sibling instance found MY
+`status2.txt` on `SeanDesktop` and correctly diagnosed a foreign writer. **LANE-BRIEF §6a-ii
+generalises: a shared host is not only `/tmp` on hetzner; it is `D:\` on SeanDesktop and it
+is the worktree itself.** Full disclosure in SUMMARY §8a.
