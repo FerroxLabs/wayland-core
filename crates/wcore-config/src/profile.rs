@@ -939,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profiles_root_ignores_wayland_home() {
         // profiles_root() must resolve identically whether or not WAYLAND_HOME
         // is set, and must NEVER be a child of it (C2).
@@ -973,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profiles_root_honors_explicit_override() {
         let root = abs_root("custom-profiles");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profile_dir_case_folds_to_same_path() {
         let root = abs_root("p");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profile_dir_rejects_invalid_name() {
         let root = abs_root("p");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn active_pointer_is_under_root_not_in_a_home() {
         let root = abs_root("p");
         let home = abs_root("some-home");
@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_respects_existing_wayland_home() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("work")).unwrap();
@@ -1092,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_sets_home_from_profile_flag() {
         let root = tempdir().unwrap();
         let work = root.path().join("work");
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_reads_pointer_when_no_flag() {
         let root = tempdir().unwrap();
         let work = root.path().join("work");
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_flag_wins_over_pointer() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("flagged")).unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_falls_through_on_missing_dir() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1167,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_falls_through_on_invalid_name() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1191,7 +1191,7 @@ mod tests {
     /// guard misses (`wayland-core profile use X` then a bare launch when X's
     /// home is gone).
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_records_unbound_selection_from_the_active_pointer() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1224,7 +1224,7 @@ mod tests {
 
     /// A cleanly bound profile (home exists) leaves nothing unbound.
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_bound_profile_records_no_unbound_selection() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_lists_and_exists() {
         let (_g, root) = rooted();
         assert!(!profile_exists("work"));
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_rejects_duplicate_and_invalid() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_with_base_writes_marker_and_never_copies_secrets() {
         let (_g, root) = rooted();
         let base = create_profile("base", None).unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_with_missing_base_errors_and_leaves_nothing() {
         let (_g, root) = rooted();
         assert!(matches!(
@@ -1324,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn list_skips_pointer_and_nondirs() {
         let (_g, root) = rooted();
         create_profile("work", None).unwrap();
@@ -1337,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn set_clear_and_active_name_roundtrip() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1356,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn set_active_refuses_missing_profile() {
         let (_g, _root) = rooted();
         assert!(matches!(
@@ -1370,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn rename_moves_dir_and_repoints_active() {
         let (_g, root) = rooted();
         create_profile("old", None).unwrap();
@@ -1385,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn rename_errors_on_missing_and_conflict() {
         let (_g, _root) = rooted();
         create_profile("a", None).unwrap();
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn delete_dir_does_not_touch_pointer() {
         let (_g, root) = rooted();
         create_profile("work", None).unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn delete_profile_clears_pointer_when_active() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn export_excludes_secrets_by_default() {
         let (_g, root) = rooted();
         let p = create_profile("work", None).unwrap();
@@ -1467,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn export_include_secrets_copies_them() {
         let (_g, _root) = rooted();
         let p = create_profile("work", None).unwrap();
@@ -1479,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_creates_profile_from_tree() {
         let (_g, _root) = rooted();
         let src = tempdir().unwrap();
@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_rejects_existing_and_bad_source() {
         let (_g, _root) = rooted();
         create_profile("taken", None).unwrap();
@@ -1512,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_does_not_follow_symlinks() {
         let (_g, _root) = rooted();
         let src = tempdir().unwrap();

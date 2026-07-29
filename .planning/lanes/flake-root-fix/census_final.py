@@ -24,8 +24,39 @@ from rsutil import fn_body_range, strip_literals  # noqa: E402
 ROOT = sys.argv[1] if len(sys.argv) > 1 else "crates"
 
 FN = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)")
-SER = re.compile(r"#\[(?:serial_test::)?(?:file_)?serial(?:\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\))?\]")
+# serial_test supports MULTIPLE comma-separated keys -- `#[serial(a, b)]` joins
+# both groups. A single-name regex silently regrades those as UNPROTECTED.
+SER = re.compile(r"#\[(?:serial_test::)?(?:file_)?serial(?:\(([^)]*)\))?\]")
+
+
+def serial_groups(blob):
+    """Return the set of serial group names a test belongs to, or None."""
+    m = SER.search(blob)
+    if not m:
+        return None
+    raw = (m.group(1) or "").strip()
+    if not raw:
+        return frozenset({"<default>"})
+    names = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" in part:      # skip `inner_attrs = [..]`, `crate = ..`
+            continue
+        names.add(part)
+    return frozenset(names or {"<default>"})
 MUT = re.compile(r"\b(?:env::)?(?:set_var|remove_var)\s*\(\s*([^,)]+)")
+# INSTRUMENT REPAIR #4. Mutations routed through a helper name the variable as
+# an ARGUMENT, not as the first argument of set_var -- e.g.
+# `EnvGuard::set(&[("WAYLAND_HOME", None)])`. The direct-call regex above misses
+# every one of them. That blind spot hid 10 WAYLAND_HOME mutators in
+# wcore-config/src/profile.rs, all in the DEFAULT serial group while every
+# config.rs peer was in `wayland_home_env` -- an entire regime split reported as
+# clean. Any UPPERCASE env-looking string literal inside a guard/helper call
+# counts as a mutation of that variable.
+HELPER_MUT = re.compile(
+    r"(?:EnvGuard|ENV_GUARD|EnvVarGuard|with_env|set_env|scoped_env)\w*::?\w*\s*\("
+)
+ENVNAME = re.compile(r'"([A-Z][A-Z_0-9]{2,})"')
 CWD = re.compile(r"\bset_current_dir\s*\(")
 STRLIT = re.compile(r'^"([A-Z_0-9]+)"$')
 READ = re.compile(r'\benv::var(?:_os)?\s*\(\s*"([A-Z_0-9]+)"')
@@ -79,14 +110,18 @@ def collect():
                     v = lit.group(1) if lit else alias.get(raw)
                     if v:
                         muts.add(v)
+                # helper-mediated mutations (EnvGuard::set(&[("VAR", ..)]), etc.)
+                for hm in HELPER_MUT.finditer(body):
+                    tail = body[hm.end():hm.end() + 400]
+                    for v in ENVNAME.findall(tail):
+                        muts.add(v)
                 if CWD.search(body):
                     muts.add("<CWD>")
                 reads = set(READ.findall(body))
                 if not muts:
                     continue
-                sm = SER.search(blob)
-                regime = ("serial:" + (sm.group(1) or "<default>")) if sm else "UNPROTECTED"
-                out[binary_of(p)].append((p, i + 1, m.group(1), regime, muts, reads))
+                groups = serial_groups(blob)  # frozenset, or None if unprotected
+                out[binary_of(p)].append((p, i + 1, m.group(1), groups, muts, reads))
     return out
 
 
@@ -96,20 +131,30 @@ def main():
     for binary, recs in data.items():
         # which vars are contended IN THIS BINARY (touched by >1 test)?
         touch = defaultdict(set)
-        for p, ln, fn, reg, muts, reads in recs:
+        for p, ln, fn, groups, muts, reads in recs:
             for v in muts:
                 touch[v].add(fn)
-        regimes = defaultdict(set)
-        for p, ln, fn, reg, muts, reads in recs:
+        # per var: the group-set of each mutator
+        per_var = defaultdict(list)
+        for p, ln, fn, groups, muts, reads in recs:
             for v in muts:
-                regimes[v].add(reg)
-        for p, ln, fn, reg, muts, reads in recs:
+                per_var[v].append((fn, groups))
+        for p, ln, fn, groups, muts, reads in recs:
             contended = {v for v in muts if len(touch[v]) > 1}
-            if reg == "UNPROTECTED" and contended:
+            if groups is None and contended:
                 unprot.append((binary, p, ln, fn, sorted(contended)))
-        for v, rs in regimes.items():
-            if len(rs) > 1 and len(touch[v]) > 1:
-                splits.append((binary, v, sorted(rs), sorted(touch[v])))
+        for v, entries in per_var.items():
+            if len(touch[v]) < 2:
+                continue
+            # Safe iff EVERY mutator is protected AND they share a COMMON group
+            # (serial_test excludes only within a shared group; a multi-key test
+            # bridges groups, so intersection -- not equality -- is the test).
+            if any(g is None for _, g in entries):
+                continue  # already reported as UNPROTECTED above
+            common = set.intersection(*[set(g) for _, g in entries])
+            if not common:
+                allg = sorted({x for _, g in entries for x in g})
+                splits.append((binary, v, allg, sorted(f for f, _ in entries)))
 
     print("=" * 74)
     print(f"UNPROTECTED mutators of a CONTENDED variable: {len(unprot)}")
