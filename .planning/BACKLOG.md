@@ -2070,3 +2070,30 @@ seven variant defaults are all literals. Recorded so nobody re-opens it as an ov
 Distinct from the deleted `CEILING_IN_FLIGHT`, and the finding the original `F24-C2-M1` row conflated
 with it. Enforcing it is a **feature**, not a repair — scope it as one.
 
+
+---
+
+### `BL-24C1-CARRIED-WORK-WINDOW` — carried work is actionable for about one cron tick (MEDIUM)
+
+Named by `lane/24-c1-abandoned`, measured twice (missed on the first attempt, hit on spin 34).
+After a restart, `resume()` leaves deliveries in `Attempted` and the **first cron tick settles
+them**, so any operator or tool acting on carried work has roughly **one second**. The surface is
+real and now driveable; the window in which it shows anything is not.
+
+### `BL-24C1-DISCORD-WINDOW` — Discord's dedup window is UNMEASURED and needs a credential (Sean-reserved)
+
+`lane/24-c1-abandoned` **refused to estimate it.** The window is server-side and measuring it needs a
+real bot token plus a guild channel; neither exists on hetzner (verified — no `channels/`, no
+platform entries, only `ANTHROPIC_API_KEY` injected; names listed, no value printed). §6 of that
+lane's summary specifies the exact bisect experiment to run once a credential exists. **This bounds
+the residual magnitude, not the correctness, of the Discord nonce fix.**
+
+### `BL-24C1-UNKNOWN-NODEDUP-UNPROVEN` — the `OutcomeUnknownNoDedup` abandon arm has no live proof (LOW)
+
+Test evidence only. The independent sink is Slack-shaped and Slack dedupes, so that arm
+short-circuits and never exercises live. Named by its lane rather than left to read as covered.
+
+### `BL-24C1-RESEND-RECEIPT-COSMETIC` — `resend` prints `receipt: 1.000000` (COSMETIC)
+
+The fixture sink returns its timestamp as the message id. Display-only.
+
