@@ -282,6 +282,29 @@ else
     "rc=0 — a reload that fixed NOTHING erased the degradation report"
 fi
 
+# --- THE H6b LEG: did the reload STEAL the right to poll? -------------------
+# The exit-code legs above are blind to this, and that blindness is the point.
+# A fix that only stopped `reload` erasing the report would pass every leg above
+# while `reload` went on starting poll tasks for a process that does not hold the
+# lease -- and polling is a DESTRUCTIVE read, so the rightful owner then sees
+# nothing at all rather than a duplicate. Silent data loss behind a green suite.
+#
+# The observable is the adapter's own health state. `Unknown` means "registered,
+# never observed", which is where the startup path correctly left it; anything
+# else means something polled or started it.
+if grep -q "start() failed" "$RUN/health-after.txt"; then
+  leg "the-reload-did-NOT-take-the-poll-lease-for-itself" no \
+    "the adapter was STARTED by a gateway that does not hold the lease: $(grep -m1 'reason:' "$RUN/health-after.txt" | tr -s ' ')"
+elif grep -q "no poll observed yet" "$RUN/health-after.txt"; then
+  leg "the-reload-did-NOT-take-the-poll-lease-for-itself" ok \
+    "adapter still unpolled after the reload: $(grep -m1 'reason:' "$RUN/health-after.txt" | tr -s ' ')"
+else
+  echo "INSTRUMENT-FAULT: could not read the adapter's post-reload state, so"
+  echo "the lease-theft leg graded nothing. health-after.txt was:"
+  cat "$RUN/health-after.txt"
+  exit 2
+fi
+
 # --- Leg: the lock holder is still alive, so the path really is still dead. --
 # Without this the run could be graded on a world where the degradation had
 # genuinely been resolved, and clearing the error would have been CORRECT.
