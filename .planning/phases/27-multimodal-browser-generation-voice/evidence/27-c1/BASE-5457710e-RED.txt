@@ -1,0 +1,49 @@
+running 14 tests
+test audio_refuses_a_relative_path ... ok
+test a_valid_png_is_still_admitted_with_its_bytes_intact ... ok
+test audio_refuses_a_unc_target ... ok
+test a_valid_wav_is_still_admitted_with_its_bytes_intact ... ok
+test image_refuses_a_relative_path_control ... ok
+test audio_refuses_a_symlinked_leaf ... FAILED
+test a_wav_is_not_admitted_as_an_image_and_a_webp_is_not_admitted_as_audio ... ok
+test audio_over_the_declared_cap_is_refused_before_it_is_read ... ok
+test an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces ... FAILED
+test audio_refuses_a_traversal_segment ... FAILED
+test image_refuses_a_denylisted_credential_path_control ... ok
+test audio_refuses_a_denylisted_credential_path ... FAILED
+test image_over_the_declared_cap_is_refused_before_it_is_read ... ok
+test image_refuses_a_traversal_segment_control ... ok
+
+failures:
+
+---- audio_refuses_a_symlinked_leaf stdout ----
+
+thread 'audio_refuses_a_symlinked_leaf' (3363331) panicked at crates/wcore-tools/tests/media_intake_unification_test.rs:163:29:
+a symlinked leaf must be refused: ("audio/wav", [82, 73, 70, 70, 36, 8, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces stdout ----
+
+thread 'an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces' (3363327) panicked at crates/wcore-tools/tests/media_intake_unification_test.rs:266:5:
+assertion failed: load_local_image(png_named_jpg.to_str().unwrap()).is_err()
+
+---- audio_refuses_a_traversal_segment stdout ----
+
+thread 'audio_refuses_a_traversal_segment' (3363332) panicked at crates/wcore-tools/tests/media_intake_unification_test.rs:99:38:
+a `..` component must be refused: ("audio/wav", [82, 73, 70, 70, 36, 8, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+---- audio_refuses_a_denylisted_credential_path stdout ----
+
+thread 'audio_refuses_a_denylisted_credential_path' (3363329) panicked at crates/wcore-tools/tests/media_intake_unification_test.rs:138:31:
+a deny-listed path must be refused: ("audio/wav", [82, 73, 70, 70, 36, 8, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+
+failures:
+    an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces
+    audio_refuses_a_denylisted_credential_path
+    audio_refuses_a_symlinked_leaf
+    audio_refuses_a_traversal_segment
+
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-tools --test media_intake_unification_test`
