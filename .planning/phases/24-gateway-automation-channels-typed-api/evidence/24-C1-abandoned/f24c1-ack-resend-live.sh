@@ -118,21 +118,31 @@ for k,v in st.items():
 PYEOF
 
 echo ""
-echo "=== 7. platform restarts it; resume CARRIES the unsettled delivery ==="
-for t in $(seq 1 20); do
-  A=$(systemctl --user is-active wayland-core-gateway-$P 2>&1)
-  NR=$(systemctl --user show -p NRestarts --value wayland-core-gateway-$P 2>&1)
-  echo "  t=$((t*2))s active=$A NRestarts=$NR"
-  [ "$A" = "active" ] && [ "$NR" != "0" ] && break
-  sleep 2
+echo "=== 7+8. restart, then drain inside the carried-work window ==="
+# THE WINDOW IS ~1s AND IT IS EASY TO MISS. `resume()` leaves the carried
+# delivery Attempted (pending=1) but does NOT re-dispatch it; the first cron
+# tick does, and the send then settles, taking pending back to 0. The run loop
+# reads the drain request BEFORE it ticks, so a request that lands before the
+# first tick is processed against pending=1 and forces an abandonment.
+#
+# A first version of this script polled `is-active` every 2s and ran
+# `journalctl` before draining. That burned the whole window: the drain arrived
+# at pending=0 and reported `Clean: abandoned=0`. So the drain is now fired in a
+# tight loop that spins while the gateway is DOWN — each call fails fast with
+# "cannot drain: no gateway is running" — and lands within ~100ms of the
+# projection being published.
+for i in $(seq 1 400); do
+  OUT=$($BIN gateway drain --profile $P --budget-ms 1 2>&1)
+  if ! echo "$OUT" | grep -q "cannot drain"; then
+    echo "drain fired on spin $i at $(date -u +%H:%M:%S.%3N)"
+    echo "$OUT" | tail -4
+    break
+  fi
+  sleep 0.1
 done
-journalctl --user -u wayland-core-gateway-$P --no-pager -n 20 2>&1 | grep -E "started pid" | tail -2
-
-echo ""
-echo "=== 8. drain with a budget it cannot meet -> a REAL abandonment ==="
-$BIN gateway drain --profile $P --budget-ms 2000 2>&1 | tail -4
-sleep 12
-journalctl --user -u wayland-core-gateway-$P --no-pager -n 40 2>&1 | grep -E "drain|ABANDONED|abandoned" | tail -6
+sleep 6
+journalctl --user -u wayland-core-gateway-$P --no-pager -n 60 2>&1 \
+  | grep -E "started pid|drain |ABANDONED" | tail -6
 
 echo ""
 echo "=== 9. THE SURFACE: what did you give up on? ==="
@@ -157,6 +167,13 @@ cat $RUN/refuse.out
 
 echo ""
 echo "=== 11. bring an independent sink back, with its OWN journal ==="
+# The gateway is STOPPED first, and that is load-bearing. A running gateway
+# would keep firing its 30s schedule into the same port, and an arrival in
+# `arrivals2.jsonl` would then prove nothing about the re-send. Stopping it
+# makes `gateway resend` the only thing that can put a line in that file.
+systemctl --user stop wayland-core-gateway-$P 2>/dev/null
+sleep 1
+echo "gateway_active=$(systemctl --user is-active wayland-core-gateway-$P 2>&1) (must NOT be active)"
 nohup $SINK --port $PORT --journal $RUN/arrivals2.jsonl > $RUN/sink2.log 2>&1 &
 SINK2_PID=$!
 sleep 2; cat $RUN/sink2.log
