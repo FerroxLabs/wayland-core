@@ -156,7 +156,10 @@ differential exercised exactly one of them.
 reports `true` — "the quarantined draft is tagged hidden" — while being handed
 the user-authored, model-VISIBLE control. It was a self-passing gate of the
 kind LANE-BRIEF §3.2 enumerates, sitting inside the instrument built to hunt
-that class. Twelfth recorded instance.
+that class. (Corrected on review: I wrote "twelfth recorded instance" here and
+cannot substantiate the ordinal — the brief says eleventh, the dispatch says
+twenty-plus. The report says "another instance" instead. An unverifiable count
+is exactly the kind of detail that should not be asserted.)
 
 Captures: `run-C..F-*.log`, byte counts 633 / 1628 / 633 / 1752, each matched
 against the remote `wc -c` before and after transfer.
