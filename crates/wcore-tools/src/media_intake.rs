@@ -906,6 +906,21 @@ mod tests {
         ));
     }
 
+    /// Moved from `vision_tools::is_network_path_flags_unc_only`, and
+    /// STRENGTHENED: the consolidated intake refuses the `\\server\share`
+    /// spelling on every platform, not only on Windows. On Unix that string is
+    /// a relative name `validate_user_path` would refuse anyway, so refusing it
+    /// here costs nothing and removes a platform-dependent answer.
+    #[test]
+    fn network_path_detection_flags_unc_and_nothing_else() {
+        // Ordinary paths are never network paths (the common case).
+        assert!(!is_network_path(Path::new("/Users/me/x.png")));
+        assert!(!is_network_path(Path::new("relative/x.png")));
+        // Both UNC spellings, on every platform.
+        assert!(is_network_path(Path::new(r"\\server\share\x.png")));
+        assert!(is_network_path(Path::new("//server/share/x.png")));
+    }
+
     #[test]
     fn refuses_a_relative_path_and_a_traversal() {
         assert!(admit_path(Path::new("relative.png"), &any()).is_err());

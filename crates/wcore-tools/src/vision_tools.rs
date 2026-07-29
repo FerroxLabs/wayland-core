@@ -814,18 +814,11 @@ mod tests {
         assert!(res.is_err(), "a directory must be rejected, got: {res:?}");
     }
 
-    #[test]
-    fn is_network_path_flags_unc_only() {
-        // Ordinary paths are never network paths (the common case).
-        assert!(!is_network_path(std::path::Path::new("/Users/me/x.png")));
-        assert!(!is_network_path(std::path::Path::new("relative/x.png")));
-        // A UNC path is flagged on Windows; on Unix the same string carries no
-        // UNC prefix, so the platform-correct value there is `false`.
-        #[cfg(windows)]
-        assert!(is_network_path(std::path::Path::new(
-            r"\\server\share\x.png"
-        )));
-    }
+    // `is_network_path_flags_unc_only` moved to `crate::media_intake` as
+    // `network_path_detection_flags_unc_and_nothing_else` when the UNC refusal
+    // became shared. It gained an assertion there: the consolidated intake
+    // refuses `\\server\share\...` on EVERY platform, where this
+    // vision-only helper returned `false` for that string on Unix.
 
     /// End-to-end: a local image drives the backend, with the null fetcher
     /// proving the local path never crosses the network seam.
