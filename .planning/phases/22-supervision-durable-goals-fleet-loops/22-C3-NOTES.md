@@ -439,3 +439,87 @@ precisely what this programme has been wrong about three times.
 - **T+9** — §0 established and committed. Premise stale; job re-scoped from "build the
   adapter surface" to "close the PARTIAL".
 
+---
+
+## §3. MEASURED — the advertised-but-dead gap, with the query that found it
+
+**Query** (unproxied, glob quoted — an earlier unquoted run was eaten by zsh with
+`no matches found: --include=*.rs`, which is the §3b-i trap arriving in my own hands):
+
+```
+$ /usr/bin/grep -rn "from_direct\|from_forgeflows\|from_fleet\|from_council\|from_anvil" \
+    crates --include='*.rs' | /usr/bin/grep -v "^crates/wcore-agent/src/goal/strategy.rs"
+```
+
+**Known-positive in the same style**, to prove the instrument is alive:
+`/usr/bin/grep -rn "fn main" crates/wcore-cli/src --include='*.rs' | wc -l` → **23**.
+
+**Result: 24 hits. 23 of them are `crates/wcore-agent/tests/goal_strategy_test.rs`.
+Exactly ONE is production — `crates/wcore-cli/src/goal_cmd.rs:532`, `from_fleet`.**
+
+That is the finding stated precisely: **four of the five adapters have zero production
+callers.** `from_direct`, `from_forgeflows`, `from_council`, `from_anvil` are reachable
+only from a test binary. A caller of the shipped product cannot make four of the five
+engines terminate through the canonical transition, because no shipped code path calls
+those adapters at all.
+
+This is the **advertised-but-dead** class (ten recorded instances on this programme, four
+found on 2026-07-29). The construction is real, the type-level enforcement is real, and
+**four fifths of it is dead code from the product's point of view.**
+
+## §4. Where each engine's REAL production path lives
+
+Measured, not assumed:
+
+| Engine | Production entry point | Shipped verb |
+|---|---|---|
+| Fleet | `FleetDispatcher` via `GoalFleetDriver` | `goal run --terminate` — **already canonical** |
+| ForgeFlows | `WorkflowRunner::run` — `crates/wcore-cli/src/workflow.rs:241` | `workflow run <NAME>` |
+| Council | `drive_council` — `crates/wcore-cli/src/crucible.rs:459` | `crucible` |
+| Anvil | `run_climb` via `forge.rs:821` — `crates/wcore-cli/src/anvil.rs:42 run_forge` | `anvil forge` |
+| Direct | `Engine::run` | main agent loop — entry still to be located |
+
+So the four unwired engines **do** have shipped verbs. They simply do not route their
+termination through the Goal. That makes the gap closable without inventing a demo path.
+
+## §5. Design decision (Decide-don't-park), taken before building
+
+**Rejected: a new `goal drive` verb that re-implements each engine's invocation.** It
+would be a parallel demo path — a fifth way to start an engine, proving only that the
+demo reaches the transition. That is the advertised-but-dead defect rebuilt one level up.
+
+**Chosen: attach the Goal to each engine's EXISTING production verb.** Each of
+`workflow run`, `crucible`, `anvil forge` and the Direct loop gains an opt-in
+`--goal <id> --journal <path>` pair. When supplied, that verb's real engine invocation
+runs INSIDE `GoalLoop::run_<strategy>` and terminates through its adapter. When absent,
+the path is byte-for-byte what it is today.
+
+This is the pattern `goal run --terminate` already established, adopted for the same
+stated reason: an always-on termination would break 22-03's kill/restart proof, which
+re-enters the same verb. Opt-in keeps every existing invocation and every existing test
+unchanged — which also means I do **not** have to edit the ≥40 test call sites the earlier
+lane measured as blocking, because I am not changing any engine signature.
+
+**What this does and does not buy.** It makes all five engines terminate through one
+canonical transition *when driven under a Goal*, from the product, on the engines' real
+entry points. It does **not** make an engine invoked with no Goal impossible — that
+remains convention, and §6 of the earlier SUMMARY is still correct about it. I will
+re-derive that ceiling myself rather than inherit it (§1).
+
+## §6. The live-proof problem, and how I intend to solve it without a credential
+
+Four of the five engines need an LLM provider to reach termination. I have no credential
+and credentials are Sean-reserved. Measured: there is **no offline/mock provider** in
+production code — `StubProvider` is `#[cfg(test)]` in `spawner.rs`, `FixtureProvider` is
+`wcore-evolve`'s and is a `ParaphraseProvider`, not an `LlmProvider`.
+
+**Plan: a local canned-response HTTP endpoint on hetzner, pointed at by `base_url`.**
+Providers are HTTP + `ProviderCompat`, so an OpenAI-compatible server on `127.0.0.1:<port>`
+with a dummy key exercises the **real** provider code, the **real** engine loop and the
+**real** termination path — only the model's tokens are canned. No secret involved, so
+this does not touch the credential rule at all. Unique port per §"many lanes are live".
+
+**Stated honestly up front:** this proves the *termination path*, not model quality. If
+it turns out an engine cannot be driven to termination this way, I will say so and show
+the call sites, not invent an exit (Honesty rule: no "termination state 4").
+
