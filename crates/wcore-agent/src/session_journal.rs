@@ -58,18 +58,29 @@ const MAX_SNAPSHOT_AUTHORITY_BYTES: usize = 16 * 1024;
 const MAX_EFFECT_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EFFECT_CHECKPOINT_SESSION_BYTES: u64 = 512 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[rustfmt::skip]
 pub struct JournalEnvelope {
     pub schema_version: u32, pub session_id: String, pub seq: u64,
     pub previous_checksum: String, pub event: SessionEvent, pub checksum: String,
-    /// 23B-H1 recovery: this envelope's stored checksum was proved against the
-    /// pre-fix `effect_receipt` encoding, so `computed_checksum` must hash
-    /// under that same encoding. Never serialized, never read from disk, and
-    /// set in exactly one place — `recover_legacy_effect_receipt`, and only
-    /// after an exact SHA-256 match.
-    #[serde(skip)] pub(crate) legacy_effect_receipt: bool,
+    /// 23B-H1: the SHA-256 of the checksum material EXACTLY AS IT WAS READ FROM
+    /// DISK, populated by `parse_complete_frames` and by nothing else. Never
+    /// serialized and never read from a journal. See [`Self::computed_checksum`].
+    #[serde(skip)] pub(crate) on_disk_checksum: Option<String>,
+}
+
+/// Bookkeeping fields are excluded: two envelopes carrying the same authority
+/// are equal whether they were read from disk or built in memory.
+impl PartialEq for JournalEnvelope {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.session_id == other.session_id
+            && self.seq == other.seq
+            && self.previous_checksum == other.previous_checksum
+            && self.event == other.event
+            && self.checksum == other.checksum
+    }
 }
 
 #[derive(Serialize)]
@@ -77,6 +88,29 @@ pub struct JournalEnvelope {
 struct ChecksumMaterial<'a> {
     schema_version: u32, session_id: &'a str, seq: u64,
     previous_checksum: &'a str, event: &'a SessionEvent,
+}
+
+/// The same five members, held as the **verbatim bytes** the producer wrote.
+/// Serializing a `RawValue` re-emits its source text unchanged, so encoding
+/// this reproduces the producer's checksum material byte for byte.
+#[derive(Serialize)]
+#[rustfmt::skip]
+struct StoredChecksumMaterial<'a> {
+    schema_version: &'a serde_json::value::RawValue,
+    session_id: &'a serde_json::value::RawValue,
+    seq: &'a serde_json::value::RawValue,
+    previous_checksum: &'a serde_json::value::RawValue,
+    event: &'a serde_json::value::RawValue,
+}
+
+#[derive(Deserialize)]
+#[rustfmt::skip]
+struct StoredEnvelopeFields<'a> {
+    #[serde(borrow)] schema_version: &'a serde_json::value::RawValue,
+    #[serde(borrow)] session_id: &'a serde_json::value::RawValue,
+    #[serde(borrow)] seq: &'a serde_json::value::RawValue,
+    #[serde(borrow)] previous_checksum: &'a serde_json::value::RawValue,
+    #[serde(borrow)] event: &'a serde_json::value::RawValue,
 }
 
 #[derive(Deserialize)]
@@ -98,14 +132,48 @@ impl JournalEnvelope {
             previous_checksum,
             event,
             checksum: String::new(),
-            legacy_effect_receipt: false,
+            on_disk_checksum: None,
         };
         envelope.checksum = envelope.computed_checksum()?;
         Ok(envelope)
     }
 
+    /// The checksum this envelope's authority must equal.
+    ///
+    /// # 23B-H1 — why this hashes the stored bytes rather than a re-encoding
+    ///
+    /// This used to hash a RE-SERIALIZATION of the decoded event, which made
+    /// the integrity check depend on serde encode/decode being a bijection over
+    /// `SessionEvent`. It is not one, and the reader says so itself:
+    /// `known_omitted_default` blesses fifteen raw encodings as explicit
+    /// defaults equivalent to absent — `"retry_of":null`,
+    /// `"effect_receipt":null`, `"provider_reservations":{}` and so on. Every
+    /// one of those is by definition dropped by the decode, so re-serializing
+    /// covered different bytes than the producer hashed and
+    /// `verify_chain_from` called corrupt exactly what
+    /// `reject_unknown_event_fields` had just declared valid. The session then
+    /// became permanently unreachable, because all twelve `session` operator
+    /// verbs read through that chain. That is the 23B-01 symptom.
+    ///
+    /// Hashing the bytes on disk removes the dependency on canonical
+    /// re-encoding entirely, and is **strictly tighter**, not looser:
+    ///
+    /// * every difference the re-encoding caught is still caught — a changed
+    ///   value changes the bytes;
+    /// * differences the re-encoding NORMALISED AWAY (reordered members,
+    ///   inserted whitespace) are now caught, where before they verified clean;
+    /// * the only forms newly accepted are raw encodings the reader has already
+    ///   declared valid — anything the decode drops that is NOT allowlisted is
+    ///   rejected by `reject_unknown_event_fields`, which runs first and fails
+    ///   closed with `UnknownCriticalField`.
+    ///
+    /// In-memory envelopes have no stored bytes and fall back to encoding the
+    /// value, which is what the writer is about to put on disk — so `create`
+    /// and the read path agree by construction.
     fn computed_checksum(&self) -> Result<String, JournalError> {
-        let _encoding = model::LegacyEffectReceiptEncoding::scoped(self.legacy_effect_receipt);
+        if let Some(on_disk) = &self.on_disk_checksum {
+            return Ok(on_disk.clone());
+        }
         let material = ChecksumMaterial {
             schema_version: self.schema_version,
             session_id: &self.session_id,
@@ -115,6 +183,28 @@ impl JournalEnvelope {
         };
         let bytes = serde_json::to_vec(&material).map_err(|source| JournalError::Json {
             context: "encoding checksum material",
+            source,
+        })?;
+        Ok(sha256_hex(&bytes))
+    }
+
+    /// Hash the checksum material exactly as `body` carries it.
+    fn checksum_of_stored_bytes(body: &[u8]) -> Result<String, JournalError> {
+        let stored = serde_json::from_slice::<StoredEnvelopeFields>(body).map_err(|source| {
+            JournalError::Json {
+                context: "reading stored checksum material",
+                source,
+            }
+        })?;
+        let bytes = serde_json::to_vec(&StoredChecksumMaterial {
+            schema_version: stored.schema_version,
+            session_id: stored.session_id,
+            seq: stored.seq,
+            previous_checksum: stored.previous_checksum,
+            event: stored.event,
+        })
+        .map_err(|source| JournalError::Json {
+            context: "encoding stored checksum material",
             source,
         })?;
         Ok(sha256_hex(&bytes))
@@ -2152,7 +2242,8 @@ fn parse_complete_frames(path: &Path, bytes: &[u8]) -> Result<ParsedJournal, Jou
                     source,
                 })?;
             reject_unknown_event_fields(body, &entry)?;
-            recover_legacy_effect_receipt(&mut entry, body)?;
+            entry.on_disk_checksum = Some(JournalEnvelope::checksum_of_stored_bytes(body)?);
+            restore_explicit_null_receipt(&mut entry, body)?;
             entries.push(entry);
         }
         offset += frame_len;
@@ -2165,30 +2256,24 @@ fn parse_complete_frames(path: &Path, bytes: &[u8]) -> Result<ParsedJournal, Jou
     })
 }
 
-/// 23B-H1 read-side recovery: restore the exact `effect_receipt` value the
-/// pre-fix writer held, so a journal already on disk hashes to its stored
-/// checksum again instead of being rejected forever.
+/// 23B-H1 value fidelity: make the decoded event say what the stored bytes say.
 ///
-/// The pre-fix encoding wrote `Some(Value::Null)` as an explicit
-/// `"effect_receipt":null`, which serde decodes back to `None`, and the fixed
-/// predicate then omits — so the recomputed checksum covers different bytes
-/// than the stored one and `ChecksumMismatch` rejects a correctly-written
-/// journal, permanently, for every operator verb.
+/// `effect_receipt` is the one blessed field where the decode loses
+/// information. It is `Option<serde_json::Value>`, so `Some(Value::Null)` and
+/// `None` are distinct values that share the encoding `null` — serde maps a
+/// JSON null to `None` for any `Option<_>`, and the writer that produced those
+/// bytes held `Some(Value::Null)`. Every other blessed encoding is lossless:
+/// no `Option<String>` value can be `null`, and an empty map or array decodes
+/// to an empty map or array.
 ///
-/// **This does not loosen the integrity check.** The raw event object is only
-/// consulted to decide WHICH value to try; the candidate is then accepted only
-/// if re-hashing it under [`model::LegacyEffectReceiptEncoding`] reproduces the
-/// stored SHA-256 exactly. A journal that is genuinely corrupt matches neither
-/// encoding and is rejected by the unchanged checks downstream. What the
-/// stored hash attests is what the reader accepts; the hash picks the
-/// interpretation, not the reader.
-fn recover_legacy_effect_receipt(
+/// This changes no integrity decision. The checksum is taken from the bytes on
+/// disk (see [`JournalEnvelope::computed_checksum`]), so a frame that fails its
+/// checksum fails it before and after this runs; all this does is stop replay
+/// reporting `None` for a receipt the journal records as present-and-null.
+fn restore_explicit_null_receipt(
     entry: &mut JournalEnvelope,
     body: &[u8],
 ) -> Result<(), JournalError> {
-    if entry.computed_checksum()? == entry.checksum {
-        return Ok(());
-    }
     let raw =
         serde_json::from_slice::<serde_json::Value>(body).map_err(|source| JournalError::Json {
             context: "checking journal event fields",
@@ -2200,18 +2285,8 @@ fn recover_legacy_effect_receipt(
     let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut entry.event else {
         return Ok(());
     };
-    if effect_receipt.is_some() {
-        return Ok(());
-    }
-    *effect_receipt = Some(serde_json::Value::Null);
-    entry.legacy_effect_receipt = true;
-    if entry.computed_checksum()? != entry.checksum {
-        // Not the 23B-H1 artifact. Leave the envelope exactly as decoded so the
-        // unchanged chain and checksum checks report the real failure.
-        if let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut entry.event {
-            *effect_receipt = None;
-        }
-        entry.legacy_effect_receipt = false;
+    if effect_receipt.is_none() {
+        *effect_receipt = Some(serde_json::Value::Null);
     }
     Ok(())
 }
@@ -2937,13 +3012,40 @@ mod fault_tests {
         explicit["event"]["retry_of"] = serde_json::Value::Null;
         explicit["event"]["effect_receipt"] = serde_json::Value::Null;
         explicit["event"]["pre_hook_phase_id"] = serde_json::Value::Null;
+
+        // 23B-H1: a producer stores the hash of the bytes it WRITES. This test
+        // previously kept the checksum computed from the clean encoding, which
+        // no producer of these bytes could have stored — so the frame verified
+        // only because the re-encoding happened to strip the very fields under
+        // test, and the assertion below never reached the chain check at all.
+        // Re-sealing here is what lets `verify_chain` be asserted, which is the
+        // check that used to reject these frames with `ChecksumMismatch`.
         let body = serde_json::to_vec(&explicit).unwrap();
-        assert_eq!(
-            parse_complete_frames(path, &raw_frame(FRAME_MAGIC, &body))
-                .unwrap()
-                .entries,
-            vec![envelope]
+        let sealed = JournalEnvelope::checksum_of_stored_bytes(&body).unwrap();
+        assert_ne!(
+            sealed, envelope.checksum,
+            "the explicit encoding must genuinely hash differently — otherwise \
+             this fixture is not exercising the defect"
         );
+        explicit["checksum"] = serde_json::Value::String(sealed.clone());
+        let body = serde_json::to_vec(&explicit).unwrap();
+
+        // The decode collapses `Some(Value::Null)` to `None` for the one
+        // blessed field that is an `Option<serde_json::Value>`; replay must
+        // report what the journal records.
+        let mut expected = envelope.clone();
+        expected.checksum = sealed;
+        let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut expected.event else {
+            unreachable!("the fixture is a ToolIntentRecordedV2")
+        };
+        *effect_receipt = Some(serde_json::Value::Null);
+
+        let entries = parse_complete_frames(path, &raw_frame(FRAME_MAGIC, &body))
+            .unwrap()
+            .entries;
+        assert_eq!(entries, vec![expected]);
+        verify_chain(&entries)
+            .expect("an encoding this reader blesses must also survive its integrity check");
 
         explicit["event"]["future_authority"] = serde_json::Value::Null;
         let body = serde_json::to_vec(&explicit).unwrap();

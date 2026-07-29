@@ -63,17 +63,27 @@ def turn_started(nonce):
     }
 
 
-def tool_intent_with_explicit_null_receipt():
-    """`ToolIntentRecordedV2` exactly as the pre-fix writer emitted it.
+def tool_intent(shape):
+    """`ToolIntentRecordedV2` carrying one explicit-default encoding.
 
-    `retry_of` and `pre_hook_phase_id` are `None` and were skipped then and are
-    skipped now, so they are absent. `effect_receipt` was `Some(Value::Null)`
-    and the pre-fix predicate wrote it as an explicit null between
-    `effect_contract` and `pre_hook_phase_id`. The contract names a reconciler
-    because the reducer refuses an effect receipt without one -- which is also
-    what makes this shape reachable in production.
+    `shape="effect_receipt"` is what the PRE-FIX writer emitted: the field was
+    `Some(Value::Null)` and the old predicate wrote it as an explicit null
+    between `effect_contract` and `pre_hook_phase_id`.
+
+    `shape="retry_of"` is the generalisation 23B-H1 missed. It sits in the SAME
+    `known_omitted_default` match arm as `effect_receipt`, and is pinned as
+    wire-compatible by
+    `known_explicit_event_defaults_are_wire_compatible_but_unknowns_fail_closed`
+    -- so the reader declares it valid and then refuses to read it. No
+    `Option<String>` value can serialize to null, so this encoding comes from a
+    producer other than the current Rust writer: an older build, another
+    version, or a host writing through the documented wire contract.
+
+    The contract names a reconciler because the reducer refuses an effect
+    receipt without one -- which is also what makes this shape reachable in
+    production.
     """
-    return {
+    event = {
         "type": "tool_intent_recorded_v2",
         "tool_execution_id": "x1",
         "idempotency_key": "k1",
@@ -89,8 +99,20 @@ def tool_intent_with_explicit_null_receipt():
             "kind": "filesystem_transactional",
             "reconciler": "filesystem",
         },
-        "effect_receipt": None,
     }
+    if shape == "effect_receipt":
+        event["effect_receipt"] = None
+    elif shape == "retry_of":
+        # Declared position: immediately after `idempotency_key`.
+        rebuilt = {}
+        for key, value in event.items():
+            rebuilt[key] = value
+            if key == "idempotency_key":
+                rebuilt["retry_of"] = None
+        event = rebuilt
+    else:
+        raise SystemExit(f"unknown shape {shape!r}")
+    return event
 
 
 def tool_execution_not_started():
@@ -148,15 +170,21 @@ def main():
         action="store_true",
         help="append a terminal outcome for the tool, so cancel appends instead of refusing",
     )
+    parser.add_argument(
+        "--shape",
+        choices=("effect_receipt", "retry_of"),
+        default="effect_receipt",
+        help="which blessed explicit-default encoding the fixture carries",
+    )
     args = parser.parse_args()
 
     first, first_checksum = envelope_body(
         args.session_id, 0, GENESIS_CHECKSUM, turn_started(args.nonce)
     )
     second, second_checksum = envelope_body(
-        args.session_id, 1, first_checksum, tool_intent_with_explicit_null_receipt()
+        args.session_id, 1, first_checksum, tool_intent(args.shape)
     )
-    if b'"effect_receipt":null' not in second:
+    if f'"{args.shape}":null'.encode("utf-8") not in second:
         raise SystemExit("fixture did not carry the explicit null it exists to carry")
 
     bodies = [first, second]
