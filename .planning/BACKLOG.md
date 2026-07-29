@@ -2097,3 +2097,29 @@ short-circuits and never exercises live. Named by its lane rather than left to r
 
 The fixture sink returns its timestamp as the message id. Display-only.
 
+
+---
+
+### `BL-SC3-ROLLBACK-WINDOWS` — the new sidecar removal calls `remove_file` on a live home (LOW today, named from reading)
+
+Named by `lane/restore-rollback-sqlite` from source inspection, **not measured**. The new
+`restore_scope` sidecar removal calls `remove_file` on a live home, and **Windows refuses to delete
+a file another process holds open.** Unreachable today because no database exists in
+`MIGRATE_SCOPE`, so the lane named it rather than pre-emptively rewriting a path it could not
+exercise. Becomes live the moment a database enters that scope.
+
+**Windows was not exercised at all for the rollback path — full stop.**
+
+### `BL-SC3-ROLLBACK-NETWORK-FS` — network filesystem coverage is partial, and deliberately labelled so
+
+`lane/restore-rollback-sqlite` **did not run on a real NFS/CIFS mount.** NFS is installable on
+hetzner, but starting a system service on a box shared by five live lanes was a cost it declined to
+impose — a judgement worth respecting.
+
+What it *did* measure is the **journal mode a network filesystem forces**: TRUNCATE, which
+`sqlite_journal` selects there, and which was **also broken at base** — `memory.db-journal` restored,
+100 problem lines, **56 rows lost**. That now passes.
+
+**Still uncovered: locking semantics and `rename` atomicity over the wire.** Do not read the
+TRUNCATE result as network-filesystem coverage; it is the mode, not the filesystem.
+

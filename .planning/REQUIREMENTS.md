@@ -276,6 +276,19 @@ text is named rather than summarised. Full grading in `26-GAPS-SUMMARY.md`.
   not "restore exact pre-operation state on rollback", and the Windows leg does not exist
   for this path. One HIGH was found and fixed on the way — see `F26-GAPS-H1`.
 
+  **Second narrowing of "exact", 2026-07-29 (`lane/restore-rollback-sqlite`), and this one is
+  unavoidable.** For a home containing a **live SQLite database**, a rolled-back database is a
+  consistent **equivalent** database, not byte-identical bytes. That is not a weakening of the
+  guarantee — **for a live database the literal clause was already unsatisfiable**, because the
+  bytes being preserved at base were a *torn mixture* of `memory.db`, `-wal` and `-shm` captured
+  mid-checkpoint. Measured at base with three concurrent writers over a 307 MiB database: **7 FAIL
+  / 1 PASS in 8 runs**, every failing run restoring the sidecars back into the home, one losing 16
+  rows committed *before* the restore was launched, and `restore`/`recover` exiting 0 throughout.
+  Trees with **no** live database remain byte-exact, demonstrated rather than asserted
+  (`a_file_merely_named_like_a_database_is_still_byte_identical` passes in both arms deliberately).
+  The honest criterion text is *"restores a consistent pre-operation state; byte-exact where the
+  home holds no live database"*.
+
 ### Phase 27 — Multimodal, Browser, Generation, and Voice Contracts
 
 **All five remain OPEN after the 2026-07-26 execution pass.** Nothing here is
