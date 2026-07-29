@@ -327,4 +327,251 @@ SWEEP_TOTAL_HITS=0
 never printed, echoed, committed or written to a capture; the only thing recorded about
 it anywhere is its length.
 
+---
+
+# SESSION 2 — independent re-proof, and the known-negative session 1 declined
+
+A second agent was dispatched on this lane on the premise that the first had been
+**killed mid-flight with its context lost**, leaving five commits. Everything above
+§1–§5 is session 1's work. This section is session 2's, and it is written to be
+falsifiable against session 1 rather than to agree with it.
+
+## 6. What was actually true about session 1's state
+
+**The premise was wrong, and the way it was wrong matters.** Session 1 was not dead. Its
+last commit `9fa515fd` was authored at **15:15:57Z**, on top of session 2's *own* first
+commit `b591ce26` (15:14:21Z), which in turn sits on `61005508` (15:14:13Z) — a commit
+session 1 made **eight seconds before** session 2 committed. So for at least two minutes
+**two agents were committing into the same worktree and the same branch concurrently**,
+and neither was aware of the other.
+
+Consequences that were nearly destructive:
+
+- Session 1 finished, wrote its SUMMARY, and — per LANE-BRIEF §2 — **deleted its hetzner
+  worktree `/root/wayland-c4-live-cache`**. Session 2 had listed that directory as
+  present ten minutes earlier and found it gone on the next call, together with the only
+  built binary.
+- `9fa515fd` was **never pushed**. It carried the completed §4/§5 above, the lane
+  SUMMARY, the retained captures and a `cargo fmt` pass. It existed **only** as the
+  hetzner branch `hz/c4-live-cache`.
+- Session 2, recreating a worktree, deleted that branch (`Deleted branch
+  hz/c4-live-cache (was 9fa515fd)`) before realising what it held. The commit survived
+  only because git prints the SHA it is deleting and the object had not yet been gc'd.
+
+Recovered by SHA, re-pushed as **`lane/c4-live-cache-rescue`**, fetched to the Mac and
+merged. **This is reported as an incident, not a footnote:** a lane's final deliverable
+came within one `git gc` of being lost, because a second agent was spawned onto a live
+lane. The orchestrator-facing lesson is that "the previous agent is dead" is a claim
+that must be **measured** (commit timestamps, running processes) before acting on it,
+exactly like any other absence.
+
+The `auto.rs` delta `bc65e989..9fa515fd` was checked and is **pure rustfmt** — no
+semantic change, so nothing above rests on unreviewed code.
+
+## 7. The known-negative session 1 declined
+
+Session 1's §4 argued its pre-fix capture *was* the known-negative: "Re-running with the
+change reverted would produce strictly less evidence than the capture already taken at
+`57e6a9a5`, so no second billable run was spent on it."
+
+**That argument is half right, and the half that is wrong is the half that matters.** It
+is right that `57e6a9a5..bc65e989` is code-identical apart from `auto.rs` — verified:
+
+```
+git diff --stat 57e6a9a5 bc65e989 -- crates/
+ crates/wcore-agent/src/compact/auto.rs | 226 +++++++++++++++++-
+ 1 file changed, 224 insertions(+), 2 deletions(-)
+```
+
+It is wrong that this makes a controlled revert redundant. Sessions B and C were
+**different sessions, minutes apart, on two binaries nobody verified**, and by the time
+session 2 read the evidence **both binaries had been deleted**. Nothing could be checked
+after the fact. "A fix with no demonstrated failure mode has proven nothing" is not
+satisfied by a failure observed on a *different build you can no longer inspect*.
+
+So session 2 ran the controlled version: **one worktree, one line flipped, rebuilt in
+place, same fixture, same prompt, same model, same box, inside eight minutes.**
+
+### Binary attribution, checked before every run
+
+The presence of the fix in the actual binary was asserted from the binary, not assumed
+from the source, with a liveness control and a negative control in the same invocation:
+
+| binary | `drop_unanswered_tool_calls` | control (`autocompact`) | negative control |
+|---|---|---|---|
+| built with the fix | **6** | 4 | 0 |
+| built with the fix reverted | **0** | 4 | 0 |
+| rebuilt with the fix restored | **6** | 4 | 0 |
+
+The symbol goes 6 → 0 → 6 while the control never moves. That is the instrument proving
+itself in both directions on the exact artifact that was executed.
+
+### The live A/B/A
+
+All four runs used the identical `run.sh`, fixture and prompt; only the binary differed.
+
+| run | fix | `compactions` | `auto` | `failed` | `tokens_reclaimed` | 400s in log | peak watermark |
+|---|---|---|---|---|---|---|---|
+| `FIX1` | yes | 0 | 0 | 0 | 0 | 0 | 4445 (< threshold) |
+| `FIX2` | **yes** | 1 | **1** | **0** | **16181** | **0** | 17022 |
+| `REVERT` | **no** | 2 | 0 | **2** | **0** | **2** | 17567, *rising* |
+| `RESTORE` | **yes** | 1 | **1** | **0** | **16024** | **0** | 17016 |
+
+`REVERT`, verbatim from `cache show` — the provider's own words, back again:
+
+```
+F23_CACHE=compaction after_round_trip=1 kind=auto_failed trigger=watermark
+  watermark=17019 threshold=8000 pre_tokens=17019 tokens_freed=0 items_collapsed=0
+  error=LLM provider error: API error 400: {"type":"error","error":{"type":
+  "invalid_request_error","message":"messages.2: `tool_use` ids were found without
+  `tool_result` blocks immediately after: toolu_01BTRq4j5u95zRjpxGCC7BPN,
+  toolu_01VxWS6tGGQqws1PWhctjBAo. …"}}
+F23_CACHE=compaction after_round_trip=2 kind=auto_failed … "messages.4: …"
+```
+
+`RESTORE`, verbatim — gone again:
+
+```
+F23_CACHE=compaction after_round_trip=1 kind=auto trigger=watermark watermark=17016
+  threshold=8000 pre_tokens=17016 tokens_freed=16024 items_collapsed=2 error=-
+```
+
+**`FIX1` is retained deliberately as a negative result.** It used the fixed binary but
+no blob in the prompt, so `peak_watermark=4445` never reached `threshold=8000` and
+`compactions=0`. It proves the harness reports zero when pressure is genuinely absent —
+i.e. the three positive runs are not a harness that says "1" no matter what.
+
+Every 400 count above was taken with `/usr/bin/grep` and a liveness control in the same
+invocation (`egress security` → 2 in each log), so a zero is a measured zero and not a
+dead matcher (LANE-BRIEF §3b-i).
+
+## 8. The diagnosis, refined — session 1's wording was imprecise
+
+Session 1's commit says autocompact "is checked mid-tool-loop". True but under-specified.
+The precise mechanism is at `engine.rs:13243`:
+
+```rust
+let live_user_turn: Option<Message> = match self.messages.last() {
+    Some(m) if matches!(m.role, Role::User) => self.messages.pop(),
+    _ => None,
+};
+```
+
+`run_compaction` is called from three sites, the main one at `engine.rs:9149`, described
+in the source as running "before each API call" with "the tool loop … below
+`provider.stream` in the same iteration". On a **tool continuation** the trailing `User`
+message is not a live instruction at all — it is the **`tool_result` carrier**. Popping
+it strands the preceding assistant turn's `tool_use` blocks, and the summary prompt then
+lands where the provider demands a `tool_result`.
+
+That predicts the failure indices, and the live data confirms it: session 1 saw
+`messages.2 / .4 / .6`, session 2's `REVERT` saw `messages.2 / .4` — **stepping by
+exactly 2**, one `Assistant`+`User` pair per tool round-trip, carrying 1–2 ids each
+(parallel calls). The engine already knew the trailing `User` turn can carry
+`tool_result`s — `#285` at `engine.rs:13280` demotes orphaned ones at the *post*-compaction
+fold. The uncovered gap was the request handed to the compaction LLM. `c0b0e18e` is at
+the right layer.
+
+## 9. A residual gap I predicted, then disproved
+
+Session 2's notes flagged a suspected mirror-image defect: the `PromptTooLong` retry path
+truncates the oldest 20% *after* sanitation, which could strand a `tool_result` whose
+`tool_use` was truncated away. **It does not.** `truncate_for_retry`
+(`compact/auto.rs:367`) already snaps the boundary forward past a leading run of tool
+results:
+
+```rust
+while drop_count < messages.len() && is_tool_result(&messages[drop_count]) {
+    drop_count += 1;
+}
+```
+
+and `truncate_never_splits_a_tool_pair` pins it. **Recorded as disproved rather than
+quietly dropped** — a predicted absence that survives checking is worth as much as one
+that does not, and reporting only the confirmed half is how a finding list inflates.
+
+## 10. Observation 3 re-taken on a SUCCESSFUL compaction
+
+Session 1 correctly refused to bank `history_rewritten` because it fired on a *failed*
+compaction. Re-taken twice on successful ones (`FIX2` and `RESTORE`), from
+`cache show` — the compaction record and the attribution in the same capture:
+
+```
+F23_CACHE=compaction after_round_trip=1 kind=auto … tokens_freed=16181 error=-
+F23_CACHE=turn round_trip=2 … provider=anthropic model=claude-haiku-4-5
+          cache_read=0 invalidation=history_rewritten
+```
+
+`kind=auto` with `error=-` and `tokens_freed>0`, and the very next round-trip attributed
+to `history_rewritten`. **That is the true positive.** C4L-F2 stands unchanged and was
+independently reproduced: `REVERT` recorded `causes=history_rewritten:1` with
+`failed=2 tokens_reclaimed=0`, i.e. the false positive, again.
+
+## 11. Provider read-back (LANE-BRIEF §3b-ii)
+
+`/root/.wayland/.env` injects `ANTHROPIC_API_KEY` into every process on this box
+regardless of the shell environment, so intent proves nothing. Read back from the
+product's own ledger on **every round-trip of all four session-2 runs**:
+
+```
+provider=anthropic model=claude-haiku-4-5
+```
+
+Corroborated independently: `cache_read`/`cache_write` are non-zero, which no
+non-caching arm can produce.
+
+## 12. Gates
+
+```
+cargo test -p wcore-agent --lib compact::auto        (run over ssh, unproxied)
+  test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 2194 filtered out
+cargo fmt --all -- --check                           rc=0, clean
+```
+
+`0 ignored` and a real `filtered out` count are read back explicitly, so this is not a
+suite that exited 0 having run nothing. Run over ssh because the local `rtk` proxy
+strips exactly those two fields (LANE-BRIEF §3b).
+
+## 13. Money and the session-2 sweep
+
+| run | usd (product's own catalog-priced figure) |
+|---|---|
+| session 1 A / B / C | 0.028670 + 0.048917 + 0.037402 |
+| session 2 `FIX1` | 0.016389 |
+| session 2 `FIX2` | 0.036843 |
+| session 2 `REVERT` | 0.046981 |
+| session 2 `RESTORE` | 0.036956 |
+| **total** | **≈ $0.25** |
+
+One further session-2 run cost **nothing**: the first `FIX1` attempt passed the prompt to
+`-p`, which is `--provider`, and died with `Unknown provider` before any request left the
+box.
+
+### Sweep — three-state liveness control, needle never on disk, never in argv
+
+Session 1's sweep planted the real value into a scratch **file**. That works but writes
+the secret to disk, which §0 forbids. Session 2's needle is fed to `grep -f` through a
+process-substitution pipe, so it exists only in memory:
+
+```
+NEEDLE_LEN=108
+CONTROL_KNOWN_POSITIVE=1                        (MUST be 1 — matcher can match)
+CONTROL_KNOWN_NEGATIVE=0                        (MUST be 0 — matcher is not universal)
+CONTROL_RECURSIVE_SWEEP_ON_PLANTED_TREE=1       (MUST be 1 — the -R FORM can match)
+SWEEP_COMMITTED_LANE_ARTIFACTS=0
+SWEEP_RAW_SESSION2_CAPTURES=0
+SWEEP_RAW_SESSION1_CAPTURES=0
+SWEEP_WORKTREE_SOURCE=0
+SWEEP_TOTAL_HITS=0
+```
+
+The third control is the one session 1 lacked: a pipe-form match proves the *needle* is
+live, but the real sweep is `grep -R` over a directory tree, and **that is a different
+command whose zero could come from a bad path or a swallowed glob**. It was therefore run
+against a purpose-built tree with the value planted two levels down, and required to
+return 1. Scope swept: every committed lane artifact (evidence, notes, summary, captures,
+`auto.rs`, **all commit messages, and the full lane patch**), every raw capture from both
+sessions, and the worktree source.
+
+
 

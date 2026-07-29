@@ -160,3 +160,30 @@ uncovered gap is the *request handed to the compaction LLM*, which is exactly wh
 retry path (`compact/auto.rs:246`) truncates the oldest 20% *after* sanitation, which
 can strand a `tool_result` whose `tool_use` was truncated away — the mirror-image
 violation. Recorded now so it is not lost.
+
+## M4 — that residual gap is DISPROVED (checked, 2026-07-29)
+
+`truncate_for_retry` (`compact/auto.rs:367`) already snaps the truncation boundary
+forward past a leading run of tool results, and `truncate_never_splits_a_tool_pair`
+pins it:
+
+```rust
+while drop_count < messages.len() && is_tool_result(&messages[drop_count]) {
+    drop_count += 1;
+}
+```
+
+**Recorded as disproved rather than dropped.** I predicted a defect, went looking, and
+it was not there. Reporting only the predictions that survive is how a finding list
+inflates.
+
+## M5 — session 2 final status
+
+- [x] diagnosis re-verified independently and refined (the `live_user_turn` pop)
+- [x] fix proved live on a binary I built and attributed by symbol (`FIX2`)
+- [x] known-negative: reverted in place, 400 returned, restored, gone (`REVERT`/`RESTORE`)
+- [x] `history_rewritten` re-taken on a SUCCESSFUL compaction, twice
+- [x] provider read back from the product on every round-trip of every run
+- [x] secret sweep, 0 hits, three-state liveness control
+- [x] integration `0d4d1842` merged (not rebased)
+- [x] orphaned session-1 commit `9fa515fd` rescued and pushed
