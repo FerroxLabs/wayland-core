@@ -183,3 +183,64 @@ relabel or stop `sean-mac-arm64`** (cost two attempts to register).
   that is ~1.9 MB moved 16,000×/s ≈ 30 GB/s. If real, the audio callback cannot keep
   up and capture degrades past 60 s. **I have not measured this yet and will not
   claim it until I have.** It is also only reachable on a >60 s recording.
+
+- **T+8 — the existing suite compiles 11 voice tests that NO DEFAULT INVOCATION RUNS.**
+  Built `cargo test -p wcore-agent --features voice --lib --no-run` on the Mac
+  (Darwin exception, disclosed; 2m22s, rc=0). Ran the test **binary directly** — not
+  through cargo — so `filtered out` survives the `rtk` cargo rewrite:
+  ```
+  test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 2169 filtered out
+  ```
+  11 executed, asserted, not inferred from exit status. Because `voice` is in no
+  default feature set, **every one of these 11 is dead in CI.**
+
+- **T+9 — device probe: `input device detected on this host: true`,** read from the
+  test's own `eprintln` under `--nocapture`. And `recording_drop_impl_releases_stream`
+  printed **no** `skip:` line → it took the **real** `CpalAudioRecorder::try_default()`
+  branch: real `start()`, real control channel, real join handle, real `cancel()`
+  teardown. **That is the first real execution of that code path anywhere on this
+  programme.** The prior lane's "no host can exercise this" is corrected.
+
+  **But `detected` is NOT `live`, and I am not treating it as such.** `try_default()`
+  + `build_input_stream()` succeeding is compatible with macOS TCC denying microphone
+  access and delivering all-zero buffers. This is the RMS-5 trap in its natural
+  habitat. Liveness control still owed — see T+11.
+
+- **T+10 — ★ THE LANE'S PRINCIPAL FINDING, and it needs NO microphone. ★**
+  **C4's `interruption` clause is structurally NOT MET in production code.**
+
+  `CpalAudioPlayer::stop()` — the barge-in seam — is an **empty body**:
+  ```rust
+  async fn stop(&self) {
+      // The OS shell player is a one-shot subprocess. We let it finish
+      // naturally — there is no cross-platform "stop a SoundPlayer"
+      // signal that's worth the complexity vs the rare interrupt need.
+  }
+  ```
+  (`wcore-agent/src/tool_backends/voice_mode.rs:628-632`, quoted byte-exact.)
+
+  Worse, `play()` calls `std::process::Command::...status()` — which **blocks until
+  `afplay` exits**. So playback is synchronous *and* the stop is a no-op: there is no
+  moment at which an interrupt could even be delivered, and if it were, it would do
+  nothing.
+
+  **And the test suite reports this surface as working.** `stop_count` is asserted
+  **twice** — `wcore-tools/src/voice_mode.rs:1198` and `:1345` — and **both are against
+  `CapturingAudioPlayer`, the mock**, which increments a counter. Enumerated all
+  **9** `CpalAudioPlayer` references in the tree (unpiped, so no line is hidden and no
+  status is stolen): production wiring at `:729`, tests at `:947` (missing file) and
+  `:958` (`os_shell_command`). **Not one calls `.stop()`.**
+
+  So the shape is: trait declares `stop` → mock implements it and counts → tests assert
+  the count → production implements it as `{}` → **zero tests touch production**. This
+  is the advertised-but-dead pattern the dispatch says has ten recorded instances; this
+  is a candidate eleventh, and unlike the others it is *self-documenting* — the code
+  comment states the omission was deliberate.
+
+  **This was gradeable from source at zero hardware cost.** The prior lane deferred C4
+  as hardware-blocked without reaching it. That is the second and larger sense in which
+  the write-off was wrong.
+
+  Adjacent, LOW: module doc `:17` calls `CpalAudioPlayer` an *"output stream via the
+  same host (primary)"*; the impl shells out to `afplay`/`aplay`/`powershell` and
+  contains no cpal output stream. Doc contradicts impl.
