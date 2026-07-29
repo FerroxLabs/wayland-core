@@ -172,11 +172,32 @@ check-all: fmt-check lint test-ci hakari-verify audit deny
 #
 # All three layers expect a pre-built release binary in target/release/
 # (release_binary_smoke.rs depends on it via WCORE_PREBUILD_REQUIRED).
+#
+# nextest, not `cargo test`: all three layers are file-level gated
+# (`harness_tui_flow` is `#![cfg(unix)]`, `harness_failure_injection` is
+# `#![cfg(feature = "harness-failure-injection")]`), so under the wrong
+# platform or a dropped feature flag the binary compiles EMPTY and `cargo test`
+# prints `test result: ok. 0 passed` and exits 0. `no-tests = "fail"` in
+# .config/nextest.toml turns that into a hard failure.
+#
+# The recipe is SPLIT by platform rather than suppressed: `harness_tui_flow` is
+# legitimately absent on Windows, so naming it there would be a false positive.
+# Declaring the platform in the invocation — the pattern this justfile already
+# uses for `f01-packaged-driver-gate` — keeps the emptiness honest instead of
+# tolerated. Measured on Linux: 28 tests run, 28 passed.
+[unix]
 harness:
     vx cargo build --release -p wcore-cli
-    vx cargo test -p wcore-cli --test harness_cli_surface --test harness_tui_flow
-    vx cargo test -p wcore-cli --features harness-failure-injection \
-        --test harness_failure_injection -- --test-threads=1
+    vx cargo nextest run -p wcore-cli --test harness_cli_surface --test harness_tui_flow
+    vx cargo nextest run -p wcore-cli --features harness-failure-injection \
+        --test harness_failure_injection --test-threads=1
+
+# Windows: `harness_tui_flow` is `#![cfg(unix)]` and does not exist here.
+[windows]
+harness:
+    vx cargo build --release -p wcore-cli
+    vx cargo nextest run -p wcore-cli --test harness_cli_surface
+    vx cargo nextest run -p wcore-cli --features harness-failure-injection --test harness_failure_injection --test-threads=1
 
 # ── W10A eval harness acceptance gate ─────────────────────────────────────
 # Required to pass before F12 GEPA (W10B) can ship. Locked CLI invocation per
@@ -201,12 +222,17 @@ f01-packaged-driver-gate:
         target_dir="$PWD/$target_dir"
     fi
     export WCORE_EVAL_BIN="$target_dir/debug/wayland-core"
-    vx cargo test --locked -p wcore-eval-scenarios \
+    # nextest, not `cargo test`: packaged_driver_gate.rs is
+    # `#![cfg(feature = "packaged-driver-gate")]`. Drop or rename that feature
+    # and `cargo test` reports `ok. 0 passed` with rc=0 — a packaged-boundary
+    # proof that proved nothing. Measured: rc=0 under cargo test, rc=4 under
+    # nextest on the identical empty binary.
+    vx cargo nextest run --locked -p wcore-eval-scenarios \
         --features packaged-driver-gate --test packaged_driver_gate
 
 [windows]
 f01-packaged-driver-gate:
-    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
+    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo nextest run --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
 
 # ── Silent-pass CI gate (Wave 0) ───────────────────────────────────────────
 # Fails if any functional todo!() exists in the eval-scenarios assertion/trace

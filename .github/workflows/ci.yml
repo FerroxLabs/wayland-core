@@ -262,8 +262,17 @@ jobs:
 
       # F01 E3 runs on every supported native OS. Bind discovery to the exact
       # pre-built release artifact so a stale debug binary cannot satisfy it.
+      #
+      # nextest, NOT `cargo test`: `packaged_driver_gate.rs` is
+      # `#![cfg(feature = "packaged-driver-gate")]`, so if that feature is ever
+      # renamed, dropped, or fails to activate, the binary compiles EMPTY and
+      # `cargo test` prints `test result: ok. 0 passed` and exits 0 — a
+      # release-integrity gate certifying nothing. Measured on this checkout:
+      # `cargo test --test packaged_driver_gate` without the feature exits 0;
+      # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
+      # via `no-tests = "fail"` in .config/nextest.toml.
       - name: F01 packaged wayland-eval driver gate
-        run: vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: vx cargo nextest run --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
         env:
           WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
           WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -557,8 +566,13 @@ jobs:
       # F01 E3 — non-optional packaged boundary proof. The release Core binary
       # built above reports this checkout's exact source SHA; wayland-eval then
       # verifies its digest and drives both PASS and hard-gate failure locally.
+      #
+      # nextest, NOT `cargo test` — see the identical step in the native matrix
+      # job above for the measurement. The CI image already installs nextest
+      # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
+      # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
-        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
