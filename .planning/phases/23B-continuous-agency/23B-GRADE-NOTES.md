@@ -121,3 +121,67 @@ file that is missing. That is a point in favour of the narratives' honesty — m
 - Secret-isolation is a known-negative (`STORE_NONCE_OCCURRENCES=0`) **and carries its own
   known-positive in the same run** (`STORE_CONTROL_OCCURRENCES=1`). This is the discipline §3b-i
   demands, and 23B-03 is the only plan in the phase that supplied it unprompted.
+
+### M4 — **NEW LIVE FINDING (not in any artifact): the Linux journey leg is DEAD at day 2.**
+
+Measured on `hetzner-dsm` 2026-07-29, by reading the live journey state the phase's own handoff
+tells a successor to check. Nothing in the tree records this.
+
+```
+/root/.f23-journey-linux/scheduled.log
+  scheduled day 1 exited 0 at 2026-07-27T14:40:03Z
+  scheduled day 2 exited 1 at 2026-07-28T14:25:00Z     <-- FAILED
+grep -c "F23_04_DAY=" /root/.f23-journey-linux/runlog.txt  ->  1
+/root/.f23-journey-linux/scheduled-day2.log
+  scripts/f23-multi-day-journey.sh: line 67: HOME: unbound variable
+```
+
+**Root cause, proved not asserted.** `scripts/f23-multi-day-journey.sh:28` sets `set -uo pipefail`;
+line 67 is `[ -n "$ROOT" ] || ROOT="$HOME/.f23-journey-$PLATFORM"`. A systemd transient service
+does not export `HOME`, so `set -u` aborts before any work. `/root/f23-journey-day.sh` does **not**
+pass `--root`.
+
+Reproduced three ways, with a known-positive in each pair:
+- On the Mac, isolated: `env -i bash` → `line 6: HOME: unbound variable`, rc=1 (matches the
+  observed `exited 1`); `env -i HOME=/root` → rc=0; `env -i ROOT=…` → rc=0. **Three assertions:
+  known-negative fails, known-positive passes, and the proposed fix passes.**
+- **On the actual host under the actual mechanism:** `systemd-run --wait --pipe` running line 67
+  verbatim → `/bin/bash: line 1: HOME: unbound variable`; the identical code in an ssh shell →
+  `ROOT=/root/.f23-journey-linux`. (The pipeline's `rc=0` there is ssh's, not the inner status —
+  the error text is the evidence, not the rc.)
+
+**This is the same defect class the lane DID guard on Windows and did not on Linux.** 23B-04's
+TRAP 4 documents that a SYSTEM scheduled task's `USERPROFILE` differs, and the Windows resume
+therefore passes `-Root` explicitly. The Linux day script passes no `--root` at all.
+
+**It will recur on 2026-07-30 14:31 UTC.** `f23-journey-day3.timer` is still armed
+(`systemctl list-timers` → `Thu 2026-07-30 14:31:00 UTC`) and calls the same unguarded script,
+so day 3 will fail identically. The day-2 transient unit is gone (transient units do not persist);
+day 3's `/run/systemd/transient/f23-journey-day3.service` still exists and still runs
+`/root/f23-journey-day.sh 3`.
+
+Nothing is lost: the pinned binaries survive (`target/release/wayland-core`,
+`multi_day_journey_test-cd7922f357e39e40`), the worktree is still detached at the pinned SHA
+`0ed05322`, and `/root/.f23-journey-linux/` retains `day-one.json` and `journey.journal`.
+The leg is **recoverable**, not destroyed.
+
+**I did NOT repair it.** My dispatch fences this lane to grading, not building, and injecting a
+day-2 row under another lane's nonce would contaminate the evidence chain it belongs to. The
+repair is one line (`--root /root/.f23-journey-linux` in `/root/f23-journey-day.sh`, or
+`Environment=HOME=/root` in the units) and is in the gap list.
+
+### M5 — **Windows day 2 LANDED.** The inherited "day one only" is wrong in Windows' favour.
+
+```
+C:\Users\seand\.f23-journey-windows\scheduled.log
+  scheduled day 1 exited 0 at Tue 07/28/2026  6:55:13
+  scheduled day 2 exited 0 at Wed 07/29/2026  6:58:18
+runlog day rows = 2
+  F23_04_DAY=1 platform=windows ts=2026-07-27T23:54:26Z host=SEANDESKTOP pid=39008
+  F23_04_DAY=2 platform=windows ts=2026-07-28T23:58:17Z host=SEANDESKTOP pid=28584
+schtasks f23win23B04day3 -> Status Ready, Next Run Time 7/31/2026 7:05:00 AM
+```
+
+So as of now: **Windows 2 of 3 and on track; Linux 1 of 3 and broken; macOS 0 of 3.**
+The brief's "day one only" was correct when written and is now correct only for Linux and macOS.
+This is exactly why the standing rule is to re-derive rather than inherit.
