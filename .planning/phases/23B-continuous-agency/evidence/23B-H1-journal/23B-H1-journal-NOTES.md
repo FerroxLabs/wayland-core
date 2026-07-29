@@ -100,3 +100,26 @@ dead in `model.rs`. Whether it is dead in the embedded foreign types is the next
 - [ ] Build a round-trip invariant that is not shape-enumerated.
 - [ ] Judgement on generalising the repair path beyond the literal null receipt.
 - [ ] Final severity grade with evidence.
+
+---
+
+## 5. RESOLVED — outcome of the working plan in §3
+
+- Mechanism B (unordered collections) **ruled out**: every map/set in the journal
+  model is `BTreeMap`/`BTreeSet`.
+- The real answer was not a new mechanism but the **generalisation of A**:
+  `computed_checksum` hashed a re-serialization, and `known_omitted_default`
+  blesses fifteen encodings the decode drops. `effect_receipt` was one of them;
+  `retry_of` and `pre_hook_phase_id` are in the same match arm and were open.
+- Deterministic reproduction obtained at HEAD (`ChecksumMismatch { seq: 1 }`),
+  live at the CLI against the shipped binary, with a control showing
+  `effect_receipt` is NOT reproducible at base because the prior lane closed it.
+- Fixed by hashing the stored bytes; that same change repairs journals already
+  on disk for the whole class.
+- Severity: I disagree with the MEDIUM downgrade and would restore HIGH.
+
+Full write-up: `../../23B-H1-JOURNAL-SUMMARY.md`.
+Evidence: `23B-H1-journal-LIVE-EVIDENCE.md`.
+
+**Still open:** the snapshot digest (`reducer.rs:15`) is the identical defect and
+is deliberately NOT changed by this lane. See SUMMARY §8.
