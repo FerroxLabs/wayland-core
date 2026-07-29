@@ -1589,3 +1589,337 @@ All **10** operations lack `summary` and `description`, so the spec viewer shipp
 `wayland-core` (`wcore-acp/src/transport/rest.rs:336`) renders method and path and nothing else.
 The endpoint is public by design (README:480, "for discovery"), so this is what a third-party
 integrator sees first. Cost is small — doc comments on the handlers — and it is not blocking.
+
+---
+
+## From lane/record-truth — findings routed to BACKLOG that never arrived (2026-07-29)
+
+Every item below was **already dispositioned by its finding lane** — each one is
+named in a `.planning/SEAM-REQUESTS/*.md` entry addressed to this file, or in a
+summary that states it goes to BACKLOG. None reached this file. An unfiled
+finding is not dispositioned, it is dropped.
+
+**Severities are carried exactly as the finder gave them.** Nothing here has been
+re-graded up or down. Where I think a severity is wrong I say so in the row and
+leave the number alone.
+
+Detection and prevention: `.planning/scripts/check-finding-disposition.py`
+(proved RED on these cases before they were filed —
+`.planning/evidence/record-truth/RED-before-filing.txt`). Re-run it before
+closing any phase.
+
+### `F21-02-F2` — `max_iterations` is an unclamped child-fillable turn budget (MEDIUM)
+
+Source: `.planning/phases/21-child-authority-and-budget-inheritance/21-02-VACUITY-SUMMARY.md` §5 F-2,
+which states "per the brief's severity policy this is BACKLOG, not blocking".
+
+`crates/wcore-tools/src/delegate.rs` exposes `max_iterations` as an LLM-fillable
+integer with no clamp; it flows to `config.max_turns` at `spawner.rs:2283` and is
+never compared against the requester's own allowance. A delegated child holding
+`Delegate` can hand a grandchild 200x its own turn budget. Turn count is not one
+of F21-02's six named dimensions and the ancestor rollup still binds
+token/cost/time, so it does not falsify F21-02's letter. Non-blocking.
+
+### `F22-M1` — a newer journal is reported to the user as corrupt (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/22.md` SR-22-1. Evidence: `22-01-JOURNAL-COMPAT.md` §3.
+
+A journal written by a newer binary is reported as `corrupt complete frame N`. It
+is not corrupt, it is newer. Measured 2026-07-26 in 22-01 Task 1 M3: the
+pre-change binary refuses a journal containing an unknown event variant with
+`JournalError::CorruptFrame`, exit 3, zero bytes of reduced state. Failing closed
+is correct; calling it corruption is not. `self-update` makes downgrade a
+one-command operation, so a user will hit this.
+
+### `F22-M2` — `SESSION_JOURNAL_SCHEMA_VERSION` stops implying a content model (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/22.md` SR-22-2. Evidence:
+`22-01-EVIDENCE/decision/panel-dissent.txt`.
+
+Once Goal/Task/Wait records land additively at v5 (authorized 2026-07-26, 4-of-4
+panel), two journals both stamped 5 may or may not contain Goal frames, and
+anything needing that distinction must scan an append-only chain. Give it an
+explicit content-level capability marker rather than inferring it from the header.
+
+### `F23A-01-M1` — skill-declared hooks are gated only by accident (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23A.md` SR-23A-1. Evidence: Phase 23A-01 census.
+
+`SkillTool::skill_hooks_for` (`crates/wcore-agent/src/skill_tool.rs:434-449`)
+authorises via `skill_is_authorized` (`:159`), which is
+`permission_for(skill) == Allow` — a permissions check that never consults
+`disable_model_invocation`. The route is unreachable today only because (a)
+`merge_skill_hooks_into` runs solely on a non-error tool result
+(`orchestration/mod.rs:3086`) and (b) `find_metadata_sync` reads the eager map and
+the LRU, which `resolve_for_model` never populates for a quarantined name
+(`wcore-skills/src/refs.rs:293`). The cron pre-dispatch scan already warms that LRU
+via the unrestricted `resolve()` (`cron.rs:262`), removing condition (b). Any
+refactor that merges hooks independently of the tool result converts this into a
+live execution route with no test standing in the way. Suggested fix: an explicit
+`disable_model_invocation` check in `skill_hooks_for`.
+
+### `F23A-01-M2` — the quarantine verdict is computed from files inside the quarantined directory (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23A.md` SR-23A-1. Evidence: Phase 23A-01 census.
+
+`is_generated_draft` (`crates/wcore-skills/src/loader.rs:463`) reads
+`<skill_dir>/manifest.json` and falls back to the exact released body shape matched
+by `crates/wcore-skills/src/draft.rs:40`. Breaking any of the four body-shape
+conditions with the manifest absent yields content the loader classifies as
+user-authored. The classifier half is CONFIRMED and deliberate (an `auto-` name
+alone must not quarantine user content). The tool-write-reachability half is NOT
+ESTABLISHED — whether the agent's own Write/Edit tools can write under
+`$WAYLAND_HOME/skills/` is owned by `crates/wcore-tools/src/workspace_policy/`.
+Residual risk with a stated precondition: an actor who can already write there can
+author a plain user skill and skip the forgery entirely.
+
+### `F23A-01-M3` — the untrusted-project-config allowlist class was never swept (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23A.md` SR-23A-1. Evidence: Phase 23A-01 census.
+
+`restrict_untrusted_project_config` (`crates/wcore-config/src/config.rs:4351`)
+preserves an allowlist of power-reducing project settings and silently re-defaults
+everything else. `observability.skills_lifecycle` was missing from that allowlist
+and failed OPEN (fixed as F23A-01-H1). The CLASS was not swept: other restricting
+settings absent from the allowlist may fail open the same way.
+
+### `F23A-01-H2` — errored tool call strands its turn and kills the session (HIGH) — **FIXED at `32a5fc90`, filed for the record**
+
+Source: `.planning/SEAM-REQUESTS/23A.md` SR-23A-2. Evidence: Phase 23A-01 live drive.
+
+**This is filed as a CLOSED record, not as open work.** Every Phase 23A document
+still describes it as open and red; it is not.
+
+Original finding: any tool call returning an error result left the tool execution
+nonterminal in the session journal and the engine aborted with
+`Session persistence authority unavailable: invalid journal state transition: turn
+<id> has nonterminal tool execution <id>`. Reproduced live on Linux at `2ecdfdf5`
+in 13s with three independent triggers (absent skill name, quarantined generated
+draft, `Read` of a nonexistent path — the `Read` case proving it is not
+skills-specific).
+
+Fix, verified at HEAD by lane/record-truth:
+- `81508b74` (2026-07-27 08:15:18) added the RED reproducer
+  `crates/wcore-agent/src/orchestration/d1_refusal_terminal_tests.rs`, wired at
+  `orchestration/mod.rs:78`, five tests:
+  `refused_read_leaves_turn_committable`, `failed_grep_…`, `failed_glob_…`,
+  `opaque_shell_error_…`, and the control `approval_denial_control_…`.
+- `32a5fc90` (2026-07-27 08:27:20) fixed it, +240/-36 over 7 files including
+  `orchestration/mod.rs` (+135) — the `PreparedToolLease::start` → `lease.fail(...)`
+  span the seam request named as the suspected leak.
+
+**Still open underneath it:** 23A's own reproducer
+`crates/wcore-eval-scenarios/tests/f23a_boundary_drive.rs` has not been touched
+since `481682b0` (2026-07-26 22:49), the day before the fix, so the **16-route
+quarantine census is unmeasured at HEAD** and the `WAYLAND_F23A_SELFTEST` control
+was never shown to fire. See `F23A-01-CENSUS-UNMEASURED` below.
+
+### `F23A-01-CENSUS-UNMEASURED` — the 16-route quarantine census has no measurement at HEAD (MEDIUM, opened by lane/record-truth)
+
+`f23a_boundary_drive.rs` last changed 2026-07-26; the product it drives changed on
+2026-07-27 (`32a5fc90`). The census result on record therefore predates the fix
+that removed its dominant failure mode. Additionally `WAYLAND_F23A_SELFTEST=refusal`
+(`f23a_boundary_drive.rs:21,41`) substitutes a user-authored control, and no
+evidence exists that it was ever made to fire — an unfired control is an
+unvalidated instrument. Needs: a re-run of the 16-route census on Linux at HEAD
+with the selftest control shown RED and then GREEN. **Do not mark the census done
+on the strength of `F23A-01-H2` being fixed** — they are different measurements.
+
+### `23B-M1` — `--list-sessions` prints its table to STDERR (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-04. Evidence: Phase 23B-01.
+
+`main.rs:1510-1525` prints to stderr, so a caller cannot capture it with a plain
+stdout redirect. The newer `session list` subcommand prints to STDOUT; the older
+flag was deliberately left unchanged to avoid breaking any consumer parsing
+stderr. Consider converging them in a future minor.
+
+### `23B-M2` — `session retry` does not re-derive approval admissibility live (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-04. Evidence: Phase 23B-01.
+
+It re-derives from the durable journal's tool-effect state rather than from a live
+re-evaluation of the current policy gate against the recorded tool intent. Strictly
+conservative — it refuses more than a live re-derivation would — but not the full
+re-derivation F23-02 describes. Closing it needs the engine's policy gate reachable
+from a non-engine context.
+
+### `23B-M3` — provider-attempt events carry no `source`, so operator resolution is unattributable (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-04. Evidence: Phase 23B-01.
+
+`ProviderAttemptFinished` / `ProviderAttemptNotStarted` (and their V2 forms) carry
+no `source` field, unlike `ToolExecutionResolved` which carries
+`ToolResolutionSource::Operator`. When an operator resolves an interrupted provider
+attempt through `wayland-core session reconcile --resolve`, the journal cannot
+record that a human rather than the engine asserted that outcome. Adding a source
+field is a `wcore-protocol`-adjacent journal-model change, deliberately not
+attempted inside 23B.
+
+### `23B-M4` — `--session-id` on an existing session fails instead of resuming, and it hid a self-passing gate (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-04. Evidence: Phase 23B-01.
+
+`wayland-core --session-id <id>` on an ALREADY EXISTING session fails with
+`Session ID '<id>' already exists` rather than resuming it; `--resume <id>` is the
+resuming flag. The failure mode is quiet and expensive: a script that uses
+`--session-id` to "continue" a session never reaches the engine's recovery gate at
+all, so any assertion about recovery behaviour passes vacuously. **This cost
+23B-01's own driver a self-passing gate before it was caught.** Consider either
+resuming on an existing id, or naming `--resume` in the error text.
+
+### `23B-H1` — a cleanly-exited run can write a journal the product cannot read back (HIGH)
+
+Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-05, which states plainly that this
+"should be promoted to a tracked issue, not left as a backlog row". Filed here
+because it was filed nowhere; **promotion to an issue is Sean-reserved.**
+
+`wayland-core --resume <id>` fails with `Error: journal checksum mismatch at
+sequence 16`, while `--list-sessions` still lists the session — the user sees a
+session they cannot re-enter, and every operator verb that reads the journal
+(`show`, `retry`, `export`, `reconcile`, `cancel`) fails identically, so there is
+no repair path. **No crash or kill is involved.** Measured on `hetzner-dsm` at base
+`15971d1b`, release binary: 8/8 and 9/10 reproductions in two bursts under
+concurrent compile load, 0/3 when the host was quiet — intermittent and
+load-sensitive. Journal size at failure ~203 KB vs ~71 KB on the passing shape.
+**CONFIRMED PRE-EXISTING:** reproduced 9/10 against a pristine binary rebuilt from
+`15971d1b` with all Phase 23B sources removed (verified pristine by
+`session --help` exiting non-zero), driving only the engine's own `--resume` path.
+Not a Phase 23B regression. Full evidence:
+`.planning/phases/23B-continuous-agency/23B-01-LIVE-EVIDENCE.md` §3.
+
+**Severity note, carried not applied:** its finder graded it HIGH and said it is
+strictly worse than live Windows UAT defect D2. I agree with HIGH and have not
+changed it. Under the standing severity policy a HIGH must be fixed or disproved
+with executable evidence, so this row should not simply age here.
+
+### `F27-M1` — MCP tool discovery is not consistent across shapes (MEDIUM)
+
+Source: `.planning/phases/27-multimodal-browser-generation-voice/27-GAPS-SUMMARY.md`
+§ lines 93-100 and 254, which state "MEDIUM → BACKLOG per the standing policy" and
+"Did not fix the MEDIUM MCP naming inconsistency — it goes to BACKLOG". Id assigned
+by lane/record-truth (the finding was recorded without one, which is part of why it
+was lost).
+
+The same fixture's tools are announced as `media_generate_image` when its server is
+alone, and as `mcp__f27media__media_generate_image` when a late-added server
+collides with it. A host's view of a tool's name depends on what else is in the
+session. Worse, it is the *config-declared* server that gets renamed, though
+`RemoveMcpServer`'s own doc says configured servers "remain authoritative". Nothing
+is dropped and names stay unique within a session — but Phase 27 Criterion 3 says
+"consistent", and it is not.
+
+### `F27-M2` — seven pre-existing files over the 1000-line guideline (MEDIUM)
+
+Source: `.planning/SEAM-REQUESTS/27.md` SR-27-4. Id assigned by lane/record-truth.
+
+Pre-existing and not introduced by Phase 27, measured with `wc -l`:
+`crates/wcore-config/src/compat.rs` 2060, `crates/wcore-providers/src/gemini.rs` 2321,
+`crates/wcore-protocol/src/events.rs` 2267, `crates/wcore-agent/src/bootstrap.rs` 4154,
+`crates/wcore-protocol/src/contract/generate.rs` 1835,
+`crates/wcore-providers/src/anthropic_shared.rs` 1377,
+`crates/wcore-tools/src/vision_tools.rs` 1150. Deliberately NOT extracted during
+Phase 27 — an unscoped lift out of a provider builder or the contract generator
+while four plans execute against those exact serialized seams is the collision the
+phase serialized them to avoid. Non-blocking.
+
+### `F29-03-08` — surgical-diff whitelist residual (MEDIUM)
+
+Source: `.planning/phases/29-supply-chain-release-integrity/29-03-SUMMARY.md` §250-251,
+which grades it MEDIUM. Not present in this file until now. Recorded so the Phase 29
+residual set is complete; `F29-03-04` and `F29-CEN-06` from the same lane WERE filed
+correctly, so this is a single miss rather than a lane-wide failure.
+
+---
+
+### Cross-lane rows — found dropped by lane/record-truth, owned by other lanes
+
+Filed here because they are dropped and nobody else is filing them. **Their owning
+lanes (24, 26) were active while this ran**, so treat these as records to reconcile
+rather than as this lane's analysis. Severities are as their finders gave them.
+
+- **`F24-01-M1` (MEDIUM)** — scheduled-task restart-on-failure is capped in count and
+  delayed in time, weaker than an SCM recovery policy. Criterion 5 requires the
+  PLATFORM to recover the runtime after a hard kill; 24-01 measured registration and
+  survival but never recovery. Source: `.planning/SEAM-REQUESTS/24.md` SEAM-24-04,
+  evidence `24-01-GATEWAY-CONTRACT.md` §7.
+- **`F24-01-M2` (MEDIUM)** — `ScheduledTaskManager::install_argv` produces
+  `Logon Mode: Interactive only`, so the gateway does not run on a headless or
+  unattended box. Both Unix families are per-user and share this property, so it is
+  symmetric rather than a regression — but it must be documented in the
+  operator-facing install output, which is not yet written. Source: same.
+- **`F24-01-L1` (LOW)** — `templates/gateway/{launchd.plist,systemd.service,windows-service.md}`
+  were never created; the unit text is generated in `wcore_gateway::service` instead.
+  The divergence from the plan should be ratified or reversed deliberately. Source: same.
+- **`F24-J-M1` (MEDIUM)** — Windows elevation. Source:
+  `24-C5-FINISH-SUMMARY.md:273`, `24-C5-JOURNEY-SUMMARY.md:339`.
+- **`F26-02-B` (MEDIUM)** — the 512-item store ceiling refuses 29 of a realistic
+  541-item executable surface and the naive recovery does not work; a working
+  four-invocation recovery exists and is discoverable from the tool's own output.
+  `MAX_EXECUTABLE_FILES` was NOT raised. Source: `26-02-SUMMARY.md:151`.
+- **`F26-02-E` (MEDIUM)** — `desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte`
+  fails with corpus drift; **verified PRE-EXISTING** at merge-base `6df10dab` with
+  byte-identical drift text. The repair is `wcore-contract generate`, which lanes are
+  forbidden to run (release-coordination, Sean-reserved). Source: `26-02-SUMMARY.md:153`.
+
+### Flagged by the checker but NOT dropped — recorded so nobody re-files them
+
+These ids appear inside filing-claim sections and are absent from this file, but
+they are absent **correctly**, because they were FIXED rather than filed. Verified
+by lane/record-truth:
+
+- `F23A-01-H1` — fixed; the seam request's own text says "failed OPEN (fixed as
+  F23A-01-H1)".
+- `F21-02-01`, `F21-02-02`, `F21-02-03` — repaired, and confirmed repaired at HEAD in
+  `21-REVERIFICATION.md` §1.
+
+This is the checker's known false-positive class: **a fixed finding needs no BACKLOG
+row.** It is reported rather than suppressed because suppressing it silently is how
+the original defect got in.
+
+### Second pass — two further cross-lane drops, and four more fixed-not-dropped
+
+Found by re-running the checker after the first filing (the residual set is itself
+evidence the instrument keeps working rather than being satisfied by one pass).
+
+- **`F24-C-M1` (MEDIUM)** — run 2's delivery tally covers 10 of 12 deliveries; the
+  permanently-stalling sink blocks the tick loop so 11 and 12 are never attempted.
+  Its finder's own disposition line reads `BACKLOG — instrument artefact, not a
+  product loss`. Source: `24-C5-JOURNEY-SUMMARY.md`.
+- **`F26-02-D` (LOW)** — dispositioned `was=low now=low disposition=backlog` by its
+  finder and never filed. Source: `26-02-SUMMARY.md`.
+
+Fixed, therefore correctly absent (do not re-file): `F24-J-H2` (HIGH — `--home` was
+a narrower carrier than the env var; FIXED, live-proven), `F24-J-H3` (fixed, Windows
+recovery OBSERVED not asserted), `F26-02-A` (`disposition=fixed`), `F26-04-A`
+(`disposition=fixed`).
+
+### `F30-03-NOOP-SED` — 30-03's falsification gate is a no-op sed, same class as `BL-F30-FORCED-MET-SED` (MEDIUM)
+
+**NEW — found by `.planning/scripts/check-finding-disposition.py` on its first real
+run, not previously reported by any lane.** Filed by lane/record-truth. Severity
+carried from the sibling finding `BL-F30-FORCED-MET-SED`, which the 30-04 lane
+graded MEDIUM for the identical defect; I have not re-graded it.
+
+`30-04-PLAN.md:251`… no — **`30-03-PLAN.md:251`**. The gate breaks an evidence
+reference and asserts the publish path refuses it:
+
+```
+sed 's#evidence/30-02/results.json#evidence/30-02/does-not-exist.json#' \
+  .planning/phases/30-continuous-scorecard-frontier-review/evidence/30-03/claims-register.json \
+  > /tmp/f30-broken-register.json
+```
+
+**`evidence/30-02/results.json` occurs 0 times in `claims-register.json`.** The
+register references `evidence/30-02/{legs.tsv, peer-clones.txt, protocol.json,
+protocol.sha256, verifier-known-good-bad.txt}` — there is no `results.json`. So
+the "broken" register is byte-identical to the good one, and whatever the gate
+observed afterwards says nothing about refusing a broken reference.
+
+This is the **second** instance of the shape in Phase 30 alone, and it was found
+by the instrument built for the first. Both should be corrected together and the
+legs re-run; neither is evidence today. Evidence:
+`.planning/evidence/record-truth/shape2-NEW-finding-30-03.txt`.
+
+**Owned by Phase 30's lane, not by lane/record-truth** — filed here only so it is
+not lost, per the rule this whole section exists to enforce.

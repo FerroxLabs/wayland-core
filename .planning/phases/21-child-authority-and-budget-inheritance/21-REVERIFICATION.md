@@ -471,3 +471,162 @@ turn on Windows.
 ---
 
 _Graded: 2026-07-27 at `ac94b1d5` · Linux (hetzner-dsm) · Verifier: Claude (ferrox-verifier), third grading_
+
+---
+
+# ADDENDUM — 2026-07-29, lane/record-truth
+
+**This addendum does not rewrite anything above it.** The body of this document,
+its frontmatter and its §4 are left exactly as the third grading wrote them.
+Re-writing a prior verification's conclusions from a later lane is a hazard this
+program has already had to correct once; the record of what was believed at
+`ac94b1d5`, and why, is worth more than a tidy document.
+
+**What this addendum establishes: F21-02 is carried NOT MET on a premise that is
+false at HEAD, and the phase was graded before its own work landed.**
+
+Graded at HEAD of `lane/record-truth`, base `ef1d97be`
+(`plan/f20-unified-audit-repair`). Mac-side source measurement only; no build.
+
+## A1. The grading predates the work — measured on commit timestamps
+
+This document's `verified_at_sha` is `ac94b1d5`, committed **2026-07-27
+07:58:42 +0700**. Four commits landed the same day, after it, that build the
+budget request channel:
+
+| SHA | committed (+0700) | subject |
+|---|---|---|
+| `10947402` | 2026-07-27 **08:47:45** | feat(21-02): sub-allocate a narrowed execution envelope to delegated children |
+| `373599ea` | 2026-07-27 **08:54:18** | test(21-02): invert the no-channel canary to assert the channel exists |
+| `d12d7d48` | 2026-07-27 **09:17:17** | test(21): unblind the budget no-channel canary |
+| `d29413c1` | 2026-07-27 **21:07:51** | fix(corpus): grade the budget legs on enforcement, not on channel absence |
+
+The frontmatter's `verified: 2026-07-27T01:30:00Z` is 08:30 +0700 — 17 minutes
+before `10947402`. Either reading puts the grade before the work. **Nothing here
+is a criticism of the grading: it was correct for the tree it read.**
+
+## A2. §4's three measurements, re-measured at HEAD — 1 survives, 2 are false
+
+§4 asserted the budget dimensions are "STILL MERELY UNREQUESTABLE", supported by
+three independent measurements. At HEAD:
+
+1. **SURVIVES.** `begin_active_turn(turn_id, None)` is still the sole production
+   caller — now `engine.rs:6203` (§4 cited 6173). Every other hit is inside
+   `budget_authority.rs`'s own tests. **But this measures the per-turn engine
+   path, not the child-spawn path**, so it no longer supports the conclusion it
+   was used for.
+2. **FALSE.** §4: *"the only `sub_budget(Some(..))` call site in the crate sits
+   inside `#[cfg(test)] mod tests`. Zero production callers pass `Some(..)`."*
+   At HEAD `crates/wcore-budget/src/execution.rs:591` is
+   `self.sub_budget(Some(narrowed))`, in the body of `sub_budget_narrowed`. The
+   first `#[cfg(test)]` in that file is line **964** — line 591 is production.
+3. **FALSE.** §4: *"no `crates/*/src` file forwards a `Some(..)` override into
+   `sub_budget`."* `crates/wcore-agent/src/spawner.rs:1350` and `:1377` forward a
+   caller-supplied `ChildBudgetRequest` into `sub_budget_narrowed`, which
+   forwards `Some(..)` on. The first `#[cfg(test)]` in `spawner.rs` is line
+   **1448** — both callers are production.
+
+## A3. The channel exists, is child-fillable, and cannot widen
+
+- `pub struct ChildBudgetRequest` — `crates/wcore-types/src/spawner.rs:555`;
+  `pub budget: Option<ChildBudgetRequest>` on `ForkOverrides` at `:597`.
+- `pub fn sub_budget_narrowed` — `crates/wcore-budget/src/execution.rs:586`.
+- **Untrusted request surface:** `crates/wcore-tools/src/delegate.rs:105`
+  `fn parse_budget(input: &Value) -> Option<ChildBudgetRequest>` — the delegating
+  model fills it. This is precisely the "child-fillable budget field" §4 and the
+  `gaps:` block say no shipped surface carries.
+- **Monotonic by construction:** `sub_budget_narrowed` intersects the request
+  with `self.effective_budget()` before passing it down, so a larger request
+  cannot amplify — the worst an adversarial delegator achieves is
+  under-allocating its own descendant.
+
+## A4. The live evidence the gaps block says cannot exist
+
+`21-02-VACUITY-SUMMARY.md` §3.1, from `crates/wcore-cli/tests/f21_02_child_budget_live.rs`
+on `hetzner-dsm` — two runs of real `wayland-core acp serve`, hermetic home,
+wiremock provider, differing **only** by the `budget` object the parent's own
+model put on its `Delegate` call:
+
+```
+F21-02 LIVE: control child served 8 turns, narrowed child served 3 turns
+under a 900-token sub-allocation of a 100000-token root.
+test result: ok. 10 passed; 0 failed; finished in 4.71s
+```
+
+The child charges 400 input tokens a turn, was permitted two (800) and **refused
+the third** (1200 > 900) while the 100 000-token root was nowhere near binding.
+The control child ran its full 8-turn script from the same root, which is what
+makes the narrowed number attributable to the sub-allocation rather than to a
+harness that never reached the seam.
+
+**The gate is proven red-able**, which is the part that matters here: reverting
+the spawn seam to unconditional `sub_budget(None)` serves the narrowed child
+**8** turns and the differential collapses (§3.2 of that document, with four
+further mutation controls).
+
+## A5. §4's own instrument was blind, and has since been repaired
+
+§4's third measurement leaned on the corpus canary. `21-02-VACUITY-SUMMARY.md` §5
+finding **F-1 (HIGH)** records that `budget_no_channel_canary` grepped the literal
+`sub_budget(Some(` while excluding `crates/wcore-budget/` — so once the caller
+moved to `sub_budget_narrowed(...)` it reported "NO-CHANNEL canary intact"
+against a live, LLM-reachable channel. That lane deliberately did not edit it,
+calling it a verifier's decision.
+
+**It has since been repaired:** `d29413c1` ("grade the budget legs on enforcement,
+not on channel absence", +218/−42 across the corpus). `budget_no_channel_canary`
+returns **0 hits** in `crates/wcore-cli/tests/child_authority_corpus/surfaces.rs`
+at HEAD. F-1 is CLOSED.
+
+The replacement canary `crates/wcore-agent/tests/f21_02_no_channel_canary.rs` is
+inverted: it asserts the channel EXISTS and is resolved by intersection, reads
+only `crates/*/src`, and asserts its own crawl collected >100 files so a broken
+walk cannot make it vacuous.
+
+## A6. Re-grade
+
+**F21-02 — NOT MET ⇒ MET WITH STATED EXCEPTIONS.**
+
+The requirement is *"nested children cannot exceed parent depth, fan-out,
+concurrency, token, cost, or time reservations."* Its NOT MET rested entirely on
+the vacuity argument — that the property held because nothing could ask. Nothing
+can ask is no longer true; something can ask, the ask is resolved by intersection
+against the caps that bind the parent, and a child that tries to spend past the
+result is refused live on the shipped binary with a differential control.
+
+**Stated exceptions, carried honestly and taken from the implementing lane's own
+"what I am not claiming":**
+
+1. **Only the token dimension is live-driven.** Fan-out, time, cost and depth now
+   have a request channel and the same intersection, but are exercised
+   **in-process only**. The channel makes them obtainable; nobody has obtained
+   them.
+2. **The widening direction was already unamplifiable**, so a test that "refuses a
+   widening request" is largely theatre. The narrowing differential is the leg
+   that cannot pass vacuously, and it is the one that was built.
+3. **Linux only.** No Windows evidence exists and none is inherited.
+4. **`Spawn` and `spawn_host_child` cannot carry a budget request** — `Spawn`
+   takes no `ForkOverrides` and `spawn_host_child` hardcodes
+   `ForkOverrides::default()`. `Delegate` is the only surface (F-3, INFO).
+
+**Unchanged by this addendum: SC3 and F21-04 remain NOT MET**, F21-03 remains
+FENCED, and **the phase goal remains NOT ACHIEVED.** This addendum moves one
+requirement on measurement; it does not move the phase. The two open questions in
+§8 items 1 and 3 are untouched. §8 item 2 — *"a recorded decision on whether a
+dimension with no request channel may close on in-process enforcement plus a
+red-able canary"* — is now **moot**: the dimension has a request channel, so the
+question it posed no longer arises.
+
+## A7. What I did not do
+
+- No build, no test execution. Every claim above is a source or git measurement
+  on the Mac, or a quotation of a number another lane measured on `hetzner-dsm`
+  and recorded with its command. **I did not re-run `f21_02_child_budget_live.rs`
+  myself** — the 8-vs-3 figure is `21-02-VACUITY-SUMMARY.md`'s, attributed, not
+  re-measured here.
+- I did not touch the frontmatter. A reader consuming `requirements:` will still
+  see `F21-02 NOT MET`; **the machine-readable header and this addendum disagree
+  on purpose**, because silently editing a prior verifier's frontmatter is the
+  hazard named at the top. Whoever next re-grades the phase should reconcile it.
+
+_Addendum: 2026-07-29 · base `ef1d97be` · lane/record-truth · source measurement only_
