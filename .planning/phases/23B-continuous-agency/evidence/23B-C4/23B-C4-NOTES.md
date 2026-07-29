@@ -87,19 +87,48 @@ surface, no exit report.
 
 ---
 
-## M2 — what I still need to establish
+## M2 — questions from M0, now answered
 
-- [ ] Is `/cost` invariant across harnesses (the brief's claim)? Find the finding, then
-      measure the shipped binary myself.
-- [ ] `compact` surface: what does the user see under token pressure? `/compact`,
-      `compact_state.rs`, auto-compaction trigger.
-- [ ] `TokenPressure` — re-derive the "0 refs" claim with a live instrument.
-- [ ] `wcore-observability/src/cache.rs` — unexamined.
-- [ ] `wcore-pricing` crate exists — how does cost get computed, and can it vary?
+- [x] **Is the cost observable invariant?** No — but it was **unlabelled**, which is worse
+      in a different way. `resolve_turn_cost` reports `priced = true` for a
+      `ProviderCompat` family-rate fallback exactly as it does for a catalog row.
+      Measured live: `ollama:smollm2:135m`, a LOCAL model, billed **$0.0756 at Anthropic's
+      rate**, with the engine's own log saying
+      `W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic`.
+      → finding **C4-F1**, fixed by recording `CostSource` and grading `CostTruth::Estimated`.
+      Variance itself is fine: two live sessions gave `$0.0756` and `$0.06165`, and the
+      engine test asserts a 100× workload costs 100.0 ± 0.01×.
+- [x] **Token pressure concept.** `TokenPressure` as a symbol genuinely has 0 refs
+      (control: `CompactConfig` → 19 files in the same invocation), but the CONCEPT lives
+      in `compact/auto.rs` (`should_autocompact`), `compact/emergency.rs`
+      (`is_at_emergency_limit`) and `CompactState::last_real_input_tokens`. Both thresholds
+      were computed inline inside their predicates; now extracted as
+      `auto::autocompact_threshold` / `emergency::emergency_limit` so the number reported
+      cannot drift from the number enforced.
+- [x] **`wcore-observability/src/cache.rs`** — it is the breakpoint-marking helper
+      (`mark_cache_boundaries`), request-side. Not an observability surface; nothing to
+      expose there.
+- [x] **`wcore-pricing`** already has cache-aware pricing
+      (`estimate_cost_with_cache_status_resolved`) and a `priced` flag. The gap was that
+      nothing aggregated or surfaced it, and that the flag conflates two provenances.
 
-## M3 — design position (provisional, will revise)
+## M2b — a second gap found live
 
-Build ONE operator-reachable surface that aggregates the four clauses, rather than four
-separate half-surfaces. Candidate: a session-scoped `CacheCompactionLedger` accumulated in
-the engine + a `/cache` slash command and a `wayland-core cache-report` CLI verb reading
-it. Drive it end to end from the shipped binary on hetzner.
+Round-trip 1 arrived with **no invalidation cause**. `CacheBreakDetector::compute_diagnostic`
+returns `Healthy { hit_rate: 0.0 }` for the first request (no previous turn to compare), so
+`CacheBreakCause::FirstRequest` is unreachable from the engine — the one round-trip
+guaranteed to be a miss was the one nothing explained. → finding **C4-F2**, fixed narrowly
+(`NoMarker` only when the opening round-trip neither read nor wrote cache).
+
+## M3 — what was built
+
+A session-scoped `CacheLedger` in `wcore-agent`, flushed after every record to
+`<wayland home>/cache-ledger/<session>.json`, plus `wayland-core cache
+{report|list|show|verify}` reading it without an engine. Driven end to end from the shipped
+binary on hetzner: see `23B-C4-LIVE-EVIDENCE.md`. `cache verify` exited **7** on the live
+ledger and **8** on an empty store — both observed, unpiped.
+
+Deviation from the M3 sketch: **no `/cache` slash command.** The slash `SlashHandler` trait
+is `&self` and stateless, so reaching a live engine's ledger through it needs shared
+interior state; the CLI verb reads the same file with none of that, and is the path I could
+prove end to end. Recorded as a deliberate omission, not an oversight.
