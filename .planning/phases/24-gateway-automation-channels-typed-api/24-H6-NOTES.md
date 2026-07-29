@@ -53,3 +53,42 @@ that the replay guard SURVIVED it), not deleted, so a regression reddens again.
 
 **Still to do:** live run of the unmodified restart probe against the fixed release binary on
 hetzner; expect `verdict=PASS gap_served_on=incremental`.
+
+---
+
+## T+~110min — LIVE RUN 1, restart probe PASS
+
+`hetzner-dsm`, `/root/wayland-24-h6`, `wayland-core 0.12.25`, sha256
+`d618d3766db2f30eaf75f68a0865b15ac5d831a6aec40189d49f8a05f610f364`, `--json-stream`.
+
+`INBOUND MATRIX RED legs=36/42 failed=0 not_measured=6 accounted=42/42
+probe_failed=false restart_verdict=PASS` — RED only because email's six legs remain
+NOT MEASURED (pre-existing SMTP/webpki-roots blocker, untouched by me). **failed=0.**
+
+**Restart probe 6/6 PASS** (was 5/6 with the leg FAILing at LOSS before the fix):
+- `restarted-binary-resyncs`: `sync_total 280 -> 282`, **`initial_sync_total 1 -> 1`** — the
+  restarted process issued NO initial sync. It resumed.
+- `gap-event-was-served-to-the-restarted-process`: sync **281, `initial:false`**, carried
+  `$f240d3685degap` — **on an incremental sync**. The adapter ASKED for the window it missed.
+- `gap-message-survives-the-restart`: **verdict=PASS arrivals=1**.
+- `gap_arrivals=1` exactly — not 2. No duplicate.
+
+**From the fixture's own journal, another OS process, with known-positive controls in the
+same extraction** (`journal-mechanism.txt`, 282 `sync.close` records):
+```
+total initial syncs in the WHOLE run (both incarnations): 1
+PRE  $f240d3685depre : initial_syncs_serving=0  incremental_syncs_serving=1
+GAP  $f240d3685degap : initial_syncs_serving=0  incremental_syncs_serving=1
+POST $f240d3685depost: initial_syncs_serving=0  incremental_syncs_serving=1
+```
+The finding lane measured the GAP row as `initial=1 incremental=0` with arrivals=0. It is
+now `initial=0 incremental=1` with arrivals=1. Same instrument, opposite result.
+
+**Operator-visible, from the product's own logs in two incarnations:**
+- `core.log`: `INFO no persisted /sync cursor (first start for this account); seeding from an initial sync — existing room backlog will NOT be replayed`
+- `core-restarted.log`: `INFO resumed persisted /sync cursor; messages delivered while this process was down will be served`
+- on disk: `home/channel-state/matrix-5fbec553f4d71022.since` = `s18`, **beside**
+  `imap-*.uid` and `telegram-*.offset` — the project's existing mechanism, not a second one.
+
+**Steady state, counted, live:** `matrix/steady 3/3 [1,1,1]` after 30s quiet; all six
+measurable adapters 3/3. Matrix 6/6, signal 6/6.

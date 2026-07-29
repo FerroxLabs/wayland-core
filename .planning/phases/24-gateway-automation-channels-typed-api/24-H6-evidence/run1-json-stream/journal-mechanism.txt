@@ -1,0 +1,5 @@
+sync.close records in the fixture's own journal (another OS process): 282
+total initial syncs in the WHOLE run (both incarnations): 1
+PRE  (before the restart) $f240d3685depre: initial_syncs_serving=0  incremental_syncs_serving=1
+GAP  (delivered while DOWN) $f240d3685degap: initial_syncs_serving=0  incremental_syncs_serving=1
+POST (after the restart) $f240d3685depost: initial_syncs_serving=0  incremental_syncs_serving=1

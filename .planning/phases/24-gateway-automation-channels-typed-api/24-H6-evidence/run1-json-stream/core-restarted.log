@@ -1,0 +1,127 @@
+[2m2026-07-29T04:08:02.430453Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T04:08:02.430480Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T04:08:02.432192Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T04:08:02.479086Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3email [3mplatform[0m[2m=[0memail
+[2m2026-07-29T04:08:02.479123Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3matrix [3mplatform[0m[2m=[0mmatrix
+[2m2026-07-29T04:08:02.479143Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3signal [3mplatform[0m[2m=[0msignal
+[2m2026-07-29T04:08:02.479166Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3slack [3mplatform[0m[2m=[0mslack
+[2m2026-07-29T04:08:02.479186Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3sms [3mplatform[0m[2m=[0msms
+[2m2026-07-29T04:08:02.479211Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3telegram [3mplatform[0m[2m=[0mtelegram
+[2m2026-07-29T04:08:02.479243Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3whatsapp [3mplatform[0m[2m=[0mwhatsapp
+[2m2026-07-29T04:08:02.479247Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m7
+[2m2026-07-29T04:08:02.479405Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T04:08:03.334056Z[0m [32m INFO[0m resumed persisted /sync cursor; messages delivered while this process was down will be served
+[2m2026-07-29T04:08:03.576804Z[0m [34mDEBUG[0m [3mstderr[0m[2m=[0mSIGFIX_READY port=45123 pid=1748215
+[2m2026-07-29T04:08:03.621773Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T04:08:03.621791Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T04:08:03.623015Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T04:08:03.623664Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T04:08:03.870466Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-29T04:08:03.870518Z[0m [32m INFO[0m inbound webhook host listening [3mbind[0m[2m=[0m127.0.0.1:18787
+{"type":"ready","version":"0.12.25","session_id":"28ad6ca49f3d","capabilities":{"tool_approval":true,"thinking":false,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54","source_inputs_digest":"sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785298083879,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785298083879,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"bubblewrap","writable_roots":["/root/wayland-24-h6","/tmp/wayland-scratch-u0/contained"],"readable_roots":["/root/.cargo/bin","/root/.rustup","/root/wayland-24-h6","/tmp/wayland-scratch-u0/contained"],"capabilities":[]}}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"declared"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"configured"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"constructed"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"ready"}
+{"type":"capability_activation","capability":"learned_policy","stage":"declared"}
+{"type":"capability_activation","capability":"learned_policy","stage":"unavailable","reason":"runtime_path_unwired"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"declared"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"declared"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"ready"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"ready"}
+[2m2026-07-29T04:08:05.325548Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:07.328322Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:09.332347Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:11.336274Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:13.340223Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:15.344220Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:17.347224Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:19.350916Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:21.355204Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:23.358801Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:25.362879Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:27.366502Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:29.370325Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:31.374503Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:33.378491Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:35.381449Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:37.385406Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:39.389284Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:41.393475Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:43.397512Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:45.400793Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:47.404701Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:49.408529Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:51.411953Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:53.414991Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:55.418035Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:57.421115Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:08:59.423954Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:01.428077Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:03.432205Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:05.436114Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:07.439805Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:09.442616Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:11.446105Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:13.449649Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:15.453353Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:17.456438Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:19.459935Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:21.463828Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:23.467728Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:25.471567Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:27.474318Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:29.478022Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:31.481874Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:33.484901Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:35.487809Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:37.491704Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:39.495289Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:41.499429Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:43.503080Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:45.506967Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:47.510623Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:49.513418Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:51.516470Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:53.519846Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:55.523795Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:57.527153Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:09:59.529912Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:01.533521Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:03.536369Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:05.539313Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:07.542538Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:09.545622Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:11.548561Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:13.551653Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:15.554647Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:17.558440Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:19.562085Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:21.565998Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:23.569692Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:25.573192Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:27.576643Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:29.580065Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:31.584224Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:33.587417Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:35.590938Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:37.594455Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:39.598143Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:41.601271Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
+[2m2026-07-29T04:10:43.604628Z[0m [33m WARN[0m imap poll iteration failed; will retry [3merror[0m[2m=[0mimap transport: connect localhost:35335: Connection refused (os error 111)
