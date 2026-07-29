@@ -82,10 +82,29 @@ impl BrowserLiveness {
     }
 }
 
-/// The Camoufox sidecar program the supervisor would spawn — the same
-/// resolution `SupervisorConfig::local_camoufox` performs.
-fn camoufox_program() -> String {
-    std::env::var("WAYLAND_CAMOUFOX_BIN").unwrap_or_else(|_| "camofox-browser".to_string())
+/// The Camoufox sidecar program the supervisor would spawn, **asked of the
+/// supervisor's own production config** rather than re-derived here.
+///
+/// This used to be a second copy of `SupervisorConfig::local_camoufox`'s
+/// resolution — the same `WAYLAND_CAMOUFOX_BIN`-or-`"camofox-browser"`
+/// expression, written out twice, with a docstring *claiming* the two agreed
+/// and nothing enforcing it. That claim is the whole probe: if the probe
+/// resolves a different program than the supervisor spawns, the flag it
+/// publishes is about a program nobody runs, and `27-C2(b)` is back in both
+/// directions —
+///
+/// * probe finds the stale name, supervisor spawns the new one ⇒ advertise
+///   `true`, then die at first use, which is the original defect verbatim;
+/// * probe finds the new name absent while the supervisor would have spawned
+///   the installed stale one ⇒ withdraw a **working** capability, which the
+///   `Indeterminate` variant exists specifically to prevent.
+///
+/// Deriving it from the config makes that drift unrepresentable rather than
+/// merely tested-for. `None` is meaningful and is not a fallback to a guess:
+/// the supervisor documents it as observe-only mode, in which `ensure_ready`
+/// spawns nothing, so there is no binary for this probe to look for either.
+fn camoufox_program(cfg: &crate::supervisor::SupervisorConfig) -> Option<&str> {
+    cfg.sidecar_program.as_deref()
 }
 
 /// Does `program` resolve to an executable? PATHEXT-aware on Windows via
@@ -128,19 +147,26 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
     // Camoufox — the only backend in the default shipped build.
     #[cfg_attr(feature = "chromium", allow(unreachable_code))]
     {
-        let program = camoufox_program();
-        if program_resolves(&program) {
-            return BrowserLiveness::Ready {
-                via: "camoufox-binary",
-            };
+        // Build the supervisor's real production config ONCE and read both the
+        // program and the healthcheck URL out of it, so the probe cannot
+        // disagree with the thing it is predicting. See `camoufox_program`.
+        let cfg = crate::supervisor::SupervisorConfig::local_camoufox(camoufox_base_url);
+
+        if let Some(program) = camoufox_program(&cfg) {
+            if program_resolves(program) {
+                return BrowserLiveness::Ready {
+                    via: "camoufox-binary",
+                };
+            }
         }
 
         // No local binary, but an externally managed sidecar (e.g. one the
         // desktop app launched) is a real, working deployment. This is the
-        // same first check `BrowserSupervisor::ensure_ready` makes.
-        let supervisor = crate::supervisor::BrowserSupervisor::with_config(
-            crate::supervisor::SupervisorConfig::local_camoufox(camoufox_base_url),
-        );
+        // same first check `BrowserSupervisor::ensure_ready` makes — and now
+        // literally against the same config value it makes it against.
+        let healthcheck_url = cfg.healthcheck_url.clone();
+        let program = camoufox_program(&cfg).map(str::to_owned);
+        let supervisor = crate::supervisor::BrowserSupervisor::with_config(cfg);
         if supervisor
             .healthcheck(Duration::from_millis(500))
             .await
@@ -151,11 +177,23 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
             };
         }
 
-        BrowserLiveness::Unavailable(Unavailable {
-            reason: format!(
+        // Report the URL the supervisor would actually poll, not a URL
+        // reconstructed here — `local_camoufox` trims a trailing slash before
+        // appending `/health`, so a caller passing `".../"` previously got a
+        // remedy naming `...//health`, an address nothing serves.
+        let reason = match program.as_deref() {
+            Some(program) => format!(
                 "no browser backend can start: `{program}` does not resolve on PATH and no \
-                 sidecar answered {camoufox_base_url}/health"
+                 sidecar answered {healthcheck_url}"
             ),
+            None => format!(
+                "no browser backend can start: the supervisor is in observe-only mode (no \
+                 sidecar command configured) and no externally managed sidecar answered \
+                 {healthcheck_url}"
+            ),
+        };
+        BrowserLiveness::Unavailable(Unavailable {
+            reason,
             remedy: "install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the \
                      executable, or start the Camoufox sidecar before the session"
                 .to_string(),
@@ -222,13 +260,137 @@ mod tests {
         let key = "WAYLAND_CAMOUFOX_BIN";
         let prior = std::env::var_os(key);
         unsafe { std::env::set_var(key, "/opt/custom/camoufox") };
-        assert_eq!(camoufox_program(), "/opt/custom/camoufox");
+        let cfg = crate::supervisor::SupervisorConfig::local_camoufox("http://127.0.0.1:1");
+        assert_eq!(camoufox_program(&cfg), Some("/opt/custom/camoufox"));
         unsafe {
             match prior {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
             }
         }
+    }
+
+    /// **The drift guard.** `27-C2(b)` was closed by making the advertised flag
+    /// depend on a probe. The probe is only worth the flag if it predicts what
+    /// the supervisor *actually does*, and the original version re-derived the
+    /// program name in a second copy of `local_camoufox`'s expression — two
+    /// literals, a docstring asserting they agreed, and nothing enforcing it.
+    ///
+    /// This is modelled on the guard that closed clause (a): rather than compare
+    /// the probe's string to the supervisor's string (which passes just as
+    /// happily when *both* have drifted away from what ships), it round-trips
+    /// through the **real production constructor** and asserts the probe's own
+    /// public verdict flips with it. `local_camoufox` is the exact call
+    /// `adapter.rs:51` makes on the engine's startup path.
+    ///
+    /// Both directions are asserted in one test, because a same-string check is
+    /// satisfied by a probe that is stuck on either answer.
+    #[tokio::test]
+    #[serial_test::serial(camoufox_bin_env)]
+    #[cfg(not(any(feature = "chromium", feature = "browserbase")))]
+    async fn the_probe_reads_the_program_out_of_the_supervisors_own_config() {
+        let key = "WAYLAND_CAMOUFOX_BIN";
+        let prior = std::env::var_os(key);
+
+        // Positive arm. Something the supervisor could really spawn. `which`
+        // takes an absolute path as given and never executes it, so the running
+        // test binary is a valid stand-in for an installed sidecar.
+        let real = std::env::current_exe().expect("resolve this test binary");
+        unsafe { std::env::set_var(key, &real) };
+        let live_cfg = crate::supervisor::SupervisorConfig::local_camoufox("http://127.0.0.1:1");
+        let live_program = camoufox_program(&live_cfg).map(str::to_owned);
+        let live_verdict = probe("http://127.0.0.1:1").await;
+
+        // Negative arm. Same code path, same URL; only the program is dead.
+        unsafe { std::env::set_var(key, "wcore-browser-drift-guard-no-such-program") };
+        let dead_cfg = crate::supervisor::SupervisorConfig::local_camoufox("http://127.0.0.1:1");
+        let dead_program = camoufox_program(&dead_cfg).map(str::to_owned);
+        let dead_verdict = probe("http://127.0.0.1:1").await;
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        // 1. The supervisor's production config is what decides, and it moved.
+        //    If these are equal the arms are not different experiments and
+        //    everything below would be measuring one state twice.
+        assert_ne!(
+            live_program, dead_program,
+            "the two arms produced the same sidecar program, so this test compares a \
+             state with itself"
+        );
+        assert_eq!(
+            live_program.as_deref(),
+            Some(real.to_str().expect("test binary path is UTF-8")),
+            "the probe did not read the program the supervisor would spawn — it is \
+             predicting a different binary than `ensure_ready` launches, which is \
+             27-C2(b) with an extra step"
+        );
+
+        // 2. The probe's public verdict tracks it, in BOTH directions. A stuck
+        //    probe fails one of these two whichever answer it is stuck on.
+        assert!(
+            !live_verdict.should_narrow(),
+            "the supervisor would spawn `{live_program:?}`, which resolves, yet the probe \
+             withdrew the capability: {live_verdict:?}"
+        );
+        assert!(
+            dead_verdict.should_narrow(),
+            "the supervisor would spawn `{dead_program:?}`, which cannot resolve, and no \
+             sidecar answers port 1, yet the probe kept advertising: {dead_verdict:?}"
+        );
+
+        // 3. The reason names the program the SUPERVISOR would spawn and the
+        //    URL it would poll. This is the half a string-compare cannot reach:
+        //    an operator acts on this text, so a reason quoting a binary the
+        //    engine never launches sends them to fix the wrong thing.
+        let u = dead_verdict
+            .unavailable()
+            .expect("Unavailable carries detail");
+        assert!(
+            u.reason
+                .contains("wcore-browser-drift-guard-no-such-program"),
+            "reason does not name the supervisor's own program: {}",
+            u.reason
+        );
+        assert_eq!(
+            dead_cfg.healthcheck_url, "http://127.0.0.1:1/health",
+            "the config's healthcheck URL is not what this test believes it is"
+        );
+        assert!(
+            u.reason.contains(&dead_cfg.healthcheck_url),
+            "reason does not name the URL the supervisor would poll ({}): {}",
+            dead_cfg.healthcheck_url,
+            u.reason
+        );
+    }
+
+    /// Observe-only mode is a real supported configuration (`sidecar_program:
+    /// None` — the supervisor spawns nothing and an external owner runs the
+    /// sidecar). The probe must then fall through to the healthcheck instead of
+    /// looking for a binary, and must say so. Before the config became the
+    /// single source of truth this state was unrepresentable in the probe, which
+    /// would have kept hunting a `"camofox-browser"` the supervisor had been
+    /// told not to launch.
+    #[test]
+    fn observe_only_mode_has_no_binary_to_look_for() {
+        let cfg = crate::supervisor::SupervisorConfig::default();
+        assert_eq!(
+            cfg.sidecar_program, None,
+            "the default is documented as observe-only; this test's premise is gone"
+        );
+        assert_eq!(camoufox_program(&cfg), None);
+        // And the production constructor is genuinely different from the
+        // default, or the assertion above would be describing the shipped path.
+        let prod = crate::supervisor::SupervisorConfig::local_camoufox("http://127.0.0.1:1");
+        assert!(
+            camoufox_program(&prod).is_some(),
+            "the production config names no sidecar command; the engine would never \
+             start a browser"
+        );
     }
 
     /// End-to-end on the default feature set: a program that cannot exist plus
