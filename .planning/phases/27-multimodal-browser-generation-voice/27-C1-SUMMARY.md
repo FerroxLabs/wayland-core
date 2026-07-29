@@ -292,3 +292,156 @@ git diff "$BASE" -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs   #
 
 No protocol seam, no contract change, nothing for the orchestrator to
 serialize.
+
+---
+
+# RECONCILIATION — merged integration `fc7ecafb`, re-proved on the merged code
+
+Integration moved `5457710e` → `fc7ecafb` during this lane. `lane/wal-followups`
+(`29d1c882`, `76474a0d`) consolidated five divergent UNC checks onto
+`crates/wcore-config/src/network_path.rs` and landed in **both** files my
+consolidation centres on. Merged with `git merge`, **not** rebase (LANE-BRIEF
+§0). Merge commit `751a2955`; reconciled HEAD `8a85913c`.
+
+`git merge-tree --write-tree` against the tip confirmed the conflict set before
+touching anything: exactly `media_intake.rs` and `vision_tools.rs`, 3 hunks each.
+
+## What I dropped, because theirs was better
+
+**My hand-rolled `media_intake::is_network_path` is gone.** I had strengthened
+the base version by combining a `Component::Prefix` UNC match with a `\\` / `//`
+string match. Their module's own defect table names `media_intake` as one of the
+five disagreeing copies, and the row that matters is:
+
+| input | `media_intake` (incl. mine) | `wcore_config::network_path` |
+|---|---|---|
+| `\\?\C:\Users\x` — verbatim path to a **local disk** | "network" | not network |
+
+**My version carried that defect verbatim**, because I kept the `\\` string
+prefix check. Their `has_unc_prefix` explicitly excludes `?` and `.` after the
+double separator. `media_intake::is_unc_path` now delegates to theirs, and
+their test
+`a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path`
+passes on the merged tree — the input is **still refused**, as
+`DeviceOrVerbatimPath`, which is the accurate reason. No previously-refused
+input is now accepted.
+
+I also agree with their cross-audit's reasoning and did not attempt a kernel
+check: touching an attacker's UNC name to classify it is the dial-out the guard
+exists to prevent. The syntactic answer is the complete answer to the question
+being asked.
+
+## What survived from mine
+
+All of it, unchanged in behaviour: six surfaces reaching
+`media_intake::admit_open`; `open_once` private so the one-path property stays
+compiler-enforced; the `openat(O_NOFOLLOW)` + `O_NONBLOCK` walk covering all six
+rather than only images; the extension-vs-bytes cross-check on `vision_analyze`;
+the `RIFF` WAV/WebP fix; and `transcribe_audio` no longer reading deny-listed
+credential paths.
+
+## One place the merge made the result better than either lane's
+
+Their `vision_tools::is_unc_path` is now **dead in this tree** and was removed.
+`load_local_image` delegates to the chokepoint, so the UNC guard is applied
+**once**, inside `admit_open`, still through their shared function — rather than
+twice (once in `vision_tools`, once in `media_intake`). Their property is
+strictly better served by the merged shape than by either branch alone.
+
+Nothing was dropped silently: a comment at the old `vision_tools` site records
+that `is_unc_path` and `open_local_image` moved into the chokepoint and why.
+
+## No test from either lane was lost
+
+Their `vision_tools::unc_guard_flags_unc_on_every_platform` lost its call site.
+It was folded with my relocated `is_network_path_flags_unc_only` into a single
+`media_intake::tests::unc_guard_flags_unc_on_every_platform` asserting the
+**union**, not the intersection — including their `\\?\C:\` verbatim-local case.
+Their two `media_intake` test additions were taken as-is (their
+`refuses_a_unc_target…` edit is a superset of mine). Merged-tree run:
+
+```
+test media_intake::tests::a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path ... ok
+test media_intake::tests::refuses_a_unc_target_without_touching_the_filesystem ... ok
+test media_intake::tests::unc_guard_flags_unc_on_every_platform ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 987 filtered out
+```
+
+## Re-proof on the merged code — all four artefacts
+
+**1. The four known-negatives are still RED at the NEW base `fc7ecafb`.**
+`wal-followups` did not cover them; the HIGH is live at the current integration
+tip. (`evidence/27-c1/BASE-fc7ecafb-RED.txt`)
+
+```
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+    an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces
+    audio_refuses_a_denylisted_credential_path
+    audio_refuses_a_symlinked_leaf
+    audio_refuses_a_traversal_segment
+```
+
+Base `fc7ecafb` still returns `("audio/wav", …)` for a file under a deny-listed
+credential path. Merged HEAD: `14 passed; 0 failed; 0 ignored; 0 filtered out`.
+
+**2. The `3 × cap` bound mutation still reddens BOTH surfaces on the merged
+tree** (`evidence/27-c1/MUTATION-cap-removed-merged.txt`):
+
+```
+--- MUTATED (stat-side cap deleted from admit_open) ---
+image_…_from_the_stat_not_from_the_read FAILED — got: Image too large …: 20971521 bytes
+audio_…_from_the_stat_not_from_the_read FAILED — got: Audio too large: 26214401 bytes
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Both mutated numbers are again exactly `cap + 1` — the value my pre-repair
+fixture searched for. The instrument repair survived the merge, which is
+precisely where it could have quietly come back.
+
+**3. The one-path gate is still non-vacuous across the merge**
+(`evidence/27-c1/GATE-one-path-merged.txt`):
+
+```
+BASE fc7ecafb : GATE: FAIL   BASE_RC=1
+MERGED HEAD   : GATE: PASS   HEAD_RC=0
+```
+
+At `fc7ecafb` it still fails with the right diagnosis — 3 surfaces opening their
+own files, 1 of 6 reaching the chokepoint, `open_once` absent, 2 magic tables.
+
+**4. All six live audio refusals reproduce off the wire on the merged binary**
+(`evidence/27-c1/LIVE-OBS-RAW-merged.log`, `wayland-core 0.12.25`):
+
+| Observation | `tool_result` on the wire |
+|---|---|
+| valid WAV | `groq transcription returned HTTP 401` — **ADMITTED** |
+| **deny-listed** | `Invalid path: path targets a denied system location: ".../.ssh/id_rsa"` |
+| traversal | `Invalid path: path contains traversal (..)` |
+| symlinked leaf | `Cannot open audio path component …: Too many levels of symbolic links (os error 40)` |
+| 3× cap sparse | `Audio too large: 78643200 bytes (limit 26214400 bytes)` |
+| relative | `Invalid path: path must be absolute` |
+
+Composer unchanged: `valid-image.png` → `IMAGE part media_type=image/png
+data_len=100`; both refusals reach the user as `engine_error` with **0 captured
+provider requests**. Secret sweep over the whole evidence tree: `0`.
+
+## Merged-tree gate state
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy -p wcore-tools -p wcore-agent -p wcore-cli --all-targets --all-features -- -D warnings` | **clean, exit 0** |
+| `cargo test -p wcore-tools` | **1004 passed; 0 failed; 3 ignored; 0 filtered out** (was 998 pre-merge; +6 from both lanes' new tests) |
+| `media_intake_unification_test` | **14 passed; 0 failed; 0 ignored; 0 filtered out** |
+| `cargo test -p wcore-cli --lib` | **1858 passed; 0 failed; 1 ignored** |
+| `cargo test -p wcore-agent --lib channel_media` | **14 passed; 0 failed** |
+| `cargo test -p wcore-config --lib network_path` | **6 passed; 0 failed** — their module, unbroken |
+| `cargo build --release -p wcore-cli` | exit 0 |
+
+Shared-file fence re-checked against the **new** merge-base: `git diff
+$(git merge-base HEAD gh/plan/f20-unified-audit-repair) -- crates/wcore-cli/src/lib.rs
+crates/wcore-cli/src/main.rs` → empty.
+
+`cargo test -p wcore-agent --lib` remains the pre-existing contention flake
+(§8); noted by the coordinator as not mine to take, along with the
+`video_analyze` unbounded frame read.
