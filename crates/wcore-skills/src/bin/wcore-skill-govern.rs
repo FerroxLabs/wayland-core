@@ -115,49 +115,72 @@ fn is_auto_drafted(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Render one **self-contained** line per skill, each carrying its own status.
+///
+/// The line format is deliberate, not cosmetic. The obvious rendering — skills in one
+/// section and revocations in another — cannot be checked without an unbound pair of
+/// substring searches ("output mentions the name AND mentions revoked"), and that pair is
+/// true whenever *any* row is revoked, regardless of which. A repaired matcher in
+/// `wcore-eval-scenarios/tests/f23a_boundary_drive.rs` demonstrated exactly this defect in
+/// this subsystem: on unchanged bytes the unbound form reported a quarantine tag while
+/// holding a model-visible, user-authored skill.
+///
+/// So every fact about a skill is emitted on that skill's own line, as `key=value` fields
+/// led by the name. A checker binds to one line and reads that line's own `status=`, and
+/// cannot borrow a neighbouring row's status. `status_field` in `tests/govern_cli_drive.rs`
+/// is the matcher this format exists to make writable, with the three-assertion self-test.
+fn print_skill_line(name: &str, status: &str, fields: &[(&str, String)]) {
+    let mut line = format!("  {name}  status={status}");
+    for (k, v) in fields {
+        line.push_str(&format!("  {k}={v}"));
+    }
+    println!("{line}");
+}
+
 fn cmd_list(store: &GovernanceStore) -> Result<(), String> {
     let dirs = skill_dirs();
     let live = store.live_revocations().map_err(|e| e.to_string())?;
 
     println!("governance root: {}", store.root().display());
     println!();
-    println!(
-        "ON DISK ({} skill director{})",
-        dirs.len(),
-        if dirs.len() == 1 { "y" } else { "ies" }
-    );
+    println!("ON DISK ({})", dirs.len());
     if dirs.is_empty() {
         println!("  (none)");
     }
     for d in &dirs {
         let name = d.file_name().unwrap_or_default().to_string_lossy();
-        let sig = read_signature(d);
         let kind = if is_auto_drafted(d) {
             "auto-drafted"
         } else {
             "user-authored"
         };
-        println!("  {name}  [{kind}]  {}", d.display());
-        if let Some(s) = sig {
-            println!("      signature: {s}");
+        let mut fields = vec![
+            ("kind", kind.to_string()),
+            ("path", d.display().to_string()),
+        ];
+        if let Some(s) = read_signature(d) {
+            fields.push(("signature", s));
         }
+        print_skill_line(&name, "present", &fields);
     }
 
     println!();
-    println!("REVOKED ({} in force)", live.len());
+    println!("REVOKED ({})", live.len());
     if live.is_empty() {
         println!("  (none)");
     }
     for r in &live {
-        println!(
-            "  {name}  revoked {at}\n      id: {id}\n      retained: {files} file(s), {bytes} byte(s)\n      would restore to: {src}",
-            name = r.skill_name,
-            at = r.revoked_at,
-            id = r.revocation_id,
-            files = r.file_count,
-            bytes = r.byte_count,
-            src = r.source_dir.display(),
-        );
+        let mut fields = vec![
+            ("id", r.revocation_id.clone()),
+            ("revoked_at", r.revoked_at.clone()),
+            ("files", r.file_count.to_string()),
+            ("bytes", r.byte_count.to_string()),
+            ("restores_to", r.source_dir.display().to_string()),
+        ];
+        if let Some(s) = &r.signature {
+            fields.push(("signature", s.clone()));
+        }
+        print_skill_line(&r.skill_name, "revoked", &fields);
     }
     Ok(())
 }
