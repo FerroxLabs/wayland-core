@@ -1241,15 +1241,21 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
     // ARM 1 — THE KNOWN-POSITIVE. The parent holds Bash. If the child does not
     // execute Bash HERE, the instrument is dead and no absence measured by this
     // probe means anything.
+    // The per-arm session ids stay HEX. `SessionManager::create_for_run` rejects
+    // anything else ("must be 6-40 hex characters"), and a rejected id fails the
+    // arm's bind — which the known-positive gate correctly reported as "no
+    // verdict" the first time this differential ran with a `-g` suffix. Left as
+    // a comment because it is exactly the class of silent-arm-death the gate
+    // exists to catch, and it caught it.
     let granted = tool_arm(
-        &format!("{session_tag}-g"),
+        &format!("{session_tag}a"),
         ParentAuthority::HoldsBash,
         "CORPUSBASHGRANTED",
     );
     // ARM 2 — THE HOSTILE REQUEST. Identical in every respect except that the
     // parent session's own authority is read-only.
     let denied = tool_arm(
-        &format!("{session_tag}-d"),
+        &format!("{session_tag}d"),
         ParentAuthority::ReadOnly,
         "CORPUSBASHDENIED",
     );
