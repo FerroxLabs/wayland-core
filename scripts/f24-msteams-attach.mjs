@@ -43,7 +43,6 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -103,14 +102,21 @@ function claimsFor(overrides = {}) {
   };
 }
 
-// ── the Bot Framework fixture ────────────────────────────────────────────────
+// ── the Bot Framework fixture (out of process — see f24-msteams-fixture.mjs) ─
+//
+// The keypairs are minted HERE and only the public JWKS is written to disk, so
+// no signable key ever reaches the filesystem. The fixture runs as its own OS
+// process because this driver sleeps synchronously (`Atomics.wait`), and a
+// synchronously-blocked main thread cannot accept a connection — the first
+// version of this file shared a process with the fixture and every request
+// silently went unanswered.
 
 class BotFrameworkFixture {
-  constructor(dir) {
+  constructor(dir, children) {
     this.dir = dir;
+    this.children = children;
     this.journalPath = path.join(dir, 'bf-sink.jsonl');
-    this.journalFd = fs.openSync(this.journalPath, 'a');
-    this.seq = 0;
+    this.jwksPath = path.join(dir, 'bf-jwks.json');
 
     // The trusted keypair, and a SECOND one that is never published. M4 signs
     // with the second: a token that is well-formed, correctly claimed, and
@@ -125,68 +131,38 @@ class BotFrameworkFixture {
     return { keys: [{ kty: jwk.kty, kid: this.kid, use: 'sig', alg: 'RS256', n: jwk.n, e: jwk.e }] };
   }
 
-  record(kind, detail) {
-    this.seq += 1;
-    const rec = { seq: this.seq, kind, at: new Date().toISOString(), ...detail };
-    fs.writeSync(this.journalFd, `${JSON.stringify(rec)}\n`);
-    fs.fsyncSync(this.journalFd);
+  start() {
+    fs.writeFileSync(this.jwksPath, JSON.stringify(this.jwks()));
+    const child = spawn(
+      process.execPath,
+      [path.join(HERE, 'f24-msteams-fixture.mjs'), '--port', String(BF_PORT), '--journal', this.journalPath, '--jwks', this.jwksPath],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    this.children.push(child);
+    child.stdout.on('data', (d) => note(`bf: ${String(d).trim()}`));
+    child.stderr.on('data', (d) => note(`bf-err: ${String(d).trim()}`));
+    this.child = child;
+    return this;
   }
 
-  start() {
-    this.server = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => {
-        body += c;
-      });
-      req.on('end', () => {
-        const url = new URL(req.url, 'http://127.0.0.1');
-        const send = (code, obj) => {
-          res.writeHead(code, { 'content-type': 'application/json' });
-          res.end(JSON.stringify(obj));
-        };
-
-        // OpenID metadata → JWKS. The adapter reads only `jwks_uri`.
-        if (url.pathname === '/openid') {
-          this.record('openid', {});
-          return send(200, { jwks_uri: `http://127.0.0.1:${BF_PORT}/keys` });
-        }
-        if (url.pathname === '/keys') {
-          this.record('jwks', { kid: this.kid });
-          return send(200, this.jwks());
-        }
-        // OAuth2 client-credentials. `start()` mints a token before it will
-        // mark itself Connected, so this must answer or the channel never
-        // reaches the state where inbound is accepted at all.
-        if (url.pathname === '/token') {
-          this.record('token', {});
-          return send(200, {
-            access_token: 'f24msteams-fixture-connector-token',
-            token_type: 'Bearer',
-            expires_in: 3600,
-          });
-        }
-        // Connector send sink: POST {serviceUrl}v3/conversations/{id}/activities
-        if (url.pathname.includes('/v3/conversations/') && url.pathname.endsWith('/activities')) {
-          let parsed = {};
-          try {
-            parsed = JSON.parse(body);
-          } catch {
-            /* recorded raw below */
-          }
-          this.record('activity_out', {
-            path: url.pathname,
-            type: parsed.type ?? null,
-            text: parsed.text ?? null,
-            raw_len: body.length,
-          });
-          return send(200, { id: `f24msteams-out-${this.seq}` });
-        }
-        this.record('unknown', { path: url.pathname });
-        return send(404, { error: `unknown ${url.pathname}` });
-      });
-    });
-    this.server.listen(BF_PORT, '127.0.0.1');
-    return this;
+  /// Block until the fixture answers its own health endpoint. Without this the
+  /// binary can start, fail to mint a token against a socket that is not up
+  /// yet, and the run measures a race rather than the adapter.
+  waitReady(secs = 30) {
+    for (let i = 0; i < secs; i += 1) {
+      const r = spawnSync(
+        process.execPath,
+        ['-e', `fetch('http://127.0.0.1:${BF_PORT}/_bf/health').then(async r=>process.stdout.write('BF '+r.status)).catch(e=>{process.stdout.write('DOWN');process.exit(1);})`],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      if (r.status === 0 && `${r.stdout}`.includes('BF 200')) {
+        note(`bf fixture ready after ${i}s`);
+        return true;
+      }
+      process.stdout.write(`[msteams] waiting for bf fixture: ${i}s\n`);
+      sleep(1000);
+    }
+    return false;
   }
 
   arrivals() {
@@ -200,7 +176,7 @@ class BotFrameworkFixture {
 
   stop() {
     try {
-      this.server?.close();
+      this.child?.kill('SIGTERM');
     } catch {
       /* already down */
     }
@@ -524,7 +500,7 @@ async function main() {
   }
 
   const run = new Run(args);
-  const bf = new BotFrameworkFixture(run.dir).start();
+  const bf = new BotFrameworkFixture(run.dir, run.children).start();
   note(`dir=${run.dir} webhook=${WEBHOOK_PORT} bf=${BF_PORT} llm=${LLM_PORT}`);
 
   const goodToken = () => signJwt({ privateKey: bf.trusted.privateKey, kid: bf.kid, claims: claimsFor() });
@@ -533,7 +509,15 @@ async function main() {
   try {
     run.writeConfig();
     run.startLlm();
-    sleep(1500);
+    // Both fixtures must be ANSWERING before the binary starts: `start()` mints
+    // a Connector token fail-fast, and a channel whose start() fails is skipped
+    // for the whole run. A race here would be reported as an adapter defect.
+    const bfReady = bf.waitReady();
+    if (!bfReady) {
+      run.record('M0-fixture', false, `bf fixture never answered 127.0.0.1:${BF_PORT}`);
+    } else {
+      run.note('bf fixture answering; starting binary');
+    }
     run.startBinary();
 
     if (!run.waitForWebhookHost()) {
@@ -594,10 +578,19 @@ async function main() {
       // Give a turn the same budget the accepted legs got, so "no turn" is a
       // measurement rather than impatience.
       const t4 = run.awaitTurn(c4, 15_000);
+      // ANTI-VACUITY. On a dead rig every POST is non-200 and no turn ever
+      // happens, so `status != 200 && no turn` passes for free — the first live
+      // run of this driver scored M4 PASS against a binary whose msteams
+      // channel had failed to start and answered 400 to everything. A rejection
+      // is only evidence if the SAME endpoint, in the SAME run, accepted a
+      // valid token. That is what `acceptsValid` requires.
+      const acceptsValid = t1 !== null || t2 !== null;
+      const kidsServed = bf.arrivals().some((a) => a.kind === 'jwks');
       run.record(
         'M4-auth',
-        r4.status !== null && r4.status !== 200 && t4 === null,
-        `POST=${r4.status} (want non-200) turn=${t4 ? 'LEAKED' : 'none'} | ${r4.output.slice(0, 160)}`,
+        acceptsValid && kidsServed && r4.status !== null && r4.status !== 200 && t4 === null,
+        `POST=${r4.status} (want non-200) turn=${t4 ? 'LEAKED' : 'none'} ` +
+          `accepts_valid_in_same_run=${acceptsValid} jwks_was_fetched=${kidsServed} | ${r4.output.slice(0, 160)}`,
       );
 
       run.note(`bf fixture journal: ${JSON.stringify(bf.arrivals().map((a) => a.kind))}`);
