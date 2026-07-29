@@ -23,6 +23,9 @@
 #   --out <dir>        where to preserve journals and (redacted) transcripts
 #   --model <id>       provider model id (default: flux-fast)
 #   --version-contains <s>  assert `<binary> --version` contains <s> (stale-binary guard)
+#   --seed-max-turns <n>  seed-run turn cap (default 4). At 1 the agent loop is
+#                      cut off immediately after the tool executes, which is the
+#                      "interrupted turn" shape 23B-01 emphasised.
 #   --jobs <n>         run <n> seed+resume cycles CONCURRENTLY against one shared
 #                      WAYLAND_HOME (default 1 = serial). 23B-01 reproduced in
 #                      "bursts"; a strictly serial harness cannot reach whatever
@@ -55,6 +58,7 @@ WANT_SHA=""
 KEY_STDIN=0
 JOBS=1
 SELFTEST=0
+SEED_MAX_TURNS=4
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,6 +68,7 @@ while [ $# -gt 0 ]; do
     --model)      MODEL="${2:-}";  shift 2 ;;
     --version-contains) WANT_SHA="${2:-}"; shift 2 ;;
     --jobs)       JOBS="${2:-}";    shift 2 ;;
+    --seed-max-turns) SEED_MAX_TURNS="${2:-}"; shift 2 ;;
     --selftest)   SELFTEST=1; shift ;;
     --key-stdin)  KEY_STDIN=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
@@ -195,7 +200,7 @@ one_run() {
   ( cd "$WORK" && env -u API_KEY -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
       HOME="$HOME_DIR" WAYLAND_HOME="$HOME_DIR" \
       WAYLAND_VAULT_PASSPHRASE="f23-h1-live" \
-      "$BINARY" --session-id "$ID" --max-turns 4 --max-tokens 4000 \
+      "$BINARY" --session-id "$ID" --max-turns "$SEED_MAX_TURNS" --max-tokens 4000 \
       --dangerously-skip-permissions -- \
       "Use the Write tool right now to create the file $TARGET containing exactly the text aardvark-$NONCE and nothing else. Do not ask; just call the tool." ) \
       > "$RUN_DIR/seed-$i.txt" 2>&1
