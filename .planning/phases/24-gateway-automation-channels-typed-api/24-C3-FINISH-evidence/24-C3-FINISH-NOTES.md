@@ -213,4 +213,112 @@ change at all** and one of those two (signal) has the simplest fixture in the ph
 correct order for anyone continuing is **matrix → signal → msteams → imessage**, and the
 first two do not need a seam plan, only a fixture.
 
+## T+55 — P2 RESULT: the email reply half IS reachable. Not from config — but the knob exists.
+
+**This changes the inherited conclusion, and the change is in the product's favour.** I was
+briefed that "the email *reply* half may not be reachable by fixture at all as currently
+built". The two measured facts I was told not to re-derive are both correct and I did not
+re-derive them. But they answer a narrower question than the one that was drawn from them.
+
+### What was already established, and is not in dispute
+
+- Linux/OpenSSL honours a child-scoped `SSL_CERT_FILE` for **IMAP**; macOS `native-tls` =
+  Security.framework and does not. (`imap.rs:194` → `native_tls::TlsConnector::new()`.)
+- **SMTP on every platform resolves to `webpki-roots`, which reads no file and no env var.**
+  Confirmed again here from the lockfile: `lettre 0.11.22`'s resolved dependency list contains
+  **`webpki-roots 1.0.7`** and contains **no `rustls-native-certs`** and no
+  `rustls-platform-verifier` (`Cargo.lock:4231-4255`).
+
+I confirmed the resolution path in lettre's own source rather than inferring it. With the
+feature set this workspace actually resolves, `TlsParametersBuilder::build` takes the branch at
+`tls.rs:505-510`:
+
+```rust
+#[cfg(all(not(feature = "rustls-platform-verifier"),
+          not(feature = "rustls-native-certs"),
+          feature = "webpki-roots"))]
+load_webpki_roots(&mut root_cert_store);
+```
+
+So `CertificateStore::Default` → Mozilla's compiled-in set, exactly as briefed. **No env var
+reaches it. That half of the finding is solid and I am not softening it.**
+
+### The part that was not established: `add_root_certificate` works under rustls
+
+`tls.rs:518-526`, and this loop runs **unconditionally, after and independent of the
+`cert_store` match**:
+
+```rust
+for cert in self.root_certs {
+    for rustls_cert in cert.rustls {
+        root_cert_store.add(rustls_cert).map_err(error::tls)?;
+    }
+}
+```
+
+`TlsParametersBuilder::add_root_certificate` (`tls.rs:248`) and
+`TlsParameters::builder(domain)` (`tls.rs:603`) are both public and both available with this
+crate's resolved features. **An extra root can be added ON TOP of webpki-roots without
+removing webpki-roots and without disabling verification.**
+
+### Why the adapter cannot use it today
+
+`LettreSender::new` (`smtp.rs:71-84`) is the entire SMTP construction path:
+
+```rust
+let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)?
+    .port(port).credentials(creds).build();
+```
+
+It passes **no TLS parameter at all**, so lettre supplies the default, which is
+`CertificateStore::Default` with an empty `root_certs`. There is no cert-source argument, no
+`EmailConfig` field, and no `#[doc(hidden)]` alternate constructor. This is **not** the Discord
+situation (seam exists, unreachable); it is a seam that does not exist yet.
+
+### Determination
+
+**Reachable: YES — with a bounded Rust change. Reachable from configuration alone: NO.**
+
+Minimum change, mirroring the `TelegramConfig::api_base_url` precedent exactly:
+
+1. `EmailConfig` gains `#[serde(default)] smtp_tls_root_cert_path: Option<PathBuf>`. A missing
+   field is not an unknown field, so every existing config still parses under
+   `deny_unknown_fields`.
+2. `LettreSender::new` takes it. `None` → the existing `starttls_relay(host)` call, byte for
+   byte. `Some(p)` → `TlsParameters::builder(host).add_root_certificate(Certificate::from_pem(..))`
+   passed via `.tls(Tls::Required(params))`.
+3. The **control test is the load-bearing one**, as it was for telegram and Discord: a config
+   naming no cert path must reach production SMTP with production trust, unchanged.
+
+Estimated cost: one config field, ~15 lines in `smtp.rs`, two tests. **~1 session.**
+
+### The security trap in this change, recorded because it is the obvious shortcut
+
+`TlsParametersBuilder` also exposes `dangerous_accept_invalid_certs` (`tls.rs:313`) and
+`dangerous_accept_invalid_hostnames` (`tls.rs:279`). Either one would make the fixture run go
+green in one line.
+
+**Both must be refused.** `add_root_certificate` ADDS a trust anchor the operator chose;
+`dangerous_accept_invalid_certs` REMOVES verification for everyone, in production, permanently.
+Reaching for it would be shipping a real security regression to make a test pass — the most
+dangerous form of "weaken a test to reach green", because it lands in the product rather than
+in the harness. The cert-path knob is operator-owned configuration at the same trust level as
+`credential_handle`, and it is not reachable from a message.
+
+### Decision: determined, NOT built this lane — and why
+
+The brief said establish reachability rather than force it, and I have. I am not building it
+here, on two grounds:
+
+1. **Clause math.** Email `route`/`bind` would add a sixth adapter to `routing`, a clause
+   already proven on five. The four untouched clauses are worth strictly more per session.
+2. **It touches the production TLS path.** 24-C3-H2 declined to fix F24-C3-H4 blind at the end
+   of a lane on the reasoning that "fixing it blind, at the end of a lane, is how a fix becomes
+   the next lane's defect". A security-sensitive change to how the product decides which
+   certificates to trust deserves its own lane with its own control test, not the last hour of
+   this one.
+
+So this is a **costed, de-risked, ready-to-execute item** rather than a blocker. That is a
+better handoff than either "blocked at TLS trust" or a rushed diff.
+
 <!-- append below this line after every measurement -->
