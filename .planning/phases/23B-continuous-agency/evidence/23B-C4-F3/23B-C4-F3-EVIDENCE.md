@@ -200,3 +200,95 @@ Twelve green tests over the broken code, and the two nearest misses are exact:
 
 That is why the new assertions had to be made against a `Config` that
 `Config::resolve` actually produced.
+
+---
+
+## §4 — LIVE: the real binary, a real local model, the operator's own surface
+
+`hetzner-dsm` runs a live ollama at `localhost:11434` carrying **`smollm2:135m`
+— the exact model the original C4 measurement billed $0.0756.** So the revert
+arm of this A/B costs nothing to run, and was run.
+
+Harness: `live/run.sh` (retained). One worktree, one condition flipped, rebuilt
+in place each time, `WAYLAND_HOME` per-arm and lane-namespaced under
+`/root/lane-cost-provider-live` (LANE-BRIEF §6a-ii — `/tmp` is shared and was
+not used). Config pins `provider = "anthropic"` **deliberately**: that is the
+configured profile the ledger used to record, and hetzner injects a real
+`ANTHROPIC_API_KEY` anyway (§3b-ii), so nothing but the router forces the local
+route. Every figure below is read from `wayland-core cache show` /
+`cache report` — the operator-reachable surface — not from an internal probe.
+
+| run | `BIN_SHA` (sha256, first 16) | ledger `provider` | `cost_usd` | `cache verify` |
+|---|---|---|---|---|
+| FIXED | `43379f732ece342c` | **ollama** | **0.000000** | 7 |
+| REVERT | `ad0171983f03c184` | **anthropic** | **0.018840** | 7 |
+| RESTORE | `43379f732ece342c` | **ollama** | **0.000000** | 7 |
+
+**The binary identity is measured, not assumed.** RESTORE's binary is
+byte-identical to FIXED's and REVERT's differs — the control that never moves.
+The C4-LIVE lane's incident (two unverified binaries, both deleted before anyone
+could check them) is the reason this column exists.
+
+Verbatim ledger rows:
+
+```
+FIXED    F23_CACHE=turn round_trip=1 turn=0 provider=ollama    model=ollama:smollm2:135m … cost_usd=0.000000 cost_source=provider_defaults
+REVERT   F23_CACHE=turn round_trip=1 turn=0 provider=anthropic model=ollama:smollm2:135m … cost_usd=0.018840 cost_source=provider_defaults
+RESTORE  F23_CACHE=turn round_trip=1 turn=0 provider=ollama    model=ollama:smollm2:135m … cost_usd=0.000000 cost_source=provider_defaults
+```
+
+`REVERT-report.txt`, in full on the cost line:
+
+```
+F23_CACHE=cost usd=0.018840 uncached_equivalent_usd=0.018840 saving_usd=0.000000 saving_ratio=0.0000 cost_truth=estimated catalog_priced_round_trips=0 estimated_round_trips=1 unpriced_round_trips=0
+F23_CACHE=cost_warning text=usd_is_a_family_rate_estimate_not_spend cost_truth=estimated
+```
+
+**$0.018840 charged for one 1126-token turn that ran on this machine's own GPU
+for nothing.** The C4-F1 money bug, reproduced live at the current tip, and
+closed by the fix in the adjacent arm.
+
+### §4a — provider read back from the product's own output (§3b-ii), and a dead instrument caught
+
+The engine's own `W7: wcore-pricing model is unresolvable` line prints the
+pricing key it used. First extraction attempt returned **zero matches on a file
+that visibly contained the lines** — the tracing output interleaves ANSI escapes
+between `provider` and `=`, so `grep 'provider="ollama"'` cannot match. That is
+an absence produced by a broken instrument (§3b-i); it was caught only because a
+known-positive was available. Repaired by stripping escapes first, then proved on
+the known-positive before being trusted:
+
+```
+instrument check:  grep -c 'provider="ollama"' FIXED-session.err   → 0   (DEAD)
+repaired:          sed 's/\x1b\[[0-9;]*m//g' … | grep -o 'provider="[a-z-]*" model="[^"]*"'
+  FIXED   →  8  provider="ollama"    model="ollama:smollm2:135m"
+  REVERT  →  8  provider="anthropic" model="ollama:smollm2:135m"
+```
+
+Both the engine's internal pricing key and the operator-facing ledger agree, on
+both arms. The selection was not inferred from what was exported.
+
+---
+
+## §5 — gates, at commit `bce323a2` on `hetzner-dsm`
+
+Every count read back with `0 ignored` / `0 filtered out` present.
+
+```
+cargo test -p wcore-config                                       567 passed; 0 failed; 0 ignored; 0 filtered out  (+13 further binaries, all ok)
+cargo test -p wcore-config --test local_model_cost_attribution_test   4 passed; 0 failed; 0 ignored; 0 filtered out
+cargo test -p wcore-agent  --test local_route_cost_attribution_test   2 passed; 0 failed; 0 ignored; 0 filtered out
+cargo test -p wcore-agent  --test cache_ledger_engine_test            6 passed; 0 failed; 0 ignored; 0 filtered out
+cargo test -p wcore-agent  --test turn_trace_shape                    3 passed; 0 failed; 0 ignored; 0 filtered out
+cargo test -p wcore-agent  --test ollama_e2e_test                     4 passed; 0 failed; 1 ignored; 0 filtered out   (the 1 ignored is pre-existing)
+cargo test -p wcore-cli    --test cache_ledger_cli                   13 passed; 0 failed; 0 ignored; 0 filtered out
+cargo test -p wcore-observability --test cost_estimate                9 passed; 0 failed; 0 ignored; 0 filtered out
+cargo check --workspace --all-targets                            Finished dev profile in 1m 25s; 0 lines matching ^error
+cargo fmt --all -- --check                                       clean (run on the Mac, which is permitted)
+```
+
+`cargo clippy -p wcore-config -p wcore-agent --all-targets` → **one warning, and
+it is not mine**: `needless_update` at
+`crates/wcore-agent/tests/cache_ledger_engine_test.rs:82`, a file this lane did
+not touch (working tree was `git status --porcelain`-empty at the time of the
+run). Named, not fixed — LANE-BRIEF §6 / AGENTS.md §3 scope discipline.
