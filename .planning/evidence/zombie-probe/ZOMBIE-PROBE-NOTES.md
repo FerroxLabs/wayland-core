@@ -196,3 +196,86 @@ ARM C -> rc=0                              -> DEAD(gone)
 ```
 
 4/4 correct, agreeing with the struct-typed read on every arm.
+
+## T+150 — the `--init`-removed experiment, three arms, and the 13 reproduce EXACTLY
+
+Container: the image `ci.yml` builds, on `hetzner-dsm` (Ubuntu 24.04, Docker
+29.2.1). Environment confirmed rather than assumed — `PID1_CMD=sh`, `MY_PID=1`,
+i.e. **PID 1 is the test command and there is no reaper**, which is precisely
+the condition `--init` was added to remove.
+
+| arm | code | `--init` | bwrap grants | result |
+|---|---|---|---|---|
+| **1** | FIXED | **REMOVED** | no | all four probe targets **GREEN** |
+| **2** | pre-fix shape (mutation) | **REMOVED** | no | **13 failed, in the exact 7+2+2+2 split** |
+| **3** | FIXED | **REMOVED** | yes | `wcore-sandbox --lib` **80/80** |
+
+### ARM 1 — fixed, no `--init`
+
+```
+TARGET=types-zombie TRUE_RC=0 | Summary  4 tests run:   4 passed,  0 skipped
+TARGET=runner-contr TRUE_RC=0 | Summary 21 tests run:  21 passed,  0 skipped
+TARGET=evalsc-lib   TRUE_RC=0 | Summary 220 tests run: 220 passed, 2 skipped
+TARGET=sandbox-pcap TRUE_RC=0 | Summary  4 tests run:   4 passed,  0 skipped
+TARGET=swarm-lib    TRUE_RC=0 | Summary 114 tests run: 114 passed, 0 skipped
+TARGET=tools-cancel TRUE_RC=0 | Summary  4 tests run:   4 passed,  0 skipped
+```
+
+Executed counts read back, not exit status. Nothing converted to a skip: the
+only `skipped` figure anywhere is `evalsc-lib`'s 2, unchanged.
+
+### ARM 2 — the falsification arm, and it reproduces the cluster exactly
+
+Mutating `proc_stat_state_is_corpse` to `false` restores the pre-fix shape for
+**all four** probes at once (a zombie satisfies `kill(pid,0)`, and it satisfies
+`/proc/<pid>` existence). Same commit, same container, still no `--init`:
+
+```
+runner_contracts       21 tests run:  14 passed,  7 failed   <- 7
+pty_capture (lib)     220 tests run: 218 passed,  2 failed   <- 2
+sandbox process_capture 4 tests run:   2 passed,  2 failed   <- 2
+swarm worktree linux  114 tests run: 112 passed,  2 failed   <- 2
+                                                  --------
+                                                       13
+```
+
+**7 + 2 + 2 + 2 = 13, with nothing left over** — the same four sites and the
+same per-site counts CI-IMAGE §2 predicted, reproduced independently here from
+the opposite direction. `real_zombie` also went red, on exactly the one
+assertion that is supposed to catch this and on none of the other three.
+Source restored and verified (`RESTORED_CLEAN`).
+
+So the answer to "do they only pass because of `--init`?" is **no**: they pass
+with `--init` removed, and they fail with `--init` removed the moment the probe
+goes back to its old shape. `--init` is not carrying them; the fix is.
+
+### ARM 3 — the 6 `wcore-sandbox --lib` failures are NOT mine
+
+ARM 1's `sandbox --lib` showed `80 run: 74 passed, 6 failed`. All six are
+`backends::bwrap::tests::*`, which is the grant class CI-IMAGE §3 measured
+(`no grant -> 14 failed`), and I ran without the four `--security-opt` grants.
+Isolated by changing only that variable — same commit, still no `--init`:
+
+```
+TRUE_RC=0   Summary [1.302s] 80 tests run: 80 passed, 0 skipped
+```
+
+So the 6 are the container's missing bwrap grants, not `--init` and not this
+change. Reported as an isolated measurement rather than a claim.
+
+### Other migrated crates, hetzner native
+
+```
+gateway-lib       TRUE_RC=0   42 tests run:  42 passed
+gateway-pidlock   TRUE_RC=0    8 tests run:   8 passed
+gateway-lifecycle TRUE_RC=0    9 tests run:   9 passed
+mcp-lib           TRUE_RC=0  129 tests run: 129 passed
+execbackend-lib   TRUE_RC=0   88 tests run:  88 passed
+browser-lib       TRUE_RC=0   89 tests run:  89 passed
+agent-lease       TRUE_RC=0    2 tests run:   2 passed
+```
+
+Workspace gates at the same commit: `cargo check --workspace --all-targets`
+`TRUE_RC=0`, `cargo clippy --workspace --all-targets -- -D warnings`
+`TRUE_RC=0` (one pre-existing third-party note about `imap-proto v0.10.2`),
+`cargo fmt --all -- --check` `TRUE_RC=0`.
