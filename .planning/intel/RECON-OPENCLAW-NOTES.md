@@ -217,3 +217,100 @@ test; `extensions/fal/video-generation-provider.ts` **23.3K** / 23.7K test;
 `extensions/music-generation-providers.live.test.ts` (11.4K).
 
 **`extensions/migrate-hermes/` exists** — that is priority 3, read next.
+
+---
+
+## MEASUREMENT 4 — durability model: one migrated SQLite state DB, 85 tables
+
+`src/state/openclaw-state-db.generated.d.ts` declares `export interface DB` with **85 tables**
+(measured: `sed -n '1305,1390p' ... | grep -cE '^  [a-z_]+: '`). Kysely-typed, generated from a
+real migration chain (`schema_meta` table is in it), opened through
+`src/state/openclaw-state-db.ts` with `runOpenClawStateWriteTransaction`,
+`assertSqliteTableIntegrity`, `runSqliteDeferredTransactionSync`, and a
+`src/state/openclaw-state-lease.ts` lease. There is a second per-agent DB
+(`openclaw-agent-db.generated.d.ts`).
+
+Tables that matter for this comparison:
+
+- Tasks: `task_runs`, `task_delivery_state`, `subagent_runs`, `flow_runs`, `cron_jobs`
+- Restart: `gateway_restart_handoff`, `gateway_restart_intent`, `gateway_restart_sentinel`,
+  `gateway_boot_lifecycle`, `state_leases`
+- Delivery: `delivery_queue_entries` (durable outbound queue)
+- Migration: **`migration_runs`, `migration_sources`** — migrations are themselves durable records
+- Media: `media_blobs`, `managed_outgoing_image_records`, `model_capability_cache`
+- Sessions: `session_state_events`, `session_state_heads` (event-sourced with heads),
+  `session_watch_cursors`, `session_upstream_links`, `session_groups`
+- Commitments: `commitments`
+- Approvals/security: `operator_approvals`, `exec_approvals_config`, `plugin_binding_approvals`,
+  `audit_events`, `audit_identity_keys`, `device_auth_tokens`, `device_identities`
+- Skills: `skill_lifecycle`, `skill_usage`, `skill_curator_state`, `skill_uploads`
+- Voice: `voicewake_triggers`, `voicewake_routing_config`, `voicewake_routing_routes`
+- Push: `apns_registrations`, `apns_registration_tombstones`, `web_push_subscriptions`,
+  `web_push_vapid_keys`
+
+### What actually survives a restart
+
+`src/tasks/task-registry.maintenance.ts` (36.6K) runs a periodic **sweep** with four outcomes
+per task — `reconciled`, `recovered`, `cleanupStamped`, `pruned` — and the decision logic is
+notably careful about *not* declaring a task dead just because this process cannot see it:
+
+- `hasLostGraceExpired(task, now)` → `retained / lost_grace_pending` (grace window before any
+  mark-lost).
+- `hasBackingSession(task, context)` → `would_reconcile / backing_session_missing`.
+- `isRuntimeAuthoritative()` → a `cron` or `acp` task is **retained**, not marked lost, when this
+  process is not the authoritative runtime for it (`cron_runtime_not_authoritative`,
+  `acp_runtime_not_authoritative`). This is precisely the "absence of evidence is not evidence of
+  absence" discipline our own lane brief keeps re-learning, implemented in product code.
+- `hasActiveCliRun(task)` → `retained / active_cli_run`.
+- `isSubagentRecoveryWedgedEntry(entry)` → `would_reconcile / subagent_recovery_wedged`.
+- `tryRecoverTaskBeforeMarkLost` (`detached-task-runtime.ts`) — an async, **best-effort,
+  time-warned (5s) plugin recovery hook** that gets a chance to reclaim the task before it is
+  marked lost; a hook that throws, hangs or returns garbage is logged and bypassed rather than
+  blocking cleanup.
+- `findDetachedTaskRun` returns `{ lookup: "available" | "unavailable" }` — it deliberately
+  **distinguishes "not found" from "cannot tell"**, with the comment: *"an empty fallback cannot
+  prove that the runtime-owned task is absent."*
+
+Operator surface on top of it: `previewTaskRegistryMaintenance()` (dry-run of the sweep) and
+`getTaskRegistryMaintenanceDiagnostics()` returning per-task
+`{ taskId, runtime, status, decision, reason, ageMs, detail }` for every stale-running task.
+Reachable as `openclaw tasks list` / `openclaw tasks audit` (both are `CliRoutedCommandId`s).
+
+### The completion contract — a genuinely novel guard
+
+`src/tasks/task-completion-contract.ts` refuses to accept a detached task as *succeeded* when the
+agent's final text is progress narration rather than a deliverable. Three regexes
+(`PROGRESS_ONLY_PATTERN`, `BARE_PROGRESS_ONLY_PATTERN`, `FOLLOW_UP_PLANNING_PREFIX_PATTERN`)
+catch "I'll now check…", "Looking into…", "Next, I'll verify…", with a
+`hasNonProgressFollowupSentence` escape so "I'll check X. Here is the answer: …" still passes.
+Failing text sets `terminalOutcome: "blocked"` +
+`"Required completion ended with progress-only text, not a final deliverable."`
+Empty text is likewise blocked. This is an anti-"claimed done" gate **in the product**, and it is
+the same failure class our own §5 honesty rules exist to police in agents.
+
+---
+
+## MEASUREMENT 5 — migration (`openclaw migrate`)
+
+Registered in `src/cli/program/register.migrate.ts` → `src/commands/migrate/` (16 modules).
+
+Surface: `migrate list`, `migrate plan <provider>`, `migrate apply <provider>`, and a default
+`migrate <provider>` that **previews then prompts**. Flags: `--from <path>`, `--dry-run`, `--yes`,
+`--include-secrets`, `--no-auth-credentials`, `--overwrite` (with *item-level backups*),
+`--skill <name>` (repeatable), `--plugin <name>` (repeatable), `--backup-output <path>`,
+`--no-backup`, `--force`, `--json`, `--verify-plugin-apps`.
+
+**Safety posture: a verified full backup is taken before apply by default.** `--no-backup` is
+refused unless `--force` is also passed. Help text is explicit: *"Apply Hermes migration
+non-interactively after writing a verified backup."*
+
+Providers are plugin-contributed under a `migrationProviders` contract:
+- `extensions/migrate-hermes/` — manifest `contracts.migrationProviders: ["hermes"]`,
+  `"Imports Hermes configuration, memories, skills, and supported credentials into OpenClaw."`
+  Modules: `source.ts` 12.5K, `memory.ts` 8.6K, `skills.ts` 6.1K, `config.ts` 6.3K, `plan.ts`,
+  `apply.ts`, `helpers.ts`, `provider.test.ts` 19.9K. `activation.onStartup: false` (lazy).
+- `extensions/migrate-claude/` — much larger (auth.ts 16.3K, secrets.ts 13.4K +48.4K test,
+  config-providers.ts 13.2K, config-provider-contract.ts 13.8K, config-mcp.ts 12.3K,
+  model.ts 12.7K, source.ts 8.1K, apply.ts 8.6K, plan.ts 7.3K, files-and-skills.test.ts 28.8K).
+
+Still to read: what `migrate-hermes/source.ts` + `memory.ts` + `skills.ts` actually map.
