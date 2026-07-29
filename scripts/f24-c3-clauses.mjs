@@ -383,7 +383,23 @@ class ClauseRun {
    * previously produced the same number.
    */
   postSlackInbound(channelName, user, channelId) {
-    const token = `f24c3fin-${channelName}-${hex(4)}`;
+    // The token MUST satisfy `f24-llm-fixture.mjs`'s `correlationOf` regex,
+    // `/f24c3-[a-z0-9-]+/i` (fixture line 89), or the fixture echoes the literal
+    // string `no-correlation` and every reply becomes untraceable to the message
+    // that caused it.
+    //
+    // Run 2 used `f24c3fin-...`, which has no hyphen after `f24c3` and therefore
+    // does NOT match. The full path worked perfectly — submit accepted 200, one
+    // LLM turn carrying this exact token in `user_text`, one reply delivered to
+    // the sink — and the driver still graded it FAIL, because the reply said
+    // `F24C3-REPLY no-correlation`. Third instrument fault of this lane, and the
+    // third to fail in the direction that blames the product.
+    //
+    // Fixed by CONFORMING to the shared fixture's contract rather than by
+    // editing the fixture, which four other drivers depend on. The self-test
+    // asserts the contract so it cannot silently drift again — a comment here
+    // would not have caught the original.
+    const token = `f24c3-fin-${channelName}-${hex(4)}`;
     const body = JSON.stringify({
       type: 'event_callback',
       team_id: 'T24C3FIN',

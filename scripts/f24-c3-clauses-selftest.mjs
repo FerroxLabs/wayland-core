@@ -218,6 +218,67 @@ check('source scan: the driver posts to the documented route, not an invented on
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2c. Token/fixture contract — the driver's token must be one the fixture echoes
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// FOUND LIVE IN RUN 2, repaired in-lane. `f24-llm-fixture.mjs:88-91` extracts a
+// correlation token with `/f24c3-[a-z0-9-]+/i` and echoes the literal
+// `no-correlation` when nothing matches. Run 2's token was `f24c3fin-...` — no
+// hyphen after `f24c3`, so no match. The product path was FLAWLESS (submit
+// accepted 200, one turn carrying the exact token, one reply at the sink) and
+// the driver still graded FAIL. Third instrument fault of this lane and the
+// third that blamed the product.
+//
+// The durable repair is not "fix the token" — it is to ASSERT THE CONTRACT here,
+// so a future edit to either side reddens instead of silently un-correlating.
+
+const FIXTURE_CORRELATION_RE = /f24c3-[a-z0-9-]+/i;
+
+function driverTokenSample(channelName = 'f24finone') {
+  const driverPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'f24-c3-clauses.mjs');
+  const src = fs.readFileSync(driverPath, 'utf8');
+  assert(src.length > 10_000, 'driver source implausibly small — scan would be vacuous');
+  const m = /const token = `([^`]+)`/.exec(src);
+  assert(m, 'could not find the token template in the driver');
+  // Materialise the template with plausible values.
+  return m[1].replace('${channelName}', channelName).replace('${hex(4)}', 'a1b2c3d4');
+}
+
+check("known-positive: the driver's token matches the fixture's correlation regex", () => {
+  const tok = driverTokenSample();
+  assert(
+    FIXTURE_CORRELATION_RE.test(tok),
+    `driver token ${tok} does not match the fixture's ${FIXTURE_CORRELATION_RE} — ` +
+      `every reply would come back as "no-correlation"`,
+  );
+});
+
+check('known-negative: the run-2 token shape is proven NOT to match', () => {
+  // Kept executable so the repair is proven to change an outcome rather than to
+  // restate the new behaviour.
+  assert(
+    FIXTURE_CORRELATION_RE.test('f24c3fin-f24finone-a1b2c3d4') === false,
+    'precondition: the run-2 shape must fail the regex, else this case proves nothing',
+  );
+});
+
+check('THE THIRD ASSERTION: the fixture regex is read from the fixture, not hardcoded blind', () => {
+  const fixturePath = path.join(path.dirname(new URL(import.meta.url).pathname), 'f24-llm-fixture.mjs');
+  const src = fs.readFileSync(fixturePath, 'utf8');
+  assert(src.length > 1_000, 'fixture source implausibly small — scan would be vacuous');
+  // If the fixture's regex is ever changed, this reddens and forces the driver's
+  // token to be re-checked against it, rather than the two drifting apart.
+  assert(
+    src.includes('/f24c3-[a-z0-9-]+/i'),
+    'the fixture correlation regex changed — re-verify the driver token against it',
+  );
+  // And the whole extracted token must survive, not just its prefix.
+  const tok = driverTokenSample();
+  const m = FIXTURE_CORRELATION_RE.exec(tok);
+  assert(m && m[0] === tok, `fixture would extract "${m && m[0]}" from "${tok}" — must be the whole token`);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 3. Journal reading — an empty file and an absent file must not read alike
 // ─────────────────────────────────────────────────────────────────────────────
 
