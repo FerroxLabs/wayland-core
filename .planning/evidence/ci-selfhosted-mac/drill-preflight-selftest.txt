@@ -1,0 +1,9 @@
+1. known-positive  both present   -> rc=0 (expect 0)
+2. known-negative  target absent  -> rc=1 (expect 1)
+2b.known-negative  script absent  -> rc=1 (expect 1)
+
+3. naive matcher on real ci.yml            : True
+   guard actually removed by mutation      : True
+   naive matcher on guard-stripped ci.yml  : True <- still True => would have MISSED the regression
+
+PREFLIGHT_SELFTEST=PASS

@@ -200,3 +200,29 @@ Result: `SELF_TEST=PASS`, rc=0, 5/5 arms detected.
 - [ ] prove the artifact is genuinely arm64 (`file`/`lipo`, and execute it)
 - [ ] counterfactual: same work under pre-change config queues behind the hosted pool
 - [ ] Windows runners unaffected
+
+---
+
+## 6. Live proof — COMPLETE
+
+- Arm B run `30429811126`, job `Build (aarch64-apple-darwin) [self-hosted]`:
+  `runner_name=sean-mac-arm64`, `runner_id=34`, queue **4.0 s**, run **8.1 min**, `success`.
+  9 jobs scheduled, **zero hosted macOS jobs**.
+- Artifact: `file -b` = `Mach-O 64-bit executable arm64`, `lipo -archs` = `arm64`, executed
+  (`wayland-core 0.12.25`, rc=0) both on the runner and independently after `gh run download`.
+  Control: `lipo -archs /bin/ls` = `x86_64 arm64e`, so the tool discriminates.
+- Counterfactual arm A run `30429535126` (hosted): arm64 darwin queued **10.4 min** then never
+  finished; `CI (macos-latest)` and `Build (x86_64-apple-darwin)` **never got a runner** in 15.4
+  min. Arm B's run additionally sat `pending, jobs=0` for 11 min behind arm A's concurrency group
+  and dispatched 32 s after I cancelled it.
+- Windows: registry unchanged, same 3 Windows jobs scheduled, 0 Windows lines removed from ci.yml.
+
+## 7. Handed-over scope (release-manifest drill) — wired, NOT proven
+
+Wired as a step at the end of `ci-linux` with `if: !cancelled()`, fails closed, self-tested 3/3.
+Cannot be proven green on this branch: its test target lives in the unmerged lane's `crates/`,
+which is outside this fence. Expected RED here until that lane merges. Stated, not papered over.
+
+## 8. Final state
+
+Branch `lane/ci-selfhosted-mac`. Fence: 0 bytes on shared files, 0 crates/, release.yml untouched.
