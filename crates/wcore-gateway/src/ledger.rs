@@ -84,6 +84,17 @@ pub enum LedgerError {
 
     #[error("unknown delivery id: {0}")]
     Unknown(String),
+
+    /// Acknowledging or re-sending something that was never abandoned is a
+    /// caller error, not a no-op. Both verbs exist to dispose of an
+    /// abandonment; applied to a live delivery they would write an
+    /// acknowledgement nobody can act on, and silently accepting that would
+    /// let a typo look like a completed operator action.
+    #[error("delivery {id} is not abandoned (state: {state:?})")]
+    NotAbandoned {
+        id: String,
+        state: Option<DeliveryState>,
+    },
 }
 
 /// Why a delivery was abandoned.
@@ -147,6 +158,30 @@ pub struct Abandonment {
     /// Which of the two abandon paths fired. `None` only for a record written
     /// before this field existed.
     pub reason: Option<AbandonReason>,
+    /// Whether an attempt had already STARTED when the product gave up.
+    ///
+    /// This is the single fact that decides whether re-sending is safe. A
+    /// delivery abandoned before any attempt certainly never reached its
+    /// destination, so re-sending it cannot duplicate. One abandoned mid-attempt
+    /// may already have landed, and re-sending it to a destination that cannot
+    /// recognise a replay produces the second copy Success Criterion 1 forbids.
+    ///
+    /// `None` for a record written before this field existed, and treated as
+    /// "may have landed" — the cautious reading — because guessing the other way
+    /// would silently authorise a duplicate.
+    pub was_attempted: Option<bool>,
+    /// When an operator acknowledged this abandonment, RFC 3339.
+    ///
+    /// `None` means nobody has looked at it yet, and an UNACKNOWLEDGED
+    /// abandonment is never dropped by compaction. See [`DeliveryLedger::compact`].
+    pub acknowledged: Option<String>,
+    /// When an operator re-sent this delivery, RFC 3339.
+    ///
+    /// Recorded ALONGSIDE the abandonment rather than replacing it. The record
+    /// must keep saying "the product gave up on this at T1" even after a human
+    /// repaired it at T2 — collapsing the two would erase the outage from the
+    /// only place it was written down.
+    pub resent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,19 +204,47 @@ struct Record {
     /// compatibility reason as `destination`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<AbandonReason>,
+    /// Present on an abandon: whether an attempt had started. Defaulted for the
+    /// same compatibility reason as `destination`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    was_attempted: Option<bool>,
+    /// Present once an operator has acknowledged an abandonment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acknowledged: Option<String>,
+    /// Present once an operator has re-sent an abandoned delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resent: Option<String>,
 }
 
-/// How many abandoned deliveries compaction keeps.
+/// How many ACKNOWLEDGED abandonments compaction keeps.
 ///
 /// Abandonments are rare by construction — one requires either a shutdown that
 /// outran its drain budget or a crash between `begin_attempt` and `settle`
 /// against a destination that cannot dedupe. A cap this size is years of
 /// operational history at any plausible rate, while still keeping the journal
-/// genuinely bounded: "retain everything" is not a bound, and a ledger that
-/// grows without limit is its own outage.
+/// genuinely bounded.
 ///
-/// Settled records can NEVER evict an abandonment; the two have separate
-/// budgets. Anything dropped past this cap is counted and reported through
+/// # Why this bounds only the acknowledged ones
+///
+/// The cap originally applied to every abandonment, on the reasoning that
+/// "retain everything" is not a bound and an unbounded ledger is its own
+/// outage. That reasoning was correct *while an abandonment was permanently
+/// terminal*: nothing could ever retire one, so unbounded retention had no
+/// exit. [`DeliveryLedger::acknowledge`] is that exit. An unacknowledged
+/// abandonment is no longer inert history — it is an unresolved work item, the
+/// same class as an unsettled delivery, which this ledger already retains
+/// without any cap at all.
+///
+/// So the budgets now split three ways and the unacknowledged set is exempt.
+/// The two failure modes are not symmetric: unbounded growth is visible,
+/// recoverable, and one JSONL line per record, whereas dropping an
+/// unacknowledged abandonment permanently destroys the only record that a
+/// specific message was never delivered — which is precisely what this surface
+/// exists to prevent. Neglect shows up instead as a loud, growing
+/// [`DeliveryLedger::unacknowledged_abandoned_count`].
+///
+/// Settled records can NEVER evict an abandonment. Anything dropped past this
+/// cap is counted and reported through
 /// [`DeliveryLedger::dropped_abandonments`] — a silent drop here would erase
 /// exactly the record this surface exists to show.
 pub const ABANDON_RETENTION: usize = 10_000;
@@ -334,17 +397,78 @@ impl DeliveryLedger {
     /// while an unknown-outcome abandonment may already have landed and must be
     /// checked at the destination before anything is re-sent.
     pub fn abandon(&mut self, id: &str, reason: AbandonReason) -> Result<(), LedgerError> {
-        let destination = match self.states.get(id) {
+        let (destination, was_attempted) = match self.states.get(id) {
             None => return Err(LedgerError::Unknown(id.to_string())),
-            Some(r) => r.destination.clone(),
+            // Captured HERE because the abandon record replaces the previous
+            // one in `states`, so after this append nothing remembers whether an
+            // attempt had started — and that is the fact a re-send has to
+            // consult. Both abandon paths can fire on either state: the drain
+            // path abandons everything still `pending()`, which is a mix of
+            // never-attempted and outcome-unknown work, so the reason alone
+            // does not answer it.
+            Some(r) => (
+                r.destination.clone(),
+                Some(r.state == DeliveryState::Attempted),
+            ),
         };
-        self.append(
-            id,
-            DeliveryState::Abandoned,
-            None,
-            destination.as_deref(),
-            Some(reason),
-        )
+        self.append_record(Record {
+            id: id.to_string(),
+            state: DeliveryState::Abandoned,
+            at: Self::now(),
+            delivered: None,
+            destination,
+            reason: Some(reason),
+            was_attempted,
+            acknowledged: None,
+            resent: None,
+        })
+    }
+
+    /// Record that an operator has seen this abandonment and disposed of it.
+    ///
+    /// Acknowledgement is what makes an abandonment eligible for compaction —
+    /// see [`ABANDON_RETENTION`]. It is a human signature, so it is deliberately
+    /// NOT written by any automatic path: a surface that empties itself is back
+    /// to being no surface at all.
+    ///
+    /// Idempotent, and the FIRST acknowledgement's timestamp wins. Re-running
+    /// the verb must not rewrite when the incident was actually reviewed.
+    pub fn acknowledge(&mut self, id: &str) -> Result<(), LedgerError> {
+        let mut rec = self.abandoned_record(id)?;
+        if rec.acknowledged.is_some() {
+            return Ok(());
+        }
+        rec.acknowledged = Some(Self::now());
+        self.append_record(rec)
+    }
+
+    /// Record that an operator re-sent this abandoned delivery.
+    ///
+    /// The state stays `Abandoned` on purpose. The product genuinely did give up
+    /// on this delivery, and a later human repair does not unmake that; flipping
+    /// the record back to `Settled` would erase the outage from the only place
+    /// it is written down, and would also put the id back where a reader looking
+    /// for lost messages can no longer find it.
+    ///
+    /// This does NOT acknowledge. The two record different facts — "the payload
+    /// went out again" versus "a human reviewed whether the destination now has
+    /// two copies" — and only the second is a reason to stop showing the record.
+    pub fn mark_resent(&mut self, id: &str) -> Result<(), LedgerError> {
+        let mut rec = self.abandoned_record(id)?;
+        rec.resent = Some(Self::now());
+        self.append_record(rec)
+    }
+
+    /// The current record for `id`, refusing anything that is not abandoned.
+    fn abandoned_record(&self, id: &str) -> Result<Record, LedgerError> {
+        match self.states.get(id) {
+            None => Err(LedgerError::Unknown(id.to_string())),
+            Some(r) if r.state != DeliveryState::Abandoned => Err(LedgerError::NotAbandoned {
+                id: id.to_string(),
+                state: Some(r.state),
+            }),
+            Some(r) => Ok(r.clone()),
+        }
     }
 
     /// The last known state of `id`.
@@ -370,6 +494,9 @@ impl DeliveryLedger {
                 destination: r.destination.clone(),
                 at: r.at.clone(),
                 reason: r.reason,
+                was_attempted: r.was_attempted,
+                acknowledged: r.acknowledged.clone(),
+                resent: r.resent.clone(),
             })
             .collect()
     }
@@ -379,6 +506,20 @@ impl DeliveryLedger {
         self.states
             .values()
             .filter(|r| r.state == DeliveryState::Abandoned)
+            .count()
+    }
+
+    /// How many abandonments nobody has acknowledged yet.
+    ///
+    /// This is the number that must stay small, and the one an operator is
+    /// answerable for. It is also the price of exempting unacknowledged
+    /// abandonments from compaction: the journal's growth is now bounded by
+    /// review rather than by a cap, so an unreviewed backlog has to be VISIBLE
+    /// rather than quietly truncated. See [`ABANDON_RETENTION`].
+    pub fn unacknowledged_abandoned_count(&self) -> usize {
+        self.states
+            .values()
+            .filter(|r| r.state == DeliveryState::Abandoned && r.acknowledged.is_none())
             .count()
     }
 
@@ -412,56 +553,71 @@ impl DeliveryLedger {
         Ok(())
     }
 
-    /// Rewrite the journal keeping EVERY unsettled delivery, at most
-    /// `retain_settled` settled ones, and at most [`ABANDON_RETENTION`]
-    /// abandoned ones.
+    /// Rewrite the journal keeping EVERY unsettled delivery, EVERY
+    /// unacknowledged abandonment, at most `retain_settled` settled ones, and
+    /// at most [`ABANDON_RETENTION`] acknowledged abandonments.
     ///
-    /// Three budgets, not two, and that is the point. Dropping an unsettled
+    /// Four budgets, not three, and that is the point. Dropping an unsettled
     /// record to meet a bound would be a lost delivery, so outstanding work is
-    /// never bounded at all. Settled and Abandoned are then bounded
-    /// SEPARATELY: sharing one budget let a burst of ordinary settled traffic
-    /// evict the record of a message the product had decided not to deliver,
-    /// which is the silent loss this surface exists to prevent. Anything
-    /// dropped past the abandon cap is counted into
-    /// [`Self::dropped_abandonments`] and warned about — never silent.
+    /// never bounded at all — and an UNACKNOWLEDGED abandonment is outstanding
+    /// work too, so it is exempt for exactly the same reason. Nobody has yet
+    /// looked at it, and compacting it away destroys the only evidence that a
+    /// particular message was never sent.
+    ///
+    /// Settled and acknowledged-Abandoned are then bounded SEPARATELY: sharing
+    /// one budget let a burst of ordinary settled traffic evict the record of a
+    /// message the product had decided not to deliver, which is the silent loss
+    /// this surface exists to prevent. Anything dropped past the abandon cap is
+    /// counted into [`Self::dropped_abandonments`] and warned about — never
+    /// silent.
     ///
     /// Records are rewritten VERBATIM. An earlier version stamped every
     /// surviving record with the compaction's own `now`, so a preserved
     /// abandonment reported the wrong time — the surface would have named the
     /// message and then lied about when it was given up on.
     pub fn compact(&mut self, retain_settled: usize) -> Result<(), LedgerError> {
-        let pick = |want: &dyn Fn(DeliveryState) -> bool, states: &BTreeMap<String, Record>| {
+        let pick = |want: &dyn Fn(&Record) -> bool, states: &BTreeMap<String, Record>| {
             states
                 .values()
-                .filter(|r| want(r.state))
+                .filter(|r| want(r))
                 .cloned()
                 .collect::<Vec<Record>>()
         };
 
         let unsettled = pick(
-            &|s| matches!(s, DeliveryState::Accepted | DeliveryState::Attempted),
+            &|r| matches!(r.state, DeliveryState::Accepted | DeliveryState::Attempted),
             &self.states,
         );
-        let settled = pick(&|s| s == DeliveryState::Settled, &self.states);
-        let abandoned = pick(&|s| s == DeliveryState::Abandoned, &self.states);
+        let settled = pick(&|r| r.state == DeliveryState::Settled, &self.states);
+        // Split by acknowledgement, not merely by state. The unreviewed ones are
+        // the reason this surface exists and are never dropped.
+        let unacknowledged = pick(
+            &|r| r.state == DeliveryState::Abandoned && r.acknowledged.is_none(),
+            &self.states,
+        );
+        let acknowledged = pick(
+            &|r| r.state == DeliveryState::Abandoned && r.acknowledged.is_some(),
+            &self.states,
+        );
 
         let settled_from = settled.len().saturating_sub(retain_settled);
-        let abandoned_from = abandoned.len().saturating_sub(ABANDON_RETENTION);
+        let abandoned_from = acknowledged.len().saturating_sub(ABANDON_RETENTION);
         if abandoned_from > 0 {
             self.dropped_abandonments += abandoned_from;
             tracing::warn!(
                 dropped = abandoned_from,
                 cap = ABANDON_RETENTION,
                 total_dropped = self.dropped_abandonments,
-                "delivery ledger compaction dropped abandonment records past the \
-                 retention cap; those deliveries can no longer be named"
+                "delivery ledger compaction dropped ACKNOWLEDGED abandonment records \
+                 past the retention cap; those deliveries can no longer be named"
             );
         }
 
         let keep: Vec<Record> = unsettled
             .into_iter()
             .chain(settled.into_iter().skip(settled_from))
-            .chain(abandoned.into_iter().skip(abandoned_from))
+            .chain(unacknowledged)
+            .chain(acknowledged.into_iter().skip(abandoned_from))
             .collect();
 
         let tmp = self
@@ -483,6 +639,10 @@ impl DeliveryLedger {
         Ok(())
     }
 
+    fn now() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
     fn append(
         &mut self,
         id: &str,
@@ -491,16 +651,26 @@ impl DeliveryLedger {
         destination: Option<&str>,
         reason: Option<AbandonReason>,
     ) -> Result<(), LedgerError> {
-        let rec = Record {
+        self.append_record(Record {
             id: id.to_string(),
             state,
-            at: chrono::Utc::now().to_rfc3339(),
+            at: Self::now(),
             delivered,
             destination: destination.map(str::to_string),
             reason,
-        };
+            was_attempted: None,
+            acknowledged: None,
+            resent: None,
+        })
+    }
+
+    /// The one write path. Takes a whole record so the abandon/acknowledge/
+    /// re-send verbs can carry `at` forward VERBATIM rather than restamping it —
+    /// an acknowledgement that moved the abandonment's timestamp would make the
+    /// surface misreport when the product gave up.
+    fn append_record(&mut self, rec: Record) -> Result<(), LedgerError> {
         writeln!(self.journal, "{}", serde_json::to_string(&rec)?)?;
-        self.states.insert(id.to_string(), rec);
+        self.states.insert(rec.id.clone(), rec);
         Ok(())
     }
 }
@@ -640,23 +810,40 @@ mod tests {
         // Unknown rather than invented.
         assert_eq!(ab[0].destination, None);
         assert_eq!(ab[0].reason, None);
+        assert_eq!(ab[0].acknowledged, None);
+        assert_eq!(ab[0].resent, None);
+        assert_eq!(
+            ab[0].was_attempted, None,
+            "an old record cannot say whether it was attempted, and must not \
+             pretend to — the re-send path reads None as 'may have landed'"
+        );
+        // An upgraded-into record is therefore UNACKNOWLEDGED, which is the safe
+        // direction: it is protected from compaction until a human reviews it.
+        assert_eq!(l.unacknowledged_abandoned_count(), 1);
     }
 
     /// Dropping past the abandon cap is REPORTED, never silent.
+    ///
+    /// The cap now applies only to ACKNOWLEDGED abandonments, so this
+    /// acknowledges every record before compacting. Without the acknowledge
+    /// calls the cap is not reached at all — which is the property
+    /// `an_unacknowledged_abandonment_is_never_compacted_away` asserts.
     #[test]
-    fn abandonments_dropped_past_the_cap_are_counted_and_reported() {
+    fn acknowledged_abandonments_dropped_past_the_cap_are_counted_and_reported() {
         let dir = tempfile::tempdir().unwrap();
         let mut l = DeliveryLedger::open(dir.path()).unwrap();
         for i in 0..(ABANDON_RETENTION + 5) {
             let id = format!("a-{i:06}");
             l.accept(&id, Some("slack-ops")).unwrap();
             l.abandon(&id, AbandonReason::DrainBudgetExpired).unwrap();
+            l.acknowledge(&id).unwrap();
         }
         assert_eq!(
             l.dropped_abandonments(),
             0,
             "nothing dropped before compaction"
         );
+        assert_eq!(l.unacknowledged_abandoned_count(), 0);
         l.compact(8).unwrap();
         assert_eq!(
             l.dropped_abandonments(),
@@ -664,6 +851,172 @@ mod tests {
             "the overflow must be counted so the surface can admit it is incomplete"
         );
         assert_eq!(l.abandoned_count(), ABANDON_RETENTION);
+    }
+
+    /// An abandonment nobody has looked at is NEVER compacted away.
+    ///
+    /// This is the whole point of the acknowledge verb. An unreviewed
+    /// abandonment is outstanding work, not history, and dropping it destroys
+    /// the only record that a specific message was never delivered. The
+    /// journal's bound becomes review rather than a cap — so the unreviewed
+    /// count has to be visible, which is asserted here too.
+    #[test]
+    fn an_unacknowledged_abandonment_is_never_compacted_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = DeliveryLedger::open(dir.path()).unwrap();
+        let over = ABANDON_RETENTION + 5;
+        for i in 0..over {
+            let id = format!("a-{i:06}");
+            l.accept(&id, Some("slack-ops")).unwrap();
+            l.abandon(&id, AbandonReason::OutcomeUnknownNoDedup)
+                .unwrap();
+        }
+        l.compact(8).unwrap();
+
+        assert_eq!(
+            l.dropped_abandonments(),
+            0,
+            "an unacknowledged abandonment must never be dropped, cap or not"
+        );
+        assert_eq!(
+            l.abandoned_count(),
+            over,
+            "every unreviewed abandonment must survive compaction"
+        );
+        assert_eq!(l.unacknowledged_abandoned_count(), over);
+
+        // And it must survive on DISK, not merely in this handle's map — the
+        // process that abandoned the delivery is typically the one that died.
+        let reopened = DeliveryLedger::open(dir.path()).unwrap();
+        assert_eq!(reopened.abandoned_count(), over);
+    }
+
+    /// Acknowledging is what retires an abandonment, and it must not rewrite
+    /// when the product actually gave up — nor when the review happened, if the
+    /// verb is run twice.
+    #[test]
+    fn acknowledge_preserves_the_abandon_time_and_the_first_review_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = DeliveryLedger::open(dir.path()).unwrap();
+        l.accept("gone", Some("discord-alerts")).unwrap();
+        l.abandon("gone", AbandonReason::DrainBudgetExpired)
+            .unwrap();
+        let abandoned_at = l.abandoned()[0].at.clone();
+
+        l.acknowledge("gone").unwrap();
+        let first_ack = l.abandoned()[0].acknowledged.clone();
+        assert!(first_ack.is_some(), "acknowledgement must be recorded");
+        assert_eq!(
+            l.abandoned()[0].at,
+            abandoned_at,
+            "acknowledging must not move the moment the product gave up"
+        );
+        assert_eq!(l.unacknowledged_abandoned_count(), 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        l.acknowledge("gone").unwrap();
+        assert_eq!(
+            l.abandoned()[0].acknowledged,
+            first_ack,
+            "re-running the verb must not rewrite when the incident was reviewed"
+        );
+    }
+
+    /// A re-send is recorded ALONGSIDE the abandonment, never in place of it.
+    ///
+    /// Flipping the record back to a live state would erase the outage from the
+    /// only place it is written down, and would hide the id from an operator
+    /// looking for messages the product failed to deliver.
+    #[test]
+    fn a_resend_is_recorded_without_erasing_the_abandonment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = DeliveryLedger::open(dir.path()).unwrap();
+        l.accept("gone", Some("slack-ops")).unwrap();
+        l.abandon("gone", AbandonReason::DrainBudgetExpired)
+            .unwrap();
+        let at = l.abandoned()[0].at.clone();
+
+        l.mark_resent("gone").unwrap();
+        l.flush().unwrap();
+
+        let after = DeliveryLedger::open(dir.path()).unwrap();
+        let found = after.abandoned();
+        assert_eq!(found.len(), 1, "the abandonment must still be listed");
+        assert_eq!(after.state("gone"), Some(DeliveryState::Abandoned));
+        assert!(found[0].resent.is_some(), "the re-send must be recorded");
+        assert_eq!(found[0].at, at, "the abandon time must survive verbatim");
+        assert_eq!(
+            found[0].acknowledged, None,
+            "a re-send must NOT silently acknowledge — a surface that empties \
+             itself is no surface"
+        );
+        assert_eq!(
+            after.unacknowledged_abandoned_count(),
+            1,
+            "it stays outstanding until a human signs it off"
+        );
+        // And it must not come back as dispatchable work.
+        assert!(after.pending().is_empty());
+    }
+
+    /// Both verbs refuse anything that is not abandoned, rather than writing an
+    /// acknowledgement nobody can act on.
+    #[test]
+    fn acknowledge_and_resend_refuse_a_delivery_that_is_not_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = DeliveryLedger::open(dir.path()).unwrap();
+        l.accept("live", Some("slack-ops")).unwrap();
+        l.settle("live", true).unwrap();
+
+        assert!(matches!(
+            l.acknowledge("live"),
+            Err(LedgerError::NotAbandoned {
+                state: Some(DeliveryState::Settled),
+                ..
+            })
+        ));
+        assert!(matches!(
+            l.mark_resent("live"),
+            Err(LedgerError::NotAbandoned { .. })
+        ));
+        assert!(matches!(l.acknowledge("nope"), Err(LedgerError::Unknown(_))));
+        assert!(matches!(l.mark_resent("nope"), Err(LedgerError::Unknown(_))));
+    }
+
+    /// Whether an attempt had STARTED is the fact that decides if re-sending can
+    /// duplicate, and it must be captured at abandon time.
+    ///
+    /// The abandon record replaces the previous one, so after the append nothing
+    /// else remembers it. Both abandon reasons can fire on either state — the
+    /// drain path abandons everything still pending, which is a mix — so the
+    /// reason alone cannot answer the question.
+    #[test]
+    fn abandon_records_whether_an_attempt_had_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = DeliveryLedger::open(dir.path()).unwrap();
+
+        l.accept("never-tried", Some("slack-ops")).unwrap();
+        l.abandon("never-tried", AbandonReason::DrainBudgetExpired)
+            .unwrap();
+
+        l.accept("mid-flight", Some("slack-ops")).unwrap();
+        l.begin_attempt("mid-flight").unwrap();
+        l.abandon("mid-flight", AbandonReason::DrainBudgetExpired)
+            .unwrap();
+        l.flush().unwrap();
+
+        let found = DeliveryLedger::open(dir.path()).unwrap().abandoned();
+        let by = |id: &str| found.iter().find(|a| a.id == id).unwrap().was_attempted;
+        assert_eq!(
+            by("mid-flight"),
+            Some(true),
+            "an attempt was in flight: it may already have landed"
+        );
+        assert_eq!(
+            by("never-tried"),
+            Some(false),
+            "never attempted: re-sending this cannot duplicate"
+        );
     }
 
     #[test]
