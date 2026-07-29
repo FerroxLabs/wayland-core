@@ -19,8 +19,18 @@ build-release:
 # ── Test ───────────────────────────────────────────────────────────────────
 
 # Unit + integration tests with nextest (default profile — local dev)
+#
+# `scripts/fd-budget.sh` guarantees RLIMIT_NOFILE is large enough for
+# `test-threads = "num-cpus"` before handing off, or refuses to run and names
+# the resource. nextest holds ~3 pipe fds per concurrently-running test in the
+# RUNNER process, so peak demand is ~3 x nproc; when that crosses the fd limit
+# the spawn fails with EMFILE and nextest reports "exec failed" — which is
+# counted like a test failure but means the test never ran, hits a different
+# set of tests every run, and disappears under --test-threads=1. Measured
+# 2026-07-29: 96 such failures at --test-threads=384, 0 real test failures.
+# It is a pass-through on Windows and a no-op wherever the budget already fits.
 test:
-    vx cargo nextest run --workspace --profile default
+    scripts/fd-budget.sh vx cargo nextest run --workspace --profile default
 
 # Unit + integration tests with nextest (CI profile — used in GitHub Actions)
 #
@@ -31,8 +41,10 @@ test:
 # the next first-deterministic Windows failure. Costs an extra few
 # minutes on cold cache when something fails; saves orders of
 # magnitude on iteration loops.
+#
+# scripts/fd-budget.sh: see the `test` recipe above.
 test-ci:
-    vx cargo nextest run --workspace --profile ci --no-fail-fast
+    scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
 
 # Run a single test by name
 test-one NAME:
@@ -172,11 +184,32 @@ check-all: fmt-check lint test-ci hakari-verify audit deny
 #
 # All three layers expect a pre-built release binary in target/release/
 # (release_binary_smoke.rs depends on it via WCORE_PREBUILD_REQUIRED).
+#
+# nextest, not `cargo test`: all three layers are file-level gated
+# (`harness_tui_flow` is `#![cfg(unix)]`, `harness_failure_injection` is
+# `#![cfg(feature = "harness-failure-injection")]`), so under the wrong
+# platform or a dropped feature flag the binary compiles EMPTY and `cargo test`
+# prints `test result: ok. 0 passed` and exits 0. `no-tests = "fail"` in
+# .config/nextest.toml turns that into a hard failure.
+#
+# The recipe is SPLIT by platform rather than suppressed: `harness_tui_flow` is
+# legitimately absent on Windows, so naming it there would be a false positive.
+# Declaring the platform in the invocation — the pattern this justfile already
+# uses for `f01-packaged-driver-gate` — keeps the emptiness honest instead of
+# tolerated. Measured on Linux: 28 tests run, 28 passed.
+[unix]
 harness:
     vx cargo build --release -p wcore-cli
-    vx cargo test -p wcore-cli --test harness_cli_surface --test harness_tui_flow
-    vx cargo test -p wcore-cli --features harness-failure-injection \
-        --test harness_failure_injection -- --test-threads=1
+    vx cargo nextest run --no-tests=fail -p wcore-cli --test harness_cli_surface --test harness_tui_flow
+    vx cargo nextest run --no-tests=fail -p wcore-cli --features harness-failure-injection \
+        --test harness_failure_injection --test-threads=1
+
+# Windows: `harness_tui_flow` is `#![cfg(unix)]` and does not exist here.
+[windows]
+harness:
+    vx cargo build --release -p wcore-cli
+    vx cargo nextest run --no-tests=fail -p wcore-cli --test harness_cli_surface
+    vx cargo nextest run --no-tests=fail -p wcore-cli --features harness-failure-injection --test harness_failure_injection --test-threads=1
 
 # ── W10A eval harness acceptance gate ─────────────────────────────────────
 # Required to pass before F12 GEPA (W10B) can ship. Locked CLI invocation per
@@ -201,12 +234,17 @@ f01-packaged-driver-gate:
         target_dir="$PWD/$target_dir"
     fi
     export WCORE_EVAL_BIN="$target_dir/debug/wayland-core"
-    vx cargo test --locked -p wcore-eval-scenarios \
+    # nextest, not `cargo test`: packaged_driver_gate.rs is
+    # `#![cfg(feature = "packaged-driver-gate")]`. Drop or rename that feature
+    # and `cargo test` reports `ok. 0 passed` with rc=0 — a packaged-boundary
+    # proof that proved nothing. Measured: rc=0 under cargo test, rc=4 under
+    # nextest on the identical empty binary.
+    vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios \
         --features packaged-driver-gate --test packaged_driver_gate
 
 [windows]
 f01-packaged-driver-gate:
-    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
+    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
 
 # ── Silent-pass CI gate (Wave 0) ───────────────────────────────────────────
 # Fails if any functional todo!() exists in the eval-scenarios assertion/trace
@@ -226,6 +264,19 @@ check-no-assertion-todos:
         exit 1
     fi
     echo "OK: no todo!() in eval-scenarios assertion paths"
+
+# ── Vacuous-green gate ─────────────────────────────────────────────────────
+# `cargo nextest` fails closed on a zero-test run (`no-tests = "fail"` in
+# .config/nextest.toml). `cargo test` does NOT: measured on this checkout, a
+# feature-gated target built without its feature prints `test result: ok.
+# 0 passed` and exits 0. 44 test binaries here carry a file-level `#![cfg(...)]`
+# and can compile to empty. This fails if a new bare `cargo test` appears in the
+# justfile, a workflow, or a script without `--no-run` or an explicit
+# executed-count assertion (`vacuity-checked:`).
+# Run: `just check-no-vacuous-cargo-test`
+check-no-vacuous-cargo-test:
+    python3 scripts/check-no-vacuous-cargo-test.py --self-test
+    python3 scripts/check-no-vacuous-cargo-test.py
 
 # ── P0 smoke gate (pre-release) ───────────────────────────────────────────
 # Runs the live P0 smoke suite (crates/wcore-cli/tests/smoke_p0.rs) via

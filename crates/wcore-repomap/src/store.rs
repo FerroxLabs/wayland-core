@@ -165,8 +165,45 @@ pub struct IndexStore {
     root: PathBuf,
 }
 
+/// How the index database journals.
+///
+/// This crate is deliberately isolated with NO internal `wcore-*`
+/// dependencies (see `Cargo.toml`), so it cannot call the workspace's
+/// filesystem-class detector in `wcore-config::sqlite_journal`. The mode is
+/// therefore INJECTED by the caller rather than decided here — the same
+/// mirror-type pattern the plugin API uses to cross an isolation boundary.
+///
+/// The detection logic is not duplicated: `wcore-cli` selects with
+/// `SqliteJournalMode::for_db_path` and converts into this type. Do not add
+/// filesystem probing to this crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JournalMode {
+    /// Write-ahead logging. Local filesystems only.
+    #[default]
+    Wal,
+    /// Rollback journal. Required on network filesystems, where WAL
+    /// corrupts the database outright.
+    Truncate,
+}
+
+impl JournalMode {
+    /// The `PRAGMA journal_mode` value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wal => "WAL",
+            Self::Truncate => "TRUNCATE",
+        }
+    }
+}
+
 impl IndexStore {
-    /// Open (creating if absent) the store at `store_path`, indexing `root`.
+    /// Open (creating if absent) the store at `store_path`, indexing `root`,
+    /// journalling as `journal_mode` says.
+    ///
+    /// `journal_mode` is supplied by the caller because this crate cannot
+    /// depend on the workspace's filesystem detector; see [`JournalMode`].
+    /// Passing [`JournalMode::Wal`] for a store on a network filesystem
+    /// will corrupt it.
     ///
     /// # Errors
     ///
@@ -176,7 +213,11 @@ impl IndexStore {
     ///   different schema version. The error names the file and says a
     ///   rebuild is the remedy. It never panics and never presents an
     ///   unreadable store as an empty index.
-    pub fn open(store_path: &Path, root: &Path) -> Result<Self, RepoMapError> {
+    pub fn open(
+        store_path: &Path,
+        root: &Path,
+        journal_mode: JournalMode,
+    ) -> Result<Self, RepoMapError> {
         let canonical_root = fs::canonicalize(root).map_err(|e| RepoMapError::Root {
             path: root.to_path_buf(),
             source: e,
@@ -196,20 +237,42 @@ impl IndexStore {
             store_path: store_path.to_path_buf(),
             root: canonical_root,
         };
-        store.migrate()?;
+        store.migrate(journal_mode)?;
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<(), RepoMapError> {
+    fn migrate(&mut self, journal_mode: JournalMode) -> Result<(), RepoMapError> {
         // `PRAGMA journal_mode` RETURNS A ROW, so it is issued as a query
         // rather than folded into the batch below. This is also the first
         // real touch of the file, which is exactly where a corrupt or
         // truncated database must surface as a structured error rather than
         // as an empty index.
+        //
+        // Leaving WAL for a rollback mode is done under an EXCLUSIVE lock so
+        // the conversion never maps the `-shm` sidecar — on a network mount
+        // that mapping is the hazard being avoided. Mirrors
+        // `wcore_config::sqlite_journal::SqliteJournalMode::apply`.
+        if journal_mode == JournalMode::Truncate {
+            self.conn
+                .busy_timeout(std::time::Duration::from_millis(5_000))
+                .map_err(|e| store_err(&self.store_path, &e))?;
+            self.conn
+                .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                .map_err(|e| store_err(&self.store_path, &e))?;
+        }
         let _mode: String = self
             .conn
-            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+            .query_row(
+                &format!("PRAGMA journal_mode = {}", journal_mode.as_str()),
+                [],
+                |r| r.get(0),
+            )
             .map_err(|e| store_err(&self.store_path, &e))?;
+        if journal_mode == JournalMode::Truncate {
+            self.conn
+                .pragma_update(None, "locking_mode", "NORMAL")
+                .map_err(|e| store_err(&self.store_path, &e))?;
+        }
 
         self.conn
             .execute_batch(

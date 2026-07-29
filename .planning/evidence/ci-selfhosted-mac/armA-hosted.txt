@@ -1,0 +1,14 @@
+snapshot_at=2026-07-29T06:55:23Z
+Build (aarch64-apple-darwin)	status=queued	conclusion=-	runner=	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z
+CI (macos-latest)	status=queued	conclusion=-	runner=	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z
+Build (x86_64-apple-darwin)	status=queued	conclusion=-	runner=	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z
+Build (aarch64-apple-darwin) [self-hosted]	status=completed	conclusion=skipped	runner=UNASSIGNED	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z
+   1 completed
+  15 queued
+
+=== FINAL ARM A SNAPSHOT before cancellation: 2026-07-29T07:06:34Z ===
+Build (aarch64-apple-darwin)	status=in_progress	runner=GitHub Actions 1000033185	created=2026-07-29T06:51:11Z
+CI (macos-latest)	status=queued	runner=UNASSIGNED	created=2026-07-29T06:51:11Z
+Build (x86_64-apple-darwin)	status=queued	runner=UNASSIGNED	created=2026-07-29T06:51:11Z
+Build (aarch64-apple-darwin) [self-hosted]	status=completed	runner=null	created=2026-07-29T06:51:11Z
+armB run 30429811126 state: pending, jobs=0

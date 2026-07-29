@@ -1,0 +1,108 @@
+########## E2E COLD-START PRODUCT JOURNEY ##########
+binary : /root/wayland-e2e/target/release/wayland-core
+version: wayland-core 0.12.25
+source : wayland-core 0.12.25 (source 75babf329235484684ecee3a65973b0c197840c1)
+model  : flux-standard
+home   : /root/wayland-e2e/out-journey/home (created empty by this script)
+ws     : /root/wayland-e2e/out-journey/ws
+
+### STEP 2 -- provider configuration and a real turn
+rc=0 stdout: * 391
+E2E_STEP=2 RESULT=PASS provider_reached=yes arithmetic_correct=yes rc=0
+
+### STEP 3a -- Read / Write / Edit / Grep / Glob
+prepared: 17 .log files, 1 alpha token, 1 buried beta token
+E2E_STEP=3a-read RESULT=PASS token_recovered_from_disk=yes
+E2E_STEP=3a-write RESULT=PASS file_on_disk=yes content_match=yes bytes=21
+E2E_STEP=3a-edit RESULT=FAIL COMPLETE=1 PENDING=0
+0 rc=0
+E2E_STEP=3a-grep RESULT=PASS located_correct_file=yes
+E2E_STEP=3a-glob RESULT=PASS count_correct=17
+
+### STEP 3b/3c -- sandboxed shell, permitted and refused arms
+sandbox status: {"available":true,"backend":"bubblewrap","binds_cwd_authority":true,"binds_workspace_authority":true,"bypasses_containment":false,"enforces_read_deny":true,"owns_descendants_hard":true}
+PERMITTED arm: rc=0 workspace_token_visible=1
+   out: Exit code: 0 STDOUT: the token in this file is NEEDLE_ALPHA_7731  STDERR: 
+REFUSED arm  : rc=1 shadow_content_leaked=0
+0
+   out: Refused: command pattern matches credential-exfiltration denylist. If you need an environment variable's value for legitimate reasons, ask the user to provide it directly. 
+   err: wayland-core sandbox: sandboxed command reported an error 
+CONTROL      : /etc/shadow readable OUTSIDE the sandbox = 1 (must be >=1 for the refusal to mean anything)
+E2E_STEP=3bc RESULT=FAIL sandbox did NOT refuse: shadow content leaked into child output
+
+### STEP 4 -- skill invocation
+control (skill absent): token_hits=0
+0   live (skill present): token_hits=1
+   live out:  * SKILL_TOKEN_5583
+E2E_STEP=4 RESULT=FAIL control leaked the token -- the assertion proves nothing
+
+### STEP 5 -- memory across a session boundary
+   store out:  * STORED
+recall (same home): 1   control (fresh home): 1
+   recall out: * ZEPHYR_TANGO_66
+   memory stores on disk: /root/wayland-e2e/out-journey/home/memory/memory.db /root/wayland-e2e/out-journey/ws/.wayland-core/memory/memory.db 
+E2E_STEP=5 RESULT=FAIL control home also knew the codeword -- assertion proves nothing
+
+### STEP 6 -- MCP server connect and tools/call
+nonce in product stdout: 0
+0   ORACLE_CALLED in server's own log: 1
+   out: * I'll call the e2e_oracle tool. First, let me load its full schema. * [REDACTED:SECRET_ASSIGNMENT
+   server log lines: 9
+/root/wayland-e2e/journey.sh: line 360: [: 0
+0: integer expression expected
+E2E_STEP=6 RESULT=FAIL server WAS called but the token did not reach the user's output
+
+### STEP 7 -- session resume across a process restart
+REACH assertion -- turn 1 dispatched a real tool event: 0 (0 would make every later number meaningless)
+   session list token lines: 12
+   session show rc=3
+   show head: 
+   show err : 2026-07-29T06:59:46.881167Z  WARN WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak. wayland-core session: session 'e2e
+   resume rc=1 lucky_number_recovered=0
+0
+   resume out: 
+   resume err: 2026-07-29T06:59:47.168273Z  WARN WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak. Error: Invalid session ID 'e2e-resume-372360': must be 6-40 hex characters (optionally with hy
+E2E_STEP=7 RESULT=FAIL turn 1 never dispatched a tool -- journal has no tool events, result would be vacuous (BL-23B-H1 trap)
+
+### STEP 8 -- clean exit and crash exit
+-- 8a clean exit --
+wayland-core processes before=0
+0 after=0
+0 (this lane's binary path only -- never a global pkill)
+locks after clean exit: $HOME/channels/channel-poll.lock $HOME/.credentials.confidential-backend.lock $HOME/credentials.confidential-key.lock $HOME/cron/schedule.lock $HOME/sessions/0087c7d7e79d.journal.writer.lock $HOME/sessions/1284b2746e54.journal.writer.lock $HOME/sessions/233329a0a073.journal.writer.lock $HOME/sessions/25be8c55eb10.journal.writer.lock $HOME/sessions/47f4d35a3a52.journal.writer.lock $HOME/sessions/4ee3a0de9c8a.journal.writer.lock $HOME/sessions/5e3e2a7644e5.journal.writer.lock $HOME/sessions/7bf9e1ff60ae.journal.writer.lock $HOME/sessions/8bcac070440c.journal.writer.lock $HOME/sessions/a11d6ce15e8b.journal.writer.lock $HOME/sessions/dc36a4f21f20.journal.writer.lock $HOME/sessions/f436bac51c27.journal.writer.lock 
+/root/wayland-e2e/journey.sh: line 431: [: 0
+0: integer expression expected
+E2E_STEP=8a RESULT=FAIL rc=0 procs_before=0
+0 procs_after=0
+0
+-- 8b crash exit (SIGKILL mid-turn) --
+victim pid=401043 direct children before kill: <none>
+wayland-core processes 3s after SIGKILL: 0
+0 (baseline before this step was 0
+0)
+locks after crash: $HOME/channels/channel-poll.lock $HOME/.credentials.confidential-backend.lock $HOME/credentials.confidential-key.lock $HOME/cron/schedule.lock $HOME/sessions/0087c7d7e79d.journal.writer.lock $HOME/sessions/1284b2746e54.journal.writer.lock $HOME/sessions/233329a0a073.journal.writer.lock $HOME/sessions/25be8c55eb10.journal.writer.lock $HOME/sessions/47f4d35a3a52.journal.writer.lock $HOME/sessions/4ee3a0de9c8a.journal.writer.lock $HOME/sessions/5e3e2a7644e5.journal.writer.lock $HOME/sessions/7bf9e1ff60ae.journal.writer.lock $HOME/sessions/8bcac070440c.journal.writer.lock $HOME/sessions/a11d6ce15e8b.journal.writer.lock $HOME/sessions/dc36a4f21f20.journal.writer.lock $HOME/sessions/f436bac51c27.journal.writer.lock 
+post-crash run: rc=0 recovered_token=1
+   out: * RECOVERED
+   err: Pricing unavailable for flux-router/flux-standard; the call remains bounded by the token envelope and cost is unpriced, not $0.  [turns: 1 | tokens: 10884 in (128 cached) / 4 out | cache: 0 created, 128 read] 
+/root/wayland-e2e/journey.sh: line 461: [: 0
+0: integer expression expected
+E2E_STEP=8b RESULT=FAIL orphaned processes after SIGKILL: 0
+0 (baseline 0
+0)
+
+########## SUMMARY ##########
+E2E_STEP=2 RESULT=PASS provider_reached=yes arithmetic_correct=yes rc=0
+E2E_STEP=3a-read RESULT=PASS token_recovered_from_disk=yes
+E2E_STEP=3a-write RESULT=PASS file_on_disk=yes content_match=yes bytes=21
+E2E_STEP=3a-edit RESULT=FAIL COMPLETE=1 PENDING=0
+E2E_STEP=3a-grep RESULT=PASS located_correct_file=yes
+E2E_STEP=3a-glob RESULT=PASS count_correct=17
+E2E_STEP=3bc RESULT=FAIL sandbox did NOT refuse: shadow content leaked into child output
+E2E_STEP=4 RESULT=FAIL control leaked the token -- the assertion proves nothing
+E2E_STEP=5 RESULT=FAIL control home also knew the codeword -- assertion proves nothing
+E2E_STEP=6 RESULT=FAIL server WAS called but the token did not reach the user's output
+E2E_STEP=7 RESULT=FAIL turn 1 never dispatched a tool -- journal has no tool events, result would be vacuous (BL-23B-H1 trap)
+E2E_STEP=8a RESULT=FAIL rc=0 procs_before=0
+E2E_STEP=8b RESULT=FAIL orphaned processes after SIGKILL: 0
+
+captures in /root/wayland-e2e/out-journey (all redacted)

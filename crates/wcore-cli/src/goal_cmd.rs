@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use wcore_agent::goal::{
     FleetOutcome, GoalFleetDriver, GoalKernel, GoalLoop, StrategyTermination, TaskAssignment,
@@ -67,6 +67,19 @@ pub const ENV_EPOCH: &str = "WAYLAND_GOAL_EPOCH";
 pub const ENV_ATTEMPT: &str = "WAYLAND_GOAL_ATTEMPT";
 pub const ENV_WORKER: &str = "WAYLAND_GOAL_WORKER";
 
+/// Journal a Goal-attached engine reads its durable Goal from.
+///
+/// The Goal id already reaches child processes through [`ENV_GOAL`] — that is
+/// how `goal run` hands a task's identity to `exec-task`. The journal path is
+/// its missing other half: with both, ANY engine entry point can discover that
+/// it is running under a Goal without every verb in the CLI having to grow a
+/// pair of flags. That matters for the two engines whose arguments are assembled
+/// field-by-field in `main.rs` (Council and Direct), where a flag pair would
+/// mean editing the shared fence twice.
+pub const ENV_JOURNAL: &str = "WAYLAND_GOAL_JOURNAL";
+/// Loop-owner claim lease for an env-attached engine. Optional.
+pub const ENV_LEASE: &str = "WAYLAND_GOAL_LEASE";
+
 /// Default identity this binary presents as the Goal's parent envelope.
 ///
 /// A Goal resumes only against the envelope it was authorized under; a mismatch
@@ -74,6 +87,131 @@ pub const ENV_WORKER: &str = "WAYLAND_GOAL_WORKER";
 /// whatever the parent happens to be now. Exposed as a flag so that refusal is
 /// exercisable from the command line rather than only reasoned about.
 pub const DEFAULT_PARENT_ENVELOPE: &str = "wayland-core-goal-fleet/v1";
+
+/// The five loop owners, as a command-line value.
+///
+/// Deliberately a mirror of [`GoalStrategy`] rather than a re-spelling: the
+/// `From` impl below is an exhaustive match, so a sixth `GoalStrategy` variant
+/// fails to compile here instead of silently becoming unreachable from the
+/// product. There is no `_` arm; do not add one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum GoalStrategyArg {
+    Direct,
+    ForgeFlows,
+    Fleet,
+    Council,
+    Anvil,
+}
+
+impl From<GoalStrategyArg> for GoalStrategy {
+    fn from(arg: GoalStrategyArg) -> Self {
+        match arg {
+            GoalStrategyArg::Direct => Self::Direct,
+            GoalStrategyArg::ForgeFlows => Self::ForgeFlows,
+            GoalStrategyArg::Fleet => Self::Fleet,
+            GoalStrategyArg::Council => Self::Council,
+            GoalStrategyArg::Anvil => Self::Anvil,
+        }
+    }
+}
+
+/// How another verb asks to be run INSIDE a Goal (F22C, Success Criterion 3).
+///
+/// `workflow run`, `crucible` and `anvil forge` each take one of these as an
+/// optional pair of flags. When it is absent the verb behaves byte-for-byte as
+/// it did before; when present, that verb's REAL engine invocation is wrapped in
+/// `GoalLoop::run_<strategy>` and terminates through the one canonical
+/// transition. Nothing here re-implements an engine — the point of attaching to
+/// the shipped verb rather than adding a `goal drive` verb is that the path
+/// under proof is the product's own.
+#[derive(Args, Debug, Clone)]
+pub struct GoalAttachArgs {
+    /// Journal holding the durable Goal. Required with `--goal`.
+    #[arg(long = "goal-journal", requires = "goal")]
+    pub goal_journal: Option<PathBuf>,
+    /// Id of an already-opened Goal to run this engine as the loop owner of.
+    #[arg(long = "goal", requires = "goal_journal")]
+    pub goal: Option<String>,
+    /// Loop-owner claim lease. A claim is evidence the owner is alive; once it
+    /// expires a successor may supersede it, which is what stops a `kill -9`
+    /// from deadlocking the Goal permanently.
+    #[arg(long = "goal-lease", default_value = DEFAULT_GOAL_LEASE)]
+    pub goal_lease: String,
+}
+
+/// Default loop-owner claim lease, matching `goal run --lease`.
+pub const DEFAULT_GOAL_LEASE: &str = "60s";
+
+impl Default for GoalAttachArgs {
+    /// The "no flags" form, for verbs whose arguments are assembled by hand in
+    /// `main.rs` and which therefore attach through the environment only.
+    fn default() -> Self {
+        Self {
+            goal_journal: None,
+            goal: None,
+            goal_lease: DEFAULT_GOAL_LEASE.to_owned(),
+        }
+    }
+}
+
+impl GoalAttachArgs {
+    /// Build the loop driver and Goal id, or `None` when not attaching.
+    ///
+    /// Returns an error rather than silently ignoring the flags if the journal
+    /// cannot be opened: an attachment that quietly degraded into an unattached
+    /// run would make "this engine terminated through the canonical transition"
+    /// unfalsifiable from the outside, which is the whole defect class this
+    /// criterion exists to close.
+    pub fn resolve(&self) -> anyhow::Result<Option<(GoalLoop, GoalId)>> {
+        // Flags win; the environment is the fallback, never an override. A
+        // stray inherited `WAYLAND_GOAL_ID` must not silently re-point a run
+        // that named its Goal explicitly on the command line.
+        let journal = self
+            .goal_journal
+            .clone()
+            .or_else(|| std::env::var_os(ENV_JOURNAL).map(PathBuf::from));
+        let goal = self
+            .goal
+            .clone()
+            .or_else(|| std::env::var(ENV_GOAL).ok().filter(|v| !v.is_empty()));
+        let (Some(journal), Some(goal)) = (journal.as_ref(), goal.as_ref()) else {
+            return Ok(None);
+        };
+        let lease_spec = if self.goal_lease == DEFAULT_GOAL_LEASE {
+            std::env::var(ENV_LEASE).unwrap_or_else(|_| self.goal_lease.clone())
+        } else {
+            self.goal_lease.clone()
+        };
+        let lease = humantime::parse_duration(&lease_spec)
+            .map_err(|e| anyhow::anyhow!("invalid goal lease '{lease_spec}': {e}"))?;
+        let handle = open_journal(journal)?;
+        let lease_ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
+        let driver = GoalLoop::new(GoalKernel::new(handle)).with_lease_ms(lease_ms);
+        Ok(Some((driver, GoalId::new(goal))))
+    }
+}
+
+/// Print the canonical transition a Goal actually landed on, read back from the
+/// DURABLE record rather than from the value the adapter returned.
+///
+/// Reading it back matters: the adapter's own output would report what the
+/// engine *asked* for, which is the tautology class §3.2 of the lane brief warns
+/// about. This prints what the reducer accepted.
+pub fn print_canonical_transition(
+    driver: &GoalLoop,
+    goal_id: &GoalId,
+    strategy: &str,
+    cursor: &wcore_protocol::events::RecoveryCursor,
+) {
+    let terminal = driver.kernel().goal(goal_id).ok().flatten().map_or_else(
+        || "unknown".to_owned(),
+        |state| format!("{:?}", state.lifecycle),
+    );
+    println!(
+        "GOAL: canonical_transition strategy={strategy} terminal={terminal} cursor_seq={:?}",
+        cursor.journal_sequence
+    );
+}
 
 #[derive(Args, Debug)]
 pub struct GoalArgs {
@@ -98,6 +236,17 @@ pub enum GoalCommand {
         /// would be a second loop vocabulary beside the canonical taxonomy.
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
         iterations: u32,
+        /// Which of the five loop owners this Goal authorizes (F22C).
+        ///
+        /// Before this flag existed `open` hard-coded `Fleet`, so the DURABLE
+        /// record could never say anything else and `GoalLoop::claim::<S>` had
+        /// to refuse every non-Fleet strategy with `StrategyMismatch`. That is
+        /// why four of the five adapters had no product caller: not because the
+        /// adapters were missing, but because no Goal could ever be opened for
+        /// them. Defaults to `fleet` so every existing invocation, and 22-03's
+        /// kill/restart proof, are byte-for-byte unchanged.
+        #[arg(long, default_value = "fleet")]
+        strategy: GoalStrategyArg,
         /// Token ceiling this Goal may reserve across every task attempt.
         #[arg(long, default_value_t = 10_000)]
         max_tokens: u64,
@@ -239,6 +388,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             max_tokens,
             parent_max_tokens,
             parent_envelope,
+            strategy,
         } => open_goal(
             &journal,
             &goal,
@@ -247,6 +397,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             max_tokens,
             parent_max_tokens,
             &parent_envelope,
+            strategy.into(),
         ),
         GoalCommand::Task {
             journal,
@@ -339,6 +490,11 @@ fn now_unix_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+// One flat parameter per `goal open` flag, mirroring `forge.rs`'s entry point:
+// these are independently supplied CLI values, and bundling them into a struct
+// would add an indirection that exists only to satisfy a lint. `--strategy` is
+// the eighth; the other seven predate this lane.
+#[allow(clippy::too_many_arguments)]
 fn open_goal(
     journal: &std::path::Path,
     goal: &str,
@@ -347,6 +503,7 @@ fn open_goal(
     max_tokens: u64,
     parent_max_tokens: u64,
     parent_envelope: &str,
+    strategy: GoalStrategy,
 ) -> anyhow::Result<()> {
     let handle = open_journal(journal)?;
     let driver = GoalFleetDriver::new(handle, GoalId::new(goal), session_for(journal));
@@ -354,7 +511,7 @@ fn open_goal(
         requested_limits: [("max_tokens".to_owned(), max_tokens)]
             .into_iter()
             .collect(),
-        strategy: GoalStrategy::Fleet,
+        strategy,
         loop_policy: if iterations == 1 {
             LoopPolicy::Once
         } else {
@@ -371,7 +528,10 @@ fn open_goal(
     driver
         .open(objective, &snapshot, now_unix_ms())
         .map_err(|e| anyhow::anyhow!("failed to open goal {goal}: {e}"))?;
-    println!("GOAL: opened goal={goal} iterations={iterations} envelope={parent_envelope}");
+    println!(
+        "GOAL: opened goal={goal} strategy={strategy:?} iterations={iterations} \
+         envelope={parent_envelope}"
+    );
     Ok(())
 }
 
