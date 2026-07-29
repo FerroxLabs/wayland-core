@@ -1,0 +1,37 @@
+== MUTATION CONTROL: macOS arm replaced with the pre-repair kill(pid,0) shape ==
+host: Darwin 25.3.0 arm64 macOS 26.3 uid=501
+EXPECT: RED. ARM D + the zombie test must both fail.
+== UNPROXIED cargo test -p wcore-types --test real_zombie ==
+   Compiling wcore-types v0.12.25 (/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-25-macos/crates/wcore-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+     Running tests/real_zombie.rs (target/debug/deps/real_zombie-c3ada7f68a6ad021)
+
+running 5 tests
+
+thread 'a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead' (207916413) panicked at crates/wcore-types/tests/real_zombie.rs:364:5:
+assertion `left == right` failed: pid 1 (launchd) must read as Live; reading it as Dead is the false-clean direction that makes an orphan reaper believe there is nothing to reap
+  left: Dead
+ right: Live
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test the_running_test_process_reads_as_live ... ok
+test a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead ... FAILED
+test a_live_process_reads_as_live ... ok
+test a_fully_reaped_process_reads_as_dead ... ok
+independent oracle for pid 98567: ps state=Z
+
+thread 'a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it' (207916415) panicked at crates/wcore-types/tests/real_zombie.rs:286:5:
+assertion `left == right` failed: an unreaped corpse (pid 98567) must read as Dead, not Live. Oracle said: ps state=Z
+  left: Live
+ right: Dead
+test a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... FAILED
+
+failures:
+
+failures:
+    a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead
+    a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-types --test real_zombie`
+cargo_rc=101

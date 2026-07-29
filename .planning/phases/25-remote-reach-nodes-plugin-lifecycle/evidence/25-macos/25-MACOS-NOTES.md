@@ -131,9 +131,91 @@ the live measurement, not before.
 **Still a PREDICTION at this point. Must be executed, not reasoned.** `NodeIdentity::local()` is
 `pub`, so it is provable under the §0 single-crate exception.
 
+## MEASUREMENT 3 (t+55m) — §0 exception used: macOS liveness arm executed in Rust, first time
+
+`wcore_types::process_liveness` has a real `#[cfg(target_os = "macos")]` arm using
+`sysctl KERN_PROC_PID` with **hardcoded ABI offsets** (`p_stat`=36, `p_pid`=40, `SZOMB`=5) taken
+from `offsetof` on real hardware. Its recorded provenance is a **C** probe
+(`.planning/evidence/zombie-probe/`), and the Rust arm had only ever been `cargo check`ed for
+`aarch64-apple-darwin` — compiled, never executed. This is exactly what the §0 exception was
+granted for.
+
+**§0 exception invoked.** `cargo test -p wcore-types --test real_zombie`. Single crate, single test
+file, bottom-layer crate with zero internal deps. No workspace build, no clippy, no release build.
+Justification: the arm is `#[cfg(target_os = "macos")]` — hetzner cannot compile it, let alone run
+it. Host: Darwin 25.3.0 arm64, macOS 26.3 (25D125), uid 501.
+
+Result (`25m-real-zombie-darwin.txt`, unproxied via `/Users/seandonahoe/.cargo/bin/cargo`):
+
+```
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+independent oracle for pid 83408: ps state=Z
+```
+
+4 executed, 0 ignored, 0 filtered — read back per §3.2, not inferred from exit status. The
+`ps state=Z` line is an oracle independent of the code under test. **The hardcoded offsets are
+still correct on macOS 26.3**, an OS several releases newer than the C probe's host; had Apple
+moved them the `p_pid` readback self-check would have degraded to `Indeterminate` → "assume alive"
+→ the corpse test would have gone red.
+
+### Instrument finding: `rtk` rewrites `cargo` too
+
+The first run of this command was rewritten by `rtk` to `cargo test: 4 passed (1 suite, 0.01s)`.
+The count happened to be right, but the re-render **strips `0 ignored` and `0 filtered out`** —
+precisely the two fields §3.2 requires to detect a suite that exits 0 having run nothing. So the
+proxied form is structurally incapable of supporting the check the brief mandates. Every count in
+this lane comes from `/Users/seandonahoe/.cargo/bin/cargo` invoked by absolute path. Adding
+`cargo` to the §3b list of rewritten tools.
+
+## MEASUREMENT 4 (t+70m) — ARM D closed: a Rust test that did not exist
+
+The C probe recorded four arms. Three (live, zombie, reaped) have Rust tests. **ARM D did not**,
+and ARM D is the one that fails in the dangerous direction:
+
+> `ARM D: live, other user (launchd) pid=1 kill(pid,0)_says_alive=0 … sysctl.p_stat=2 -> LIVE`
+
+Absence verified per §3b-i: `/usr/bin/grep -n "launchd\|EPERM\|other_user\|ARM D\|arm_d"
+crates/wcore-types/tests/real_zombie.rs` → **rc=1, zero matches**, with a live positive control in
+the same file (`grep -c zombie` → **4**). So the zero is a measurement, not a dead instrument.
+
+Why it matters: a probe that reads a **live** process as **dead** makes an orphan reaper believe
+it has nothing to clean up — a *false clean*. That is the C4-relevant direction ("no orphaned
+execution"). And it is **unobservable on the Linux proof host**, which runs as root: `kill(1, 0)`
+succeeds for root, so hetzner literally cannot demonstrate this arm. Darwin at uid 501 can.
+
+Added `a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead` with
+three assertions per §6b-ii — known-positive (pid 1 is Live), known-negative (a reaped pid is
+still Dead, in the same test, so a probe answering Live to everything cannot pass), and **the old
+shape would have missed it** (`kill(1,0)` fails EPERM at that same instant). It `assert_ne!`s on
+euid 0 rather than skipping, so it cannot go green by being unobservable.
+
+```
+ARM D reproduced on Darwin: uid=501 pid=1 new_probe=Live old_shape(kill(1,0))=alive:false errno=1 (EPERM=1)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+## MEASUREMENT 5 (t+80m) — mutation control: the new test CAN fail
+
+Per §3.2 a gate is worthless until it has been seen to fail. The macOS arm was temporarily
+replaced with the pre-repair `kill(pid,0)` shape and the suite re-run
+(`25m-mutation-control-darwin.txt`):
+
+```
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+  a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead ... FAILED
+  a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... FAILED
+```
+
+Both directions go red without the sysctl arm — the corpse arm and ARM D. `process_liveness.rs`
+was restored byte-identically afterwards (`git diff --stat` empty; `grep -c "MUTATION CONTROL"` →
+0). The mutation lived only in the working tree and was never committed.
+
 ## Open / next
 
-1. Execute the machine_id prediction on Darwin via the §0 exception; execute the same on hetzner.
-2. Check the C4 orphan/liveness leg (`wcore_types::process_liveness`) for Darwin divergence.
-3. Check C3 plugin-load for a `.dylib`/quarantine path.
-4. Say plainly which legs need Darwin and which prove nothing re-run.
+1. Execute the machine_id prediction (C2) — still unproven.
+2. Decide C3 plugin-load Darwin relevance.
+3. Say plainly which legs need Darwin and which prove nothing re-run.
+
+Note: `Cargo.lock` regenerates on any cargo run (the committed lock predates `wcore-types`'
+`libc`/`windows-sys` deps). Pre-existing drift, not this lane's; restored to HEAD and left
+unstaged to avoid cross-lane conflict.

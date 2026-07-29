@@ -1,0 +1,22 @@
+== host ==
+Darwin 25.3.0 arm64
+ProductName:		macOS ProductVersion:		26.3 BuildVersion:		25D125 
+uid=501 euid=501
+commit=c69cba131cb792c42dfa7d0df65ae89c77dc46a3
+== UNPROXIED cargo test -p wcore-types --test real_zombie ==
+   Compiling wcore-types v0.12.25 (/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-25-macos/crates/wcore-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running tests/real_zombie.rs (target/debug/deps/real_zombie-c3ada7f68a6ad021)
+
+running 5 tests
+test the_running_test_process_reads_as_live ... ok
+test a_live_process_reads_as_live ... ok
+ARM D reproduced on Darwin: uid=501 pid=1 new_probe=Live old_shape(kill(1,0))=alive:false errno=1 (EPERM=1)
+test a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead ... ok
+test a_fully_reaped_process_reads_as_dead ... ok
+independent oracle for pid 93070: ps state=Z
+test a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+cargo_rc=0

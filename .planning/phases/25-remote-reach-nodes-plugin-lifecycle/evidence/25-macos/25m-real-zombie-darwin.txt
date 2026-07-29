@@ -1,0 +1,19 @@
+== host ==
+Darwin 25.3.0 arm64
+ProductName:		macOS ProductVersion:		26.3 BuildVersion:		25D125 
+uid=501
+commit=c69cba131cb792c42dfa7d0df65ae89c77dc46a3
+== UNPROXIED: /Users/seandonahoe/.cargo/bin/cargo test -p wcore-types --test real_zombie -- --nocapture ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/real_zombie.rs (target/debug/deps/real_zombie-c3ada7f68a6ad021)
+
+running 4 tests
+test the_running_test_process_reads_as_live ... ok
+test a_live_process_reads_as_live ... ok
+test a_fully_reaped_process_reads_as_dead ... ok
+independent oracle for pid 83408: ps state=Z
+test a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+cargo_rc=0
