@@ -338,7 +338,18 @@ ledger lane fold in both.
 
 ## 11. Housekeeping
 
-hetzner worktree `/root/wayland-f24-c3-h5` (branch `hz/f24-c3-h5-reload`) and its `target/` are
-still present at the time of writing — see the final report for disposition. Disk was 519G free
-after all runs. Stray `sleep 900` lock holders left by my broken release were cleaned up and
-verified gone.
+- **Integration merged forward** (`gh/plan/f20-unified-audit-repair` @ `25fb1185`) into this
+  lane at `7a7bf667`: clean, `ort`, no conflicts, and nothing it brought in touches this lane's
+  crates. **Pushed only to `lane/f24-c3-h5-reload`, never to integration.** Every gate was
+  re-run on the merged tree: workspace check rc=0 / 0 errors, `gateway::tests` 16/0,
+  `framework_matrix` 19/0, the H5 test 1/0, and the live driver **7/0** (evidence in
+  `f24-c3-h5-reload-evidence/merged/`).
+- **hetzner worktree removed**: `/root/wayland-f24-c3-h5` and its 23G `target/` are gone, branch
+  `hz/f24-c3-h5-reload` deleted, `git worktree prune` run. Disk went 511G → **534G free**. All
+  `/tmp/f24c3h6-*` scratch removed.
+- **Stray `sleep 900` lock holders** left by my broken release were cleaned up and verified gone;
+  a final probe found zero lock holders and zero lane processes, so the repaired group-kill
+  cleanup is holding.
+- Every measurement in this file came from an unproxied tool (`/usr/bin/git`, `/usr/bin/grep`,
+  `/root/.cargo/bin/cargo`). All lane scratch on hetzner used `/tmp/f24c3h6-*` paths unique to
+  this lane, and every glob read back was scoped to them (§6a-ii).
