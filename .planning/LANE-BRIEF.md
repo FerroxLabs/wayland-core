@@ -138,10 +138,19 @@ so nothing looks wrong. Two classes measured:
   underneath it. Another lane's `git diff` came back re-indented by two spaces, which blinded a
   `^-` removal-line matcher and produced a false "no removals" fence result.
 
-- **`cargo`** — also rewritten, and this one is the worst of the three. It reports the pass count
+- **`cargo`** — also rewritten, and this one is the worst of the four. It reports the pass count
   correctly and **strips `0 ignored` and `0 filtered out`** — the exact two fields §3.2 requires you
   to read back to catch a suite that exits 0 having run nothing. **So the proxy silently removes
   the evidence the anti-vacuity rule is built on.** Measured 2026-07-29.
+
+- **`ls`** — also rewritten: it alters the size column and reorders entries. Found 2026-07-29 by
+  `lane/22-remaining`. Anything that counts or sizes files from a directory listing is affected.
+
+**Assume the list is incomplete.** Four tools were found in five days, each after a lane trusted it.
+The safe posture is that *any* proxied tool may re-render, so reach for the absolute path first
+rather than discovering the fifth member the hard way. The orchestrator hit this too on 2026-07-29:
+`git log` reported an unchanged HEAD immediately after a 24-branch merge train had moved it, and the
+truth came from `command git reflog` plus a filesystem check.
 
 **Rule: anything load-bearing goes through `/usr/bin/git`, `/usr/bin/grep`, `/usr/bin/env cargo`
 (absolute path), or `rtk proxy`.** That
