@@ -149,3 +149,51 @@ rather than shipped red; recoverable from `git show 189599ca -- .github/workflow
 
   **Falsifiable prediction, stated before the run:** with `--init` the 13 pass in
   real CI. If they do not, this mechanism is wrong and I will say so.
+
+- **T3 — bubblewrap: the prior lane's blocker is REFUTED, and the grant is measured.**
+  Matrix on hetzner (`bwmatrix.sh`, `bwmatrix2.sh`), engine argv from `bwrap.rs:212-349`:
+
+  | case | result |
+  |---|---|
+  | no grant, workspace = bind-mounted `/work` | `No permissions to create new namespace` |
+  | grant, workspace = bind-mounted `/work` | `Can't mount proc on /newroot/proc` |
+  | grant, workspace = **container-internal** dir | **identical failure** |
+
+  B and C are the same, so **the bind mount was never the variable** — refuting the
+  earlier "mount propagation on the docker bind mount" diagnosis. The blocker is
+  Docker's masked `/proc` paths, which are locked mounts that refuse bwrap's
+  `--proc`. The earlier namespace probe passed only because it omitted `--proc`.
+
+  Minimal grant, each flag closing a distinct refusal (removing any one restores it):
+  `--cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt
+  apparmor=unconfined --security-opt systempaths=unconfined`.
+
+  End-to-end, real tests, bubblewrap installed in BOTH arms so the package is
+  isolated from the grant:
+
+  | crate | no grant | with grant |
+  |---|---|---|
+  | `wcore-sandbox` | 100 run, 86 passed, **14 failed** | 100 run, **100 passed, 0 failed** |
+  | `wcore-swarm` + `wcore-tools` | 1344 run, 1330 passed, **14 failed** | 1344 run, **1344 passed, 0 failed** |
+
+  **Zero regressions in either crate.**
+
+- **T4 — instrument defect in MY OWN reasoning, repaired here (§6b-ii).** I read
+  "absent from `win81.txt`" as "passed on Windows". For a `#[cfg(target_os="linux")]`
+  test, absence means it does not exist there. I used that to argue the bwrap tests
+  had native coverage elsewhere — which would have overstated the case for skipping
+  them. Repaired: `classify-windows-status.py` consults the cfg gate as a second
+  oracle and returns a third state, `NOT_PRESENT`. Self-test 3/3; A3 reports
+  `repaired=NOT_PRESENT_ON_WINDOWS old=PASSED_ON_WINDOWS`.
+
+- **T5 — second self-inflicted defect, caught before it shipped.** My first
+  `bwmatrix.sh` put `--ro-bind / /` AFTER `--proc`/`--dev`, overmounting them, which
+  produced a spurious `cannot create /dev/null`. It did not change the B-vs-C
+  conclusion (both failed identically at the proc mount) but the error text was my
+  harness's, not the kernel's. Recorded rather than quietly dropped.
+
+- **T6 — a YAML defect my pre-push validation caught.** My step name contained
+  `expected: none`; an unquoted colon-space is invalid YAML and would have made the
+  ENTIRE workflow unparseable, producing a run that measured nothing. Renamed. The
+  validator now also asserts the grant reaches exactly one step and that the other
+  seven keep the hardened `DOCKER_RUN`.
