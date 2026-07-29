@@ -252,6 +252,13 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
         // Compaction off: this test measures cost, and a compaction pass would
         // consume a scripted turn and change the token totals underneath it.
         config.compact.enabled = false;
+        // …and the emergency hard stop is ALWAYS on, independent of
+        // `compact.enabled`. At scale=100_000 the watermark reaches 1M and the
+        // run aborts with ContextTooLong before the third round-trip, which is
+        // how this first came back red. Widen the window so the cost arithmetic
+        // is what is under test here; `token_pressure_*` below covers the
+        // thresholds themselves.
+        config.compact.context_window = 100_000_000;
         let mut engine = AgentEngine::new_with_provider(
             provider,
             config,
