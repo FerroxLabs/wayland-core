@@ -116,4 +116,98 @@ Exit codes, captured **unpiped** (no `tee`, no `grep` — a pipe steals exit sta
 RC_REPORT=0  RC_SHOW=0  RC_LIST=0  RC_VERIFY=0
 ```
 
+---
+
+## 2. OBSERVATION 2 — a live compaction under token pressure
+
+Session B, isolated home `/root/c4-live/homeB`, same binary and model. The
+thresholds were lowered through the product's own TOML so pressure is reachable for
+cents instead of by burning 167k real tokens:
+
+```toml
+[compact]
+enabled = true
+context_window    = 30000
+output_reserve    = 2000
+autocompact_buffer = 20000   # threshold = 30000-2000-20000 =  8000
+emergency_buffer  = 1000     # emergency = 30000-1000       = 29000
+```
+
+The product read those back itself — `threshold=8000 emergency_limit=29000` on every
+round-trip — so the numbers acted on are the numbers reported.
+
+`wayland-core cache report`, verbatim:
+
+```
+F23_CACHE=quality hit_ratio=0.4934 warm_hit_ratio=0.9745 hit_round_trips=2
+          miss_round_trips=2 warm_round_trips=2 cache_read=34103 cache_write=35008
+          uncached_input=12 output=347 total_input=69123
+F23_CACHE=invalidation distinct_causes=1 causes=history_rewritten:1
+F23_CACHE=invalidation_cause name=history_rewritten count=1
+F23_CACHE=pressure peak_watermark=17617 autocompact_threshold=8000
+          emergency_limit=29000 peak_pressure=2.2021 compactions=3 micro=0 auto=0
+          failed=3 tokens_reclaimed=0
+F23_CACHE=cost usd=0.048917 uncached_equivalent_usd=0.070858 saving_usd=0.021941
+          saving_ratio=0.3096 cost_truth=priced catalog_priced_round_trips=4
+```
+
+**The threshold was crossed and the compactor acted.** `peak_pressure=2.2021` — the
+watermark reached 2.2× the trigger, versus the prior lane's `peak_pressure=0.0245`
+against a threshold nothing ever approached. `compactions=3`, `trigger=watermark`.
+
+**But all three compactions FAILED**, and the ledger says so with the provider's own
+words (`cache show`, verbatim, one of three):
+
+```
+F23_CACHE=compaction after_round_trip=1 kind=auto_failed trigger=watermark
+  watermark=16997 threshold=8000 pre_tokens=16997 tokens_freed=0 items_collapsed=0
+  error=LLM provider error: API error 400: {"type":"error","error":{"type":
+  "invalid_request_error","message":"messages.2: `tool_use` ids were found without
+  `tool_result` blocks immediately after: toolu_01CXdh78hXfCf8ZBShzdPbKr. Each
+  `tool_use` block must have a corresponding `tool_result` block in the next
+  message."},"request_id":"req_011CdWYu5v2EKzqgSUthFpvd"}
+```
+
+So the honest reading of this observation: **the token-pressure clause is now live —
+the threshold is crossed, the trigger fires, and the outcome is recorded — and what it
+recorded is a real HIGH defect (§4 C4L-F1) that only a live run against a real provider
+could have produced.** `tokens_reclaimed=0` is not a reporting gap; it is the truth.
+
+---
+
+## 3. OBSERVATION 3 — `history_rewritten`, observed live, and WRONG
+
+```
+F23_CACHE=invalidation distinct_causes=1 causes=history_rewritten:1
+F23_CACHE=turn round_trip=2 ... invalidation=history_rewritten
+```
+
+The label reaches the operator surface for the first time. **But it is a false
+positive, and I am not going to bank it as a clean close.** All three compactions
+failed with `tokens_freed=0 items_collapsed=0` — the engine explicitly restores the
+carved-out live user turn on failure, so **the history was never rewritten**. The
+actual cause of round-trip 2's miss is the same breakpoint drift that produced
+`expired` in session A.
+
+The mechanism, from the code (`cache_ledger.rs:402`):
+
+```rust
+pub fn compacted_since_last_round_trip(&self) -> bool {
+    let completed = self.turns.len() as u64;
+    self.compactions.iter().any(|c| c.after_round_trip >= completed)
+}
+```
+
+It filters on **position only** — not on `kind`, not on `error.is_none()`. Every
+compaction *attempt* is recorded (correctly — a compactor that cannot run is the
+sharpest token-pressure fact there is), so an `auto_failed` event with zero tokens
+freed satisfies the predicate exactly as a successful one would. Filed as C4L-F2.
+
+Note this also **falsifies my own pre-run prediction** (`23B-C4-LIVE-NOTES.md` §M1b),
+which was that `history_rewritten` would be unreachable because the surviving
+system/tools cache would keep `cache_read_tokens > 0`. It reached zero for a reason I
+had not modelled — the whole prefix moved — and the label fired. The prediction was
+committed before the run precisely so it could be wrong in public.
+
 <!-- ferrox:write-continue -->
+
