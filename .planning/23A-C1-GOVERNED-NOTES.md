@@ -132,4 +132,86 @@ promotion is the path I am building.** So closing this is mine, exactly as the b
    by some other route.
 5. Restore `--skills-promote` last, only after 1-4 live-prove.
 
+---
+
+## T+150 — the `evolved_prompts` hydration vector, verified rather than accepted
+
+The coordinator relayed a claim from `lane/open-highs`: that the resurrection vector is the
+`evolved_prompts` row rather than the `Procedure` row, that my notes never mention it, and
+that **my mechanism is the `Procedure` row, "store (c), which your own notes measure as
+INERT"**. I was told to verify rather than accept. Verified, and the result splits.
+
+### The substantive half is TRUE and I had missed it
+
+`evolved_prompts` is real and it does hydrate the router.
+`crates/wcore-agent/src/bootstrap.rs:2122-2176` seeds the `SkillRouter` from it in two
+layers — `scorer="bench"` (GEPA winners) and `scorer="auto_drafter"` (Layer 1b, the
+auto-draft read-back) — plus `seed_from_prioritizer` as layer 2. **My notes did not mention
+it.** That was a genuine gap in my analysis and the lane was right to raise it.
+
+### The half about *my* mechanism is FALSE, and misattributed
+
+- **The file it cites does not exist here.** It reports reading `23A-C1-NOTES.md` §6.3. My
+  notes file is `23A-C1-GOVERNED-NOTES.md`; `ls .planning/23A-C1*.md` returns exactly one
+  file, mine, which has no §6.3 and contains the string "inert" nowhere. It read a
+  different lane's notes and attributed them to me.
+- **My mechanism is not the `Procedure` row.** `ProcedureStatus::Revoked` is a secondary
+  defence. My primary guard is the **loader catalog post-pass** (`loader.rs
+  apply_governance`), which *drops* revoked skills from the catalog entirely rather than
+  quarantining them.
+
+### And the loader guard **does** cover the `evolved_prompts` vector
+
+Measured, by reading the hydration block itself:
+
+```
+bootstrap.rs:1836   skill_refs   = load_catalog_with_bundled(...)   <-- apply_governance runs HERE
+bootstrap.rs:2114   catalog      = SkillCatalog::from_refs(skill_refs)
+bootstrap.rs:2148   candidate_names = catalog.visible().map(|r| r.name).collect()
+bootstrap.rs:2152   store.seed_pairs_for(&candidate_names, "bench", 1)
+bootstrap.rs:2173   store.seed_pairs_for(&candidate_names, "auto_drafter", 1)   <-- Layer 1b
+bootstrap.rs:2189   sk_router.seed_from_prioritizer(&candidate_names)
+```
+
+**All three hydration layers are scoped to `candidate_names`**, and `candidate_names` is
+derived from the catalog my post-pass filters. `PromptStore::best_for_skill` (which
+`seed_pairs_for` drives) is `WHERE skill_name = ?1` — a **per-name lookup**, so a name that
+never enters the candidate list is never queried at all.
+
+So a revoked skill's `evolved_prompts` row is not purged — it is made **unreachable**. The
+row survives; nothing ever asks for it. And `SkillRouter::choose` calls
+`thompson_pick(input.candidates)`, so even a seeded arm for a non-candidate name cannot be
+picked.
+
+**This is why `wcore-skills` does not need a `wcore-evolve` dependency.** The dependency
+graph does not force the guard up to `bootstrap.rs`, because the catalog sits *below* both
+stores and both are scoped to it. Unreachability is achievable at the lower layer;
+deletion would not be.
+
+### The honest limit of my guard, stated rather than smoothed
+
+My guard holds **because** every current hydration path is catalog-scoped. It is a property
+of those three call sites, not a structural guarantee — a future hydration path that reads
+`evolved_prompts` unscoped would bypass it. That residual is exactly what a guard sited at
+`bootstrap.rs` covers, and `lane/open-highs` has landed one (+182/−0, with a mutation that
+reddens both drop assertions against a green control).
+
+**Seam, stated so neither lane assumes the other:**
+
+| Half | Owner | Mechanism |
+|---|---|---|
+| Promotion / revocation / rollback feature, catalog-level drop, promotion refusal, grant withdrawal, `ProcedureStatus::Revoked` | **this lane** | revoked skills never enter the catalog, so never enter `candidate_names` |
+| Defence-in-depth guard at the agent-bootstrap bridge | **`lane/open-highs`** | catches any future unscoped hydration path |
+
+I own the first. I am relying on the second for the residual. **The hazard is closed
+against `evolved_prompts` and Layer 1b by my catalog guard as measured above** — but the
+structural guarantee, as opposed to the call-site property, is the other lane's.
+
+## T+150 — the flaky baseline, noted so I do not misread my own results
+
+`cargo test -p wcore-agent --lib` is red at my base `75babf32` — 2152 passed / 20 failed,
+varying set, mostly `session journal writer lease is already held`. Owned by
+`lane/flaky-root-cause`. **Not mine, and a green run there proves nothing either.** My
+gates are scoped to `wcore-skills`, `wcore-memory` and `wcore-cli`.
+
 **Nothing below this line is established yet.**
