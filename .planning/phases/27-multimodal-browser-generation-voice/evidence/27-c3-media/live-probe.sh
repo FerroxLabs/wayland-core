@@ -162,6 +162,36 @@ echo "--- P4 liveness control for that grep (a known-positive in the SAME files)
 echo "  control_hits_wrote=$(cat "$OUT/p4-image-subcommand".std* | grep -c -E 'wrote|bytes' || true)"
 echo "  p4_stderr_verbatim: $(cat "$OUT/p4-image-subcommand.stderr")"
 
+echo "--- P4 accounting lines (present as of the 27-c3 repair):"
+grep -h "^accounting" "$OUT/p4-image-subcommand.stderr" || echo "  (none)"
+
+# --------------------------------------------------------------------------
+# P5 — the SAME subcommand with two variables moved (n=1 -> 2, size unknown ->
+#      1024x1024). The record must change. A record that is identical to P4's
+#      is a constant, not a measurement — which is the whole failure this lane
+#      exists to avoid.
+# --------------------------------------------------------------------------
+echo "=== RUN p5-image-subcommand-varied"
+(
+  export WAYLAND_HOME="$HOME_DIR"
+  export FLUX_API_KEY="$KEY"
+  unset ANTHROPIC_API_KEY OPENAI_API_KEY
+  export RUST_LOG="info"
+  timeout 240 "$BIN" image --model flux-image --n 2 --size 1024x1024 \
+    --prompt "a small red lighthouse at dusk" --out "$OUT/p5.png"
+) > "$OUT/p5-image-subcommand-varied.stdout" 2> "$OUT/p5-image-subcommand-varied.stderr"
+echo "RC_p5-image-subcommand-varied=$?"
+echo "--- P5 accounting lines:"
+grep -h "^accounting" "$OUT/p5-image-subcommand-varied.stderr" || echo "  (none)"
+echo "--- P4 vs P5 accounting_json differ?"
+P4J="$(grep -h '^accounting_json:' "$OUT/p4-image-subcommand.stderr" || echo P4_MISSING)"
+P5J="$(grep -h '^accounting_json:' "$OUT/p5-image-subcommand-varied.stderr" || echo P5_MISSING)"
+if [ "$P4J" = "$P5J" ]; then
+  echo "  CLI_RECORD_VARIES=NO   <-- the record is a constant; this is a FAILURE"
+else
+  echo "  CLI_RECORD_VARIES=YES"
+fi
+
 unset KEY FLUX_API_KEY
 echo
 echo "PROBE_DONE captures_in=$OUT"
