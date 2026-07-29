@@ -165,7 +165,15 @@ export const SIG = {
   second: '+15552240002',
 };
 
-const WEBHOOK_PORT = 18787;
+// FIXED port by default, overridable per run. The default is unchanged, so no
+// existing invocation behaves differently.
+//
+// It is overridable because a hard-coded port is the second half of why this
+// harness cannot run twice on one host: two lanes both bind 127.0.0.1:18787,
+// the loser's webhook host never comes up, and `failWebhookLegs` then reports
+// 18 product FAILs that are really a port collision. Measured on `hetzner-dsm`
+// 2026-07-29 across two lanes. Set `F24_WEBHOOK_PORT` to run concurrently.
+const WEBHOOK_PORT = Number(process.env.F24_WEBHOOK_PORT ?? 18787);
 const ARRIVAL_BUDGET_MS = 90_000;
 
 // How long the shipped binary's inbound dedupe cache remembers a message id.
