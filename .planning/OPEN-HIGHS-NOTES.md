@@ -151,6 +151,36 @@ guards are directory-level and the row is name-keyed.
 **Action: build the Layer 1b guard (mine, non-overlapping), and flag the divergence to them
 rather than fixing their half.**
 
+### Guard built and proven — `a3b4d289`
+
+`drop_revoked_auto_draft_seeds{,_with}` in `bootstrap.rs`, filtering the Layer 1b pairs. Fails
+open on an unreadable governance root (matching `is_revoked`'s documented posture) and logs each
+drop. Three tests, hetzner (`hz/open-highs`), unproxied cargo:
+
+```
+GREEN     3 passed; 0 failed; 0 ignored; 2175 filtered out     WLGUARD=0
+MUTATED   1 passed; 2 failed; 0 ignored; 2175 filtered out     WLRC=101
+CLIPPY    -p wcore-agent --all-targets -D warnings             WLCLIPPY=0
+```
+
+`2175 filtered out` is the anti-vacuity read-back — the filter matched 3 real tests, so flavour
+(c) (a filter matching no test name) is excluded.
+
+**Negative control, one variable** (`let blocked = revoked.contains(name)` → `false`, the pre-fix
+shape; applied by `sed`, no git ops on the shared store). Both drop assertions redden with the
+revoked seed visibly surviving — `got [("auto-revoked-one", 4), ("hand-written-keeper", 3)]` and
+`got [("collides", 5)]` — while **the no-revocation control test stays green**, so the mutation
+did not simply break everything. Reverted; `git diff --quiet` on the file returned `WLDIFF=0`
+(byte-identical to the committed blob), not merely a grep match.
+
+### Full `wcore-agent --lib` is RED at 11 — attribution in progress, NOT claimed as pre-existing
+
+`2164 passed; 11 failed; 3 ignored; 0 filtered out`. Nine are `session journal writer lease is
+already held`, plus two injected-crash tests. None touch the router seed path and my change cannot
+plausibly hold a journal lease — **but that is an argument, and an argument is not evidence.**
+Running the identical suite at base `75babf32` in a separate hetzner worktree as the one-variable
+control before attributing it either way. Reported red until measured.
+
 ## Target 3 — grades resting on a dead instrument
 
 **Status: not yet started.** The precedent is `BL-23B-H1` (`MILESTONE-RC.md` §2 row 4): a HIGH
