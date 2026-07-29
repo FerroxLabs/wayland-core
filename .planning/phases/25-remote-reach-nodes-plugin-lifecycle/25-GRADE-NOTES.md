@@ -142,3 +142,28 @@ rolled back, removed, published, recovered = **ELEVEN** verbs. The phase calls i
 - C3: does `plugin test` actually run tests, or exit 0 having run zero? (vacuity class)
 - C4: were all five hostile compromises INDUCED FOR REAL on both hosts?
 - Whether F25-05 (listed in ROADMAP Requirements, no criterion, no plan) is a scope gap.
+
+### C4 — THE CENTRAL FINDING
+- Linux: denied-secret (log:64) and denied-egress (log:156) are the SAME command
+  (`backend run --backend cloud`) with the SAME CredentialAbsent verdict. Four distinct
+  mechanisms, not five.
+- Windows: denied-egress capture is `backend probe cloud` **EXIT: 0**, while the ledger
+  records `REFUSED ... exit=1`. Enumerated all 6 commands in the Windows log — there is NO
+  `backend run` egress leg. The Linux leg was corrected and re-run; Windows never was.
+  This is lane-brief 6b-ii exactly: documented defect that recurred because the instrument
+  was not repaired everywhere.
+- `25-04-FAIL-CLOSED-EVIDENCE.md` §6 concedes: "A real egress policy denial ... is NOT proven."
+- Both hosts DO carry a vacuity control ("verify the intact receipt (must PASS or the cases
+  are vacuous)") — good discipline, recorded in the verdict's favour.
+- Orphan half is genuinely MET on all surfaces, both directions, with UNPLANTED positives.
+
+### Credential answer (asked specifically)
+`/root/.wayland-f25-cloud.env` EXISTS on hetzner-dsm, 0600, 716 bytes, 3 lines, Jul 28.
+Names both WAYLAND_F25_CLOUD_TOKEN and WAYLAND_F25_CLOUD_ORG (count 1 each). Known-negative
+control `ZZZ_NOT_A_REAL_VAR` -> 0, so the instrument can return zero. **No value printed.**
+=> the cloud-cancellation gap is BUILD WORK, not a Sean item.
+`WAYLAND_EXEC_SSH_TARGET` verified UNSET on hetzner-dsm today.
+
+### FINAL GRADES
+C1 PARTIAL · C2 MET-WITH-STATED-EXCEPTIONS · C3 MET · C4 PARTIAL
+=> 1 MET. Corroborates the competitive ledger; refutes the 4-MET status table.
