@@ -495,3 +495,76 @@ the commit that unblocks CI would have delayed the merge the coordinator asked f
 `wcore-eval-scenarios` and delete both allows. There is no cycle risk — `wcore-egress` sits below
 this crate and this crate already depends on `wcore-protocol`, `wcore-config` and `wcore-types`.
 The `tests/` one is free either way. **I am flagging it, not doing it.**
+
+---
+
+## T+6 — MEASUREMENT 5: a REAL two-member cohort, and the symmetry test
+
+**SR-30-6 is closed.** Hermes Agent **0.17.0 at pin `dbe734be`** provisioned on `hetzner-dsm` from a
+`git archive` of Sean's reference checkout (59,749,790 bytes — the prior lane's 392 MB OpenClaw
+bundle failure does not apply to a tree archive), installed into a venv with
+`env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GITHUB_TOKEN`. `hermes --version` →
+`Hermes Agent v0.17.0 (2026.6.19)`.
+
+Provider config was NOT guessed: `--provider openai` fails with `Unknown provider 'openai'` at this
+pin, and the working shape (`custom_providers: [{name, base_url, model, api_key}]`) was read out of
+`hermes_cli/config.py:4400 get_compatible_custom_providers`.
+
+Live discovery: **18 declared tools**, `corpus_sha256 13c077fc…`, names include `write_file`,
+`read_file`, `patch`, `terminal`, `execute_code`.
+
+```
+DIALECT_COHORT=ELIGIBLE dimension=correctness members=2 all_resolved=true
+  member=wayland declared_tools=8  resolved=Write       corpus_sha256=10c85fbd…
+  member=hermes  declared_tools=18 resolved=write_file  corpus_sha256=13c077fc…
+```
+
+**That gate has never returned ELIGIBLE before.** The prior lane reported `COHORT_TOO_SMALL:1`.
+
+**Incidental validation of the negative control.** Hermes' compiled correctness translation digests
+to `dc33a24446f4888a4713727ccec88aa913a160eacad50ae18d679d786d02825a` — **byte-identical** to the
+synthetic peer translation NC-B used. So NC-B did not drive Wayland with an approximation of a peer
+dialect; it drove it with **the real Hermes dialect**, and got 0/10.
+
+### 6a. Every arm, recounted independently on the Mac from the pulled JSONL
+
+| arm | tool | dim | n | success | driven tool | diagnostic |
+|---|---|---|---|---|---|---|
+| arm-a | wayland | correctness | 30 | **0** | FROZEN_V1 (`write_file`) | no |
+| arm-b | wayland | correctness | 30 | **0** | `Write` | no |
+| hermes-rel | hermes | correctness | 30 | **30** | `write_file` | no |
+| arm-c | wayland | correctness | 30 | **30** | `Write` | yes |
+| arm-d | wayland | correctness | 10 | **0** | FROZEN_V1 | yes |
+| hermes-abs | hermes | correctness | 30 | **30** | `write_file` | yes |
+| nc-b | wayland | correctness | 10 | **0** | `write_file` (real Hermes dialect) | yes |
+| wayland-recovery-abs | wayland | recovery | 15 | **15** | `Write` | yes |
+| hermes-recovery-abs | hermes | recovery | 15 | **15** | `write_file` | yes |
+
+### 6b. THE SYMMETRY TEST — the remedy is not a Wayland tune
+
+The obvious attack on Finding C's remedy is: *"you absolutized the path because it makes your
+product pass."* So it was run on the peer too.
+
+| harness | compiled dialect, **relative** path (as registered) | compiled dialect, **absolutized** path |
+|---|---|---|
+| Hermes 0.17.0 | **30/30** | **30/30** |
+| Wayland Core | **0/30** | **30/30** |
+
+**Absolutizing is neutral for the peer and decisive for us.** Hermes is indifferent; it passes
+either way. That is what a de-biasing change looks like, and it is the opposite of a tune: the
+change that would flatter Wayland selectively would have to *hurt* the peer, and this one does not
+touch it.
+
+The corollary is the uncomfortable half, and it is the honest reading: **v1's relative path was
+itself the biased choice.** It silently required a path convention that exactly one of the two
+harnesses honours, and that requirement was never stated in the protocol.
+
+### 6c. FINDING A confirmed by prediction, not by re-reading
+
+T+1b predicted from the v1 request counts that Wayland's recovery machinery worked and only the
+artifact half of the conjunctive observable failed. Tested: **wayland recovery 15/15, hermes
+recovery 15/15** under compiled dialects with the path confound removed. The prediction held.
+
+## T+6 — status
+
+Cohort ELIGIBLE at 2 members, symmetry proven, both dimensions exercised. Writing the deliverable.
