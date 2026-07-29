@@ -271,15 +271,27 @@ echo
 echo "--- ARM: create (kill mid-archive) ---"
 CREATE_HOME_MOVED=0; CREATE_BAD_ARCHIVE=0; CREATE_MID=0
 SRC_DIGEST=$(digest_of "$SRC")
+# Measure how long a create takes on THIS hardware, so the kills sweep the real
+# window instead of a guessed one.
+CT0=$(date +%s%N)
+"$BIN" backup create --home "$SRC" --out "$WORK/timing.tar.gz" > /dev/null 2>&1
+CT1=$(date +%s%N)
+CREATE_DUR_MS=$(( (CT1 - CT0) / 1000000 ))
+[ "$CREATE_DUR_MS" -gt 0 ] || CREATE_DUR_MS=1
+rm -f "$WORK/timing.tar.gz"
+echo "CREATE-DURATION-MS: $CREATE_DUR_MS"
 k=1
 while [ "$k" -le "$TRIALS" ]; do
     OUT="$WORK/killed-$k.tar.gz"
     rm -f "$OUT"
     "$BIN" backup create --home "$SRC" --out "$OUT" > "$WORK/create-$k.log" 2>&1 &
     PID=$!
-    # `create` is fast, so sweep sub-millisecond to millisecond delays: the point
-    # is to land inside it at all, and a spread of delays is how.
-    python3 -c "import time,sys; time.sleep(float(sys.argv[1])/1000.0)" "$k"
+    # Sweep across the MEASURED duration of a create, the same way the restore
+    # arms do. The first version slept 1..9ms regardless of how long a create
+    # actually takes, so every kill landed before publication and the arm proved
+    # only that a create that never got started publishes nothing.
+    CDELAY=$(( CREATE_DUR_MS * k / (TRIALS + 1) ))
+    python3 -c "import time,sys; time.sleep(float(sys.argv[1])/1000.0)" "$CDELAY"
     kill -9 "$PID" 2>/dev/null
     wait "$PID" 2>/dev/null
 
@@ -297,7 +309,7 @@ while [ "$k" -le "$TRIALS" ]; do
         VERD=absent; CREATE_MID=$((CREATE_MID + 1))
     fi
     printf 'TRIAL[create]: %d delay_ms=%d home_moved=%s archive=%s\n' \
-        "$k" "$k" "$([ "$NOW" = "$SRC_DIGEST" ] && echo no || echo YES)" "$VERD"
+        "$k" "$CDELAY" "$([ "$NOW" = "$SRC_DIGEST" ] && echo no || echo YES)" "$VERD"
     k=$((k + 1))
 done
 echo "ARM-create SOURCE-HOME-MOVED: $CREATE_HOME_MOVED"
@@ -320,6 +332,8 @@ echo "NOKILL-ARM-RECOVERED: $K_REC"
 echo "NOKILL-ARM-COMPLETED-REVERTED: $K_COMP_EQ"
 echo "CREATE-ARM-SOURCE-MOVED: $CREATE_HOME_MOVED"
 echo "CREATE-ARM-UNVERIFIABLE-ARCHIVES: $CREATE_BAD_ARCHIVE"
+echo "CREATE-ARM-NO-ARCHIVE-PUBLISHED: $CREATE_MID"
+echo "CREATE-ARM-DURATION-MS: $CREATE_DUR_MS"
 
 # --- gates --------------------------------------------------------------------
 [ "$R_MID" -ge 3 ] \
