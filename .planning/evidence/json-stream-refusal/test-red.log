@@ -1,0 +1,58 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.13s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/json_stream_startup_refusal.rs (target/debug/deps/json_stream_startup_refusal-327e42567fe10063)
+
+running 6 tests
+test corrupt_config_refusal_reaches_the_host ... FAILED
+test healthy_start_still_emits_ready ... ok
+test missing_api_key_still_reports_exactly_once ... ok
+test plaintext_credentials_refusal_reaches_the_host ... FAILED
+test profile_guard_refusal_reaches_the_host ... FAILED
+test refusal_is_on_stdout_not_merely_somewhere ... FAILED
+
+failures:
+
+---- corrupt_config_refusal_reaches_the_host stdout ----
+
+thread 'corrupt_config_refusal_reaches_the_host' (2291673) panicked at crates/wcore-cli/tests/json_stream_startup_refusal.rs:125:5:
+assertion `left == right` failed: corrupt-config: host must receive exactly one error frame, got 0. stdout was:
+
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- plaintext_credentials_refusal_reaches_the_host stdout ----
+
+thread 'plaintext_credentials_refusal_reaches_the_host' (2291995) panicked at crates/wcore-cli/tests/json_stream_startup_refusal.rs:125:5:
+assertion `left == right` failed: plaintext-credentials: host must receive exactly one error frame, got 0. stdout was:
+
+  left: 0
+ right: 1
+
+---- profile_guard_refusal_reaches_the_host stdout ----
+
+thread 'profile_guard_refusal_reaches_the_host' (2292101) panicked at crates/wcore-cli/tests/json_stream_startup_refusal.rs:125:5:
+assertion `left == right` failed: profile-guard: host must receive exactly one error frame, got 0. stdout was:
+
+  left: 0
+ right: 1
+
+---- refusal_is_on_stdout_not_merely_somewhere stdout ----
+
+thread 'refusal_is_on_stdout_not_merely_somewhere' (2292200) panicked at crates/wcore-cli/tests/json_stream_startup_refusal.rs:296:5:
+stdout must not be empty on a refusal -- that is the defect
+
+
+failures:
+    corrupt_config_refusal_reaches_the_host
+    plaintext_credentials_refusal_reaches_the_host
+    profile_guard_refusal_reaches_the_host
+    refusal_is_on_stdout_not_merely_somewhere
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+error: test failed, to rerun pass `-p wcore-cli --test json_stream_startup_refusal`
+TESTRC=101
+TESTDONE

@@ -96,6 +96,73 @@ Two facts this baseline settles that the static read could not:
    returns at `main.rs:1732`, above the emit at `1789`. #186 believed it covered config
    failure; it covers the credential half and not the corrupt-file half.
 
+## T+2h — INSTRUMENT DEFECT IN MY OWN FENCE GATE (§6b-ii), found and repaired here
+
+Writing the §6 shared-file fence check as `git diff "$BASE" -- <files> | grep -c '^-[^-]'`
+reported **0 removed lines while `--numstat` reported 3**. `git diff` issued as a direct agent
+tool call is proxied by a token-optimising wrapper (rtk) that re-renders the diff **indented by
+two spaces**, so `^-` matches nothing. Measured: 3849 bytes of diff, 3 real deletions, scored 0.
+A fence gate that cannot see a removal cannot fail.
+
+Repaired in `fence-gate.sh` by abandoning diff-TEXT parsing for `--numstat` (machine-readable
+columns, no prefix to mangle). Loosening the regex to allow leading whitespace was **rejected**:
+a diff CONTEXT line beginning with `-` (a markdown bullet) matches that too, trading a false
+negative for a false positive.
+
+**The 3-assertion self-test caught my own wrong model on its first run.** A3 originally asserted
+"the wrapper is always active"; it FAILED, because the wrapper intercepts direct tool calls but
+NOT git invoked inside a script. Corrected A3 now applies the wrapper's exact transform
+explicitly and asserts the old matcher goes blind under it while `--numstat` does not.
+That failure is the self-test doing its job — it refused to certify a repair on a false premise.
+
+Gate proven able to fail: injecting an undeclared removal (`pub mod sandbox_cmd;`) produced
+`FENCE=FAIL 1 undeclared removal(s)`; restoring it produced `FENCE=PASS`.
+
+## T+3h — FIX LANDED, RED→GREEN, LIVE RE-PROVEN
+
+Fix commit `743e52bb`. Chokepoint `crates/wcore-cli/src/startup_error.rs` fires at process exit
+for any error escaping `run()` before `ready`. Reuses `ProtocolEvent::Error` / `msg_id: None` /
+code `init_failed` — no new frame, `ready` untouched.
+
+**RED→GREEN on the same test file, executed counts read back (never exit status):**
+
+- base `0b5182ef`, fix absent, test present: `test result: FAILED. 2 passed; 4 failed`
+- fix `743e52bb`: `test result: ok. 6 passed; 0 failed; 0 ignored; 0 filtered out`
+
+The 2 that pass at base are exactly the 2 that should: the positive control, and the
+missing-API-key path that #186 had already covered. The gate fails for the right reasons.
+
+**Live consumer-side sweep, before vs after (same harness, same host):**
+
+| case | pre-fix | post-fix |
+|---|---|---|
+| P_OK (control) | rc=0 4480B **27 frames** | rc=0 4480B **27 frames — unchanged** |
+| N_REFUSE | rc=1 **0B 0 frames** | rc=1 485B **1 error frame** naming `plaintext` |
+| D_PARSE | rc=1 **0B 0 frames** | rc=1 368B **1 error frame** naming the TOML error |
+| D_NOKEY | rc=1 496B 1 frame | rc=1 496B **1 frame — unchanged, no duplicate** |
+| D_PROFILE | rc=1 **0B 0 frames** | rc=1 490B **1 error frame** naming `WAYLAND_HOME` |
+
+P_OK byte-identical at 4480B/27 frames excludes the "manufacture a green by making nothing
+start" failure. D_NOKEY byte-identical at 496B proves the chokepoint does not double-report.
+
+**Regression:** `wcore-protocol --test golden_v0_1_21` **22 passed; 0 failed** (the `ready` and
+`error` wire shapes are unchanged); `wcore-cli --lib` serial **1837 passed; 0 failed; 1 ignored**;
+the 6 `startup_error::tests::*` executed by name (`6 passed; 1832 filtered out`);
+`cargo clippy -p wcore-cli --all-targets` clean; `cargo fmt --all -- --check` rc=0.
+
+## Startup refusal paths NOT covered — stated plainly
+
+1. **A panic during startup.** The chokepoint sees `Err`; a panic unwinds past it, so the host
+   still gets nothing. `crash_sentinel` records it for the NEXT run, which does not help the
+   host now. This is a crash, not a refusal, and closing it needs a panic hook — a bigger
+   change than this lane should make.
+2. **Failures before `Cli::parse()`** — `activate_for_launch()` and `load_wayland_env_file()`
+   run before protocol mode is even known, so nothing can be attributed to a host yet.
+3. **Clap argument-parse errors**, which clap prints and exits on directly.
+4. **Post-`ready` session failures** — a deliberate scope boundary, not an oversight: past
+   `ready` the session is live and the protocol sink owns error reporting.
+5. **SIGTERM during startup** returns `Ok(SUCCESS)` through the shutdown path and emits nothing.
+
 ## Harness rules I am binding myself to in this lane (§6b-ii)
 
 - Byte-count every capture (`wc -c`), never infer emptiness from a visual blank.
