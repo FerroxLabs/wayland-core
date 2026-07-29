@@ -113,6 +113,38 @@ failure MORE likely, so 0/25 is a conservative result, not a lucky quiet box.
 binary, and integration-test binaries are separate processes, so it cannot race.
 Left unchanged (AGENTS.md §3, surgical changes).
 
+## *** HIGH — REAL DEFECT, NOT CONTENTION: the test binary SIGSEGVs ***
+
+`/tmp/flake-root-fix-base-config/rep-8.log`, at BASE `eaff921d`, unmodified tree:
+
+```
+error: test failed, to rerun pass `-p wcore-config --lib`
+Caused by:
+  process didn't exit successfully:
+  `/root/wayland-flake/target/debug/deps/wcore_config-9fe3fef9b4bf10f1`
+  (signal: 11, SIGSEGV: invalid memory reference)
+```
+
+Rate at base: **1 crash in the first 9 reps of `wcore-config --lib`** (~11%). Zero
+crashes in 100 reps across exec-backend (x2) and migrate_hermes (x2) — it is specific
+to the crate with by far the heaviest concurrent env mutation (config.rs alone has 78
+sites).
+
+**This is memory-unsafety, not a flaky assertion.** glibc's `setenv`/`unsetenv` are NOT
+thread-safe: `setenv` can `realloc` the `environ` array while another thread is inside
+`getenv`, which then dereferences freed memory. This is exactly why Rust made
+`std::env::set_var` `unsafe` in edition 2024 — and every site in this codebase silences
+it with an `unsafe` block plus a comment asserting single-threadedness that is FALSE
+under `cargo test`.
+
+**Consequence for the whole flake story: `#[serial]` does NOT close this.** Serial
+groups serialize WRITERS against each other, but a writer still runs concurrently with
+every READER — any test calling `Config::resolve`, `std::env::var`, or any library that
+reads env. The UB window stays open. So the `#[serial]` repairs below fix the *logical*
+races (wrong values) and reduce, but do not eliminate, the crash surface. Fully closing
+it means not mutating process env in a multi-threaded process at all — i.e. injection
+everywhere, which is a much larger change than this lane. **Reported, not papered over.**
+
 ## NOT A DEFECT — do not "fix"
 
 `always_fails` (`crates/wcore-cli/src/plugin/scaffold.rs:274`) is a **string literal the
