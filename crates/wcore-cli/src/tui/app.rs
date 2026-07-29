@@ -270,6 +270,34 @@ pub struct App {
     /// `session.sub_agents` (the SubAgents tab is unchanged); read only by
     /// the Workflows surface. Empty until a workflow runs.
     pub workflows: Vec<WorkflowView>,
+    /// F22-C1 — durable Goals the host protocol has reported, keyed by goal id.
+    ///
+    /// Before this field the TUI had ZERO goal references: a user driving a
+    /// durable Goal from the terminal could not see one without shelling out to
+    /// `wayland-core goal status`. Written ONLY by the protocol bridge from
+    /// `goal_snapshot`, so the TUI never derives Goal state of its own — it
+    /// renders the projection the chain produced, and cannot disagree with it.
+    ///
+    /// `BTreeMap` rather than `Vec` because a Goal is keyed by identity and a
+    /// re-snapshot must REPLACE its predecessor; a Vec would accumulate stale
+    /// copies of the same Goal and the status line would show whichever one it
+    /// happened to scan first.
+    pub goals: std::collections::BTreeMap<String, wcore_protocol::goal::GoalProjection>,
+    /// F22-C1 — the most recent Goal transition observed, for the status line.
+    ///
+    /// Kept separately from [`Self::goals`] because a transition is a MILESTONE
+    /// and a projection is a STATE: a snapshot that has not arrived yet must not
+    /// make the last transition invisible, and a transition must not be mistaken
+    /// for Goal state that replay would reproduce.
+    pub goal_last_transition: Option<GoalTransitionView>,
+}
+
+/// F22-C1 — one observed durable Goal transition, as the status line shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTransitionView {
+    pub goal_id: String,
+    pub transition: wcore_protocol::goal::GoalTransitionKind,
+    pub lifecycle: wcore_protocol::goal::GoalLifecycleWire,
 }
 
 impl App {
@@ -364,6 +392,9 @@ impl App {
             pending_touch: HashMap::new(),
             // ForgeFlows-Live Phase 2: no workflows running at boot.
             workflows: Vec::new(),
+            // F22-C1: no durable Goals observed at boot.
+            goals: std::collections::BTreeMap::new(),
+            goal_last_transition: None,
         }
     }
 
@@ -560,6 +591,12 @@ impl App {
         // ForgeFlows-Live Phase 2: drop inferred workflows on /new alongside
         // the sub-agent state they are grouped from.
         self.workflows.clear();
+        // F22-C1: a durable Goal outlives the process, but the VIEW of one is
+        // session state fed by the event stream. Keeping a stale projection
+        // across /new would show a Goal nothing is reporting on any more —
+        // the next snapshot repopulates it if it is still live.
+        self.goals.clear();
+        self.goal_last_transition = None;
         // onboarding_state: intentionally NOT reset (once-per-session first-spawn hint).
     }
 

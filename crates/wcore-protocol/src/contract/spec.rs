@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,9 +31,14 @@ use crate::events::{
     WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
+use crate::goal::{
+    GOAL_PROTOCOL_VERSION, GoalAuthorityWire, GoalLifecycleWire, GoalLoopOwnerWire, GoalProjection,
+    GoalTaskWire, GoalTaskWireStatus, GoalTransitionKind,
+};
 use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
 };
+use wcore_types::goal::{GoalStrategy, GoalTerminalState, LoopPolicy};
 
 use super::fixtures_support::capabilities;
 
@@ -747,6 +752,41 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "session_id_and_sequence",
         "anvil_receipts"
     ),
+    // F22-C1 — durable Goals become observable to a host for the first time.
+    // Observational, not Safety: these carry no authority and a host that
+    // cannot read them is not made less safe, only blind. The capability is
+    // registered `ShapeOnly` because Core emits these but there is no host
+    // command to pull one yet — see the seam request in 22-C1-SUMMARY.md.
+    wire!(
+        "goal_snapshot",
+        "events/goal_snapshot.json",
+        [
+            "goal_version",
+            "session_id",
+            "goal_id",
+            "cursor",
+            "state_digest",
+            "goal"
+        ],
+        Observational,
+        "goal_id_and_cursor",
+        "durable_goals_v1"
+    ),
+    wire!(
+        "goal_transition",
+        "events/goal_transition.json",
+        [
+            "goal_version",
+            "session_id",
+            "goal_id",
+            "cursor",
+            "transition",
+            "lifecycle"
+        ],
+        Observational,
+        "goal_id_and_cursor",
+        "durable_goals_v1"
+    ),
 ];
 
 pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
@@ -827,6 +867,8 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "compact_offload",
     "anvil_receipt",
     "anvil_receipt_invalidated",
+    "goal_snapshot",
+    "goal_transition",
     "pong",
 ];
 
@@ -839,6 +881,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/writer.rs",
     "crates/wcore-protocol/src/anvil.rs",
     "crates/wcore-protocol/src/execution_policy.rs",
+    "crates/wcore-protocol/src/goal.rs",
     "crates/wcore-protocol/src/workflow.rs",
     "crates/wcore-protocol/src/contract/mod.rs",
     "crates/wcore-protocol/src/contract/canonical.rs",
@@ -1147,6 +1190,67 @@ fn recovery_cursor(sequence: Option<u64>, byte: char) -> RecoveryCursor {
     RecoveryCursor {
         journal_sequence: sequence,
         journal_digest: journal_digest(byte),
+    }
+}
+
+/// Canonical Goal projection fixture (F22-C1).
+///
+/// Deliberately NOT the empty/default shape. It carries a live loop owner, a
+/// completed-but-undelivered task and a dependent blocked behind it, because
+/// those are the three states a Desktop consumer is most likely to render
+/// wrongly: an outbox entry that looks delivered, a dependency that looks
+/// runnable, and a loop-owner lease that looks like a lock rather than
+/// liveness evidence. A fixture built from defaults would exercise none of them.
+fn goal_projection() -> GoalProjection {
+    GoalProjection {
+        goal_id: "goal-001".into(),
+        objective: "ship the release candidate".into(),
+        authority: GoalAuthorityWire {
+            effective_limits: BTreeMap::from([("max_tokens".into(), 10_000)]),
+            strategy: GoalStrategy::Fleet,
+            loop_policy: LoopPolicy::Fixed { iterations: 8 },
+            parent_envelope_digest: "wayland-core-goal-fleet/v1".into(),
+            snapshot_digest: digest('8'),
+        },
+        lifecycle: GoalLifecycleWire::Running,
+        iterations_started: 3,
+        iteration_ceiling: Some(8),
+        resume_count: 1,
+        opened_at_unix_ms: 1_721_000_000_000,
+        cursor: RecoveryCursor {
+            journal_sequence: Some(22),
+            journal_digest: journal_digest('9'),
+        },
+        tasks: vec![
+            GoalTaskWire {
+                task_id: "task-build".into(),
+                depends_on: BTreeSet::new(),
+                idempotency_key: "idem-task-build".into(),
+                status: GoalTaskWireStatus::CompletedUndelivered,
+                epoch: 2,
+                attempts: 2,
+                outcome: Some(GoalTerminalState::SelfChecked),
+                dependency_releases: 0,
+                last_transition_seq: 20,
+            },
+            GoalTaskWire {
+                task_id: "task-publish".into(),
+                depends_on: BTreeSet::from(["task-build".to_owned()]),
+                idempotency_key: "idem-task-publish".into(),
+                status: GoalTaskWireStatus::Blocked,
+                epoch: 0,
+                attempts: 0,
+                outcome: None,
+                dependency_releases: 0,
+                last_transition_seq: 18,
+            },
+        ],
+        loop_owner: Some(GoalLoopOwnerWire {
+            strategy: GoalStrategy::Fleet,
+            epoch: 1,
+            lease_expires_unix_ms: 1_721_000_060_000,
+        }),
+        loop_owner_epochs: 1,
     }
 }
 
@@ -1504,6 +1608,34 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "The run completed.".into(),
                 subject: Some("Wayland update".into()),
                 conversation_id: Some("session-desktop-001".into()),
+            },
+        ),
+        (
+            "events/goal_snapshot.json".into(),
+            ProtocolEvent::GoalSnapshot {
+                goal_version: GOAL_PROTOCOL_VERSION,
+                session_id: "session-desktop-001".into(),
+                goal_id: "goal-001".into(),
+                cursor: RecoveryCursor {
+                    journal_sequence: Some(22),
+                    journal_digest: "sha256:goalcursor".into(),
+                },
+                state_digest: "sha256:goalstate".into(),
+                goal: goal_projection(),
+            },
+        ),
+        (
+            "events/goal_transition.json".into(),
+            ProtocolEvent::GoalTransition {
+                goal_version: GOAL_PROTOCOL_VERSION,
+                session_id: "session-desktop-001".into(),
+                goal_id: "goal-001".into(),
+                cursor: RecoveryCursor {
+                    journal_sequence: Some(22),
+                    journal_digest: "sha256:goalcursor".into(),
+                },
+                transition: GoalTransitionKind::LoopOwnerClaimed,
+                lifecycle: GoalLifecycleWire::Running,
             },
         ),
         (

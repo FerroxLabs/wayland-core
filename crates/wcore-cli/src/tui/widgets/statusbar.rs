@@ -271,6 +271,19 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
         ));
     }
 
+    // F22-C1 — durable Goal activity. Placed BEFORE the toast so a transient
+    // message never displaces standing Goal state, and rendered only when a
+    // Goal has actually been reported, so a session that never opens one pays
+    // no width. Before this segment the terminal had no way to show a durable
+    // Goal at all; the user had to shell out to `wayland-core goal status`.
+    if let Some(summary) = crate::tui::protocol_bridge::goal_status_summary(app) {
+        spans.push(divider(t));
+        spans.push(Span::styled(
+            format!(" {summary} "),
+            Style::default().bg(t.bg).fg(t.text_dim),
+        ));
+    }
+
     // Toast (SPEC §3 S7): a transient demoted-status message, RENDERED here
     // (emitted by the protocol bridge). Auto-dismisses after `TOAST_DWELL`.
     // We read `App` immutably in the render path, so we cannot clear the

@@ -8,6 +8,7 @@ pub mod contract;
 pub mod diagnostics;
 pub mod events;
 pub mod execution_policy;
+pub mod goal;
 pub mod output_pump;
 pub mod reader;
 pub mod workflow;

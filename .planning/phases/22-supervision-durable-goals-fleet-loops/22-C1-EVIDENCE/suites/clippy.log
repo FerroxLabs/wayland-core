@@ -1,0 +1,5 @@
+    Checking wcore-agent v0.12.25 (/root/wayland-22-c1/crates/wcore-agent)
+   Compiling wcore-cli v0.12.25 (/root/wayland-22-c1/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 05s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

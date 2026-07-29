@@ -1,0 +1,58 @@
+=== 0. BUILD IDENTITY (assert before any measurement) ===
+wayland-core 0.12.25 (source d5a77d023941fc6ca483a6932f8a38ae15e1251b)
+build-sha OK
+=== 1. OPEN a durable Goal through the shipped verb ===
+rc=0
+GOAL: opened goal=g-22c1final-1785290238-16790 iterations=4 envelope=wayland-core-goal-fleet/v1
+=== 2. DECLARE tasks with a real dependency ===
+rc=0
+rc=0
+GOAL: declared task=build depends_on=- key=idem-build
+GOAL: declared task=publish depends_on=build key=idem-publish
+=== 3. RUN the Goal through the real Fleet dispatcher, terminating canonically ===
+rc=0
+GOAL: run pid=4024911 goal=g-22c1final-1785290238-16790
+GOAL: recovery=resumed iterations=0 resume_count=1 resumable=true revoked=0 drained=0 needs_resolution=0
+worked
+GOAL-EXEC: task=build key=idem-build produced=yes
+worked
+GOAL-EXEC: task=publish key=idem-publish produced=yes
+GOAL: wave=0 shards=1 claimed=1 lost=0 completed=1 failed=0 indeterminate=0 abandoned=0 delivered=1 dispatch_error=-
+GOAL: wave=1 shards=1 claimed=1 lost=0 completed=1 failed=0 indeterminate=0 abandoned=0 delivered=1 dispatch_error=-
+GOAL: run_complete waves=2 iterations=2 completed=2 delivered=2 stopped_because=no claimable task remains
+GOAL: canonical_transition strategy=fleet terminal=Terminated { terminal: PartiallyCompleted { completed: 2, failed: 0 } } cursor_seq=Some(17)
+=== 4. STATUS (the pre-existing CLI surface, for comparison) ===
+rc=0 bytes=2400
+=== 5. STREAM — the NEW protocol surface, driven from the real binary ===
+rc=0
+stdout bytes=3209  stderr bytes=82
+GOAL-STREAM: goal=g-22c1final-1785290238-16790 events=7 transitions=6 snapshots=1
+=== 6. COUNTS — measured from the real stdout, by type ===
+lines=7 goal_snapshot=1 goal_transition=6
+--- transition kinds, in emitted order ---
+"opened"
+"run_resumed"
+"loop_owner_claimed"
+"iteration_started"
+"iteration_started"
+"loop_owner_finished"
+--- every line is valid JSON? ---
+valid_json_lines=7 invalid=0
+=== 7. FALSIFY the gate — --expect with a wrong count MUST exit non-zero ===
+wrong-expect rc=1 (MUST be non-zero)
+GOAL-STREAM: goal=g-22c1final-1785290238-16790 events=7 transitions=6 snapshots=1
+wayland-core goal: expected 999 goal events, emitted 7
+right-expect rc=0 (MUST be 0)
+=== 8. FALSIFY absence — an unknown goal MUST fail, not print an empty Goal ===
+absent rc=1 (MUST be non-zero)  stdout bytes=0
+wayland-core goal: no goal g-does-not-exist in /root/wayland-22-c1/live-22c1final-1785290238-16790/session.journal
+=== 9. DETERMINISM — a second stream of the same chain must be byte-identical ===
+deterministic=YES (byte-identical replay)
+402bc25e027d840af72d547e989d2aaca2751f81d825d543c8888b5e4e716042  /root/wayland-22-c1/live-22c1final-1785290238-16790/5-stream.jsonl
+402bc25e027d840af72d547e989d2aaca2751f81d825d543c8888b5e4e716042  /root/wayland-22-c1/live-22c1final-1785290238-16790/9-stream-again.jsonl
+=== 10. VERDICT ===
+GOAL_EVENTS_ON_PROTOCOL=7
+SNAPSHOTS=1 TRANSITIONS=6
+GATE_FALSIFIABLE=YES
+ABSENCE_REFUSED=YES
+WLDRIVE_DONE nonce=22c1final-1785290238-16790
