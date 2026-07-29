@@ -1003,7 +1003,75 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::AnvilReceipt { .. }
         | ProtocolEvent::AnvilReceiptInvalidated { .. }
         | ProtocolEvent::Pong => {}
+        // ── F22-C1: durable Goals ────────────────────────────────────
+        //
+        // Before this arm the TUI had zero goal references, so a user driving
+        // a durable Goal from the terminal could not see one at all. These two
+        // arms are the whole TUI ingest: the view is WRITTEN from the
+        // projection and never derived, so the terminal cannot show a Goal
+        // state the chain does not hold.
+        ProtocolEvent::GoalSnapshot { goal, .. } => {
+            // Keyed insert, so a re-snapshot REPLACES rather than accumulates.
+            app.goals.insert(goal.goal_id.clone(), goal);
+        }
+        ProtocolEvent::GoalTransition {
+            goal_id,
+            transition,
+            lifecycle,
+            ..
+        } => {
+            // The lifecycle also lands on the projection when one is already
+            // held, so the status line does not show a terminal transition
+            // beside a running projection until the next snapshot arrives.
+            if let Some(projection) = app.goals.get_mut(&goal_id) {
+                projection.lifecycle = lifecycle.clone();
+            }
+            app.goal_last_transition = Some(crate::tui::app::GoalTransitionView {
+                goal_id,
+                transition,
+                lifecycle,
+            });
+        }
     }
+}
+
+/// F22-C1 — the status-line summary of durable Goal activity, if any.
+///
+/// `None` when no Goal has been reported, so a session that never opens one
+/// pays no status-line width — the same discipline the cost and MCP indicators
+/// follow.
+///
+/// Counts live Goals rather than naming one: a user running a fleet needs to
+/// know how many are still going before they need to know which.
+#[must_use]
+pub fn goal_status_summary(app: &App) -> Option<String> {
+    if app.goals.is_empty() && app.goal_last_transition.is_none() {
+        return None;
+    }
+    let total = app.goals.len();
+    let terminal = app
+        .goals
+        .values()
+        .filter(|goal| goal.lifecycle.is_terminal())
+        .count();
+    let live = total.saturating_sub(terminal);
+
+    let mut summary = if total == 0 {
+        // A transition arrived before any snapshot did. Say so rather than
+        // rendering "0 goals", which reads as "none exist".
+        "goal: awaiting snapshot".to_owned()
+    } else {
+        format!("goals {live} live / {total}")
+    };
+
+    if let Some(last) = &app.goal_last_transition {
+        let kind = serde_json::to_value(last.transition)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "transition".to_owned());
+        summary.push_str(&format!(" · {} {kind}", last.goal_id));
+    }
+    Some(summary)
 }
 
 /// Find the in-flight tool card matching `call_id`, if any.
@@ -4665,6 +4733,220 @@ mod tests {
             app.session.tool_cards.len(),
             before,
             "a non-egress orphan approval must not synthesize a card"
+        );
+    }
+
+    // ── F22-C1: durable Goals reach the terminal ─────────────────────
+
+    fn goal_projection(
+        goal_id: &str,
+        lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+    ) -> wcore_protocol::goal::GoalProjection {
+        wcore_protocol::goal::GoalProjection {
+            goal_id: goal_id.to_owned(),
+            objective: "ship it".into(),
+            authority: wcore_protocol::goal::GoalAuthorityWire {
+                effective_limits: std::collections::BTreeMap::new(),
+                strategy: wcore_types::goal::GoalStrategy::Fleet,
+                loop_policy: wcore_types::goal::LoopPolicy::Once,
+                parent_envelope_digest: "parent".into(),
+                snapshot_digest: "sha256:aa".into(),
+            },
+            lifecycle,
+            iterations_started: 0,
+            iteration_ceiling: Some(1),
+            resume_count: 0,
+            opened_at_unix_ms: 1,
+            cursor: wcore_protocol::events::RecoveryCursor {
+                journal_sequence: Some(1),
+                journal_digest: "sha256:bb".into(),
+            },
+            tasks: Vec::new(),
+            loop_owner: None,
+            loop_owner_epochs: 0,
+        }
+    }
+
+    fn snapshot_event(
+        goal_id: &str,
+        lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+    ) -> ProtocolEvent {
+        ProtocolEvent::GoalSnapshot {
+            goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+            session_id: "s".into(),
+            goal_id: goal_id.to_owned(),
+            cursor: wcore_protocol::events::RecoveryCursor {
+                journal_sequence: Some(1),
+                journal_digest: "sha256:bb".into(),
+            },
+            state_digest: "sha256:cc".into(),
+            goal: goal_projection(goal_id, lifecycle),
+        }
+    }
+
+    /// The baseline this lane exists to move: before it, no ProtocolEvent
+    /// could put a Goal in front of a terminal user at all.
+    #[test]
+    fn a_goal_snapshot_becomes_visible_state_and_a_status_segment() {
+        let mut app = App::new();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "a session with no Goal must render no Goal segment"
+        );
+
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+
+        assert_eq!(app.goals.len(), 1);
+        let summary = goal_status_summary(&app).expect("a reported Goal must be visible");
+        assert!(
+            summary.contains("1 live / 1"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    /// A re-snapshot must REPLACE, or the status line counts one Goal twice.
+    #[test]
+    fn re_snapshotting_one_goal_replaces_it_rather_than_accumulating() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Opened),
+        );
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+
+        assert_eq!(
+            app.goals.len(),
+            1,
+            "one Goal, snapshotted twice, is one Goal"
+        );
+        assert_eq!(
+            app.goals["g-1"].lifecycle,
+            wcore_protocol::goal::GoalLifecycleWire::Running,
+            "the later snapshot must win"
+        );
+    }
+
+    /// A terminated Goal must stop being counted as live, or the terminal
+    /// shows work still running that finished.
+    #[test]
+    fn a_terminated_goal_leaves_the_live_count_but_stays_in_the_total() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        apply_event(
+            &mut app,
+            snapshot_event("g-2", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).unwrap().contains("2 live / 2"));
+
+        apply_event(
+            &mut app,
+            snapshot_event(
+                "g-2",
+                wcore_protocol::goal::GoalLifecycleWire::Terminated {
+                    terminal: wcore_types::goal::GoalTerminalState::Cancelled,
+                },
+            ),
+        );
+        let summary = goal_status_summary(&app).unwrap();
+        assert!(
+            summary.contains("1 live / 2"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    /// A transition must update the held projection's lifecycle, so the
+    /// status line cannot show `2 live` for a Goal that just terminated
+    /// while the next snapshot is still in flight.
+    #[test]
+    fn a_terminal_transition_updates_the_held_projection_before_the_next_snapshot() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).unwrap().contains("1 live / 1"));
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalTransition {
+                goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+                session_id: "s".into(),
+                goal_id: "g-1".into(),
+                cursor: wcore_protocol::events::RecoveryCursor {
+                    journal_sequence: Some(2),
+                    journal_digest: "sha256:dd".into(),
+                },
+                transition: wcore_protocol::goal::GoalTransitionKind::LoopOwnerFinished,
+                lifecycle: wcore_protocol::goal::GoalLifecycleWire::Terminated {
+                    terminal: wcore_types::goal::GoalTerminalState::Verified,
+                },
+            },
+        );
+
+        let summary = goal_status_summary(&app).unwrap();
+        assert!(
+            summary.contains("0 live / 1"),
+            "unexpected summary: {summary}"
+        );
+        assert!(
+            summary.contains("loop_owner_finished"),
+            "the transition must be named: {summary}"
+        );
+    }
+
+    /// A transition arriving before any snapshot must say so, not render
+    /// "0 goals" — which a user reads as "none exist".
+    #[test]
+    fn a_transition_with_no_snapshot_yet_reports_awaiting_rather_than_zero() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalTransition {
+                goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+                session_id: "s".into(),
+                goal_id: "g-9".into(),
+                cursor: wcore_protocol::events::RecoveryCursor {
+                    journal_sequence: Some(1),
+                    journal_digest: "sha256:ee".into(),
+                },
+                transition: wcore_protocol::goal::GoalTransitionKind::Opened,
+                lifecycle: wcore_protocol::goal::GoalLifecycleWire::Opened,
+            },
+        );
+        let summary = goal_status_summary(&app).expect("a transition alone is still news");
+        assert!(
+            summary.contains("awaiting snapshot"),
+            "unexpected: {summary}"
+        );
+        assert!(
+            !summary.contains("0 live"),
+            "must not read as none exist: {summary}"
+        );
+    }
+
+    /// `/new` must drop the Goal VIEW, or the terminal keeps showing a Goal
+    /// nothing is reporting on.
+    #[test]
+    fn resetting_the_session_clears_the_goal_view() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).is_some());
+        app.reset_agents();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "the Goal view must not survive /new"
         );
     }
 }
