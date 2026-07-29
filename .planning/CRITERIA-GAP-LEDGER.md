@@ -831,6 +831,43 @@ and the inbound half is unproven end-to-end.
 > silent-drop, and it is the same family as the failure mode §3 ranks first. Any reader using
 > §3 to plan should treat this as a candidate for that list.
 
+>
+> **LATE CORRECTION 2026-07-30 (`lane/f24-c3-h5-reload`, ancestry verified independently by the
+> orchestrator with a discriminating control): `F24-C3-H5` was ALREADY FIXED when this row called it
+> open.** `5d4bf4b9`, `44a7cc16` and `7c512fe2` are all ancestors of `d622cb09`, and
+> `24-H5-SUMMARY.md` sits at HEAD with `status: complete`. Every live run prints `policies=1`, the
+> field the H5 lane named as its fix. **The row graded off the FINDING lane's summary; the REPAIR lane
+> merged afterwards** — the same read-the-wrong-artifact mistake that produced the `24-C5` and
+> `27-C2(b)` errors.
+>
+> **In its place, a genuinely new HIGH — `F24-C3-H6` — found by asking whether the access policy was
+> the only stale-on-reload state. Two facets, both FIXED:**
+>
+> - **`manager.rs:645` — silent data loss.** Reload's unconditional `start_all` started poll tasks for
+>   a gateway whose startup path had correctly **declined** for want of the single-owner lease.
+>   **Polling is a destructive read, so the rightful owner sees nothing.**
+> - **`gateway.rs:1465` — a health surface that heals itself and nothing else.**
+>   `registration_error = None` in the reload success branch; that field is the only thing
+>   `channel health` fails on once `registered >= configured`, and it carried facts reload never
+>   re-evaluates. Measured: **health rc=1 → rc=0 across one reload**, lock holder still alive, path
+>   just as dead.
+>
+> **The number to remember is the half-fix.** With facet (a) fixed and (b) not, the suite is **fully
+> green — 16 passed, 0 failed, rc=0** — and every exit-code leg of the live driver passes too,
+> including `health-STILL-fails-after-a-successful-reload`. Only the leg reading the adapter's **own
+> post-reload state** catches it. **The obvious test shape grades silent data loss as fixed**, and the
+> lane reports writing that shape first itself.
+>
+> A pre-existing permanently-red bug was closed beside it: the boot-time lease string was never
+> recomputed, so health could not clear. It can now **fail and pass** — releasing the lease clears it
+> in ~1.5 s with no reload.
+>
+> Swept and named, not changed: **no production adapter overrides `config_fingerprint()`**, so
+> `unchanged` is always empty and reload replaces every adapter — fail-safe.
+>
+> **`24-C3` is still NOT MET and the repairing lane declines to claim it** — media and native actions
+> remain at zero and the reconnect half is untouched. **Linux only**; Windows uses a mandatory rather
+> than advisory lock and deserves a real run.
 #### 24-C4 — MET on Linux / HTTP+SSE only
 
 > **"Typed authenticated clients recover event gaps and produce useful redacted health/log/support
