@@ -268,3 +268,50 @@ like a hung agent (§6b).
 Repaired, not merely noted: every `expect_err`/`unwrap_err` on a byte-payload result now goes
 through `.map(|b| b.len())` first, so a failure prints a length. Commit `dd14ebe8`. The second
 mutation run above is the proof the repair works — same mutation, readable output.
+
+## T+120 — orchestrator update: rebase onto 35243f36, re-run the census
+
+Lane `24-msteams-attach` merged and created the **first production consumer** of the surface I am
+repairing. Handled:
+
+- **Merged `35243f36` into my lane** rather than rebasing — LANE-BRIEF §0 forbids `git rebase`
+  (shared object store). Clean merge, no conflicts.
+- **Re-ran the census at the new base rather than carrying the handed number forward.** It is now
+  **2 reads: 1 production (`msteams/src/lib.rs:141`) + 1 test.** The handed "exactly one, and it is
+  a test" was true at `15cda12d` and is **no longer true**. `normalize_all` went 0 → 1 production
+  caller.
+- msteams leaves `media_bounds()` at the trait default, implements no `fetch_media`, and Bot
+  Framework reports no attachment size — so it consumes the **declaration-time** half (count bound
+  only). My repair is the **fetch-time** half plus the count bound at the enricher. Complementary,
+  and msteams' 38 tests stay green under my change.
+
+## T+140 — LIVE, on the real binary. All three gates PASS, twice.
+
+Driver derived by asserted patch from the proven `f24-media-actions.mjs` harness. Real
+`wayland-core gateway run`, real discord gateway fixture, 12 inbound attachments vs a declared
+bound of 10.
+
+```
+PASS  C1 [POSITIVE]          hits=2 (want exactly 2)
+PASS  C2 [NEGATIVE CONTROL]  capture_alive=true notice=false
+PASS  C3 [LIVENESS CONTROL]  vision_notice=true  (the first 10 were processed, not skipped)
+all_pass=true   x2, distinct shasums
+```
+
+Turn prompt: #10 carries the ordinary no-vision notice, #11 and #12 carry the past-bound notice,
+and **all twelve survive** — nothing truncated.
+
+## T+150 — the 21 wcore-agent failures: PRE-EXISTING and FLAKY, measured not assumed
+
+Ran the **unchanged baseline `35243f36` twice**: **22 failures, then 18**, sets differing in both
+directions. Load-sensitive flakes in `channel_lease` / `engine::audit_2026_05_22` / `session` /
+`orchestration`; none touches media. My media tests 14/14 in isolation. This lane introduces none.
+
+## T+160 — Darwin exception used and disclosed
+
+`wcore-channel-imessage` is macOS-gated; on hetzner it is an empty shell reporting `0 passed;
+0 filtered out` — **zero tests exist**, so hetzner provably cannot cover my change to it. Ran ONE
+crate on the Mac: `cargo test -p wcore-channel-imessage --lib` → **25 passed, 0 failed, 0 ignored,
+0 filtered out**. No workspace build, no clippy, no release build.
+
+## DONE. Report written to 24-MEDIA-BOUNDS.md.
