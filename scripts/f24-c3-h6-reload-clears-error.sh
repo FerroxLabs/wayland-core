@@ -196,12 +196,39 @@ else
     "the lock holder died mid-run — the final reading is not interpretable"
 fi
 
+# --- CAN THE GATE PASS? (LANE-BRIEF 3b-iii.) --------------------------------
+# Everything above asks whether health can FAIL. If it can only fail, the fix
+# would be the inverse defect: a permanently-red surface reporting a
+# degradation that has resolved and that nothing can ever clear. That is a real
+# hazard here and not hypothetical, because the first draft of this fix froze
+# the boot-time lease string and would have done exactly that.
+#
+# So: release the lease and assert health clears BY ITSELF, with no reload. The
+# supervisor re-claims every tick, so winning it back is the achievable world in
+# which this gate must go green.
+kill "$LOCK_PID" 2>/dev/null
+wait "$LOCK_PID" 2>/dev/null
+RC_RELEASED=1
+for i in $(seq 1 40); do
+  RC_RELEASED=$(health "$RUN/health-released.txt")
+  [ "$RC_RELEASED" = 0 ] && break
+  sleep 0.5
+done
+if [ "$RC_RELEASED" = 0 ]; then
+  leg "health-CLEARS-once-the-lease-is-won-back-with-no-reload" ok \
+    "rc=0 after ~$((i * 500))ms: $(tr -d '\r' < "$RUN/health-released.txt" | head -1)"
+else
+  leg "health-CLEARS-once-the-lease-is-won-back-with-no-reload" no \
+    "rc=$RC_RELEASED — the surface is stuck red; it reports a degradation that has resolved"
+fi
+
 cat > "$RESULT" <<JSON
 {
   "finding": "F24-C3-H6",
   "binary": "$BIN",
   "pass": $PASS,
   "fail": $FAIL,
+  "rc_health_after_lease_released": $RC_RELEASED,
   "rc_health_before_reload": $RC_BEFORE,
   "rc_health_after_reload": $RC_AFTER,
   "legs": [${LEGS%,}
