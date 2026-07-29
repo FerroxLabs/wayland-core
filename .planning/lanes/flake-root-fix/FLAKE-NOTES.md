@@ -320,6 +320,15 @@ SUPPOSED to fail. At least six prior lanes have re-diagnosed it. Untouched.
 | census: unprotected mutators of a contended var | **9** | **0** |
 | census: serial-regime splits | **4** (pre-dedup) | **0** |
 
+### Post-merge confirmation (merged with `gh/plan/f20-unified-audit-repair`)
+
+At merge commit `1893a6f1`, on a FRESH hetzner worktree `/root/wayland-flake-merged`:
+`wcore-config --lib` **10 reps: PASS=10, FAIL=0, CRASH=0**, each rep
+`572 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`. (572 not 568 -- other
+lanes' merged work added 4 tests.) `wcore-exec-backend` 89, `wcore-browser` 89,
+`wcore-cua` 51, `wcore-eval-scenarios --test smoke` 4 -- all green. Census re-run on
+the merged tree: still 0 unprotected / 0 splits.
+
 Every AFTER run reported `0 ignored; 0 filtered out` and a full executed count, so none
 is a vacuous green. The exec-backend AFTER run was taken at **4x the load** of its
 BEFORE run — for a logic race that makes failure more likely, so 0/25 is conservative.
