@@ -445,7 +445,12 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
             let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
             if fd < 0 {
                 let err = std::io::Error::last_os_error();
-                if is_leaf && err.kind() == std::io::ErrorKind::NotFound {
+                // ENOENT anywhere on the walk — leaf or an intermediate
+                // directory — is "not found" as the user means it. Reporting a
+                // missing parent as a component-open failure would be a
+                // regression against the wording every other media surface
+                // produces for the same condition.
+                if err.kind() == std::io::ErrorKind::NotFound {
                     return Err(IntakeError::NotFound(path.to_path_buf()));
                 }
                 return Err(IntakeError::OpenComponent {
