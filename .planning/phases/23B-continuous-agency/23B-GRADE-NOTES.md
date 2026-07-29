@@ -59,3 +59,65 @@ known-positive: 20 other `.md` files were returned by the same `wc -l *.md` invo
 - Does the 23B-H1 re-grade harness have a known-positive proving it dispatches tool events?
 
 _(Appended below as measurements land.)_
+
+---
+
+## MEASUREMENT LOG
+
+### M1 — artifact existence (one invocation, 18 PRESENT / 4 ABSENT — instrument proven alive)
+
+PRESENT with line counts: `session_lifecycle.rs` 1297, `session_cmd.rs` 499,
+`session_operator_lifecycle.rs` 534, `f23-session-operator-drive.sh` 356,
+`provenance.rs` 989, `v6_recall_control.sql` 35, repomap `store.rs` 1005 / `scope.rs` 404 /
+`search.rs` 543, `index_cmd.rs` 201, `incremental_index.rs` 675, `retrieval_quality.rs` 386,
+`f23-index-drive.sh` 514, `f23-index-drive.ps1` 473, `multi_day_journey_test.rs` 1018,
+`f23-clock-probe.sh` 296, `f23-multi-day-journey.sh` 236 / `.ps1` 204.
+
+ABSENT: `scripts/f23-macos-binary.sh`, `scripts/f23-context-economics-drive.sh`,
+`crates/wcore-cli/tests/memory_control_lifecycle.rs`,
+`crates/wcore-agent/tests/context_economics_test.rs`.
+
+**The ABSENT set matches exactly what the SUMMARYs said was not built.** No summary claimed a
+file that is missing. That is a point in favour of the narratives' honesty — measured, not assumed.
+
+### M2 — F23-04 (criterion 4) has no artifact. Absence measured with a live instrument.
+
+- `/usr/bin/grep -rln "F23_04\|F23-04" crates/ scripts/` → 5 files, and **all five are plan
+  23B-04's multi-day-journey files** (plan number collision: plan `23B-04` implements requirement
+  **F23-05**, not F23-04). Zero cache/compaction artifacts.
+- Concept search (quoted globs, per §3b-i): `invalidation_cause|InvalidationCause|token_pressure|
+  TokenPressure|cost_reconcil|CostReconcil|compaction_quality|CompactionQuality` over
+  `crates/ --include=*.rs` → **20 hits, all in `crates/wcore-providers/src/cache_observation.rs`
+  (19) + `lib.rs` (1)**. Known-positive in the same flags: `CacheDiagnostics` → 0, so the type is
+  named otherwise; the 20-hit result is itself the proof the instrument was alive.
+  **First attempt returned 0 because zsh ate the unquoted `--include=*.rs` — the exact trap
+  §3b-i names. The 0 was discarded, not reported.**
+- `cache_observation.rs` (278 lines) last touched by `38736654` (PR #186, cache-health
+  **telemetry**) and `da5a18b5`; `cache_diagnostics.rs` last touched `58e64fc6` (2026-07-15,
+  pre-23B); `compact/state.rs` last touched `2c70b7b8` (PR #65). Known-positive on the same
+  `git log --` instrument: `provenance.rs` correctly shows the three 23B-02 commits.
+- Only **2** references to `cache_observation`/`TokenPressure` across `wcore-agent` + `wcore-cli`.
+
+**Conclusion (C4): no work exists. Criterion 4 is NOT MET, and the honest cause is that plan
+23B-02 Task 2 was never started — which its own SUMMARY states.**
+
+### M3 — index legs (C6) ran at TWO different SHAs. Re-derived, and it is benign.
+
+- Linux `F23_03_PROVENANCE=ok sha=b33827d3`, macOS + Windows `sha=1eb2d7c2`.
+- `git merge-base --is-ancestor b33827d3 1eb2d7c2` → YES.
+- `git diff --stat b33827d3 1eb2d7c2 -- crates/wcore-repomap crates/wcore-cli/src/index_cmd.rs
+  scripts/f23-index-drive.{sh,ps1}` → **product code IDENTICAL**; only `f23-index-drive.ps1`
+  (+473, new) and `f23-index-drive.sh` (11 lines).
+- The 11-line `.sh` delta is the **field-extractor repair** (anchored `sed` returned EMPTY for the
+  FIRST field on a line). **So the Linux leg ran the broken extractor** — its log shows
+  `F23_03_VERIFY=agrees= exit=6` (empty), while macOS/Windows show `agrees=false`.
+- **Does that vacate a Linux gate? No — checked, not assumed.** `field verify agrees` is used at
+  `f23-index-drive.sh:460` in an `echo` only; the verify gate at :461 reads `VERIFY_RC`. Every
+  *asserted* extraction (`records`, `symbols`, `read`, `extracted`, mutation fields at :378-383,
+  `search fallback` at :308) returned non-empty real values on Linux, so none was first-on-line.
+  Cost of the defect: one informational field. **Confidence downgrade: minor, not material.**
+- Platform identity is corroborated by paths that cannot be cross-faked: macOS
+  `/private/var/folders/8h/…`, Windows `//?/C:/Users/seand/…`, Linux `/root/wayland-23B-03`.
+- Secret-isolation is a known-negative (`STORE_NONCE_OCCURRENCES=0`) **and carries its own
+  known-positive in the same run** (`STORE_CONTROL_OCCURRENCES=1`). This is the discipline §3b-i
+  demands, and 23B-03 is the only plan in the phase that supplied it unprompted.
