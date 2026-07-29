@@ -342,6 +342,29 @@ sqlite_snapshot.rs:                    0
 sqlite_journal.rs:                     0
 ```
 
+## Re-verified after merging integration forward
+
+Integration moved from `2c8b6d1d` to `69a73a4e` while I worked, so I merged it
+into my branch (§1 — merging integration IN is required; pushing to it is not)
+and re-ran on the merged tree at `b6ee4bec`, binary
+`172e87f477bbe2736f2316ecbc6905d08be837ba2147679cabf53b93e6cdd36f`:
+
+```
+cargo test -p wcore-cli --lib -- backup:: migrate::
+    102 passed; 0 failed; 0 ignored; 0 measured; 1779 filtered out
+cargo clippy -p wcore-cli --all-targets     clean (pre-existing imap-proto only)
+
+live fixed arm  : capture 2.21s, +3742/+3634/+3794 commits across it,
+                  6,796 rows demanded, sidecars [], integrity ok, 0 missing → PASS
+interrupt-proof : DIGEST-EQUAL: yes / PROOF-OK
+rollback sweep  : PROOF: PASS, byte-diff 0, known-negative arm damaged 9/9,
+                  unverifiable archives 0
+```
+
+The merge did not disturb this lane's files:
+`git diff --stat fcb07990 HEAD -- journal.rs sqlite-restore-rollback-proof.py`
+printed nothing.
+
 ## For the orchestrator to serialize
 
 - `crates/wcore-cli/src/backup/journal.rs` — `copy_inner` gains a fourth

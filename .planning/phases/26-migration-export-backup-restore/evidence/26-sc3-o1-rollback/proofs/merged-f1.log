@@ -1,0 +1,34 @@
+[merged-f1] donor archive: donor.tar.gz
+[merged-f1] prefilling memory.db to ~300 MiB ...
+[merged-f1] prefill done in 1.5s, memory.db = 307.7 MiB
+[merged-f1] waiting for writers: 0/3 started (iter 0, 1785346857)
+[merged-f1] waiting for writers: 3/3 started (iter 1, 1785346858)
+[merged-f1] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[merged-f1] pre-restore committed high-water marks: {'w0': 2348, 'w1': 2063, 'w2': 2385}
+[merged-f1] restore --replace launched pid=1045694
+[merged-f1] waiting for preserved=true (iter 20, 1.0s, records=0)
+[merged-f1] waiting for preserved=true (iter 40, 2.0s, records=1)
+[merged-f1] preserved=True after 2.21s op_id=1785346858105-1045694
+[merged-f1] post-capture committed high-water marks: {'w0': 6090, 'w1': 5697, 'w2': 6179}
+[merged-f1] commits during capture window: w0=+3742, w1=+3634, w2=+3794
+[merged-f1] restore killed, reaped rc=-9
+[merged-f1] open journal records after kill: 1
+[merged-f1] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785346858105-1045694
+[merged-f1] home entries after rollback: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: concurrent
+JOURNAL-MODE: wal
+WRITERS: 3
+CAPTURE-SECONDS: 2.21
+PRE-RESTORE-COMMITTED: 6796
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: PASS
