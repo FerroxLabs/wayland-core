@@ -210,9 +210,15 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(camoufox_bin_env)]
     fn camoufox_program_honours_the_operator_override() {
-        // Serialised implicitly: the only env var touched is this one, and no
-        // other test in this module reads it.
+        // The previous comment claimed "serialised implicitly: the only env var
+        // touched is this one, and no other test in this module reads it".
+        // False on the second half: `nothing_installed_and_nothing_listening_is_
+        // unavailable`, in THIS module, also sets `WAYLAND_CAMOUFOX_BIN`. Under
+        // `cargo test` both run concurrently in one process, so each could
+        // observe the other's value. Nothing about touching a single variable
+        // serialises anything.
         let key = "WAYLAND_CAMOUFOX_BIN";
         let prior = std::env::var_os(key);
         unsafe { std::env::set_var(key, "/opt/custom/camoufox") };
@@ -230,7 +236,10 @@ mod tests {
     /// a reason and a remedy. If this ever returns `Ready`, the probe is inert.
     #[cfg(not(any(feature = "chromium", feature = "browserbase")))]
     #[tokio::test]
+    #[serial_test::serial(camoufox_bin_env)]
     async fn nothing_installed_and_nothing_listening_is_unavailable() {
+        // Shares `WAYLAND_CAMOUFOX_BIN` with
+        // `camoufox_program_honours_the_operator_override`; same serial group.
         let key = "WAYLAND_CAMOUFOX_BIN";
         let prior = std::env::var_os(key);
         unsafe { std::env::set_var(key, "wcore-browser-liveness-probe-no-such-program") };

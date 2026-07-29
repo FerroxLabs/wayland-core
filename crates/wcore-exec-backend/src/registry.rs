@@ -29,9 +29,59 @@ pub struct LiveTask {
     pub started_unix_ms: u64,
 }
 
+thread_local! {
+    /// Per-thread override of [`state_dir`], installed by [`StateDirGuard`].
+    ///
+    /// Deliberately a thread-local and NOT a process global. `cargo test` runs
+    /// every test of a binary on its own thread inside ONE SHARED PROCESS, so a
+    /// process-global override (which is what `WAYLAND_EXEC_BACKEND_STATE_DIR`
+    /// is) is visible to every other concurrently-running test. That is the
+    /// exact defect this replaces: two tests each pointed the env var at their
+    /// own `TempDir`, so whichever wrote last silently redirected the other's
+    /// `record`/`load`/`list` calls into a directory that was about to be
+    /// deleted. Injecting per-thread makes the tests independent without
+    /// serializing them, and without weakening the assertions.
+    static STATE_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII override of [`state_dir`] scoped to the CURRENT THREAD.
+///
+/// Restores the previous value on drop, so nesting and early returns are safe.
+/// Exposed (rather than `#[cfg(test)]`-gated) so integration tests in
+/// `tests/`, which link this crate compiled WITHOUT `cfg(test)`, can use the
+/// same isolation as the unit tests.
+#[doc(hidden)]
+pub struct StateDirGuard {
+    prev: Option<PathBuf>,
+}
+
+impl StateDirGuard {
+    /// Point [`state_dir`] at `dir` for this thread until the guard drops.
+    pub fn set(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let prev = STATE_DIR_OVERRIDE.with(|cell| cell.replace(Some(dir)));
+        Self { prev }
+    }
+}
+
+impl Drop for StateDirGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        STATE_DIR_OVERRIDE.with(|cell| *cell.borrow_mut() = prev);
+    }
+}
+
 /// Where live-task state lives. Overridable so tests never touch a real
 /// operator's state directory.
+///
+/// Resolution order: the thread-local test override ([`StateDirGuard`]), then
+/// the `WAYLAND_EXEC_BACKEND_STATE_DIR` operator override, then the default
+/// under the Wayland config dir.
 pub fn state_dir() -> PathBuf {
+    if let Some(dir) = STATE_DIR_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return dir;
+    }
     if let Ok(dir) = std::env::var("WAYLAND_EXEC_BACKEND_STATE_DIR") {
         return PathBuf::from(dir);
     }
@@ -116,9 +166,12 @@ mod tests {
 
     fn with_temp_state<T>(f: impl FnOnce() -> T) -> T {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY-of-intent: these tests are single-threaded per process under
-        // nextest, which runs each test in its own process.
-        unsafe { std::env::set_var("WAYLAND_EXEC_BACKEND_STATE_DIR", dir.path()) };
+        // Per-thread injection, NOT a process-global env var. Under `cargo
+        // test` all tests of this binary share one process, so the previous
+        // `set_var` leaked into every concurrently-running test. `dir` is held
+        // for the whole of `f()`, so the directory cannot be deleted while the
+        // override still points at it.
+        let _guard = StateDirGuard::set(dir.path());
         f()
     }
 
