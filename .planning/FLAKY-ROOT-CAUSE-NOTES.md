@@ -90,6 +90,65 @@ every headline number must be taken with the machine's concurrent load recorded.
 - [ ] ≥20-run post-fix distribution.
 - [ ] Pre-fix counterfactual with the identical harness.
 
+---
+
+## MEASUREMENT 1 — baseline at base commit, default concurrency. THE FLAKE DID NOT REPRODUCE.
+
+hetzner `/root/wayland-flaky` @ `2cfbf972` (= base `75babf32` + my notes commit; no code
+delta). Harness `/root/flaky-eviden/runharness.sh`, raw `/root/.cargo/bin/cargo`, no `rtk`.
+
+```
+run=1 rc=0 load=[15.26 8.67 5.29] Summary [31.402s] 2172 tests run: 2172 passed (2 slow), 3 skipped
+run=2 rc=0 load=[15.67 9.79 5.81] Summary [31.398s] 2172 tests run: 2172 passed (2 slow), 3 skipped
+run=3 rc=0 load=[12.83 9.68 5.90] Summary [31.386s] 2172 tests run: 2172 passed (2 slow), 3 skipped
+run=4 rc=0 load=[13.57 10.49 6.33] Summary [31.378s] 2172 tests run: 2172 passed (2 slow), 3 skipped
+run=5 rc=0 ... 2172 passed, 3 skipped
+```
+
+**5/5 clean, 0 failures, at `test-threads = num-cpus` = 96.** Denominator stable at 2172
+(`nextest list` = 2172, so `no-tests`/vacuity is not in play; 3 skipped are real `#[ignore]`s).
+Pass-set diff between run 1 and run 5 shows only *ordering* differences, not membership.
+
+**This is a real result and it reframes the whole task.** The suite is not unconditionally
+flaky at default concurrency. Something else was true when the 22/18 failures were measured.
+Differences I must now separate, before I can claim any mechanism:
+
+- **(a) Tree.** "Unchanged tree" in the brief may mean the integration branch
+  `plan/f20-unified-audit-repair` as it stood, not base `75babf32`. Must check.
+- **(b) Machine load.** My runs sat at load ~13-15 on 96 cores — nearly idle. The reported
+  flakes came from a window with five lanes compiling. LANE-BRIEF §6 already records that a
+  contended full-workspace run is not a measurement.
+- **(c) Invocation.** The default profile has **`retries = 1`**, so a merely-transient failure
+  is absorbed and reported as `flaky`, not `failed`. 22 *failures* under this profile means 22
+  tests failed **twice each** — or the measuring lane did not use this profile.
+
+### Sub-finding: the timing distribution is not starvation-shaped
+
+Only **6** of 2172 tests exceed 5s and only **4** exceed 10s. The long poles are
+30.041s / 30.041s / 20.042s / 15.040s — round numbers, i.e. **timeouts, not CPU work**. The
+two 30s ones are `tool_backends::gemini_vision::tests::vision_send_error_message_omits_api_key`
+and `tool_backends::image_gen::tests::gemini_imagen_send_error_omits_api_key`, which POST to
+**`192.0.2.1:9` (TEST-NET-1, RFC 5737, deliberately non-routable)** and wait for the connect to
+fail. So they are not internet-dependent, but they *are* wall-clock-bound and they sit against a
+`slow-timeout = 30s, terminate-after = 2` → **60s hard kill**.
+
+A mass CPU-starvation story would need a big cohort near the kill line. There isn't one. That
+argues against "everything got slow and got killed" as the *general* explanation, while leaving
+it wide open for the handful of wall-clock-bound tests.
+
+### Instrument defect found and recorded (LANE-BRIEF §6b-ii — must repair, not just note)
+
+`cargo nextest list` on this host prints:
+`warning: in config file .config/nextest.toml, ignoring unknown configuration key:
+profile.default.no-tests`
+
+The repo's `no-tests = "fail"` anti-vacuity guard — the one documented at length as closing the
+"exits 0 having certified nothing" family — is **INERT on cargo-nextest 0.9.137** (installed
+here). The comment block above it even predicts a 0.9.138 warning about `env`; the key itself is
+unsupported at 0.9.137. This does not affect my numbers (I read the executed count back
+directly, 2172, and cross-checked against `nextest list` = 2172) but it is a live self-passing
+gate in the repo and I must report it.
+
 ## Open questions I must not paper over
 
 - Does nextest ever run more than one test per process here? (`--lib` is one binary; I
