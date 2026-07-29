@@ -14,6 +14,10 @@ pub mod bootstrap;
 pub mod budget;
 pub mod budget_authority;
 pub mod cache_diagnostics;
+// F23-04: the durable cache/compaction ledger — accumulates quality,
+// invalidation, token-pressure and cost-truth across a session and persists it
+// where `wayland-core cache` can read it without an engine.
+pub mod cache_ledger;
 // W8a A.2: cooperative cancellation primitives (re-export of tokio-util).
 pub mod cancel;
 // Inbound channel consumer: subscribes to the ChannelManager broadcast,
