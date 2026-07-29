@@ -6390,6 +6390,21 @@ impl AgentEngine {
         }
     }
 
+    /// The active durable session journal, if this process has one (F22-C1).
+    ///
+    /// Additive read-only accessor. `SessionJournal` is an `Arc`-shared handle,
+    /// so the clone is the SAME chain and the same writer lock — not a second
+    /// journal, which would be a second source of truth for Goal state.
+    ///
+    /// Exposed so the protocol command loop can answer host Goal control
+    /// commands. It grants no authority by itself: `SessionJournal::append`
+    /// refuses every Goal variant, so a holder of this handle still cannot mint
+    /// a Goal transition without going through `GoalKernel`.
+    #[must_use]
+    pub fn session_journal(&self) -> Option<&crate::session_journal::SessionJournal> {
+        self.session_journal.as_ref()
+    }
+
     /// Return the fail-closed recovery decision for the active durable
     /// session. Hosts use the same projection before offering TUI or JSON
     /// recovery actions.

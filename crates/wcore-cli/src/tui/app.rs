@@ -290,6 +290,18 @@ pub struct App {
     /// make the last transition invisible, and a transition must not be mistaken
     /// for Goal state that replay would reproduce.
     pub goal_last_transition: Option<GoalTransitionView>,
+    /// F22-C1 — the most recent REFUSED Goal control command.
+    ///
+    /// The TUI can now issue Goal commands, not only render them, so it needs
+    /// somewhere to put a refusal. Without this a refused command would look
+    /// exactly like an accepted one that changed nothing, which is the failure
+    /// this whole surface exists to close — a control plane that cannot tell
+    /// "no" from "done" will retry forever against a Goal that will never move.
+    ///
+    /// Written ONLY by the protocol bridge from `goal_control_refused`, on the
+    /// same terms as [`Self::goals`]: the TUI renders the refusal Core sent and
+    /// never decides for itself that a command failed.
+    pub goal_last_refusal: Option<GoalRefusalView>,
 }
 
 /// F22-C1 — one observed durable Goal transition, as the status line shows it.
@@ -298,6 +310,14 @@ pub struct GoalTransitionView {
     pub goal_id: String,
     pub transition: wcore_protocol::goal::GoalTransitionKind,
     pub lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+}
+
+/// F22-C1 — one refused Goal control command, as the status line shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRefusalView {
+    pub request_id: String,
+    pub goal_id: String,
+    pub reason: wcore_protocol::events::GoalControlRefusalReason,
 }
 
 impl App {
@@ -395,6 +415,7 @@ impl App {
             // F22-C1: no durable Goals observed at boot.
             goals: std::collections::BTreeMap::new(),
             goal_last_transition: None,
+            goal_last_refusal: None,
         }
     }
 
@@ -597,6 +618,7 @@ impl App {
         // the next snapshot repopulates it if it is still live.
         self.goals.clear();
         self.goal_last_transition = None;
+        self.goal_last_refusal = None;
         // onboarding_state: intentionally NOT reset (once-per-session first-spawn hint).
     }
 
