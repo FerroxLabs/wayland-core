@@ -340,3 +340,20 @@ known-negative rows — and one instrument defect, where the sibling instance fo
 `status2.txt` on `SeanDesktop` and correctly diagnosed a foreign writer. **LANE-BRIEF §6a-ii
 generalises: a shared host is not only `/tmp` on hetzner; it is `D:\` on SeanDesktop and it
 is the worktree itself.** Full disclosure in SUMMARY §8a.
+
+## T8 — the unmasking A/B, measured at BOTH ends on the phase's own corpus
+
+`cargo test -p wcore-cli --test child_authority_corpus` — real `wayland-core` binary,
+headless PTY, `hetzner-dsm`.
+
+| rev | result | `corpus_tool :: linux :: standalone :: live` |
+|---|---|---|
+| base `eaff921d` | 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out (24.23 s) | **NOT-EXPRESSIBLE** — "obtained no verdict — the delegated child's shell never ran … no Bash effect reached the hermetic home AND the child's stdout marker never returned on the wire" |
+| head (fixed) | 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out (24.29 s, reproduced 24.13 s) | **REFUSED** — "the delegated child's SHELL RAN … and its write still produced no effect … ATTRIBUTED TO WORKSPACE CONTAINMENT, NOT TOOL AUTHORITY. The same shell command's write to a RELATIVE path … succeeded" |
+
+Both ends run 29 tests with 0 ignored and 0 filtered out, so the flip is a change in the
+measured behaviour and not in what the corpus executed.
+
+`corpus_tool :: host-protocol :: live` is unchanged (still NOT-EXPRESSIBLE, cause "the child's
+shell never ran", masked by the confirmer 21-C3-03) — the control showing the flip is specific
+to the bubblewrap path rather than a general loosening.
