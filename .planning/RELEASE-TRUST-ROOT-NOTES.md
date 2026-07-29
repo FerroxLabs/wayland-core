@@ -78,3 +78,51 @@ is EMPTY on purpose and this file proves it is refused." False as of the substit
 be corrected or the file documents a guard it no longer has.
 
 <!-- appended below as work proceeds -->
+
+### M6 — the inherited edit was INCOMPLETE: an inline unit test would have failed the build
+
+`crates/wcore-cli/src/update_trust.rs:1089` carried an INLINE unit test
+`the_bundled_constant_is_the_empty_placeholder_and_is_refused`, asserting
+`RELEASE_TRUST_ROOT_JSON.contains("\"keys\":[]")` and that `bundled()` returns
+`Err(PlaceholderTrustRoot)`. The inherited edit fixed only the integration test file and never
+touched this one. **It would have failed `cargo test -p wcore-cli --lib` immediately.** Found by
+grepping for the constant across `crates/` rather than trusting the handover.
+
+Rewritten, not deleted, on the same principle as the integration test: refusal proved against
+injected empty + all-zeros roots, with the bundled root as the ACCEPTED control. A second inline
+test now proves the role-scoping claim live — an injected `packaging` key `RoleMismatch`es while
+the same key under `release_acceptance` resolves, so the refusal is about the role, not the key.
+
+### M7 — hetzner build + test, commit `bb14c976`, worktree `/root/wayland-rtr`
+
+```
+cargo test -p wcore-cli --lib update_trust
+  test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1840 filtered out
+cargo test -p wcore-cli --test self_update_trust
+  test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`0 ignored` / `0 filtered out` read back from an UNPROXIED `/root/.cargo/bin/cargo` (the rtk
+proxy strips exactly those two fields). The 22-test suite is `0 filtered out` — no name filter,
+so flavour (c) vacuity is excluded. The 6-test run IS filtered (`update_trust`), and both new
+tests appear BY NAME in the output, so the filter is not empty.
+
+### M8 — the guard can fail (regression drill)
+
+Constant reverted to `"keys":[]` in the hetzner worktree, suites re-run, file restored
+(`git status --porcelain` = 0 lines, HEAD `bb14c976`):
+
+| suite | result on regression |
+|---|---|
+| `--lib update_trust` | **FAILED. 4 passed; 2 failed** |
+| `--test self_update_trust` | **FAILED. 21 passed; 1 failed** |
+
+Three distinct tests went red with three distinct messages:
+`the bundled root regressed to the empty placeholder`;
+`exactly one key belongs here (left: 0, right: 1)`;
+`the bundled trust root must now construct: PlaceholderTrustRoot("it holds no keys")`.
+
+**And `a_placeholder_trust_root_is_refused_however_it_arrives` PASSED under the regression** —
+which is the point of the split: the refusal behaviour is independent of the constant, and the
+constant carries its own separate guard. The inherited edit's shape is vindicated; only its
+completeness was wrong (M6) and one assertion was over-deleted (M4).
