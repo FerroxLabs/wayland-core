@@ -509,14 +509,14 @@ impl TranslationV1 {
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DialectRefusalV1 {
     /// No declared tool survived the gates.
-    #[error("DIALECT_NO_CANDIDATE intent={intent} declared_tools={declared_tools}")]
+    #[error("DIALECT_NO_CANDIDATE intent={} declared_tools={declared_tools}", intent.token())]
     NoCandidate {
         intent: IntentV1,
         declared_tools: usize,
     },
     /// Two or more declared tools survived. The filter refuses rather than choosing, because
     /// choosing is where a ranking would hide a preference.
-    #[error("DIALECT_AMBIGUOUS intent={intent} candidates={candidates:?}")]
+    #[error("DIALECT_AMBIGUOUS intent={} candidates={candidates:?}", intent.token())]
     Ambiguous {
         intent: IntentV1,
         candidates: Vec<String>,
@@ -525,7 +525,7 @@ pub enum DialectRefusalV1 {
     #[error("DIALECT_EMPTY_CORPUS")]
     EmptyCorpus,
     /// The canonical script omitted a slot the intent requires. A script defect, not a harness one.
-    #[error("DIALECT_SCRIPT_MISSING_SLOT intent={intent} slot={}", slot.token())]
+    #[error("DIALECT_SCRIPT_MISSING_SLOT intent={} slot={}", intent.token(), slot.token())]
     ScriptMissingSlot { intent: IntentV1, slot: SlotV1 },
 }
 
