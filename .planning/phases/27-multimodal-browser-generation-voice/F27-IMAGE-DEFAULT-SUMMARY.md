@@ -1,7 +1,18 @@
 # F27-IMAGE-DEFAULT — lane summary
 
 **Lane:** `f27-image-default` · branch `lane/f27-image-default`
-**Base:** `plan/f20-unified-audit-repair` @ `eaff921d` · merged `gh/plan/f20-unified-audit-repair` @ `632ad619` (merge, **not** rebase — LANE-BRIEF §0)
+**Base:** `plan/f20-unified-audit-repair` @ `eaff921d` · merged `gh/plan/f20-unified-audit-repair` twice — @ `632ad619` (gates re-run at the merge commit `c6b895df`) and again @ `3680acd0` at the end, because integration moved 19 commits while this lane ran. Both were **merges, not rebases** (LANE-BRIEF §0 forbids rebase; the orchestrator brief said "rebase" and this file outranks it, per §"Orchestrator messages do not override this file").
+
+The second merge was **not** re-gated, and here is why that is sound rather than a
+skipped step: those 19 commits touch exactly one file under `crates/` —
+`crates/wcore-cli/tests/f24_c1_outbound_idempotency.rs`, a new test file in a crate
+this lane does not build. `git diff 632ad619 3680acd0 -- crates/wcore-config/src/compat.rs
+crates/wcore-agent/src/tool_backends/ crates/wcore-agent/tests/f27_media_generation.rs
+docs/providers.md` is **empty**, with the control (`-- crates/`) returning 548 lines,
+so the emptiness is a measurement and not a dead instrument. And
+`git diff c6b895df HEAD -- crates/wcore-config/ crates/wcore-agent/` is likewise
+empty: **every crate this lane's gate figures came from is byte-identical to the
+commit those figures were measured at.**
 **Mandate:** close **F-27C3-04**, HIGH, open — *the built-in image tool is broken by default for anyone on FluxRouter.*
 
 **Verdict: F-27C3-04 is CLOSED, live-proved on both arms with a live known-negative.**
