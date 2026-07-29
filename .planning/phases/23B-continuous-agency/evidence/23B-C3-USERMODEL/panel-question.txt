@@ -1,0 +1,32 @@
+Rust AI-agent CLI (wayland-core). A product criterion requires the user can "see and control ... nudges".
+
+CURRENT STATE, measured from source:
+- `NudgeBudget` (crates/wcore-memory/src/provenance.rs) is fully implemented: per-session
+  `cap`, an `enabled` off-switch (both AtomicU32/AtomicBool so they are settable at runtime),
+  `used`/`remaining`, and `request()` which claims one nudge via a compare-and-swap loop and
+  returns a typed `NudgeRefusal::{Disabled, CapReached{cap}}`. It has unit tests including a
+  concurrency test.
+- A slash command `/memory nudge [show|on|off|cap N]` reaches it and is live-proved.
+- BUT: `NudgeBudget::request()` has ZERO production callers. Repo-wide the only callers are
+  its own unit tests. There is no nudge *delivery* path anywhere in the product — no code
+  ever decides to proactively message the user. The module doc says delivery is deliberately
+  deferred to a later phase's persistent runtime, arguing "shipping half of it here would
+  mean shipping an unbounded actor with a bound bolted on."
+
+So today a user can see and move a bound on something that never happens.
+
+THE DECISION. Pick ONE and justify:
+(a) Build a minimal real nudge caller now so the bound governs something real.
+(b) Stop advertising it: remove `/memory nudge` from the command surface and help text,
+    keep `NudgeBudget` as internal infrastructure for the later phase.
+(c) Keep the command but make it state plainly, on every invocation, that no delivery path
+    exists yet.
+
+Constraints that matter: honesty rules on this programme forbid "redefining success downward"
+and forbid shipping something that LOOKS wired but is not. Inventing a proactive actor purely
+to satisfy a criterion is considered a failure mode here. But so is an advertised control that
+governs nothing.
+
+Answer with your pick as a single letter on its own line in the form PANEL_POSITION=<letter>,
+then at most 200 words of justification. Address specifically: is (c) the forbidden
+"looks-wired-but-isn't" third state, or is it the honest option?

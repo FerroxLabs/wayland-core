@@ -82,7 +82,18 @@ fn build_slash_dispatcher(engine: &wcore_agent::engine::AgentEngine) -> SlashDis
     let memory_api = engine.memory_api().clone();
     let plugin_handles = engine.plugin_runtime_handles_arc();
     let skill_catalog = engine.skill_catalog().cloned();
-    SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog)
+    let mut dispatcher = SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog);
+    // 23B-C3: register `/usermodel` only when bootstrap actually opened a
+    // correction store, so the command is absent rather than present-and-inert.
+    if let Some((store, user_id)) = engine.user_correction_store() {
+        let mut handler =
+            wcore_agent::slash::usermodel::UserModelHandler::new(store.clone(), user_id);
+        if let Some(backend) = engine.user_model_backend() {
+            handler = handler.with_backend(backend.clone());
+        }
+        dispatcher.register(std::sync::Arc::new(handler));
+    }
+    dispatcher
 }
 
 /// Pre-process one input line through the slash dispatcher, falling through

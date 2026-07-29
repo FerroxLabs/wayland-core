@@ -1,0 +1,642 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.1
+   Compiling log v0.4.30
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling libm v0.2.16
+   Compiling shlex v2.0.1
+   Compiling bytes v1.11.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling generic-array v0.14.7
+   Compiling lock_api v0.4.14
+   Compiling subtle v2.6.1
+   Compiling autocfg v1.5.1
+   Compiling futures-sink v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling futures-channel v0.3.32
+   Compiling equivalent v1.0.2
+   Compiling slab v0.4.12
+   Compiling allocator-api2 v0.2.21
+   Compiling tracing-core v0.1.36
+   Compiling foldhash v0.2.0
+   Compiling http v1.4.1
+   Compiling zmij v1.0.21
+   Compiling num-traits v0.2.19
+   Compiling cpufeatures v0.2.17
+   Compiling ryu v1.0.23
+   Compiling syn v2.0.117
+   Compiling hashbrown v0.17.1
+   Compiling thiserror v2.0.18
+   Compiling pkg-config v0.3.33
+   Compiling rustix v1.1.4
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.2.17
+   Compiling jobserver v0.1.34
+   Compiling errno v0.3.14
+   Compiling mio v1.2.1
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling cc v1.2.63
+   Compiling socket2 v0.6.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling http-body v1.0.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling digest v0.10.7
+   Compiling ipnet v2.12.0
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling zerocopy v0.8.50
+   Compiling percent-encoding v2.3.2
+   Compiling serde_json v1.0.150
+   Compiling http-body-util v0.1.3
+   Compiling getrandom v0.4.2
+   Compiling base64 v0.22.1
+   Compiling rand_core v0.10.1
+   Compiling iana-time-zone v0.1.65
+   Compiling aws-lc-rs v1.17.0
+   Compiling sha2 v0.10.9
+   Compiling stable_deref_trait v1.2.1
+   Compiling untrusted v0.9.0
+   Compiling anyhow v1.0.103
+   Compiling untrusted v0.7.1
+   Compiling httparse v1.10.1
+   Compiling either v1.16.0
+   Compiling rustls v0.23.40
+   Compiling tower-service v0.3.3
+   Compiling form_urlencoded v1.2.2
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling try-lock v0.2.5
+   Compiling cmake v0.1.58
+   Compiling want v0.3.1
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling sync_wrapper v1.0.2
+   Compiling bitflags v2.11.1
+   Compiling indexmap v2.14.0
+   Compiling utf8_iter v1.0.4
+   Compiling fastrand v2.4.1
+   Compiling tower-layer v0.3.3
+   Compiling openssl-probe v0.2.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling regex-syntax v0.8.10
+   Compiling base64ct v1.8.3
+   Compiling vcpkg v0.2.15
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling workspace-hack v0.1.0 (/root/wl-23bc3um-base/workspace-hack)
+   Compiling winnow v1.0.3
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling option-ext v0.2.0
+   Compiling aws-lc-sys v0.41.0
+   Compiling ring v0.17.14
+   Compiling dirs-sys v0.5.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling aho-corasick v1.1.4
+   Compiling dirs v6.0.0
+   Compiling block-padding v0.3.3
+   Compiling mime v0.3.17
+   Compiling inout v0.1.4
+   Compiling unicase v2.9.0
+   Compiling ahash v0.8.12
+   Compiling libsqlite3-sys v0.30.1
+   Compiling mime_guess v2.0.5
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling libdbus-sys v0.2.7
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling io-lifetimes v2.0.4
+   Compiling glob v0.3.3
+   Compiling dbus v0.9.11
+   Compiling universal-hash v0.5.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling crc32fast v1.5.0
+   Compiling synstructure v0.13.2
+   Compiling regex-automata v0.4.14
+   Compiling opaque-debug v0.3.1
+   Compiling semver v1.0.28
+   Compiling poly1305 v0.8.0
+   Compiling password-hash v0.5.0
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling rtoolbox v0.0.5
+   Compiling sha1_smol v1.0.1
+   Compiling io-extras v0.18.4
+   Compiling argon2 v0.5.3
+   Compiling uuid v1.23.2
+   Compiling rpassword v7.5.2
+   Compiling serde_ignored v0.1.14
+   Compiling powerfmt v0.2.0
+   Compiling ambient-authority v0.0.2
+   Compiling time-core v0.1.8
+   Compiling cap-primitives v3.4.5
+   Compiling cpufeatures v0.3.0
+   Compiling num-conv v0.2.2
+   Compiling deranged v0.5.8
+   Compiling num-integer v0.1.46
+   Compiling time-macros v0.2.27
+   Compiling maybe-owned v0.3.4
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.4.3
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling zeroize v1.8.2
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling futures-util v0.3.32
+   Compiling zerocopy-derive v0.8.50
+   Compiling zerofrom-derive v0.1.7
+   Compiling rustls-pki-types v1.14.1
+   Compiling yoke-derive v0.8.2
+   Compiling tracing v0.1.44
+   Compiling async-trait v0.1.89
+   Compiling displaydoc v0.2.6
+   Compiling zerovec-derive v0.11.3
+   Compiling zerofrom v0.1.8
+   Compiling webpki-roots v1.0.7
+   Compiling rustls-native-certs v0.8.4
+   Compiling tempfile v3.27.0
+   Compiling cipher v0.4.4
+   Compiling regex v1.12.3
+   Compiling dbus-secret-service v4.1.0
+   Compiling chacha20 v0.9.1
+   Compiling fd-lock v4.0.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling fs-set-times v0.20.3
+   Compiling yoke v0.8.2
+   Compiling keyring v3.6.3
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling time v0.3.47
+   Compiling zerotrie v0.2.4
+   Compiling zerovec v0.11.6
+   Compiling cap-std v3.4.5
+   Compiling rustix v0.38.44
+   Compiling bumpalo v3.20.3
+   Compiling futures-executor v0.3.32
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling linux-raw-sys v0.4.15
+   Compiling smallvec v1.15.1
+   Compiling chrono v0.4.44
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling parking_lot v0.12.5
+   Compiling wcore-compact v0.12.25 (/root/wl-23bc3um-base/crates/wcore-compact)
+   Compiling tokio v1.52.3
+   Compiling icu_provider v2.2.0
+   Compiling futures v0.3.32
+   Compiling wcore-types v0.12.25 (/root/wl-23bc3um-base/crates/wcore-types)
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling wcore-budget v0.12.25 (/root/wl-23bc3um-base/crates/wcore-budget)
+   Compiling http v0.2.12
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling libseccomp-sys v0.3.0
+   Compiling base64-simd v0.8.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling http-body v0.4.6
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling hashbrown v0.14.5
+   Compiling bytes-utils v0.1.4
+   Compiling libseccomp v0.4.0
+   Compiling const-oid v0.9.6
+   Compiling rand_chacha v0.3.1
+   Compiling pin-utils v0.1.0
+   Compiling simd-adler32 v0.3.9
+   Compiling url v2.5.8
+   Compiling rand v0.8.6
+   Compiling hashlink v0.9.1
+   Compiling xattr v1.6.1
+   Compiling rustc_version v0.4.1
+   Compiling filetime v0.2.29
+   Compiling rusqlite v0.32.1
+   Compiling hybrid-array v0.4.12
+   Compiling home v0.5.12
+   Compiling tar v0.4.46
+   Compiling which v6.0.3
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling heck v0.5.0
+   Compiling cmov v0.5.4
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+   Compiling ctutils v0.4.2
+   Compiling encoding_rs v0.8.35
+   Compiling crossbeam-utils v0.8.21
+   Compiling const-oid v0.10.2
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.0
+   Compiling byteorder v1.5.0
+   Compiling getrandom v0.3.4
+   Compiling tinyvec_macros v0.1.1
+   Compiling zlib-rs v0.6.6
+   Compiling tinyvec v1.11.0
+   Compiling hmac v0.12.1
+   Compiling cranelift-srcgen v0.123.12
+   Compiling crossbeam-epoch v0.9.20
+   Compiling unicode-normalization v0.1.25
+   Compiling cranelift-assembler-x64-meta v0.123.12
+   Compiling der v0.6.1
+   Compiling chacha20 v0.10.0
+   Compiling digest v0.11.3
+   Compiling serde_derive_internals v0.29.1
+   Compiling schemars v0.8.22
+   Compiling unicode-bidi v0.3.18
+   Compiling unicode-properties v0.1.4
+   Compiling rand v0.10.1
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling wcore-protocol v0.12.25 (/root/wl-23bc3um-base/crates/wcore-protocol)
+   Compiling spki v0.6.0
+   Compiling stringprep v0.1.5
+   Compiling schemars_derive v0.8.22
+   Compiling rand_core v0.9.5
+   Compiling pulley-macros v36.0.12
+   Compiling wcore-plugin-api v0.12.25 (/root/wl-23bc3um-base/crates/wcore-plugin-api)
+   Compiling h2 v0.4.14
+   Compiling tower-http v0.6.11
+   Compiling aws-smithy-types v1.4.9
+   Compiling wcore-sandbox v0.12.25 (/root/wl-23bc3um-base/crates/wcore-sandbox)
+   Compiling rustversion v1.0.22
+   Compiling dyn-clone v1.0.20
+   Compiling rand_chacha v0.9.0
+   Compiling pkcs8 v0.9.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling sha2 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling half v2.7.1
+   Compiling cranelift-bitset v0.123.12
+   Compiling crypto-bigint v0.4.9
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling ff v0.12.1
+   Compiling nom v8.0.0
+   Compiling inventory v0.3.24
+   Compiling cranelift-isle v0.123.12
+   Compiling hex v0.4.3
+   Compiling foldhash v0.1.5
+   Compiling weezl v0.1.12
+   Compiling same-file v1.0.6
+   Compiling base16ct v0.1.1
+   Compiling sec1 v0.3.0
+   Compiling walkdir v2.5.0
+   Compiling pulley-interpreter v36.0.12
+   Compiling hashbrown v0.15.5
+   Compiling group v0.12.1
+   Compiling rand v0.9.4
+   Compiling sqlite-vec v0.1.9
+   Compiling target-lexicon v0.13.5
+   Compiling cranelift-codegen-shared v0.123.12
+   Compiling elliptic-curve v0.12.3
+   Compiling rand_distr v0.5.1
+   Compiling aws-smithy-schema v0.1.0
+   Compiling rfc6979 v0.3.1
+   Compiling cranelift-entity v0.123.12
+   Compiling cranelift-assembler-x64 v0.123.12
+   Compiling zopfli v0.8.3
+   Compiling wcore-safety v0.12.25 (/root/wl-23bc3um-base/crates/wcore-safety)
+   Compiling flate2 v1.1.9
+   Compiling cranelift-codegen-meta v0.123.12
+   Compiling signature v1.6.4
+   Compiling bstr v1.12.1
+   Compiling hyper v1.10.1
+   Compiling quick-error v2.0.1
+   Compiling humantime v2.3.0
+   Compiling pom v1.1.0
+   Compiling zune-core v0.5.1
+   Compiling bytemuck v1.25.0
+   Compiling globset v0.4.18
+   Compiling humantime-serde v1.1.1
+   Compiling ecdsa v0.14.8
+   Compiling zune-jpeg v0.5.15
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-types v1.3.16
+   Compiling fdeflate v0.3.7
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling cbc v0.1.2
+   Compiling wasmtime-internal-versioned-export-macros v36.0.12
+   Compiling gimli v0.32.3
+   Compiling md-5 v0.10.6
+   Compiling wasmtime-internal-math v36.0.12
+   Compiling typed-path v0.12.3
+   Compiling hyper-util v0.1.20
+   Compiling color_quant v1.1.0
+   Compiling debug_unsafe v0.1.4
+   Compiling rangemap v1.7.1
+   Compiling arbitrary v1.4.2
+   Compiling rustc-hash v2.1.2
+   Compiling pxfm v0.1.29
+   Compiling byteorder-lite v0.1.0
+   Compiling ttf-parser v0.25.1
+   Compiling zip v2.4.2
+   Compiling fax v0.2.7
+   Compiling image-webp v0.2.4
+   Compiling tiff v0.11.3
+   Compiling cranelift-control v0.123.12
+   Compiling zip v8.6.0
+   Compiling regalloc2 v0.12.2
+   Compiling cranelift-codegen v0.123.12
+   Compiling gif v0.14.2
+   Compiling atoi_simd v0.18.1
+   Compiling png v0.18.1
+   Compiling lopdf v0.42.0
+   Compiling moxcms v0.8.1
+   Compiling p256 v0.11.1
+   Compiling ignore v0.4.25
+   Compiling adobe-cmap-parser v0.4.1
+   Compiling type1-encoding-parser v0.1.1
+   Compiling cranelift-bforest v0.123.12
+   Compiling aws-smithy-observability v0.2.6
+   Compiling quick-xml v0.41.0
+   Compiling codepage v0.1.2
+   Compiling hashify v0.2.9
+   Compiling openssl-sys v0.9.116
+   Compiling euclid v0.20.14
+   Compiling sha1 v0.10.6
+   Compiling crypto-bigint v0.5.5
+   Compiling csv-core v0.1.13
+   Compiling postscript v0.14.1
+   Compiling cff-parser v0.2.0
+   Compiling wasmparser v0.236.1
+   Compiling fast-float2 v0.2.3
+   Compiling mutate_once v0.1.2
+   Compiling object v0.37.3
+   Compiling kamadak-exif v0.6.1
+   Compiling calamine v0.36.1
+   Compiling mail-parser v0.11.3
+   Compiling csv v1.4.0
+   Compiling aws-sigv4 v1.4.3
+   Compiling wcore-repomap v0.12.25 (/root/wl-23bc3um-base/crates/wcore-repomap)
+   Compiling lru v0.18.0
+   Compiling wasm-encoder v0.236.1
+   Compiling image v0.25.10
+   Compiling pdf-extract v0.12.0
+   Compiling signature v2.2.0
+   Compiling aws-smithy-json v0.62.7
+   Compiling cobs v0.3.0
+   Compiling num-bigint v0.4.6
+   Compiling unicode-xid v0.2.6
+   Compiling id-arena v2.3.0
+   Compiling anstyle v1.0.14
+   Compiling termcolor v1.4.1
+   Compiling lexical-core v0.7.6
+   Compiling wasmtime-internal-component-util v36.0.12
+   Compiling regex-lite v0.1.9
+   Compiling leb128fmt v0.1.0
+   Compiling simple_asn1 v0.6.4
+   Compiling postcard v1.1.3
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling pem v3.0.6
+   Compiling nom v5.1.3
+   Compiling static_assertions v1.1.0
+   Compiling bitflags v1.3.2
+   Compiling arrayvec v0.5.2
+   Compiling utf8parse v0.2.2
+   Compiling xmlparser v0.13.6
+   Compiling urlencoding v2.1.3
+   Compiling thiserror v1.0.69
+   Compiling wasmtime-internal-component-macro v36.0.12
+   Compiling foreign-types-shared v0.1.1
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling openssl v0.10.80
+   Compiling foreign-types v0.3.2
+   Compiling aws-smithy-xml v0.60.15
+   Compiling aws-smithy-query v0.60.15
+   Compiling anstyle-parse v1.0.0
+   Compiling wasmtime v36.0.12
+   Compiling thiserror-impl v1.0.69
+   Compiling openssl-macros v0.1.1
+   Compiling itertools v0.14.0
+   Compiling inotify-sys v0.1.5
+   Compiling wasmtime-internal-asm-macros v36.0.12
+   Compiling colorchoice v1.0.5
+   Compiling lazy_static v1.5.0
+   Compiling native-tls v0.2.18
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling inotify v0.11.2
+   Compiling wcore-agents-pack v0.12.25 (/root/wl-23bc3um-base/crates/wcore-agents-pack)
+   Compiling md-5 v0.11.0
+   Compiling memfd v0.6.5
+   Compiling der_derive v0.7.3
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling notify-types v2.1.0
+   Compiling cap-fs-ext v3.4.5
+   Compiling siphasher v1.0.3
+   Compiling system-interface v0.27.3
+   Compiling fallible-iterator v0.2.0
+   Compiling data-encoding v2.11.0
+   Compiling flagset v0.4.7
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling wasmtime-internal-slab v36.0.12
+   Compiling signal-hook v0.3.18
+   Compiling clap_lex v1.1.0
+   Compiling utf-8 v0.7.6
+   Compiling der v0.7.10
+   Compiling postgres-protocol v0.6.12
+   Compiling convert_case v0.10.0
+   Compiling clap_builder v4.6.0
+   Compiling imap-proto v0.10.2
+   Compiling wit-parser v0.236.1
+   Compiling wasmprinter v0.236.1
+   Compiling phf_shared v0.13.1
+   Compiling notify v8.2.0
+   Compiling wcore-dispatch v0.12.25 (/root/wl-23bc3um-base/crates/wcore-dispatch)
+   Compiling clap_derive v4.6.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling webpki-roots v0.26.11
+   Compiling blake3 v1.8.5
+   Compiling email-encoding v0.4.1
+   Compiling email_address v0.2.9
+   Compiling unicode-width v0.2.2
+   Compiling quoted_printable v0.5.2
+   Compiling bufstream v0.1.4
+   Compiling wasmtime-environ v36.0.12
+   Compiling base64 v0.13.1
+   Compiling minimal-lexical v0.2.1
+   Compiling imap v2.4.1
+   Compiling nom v7.1.3
+   Compiling spki v0.7.3
+   Compiling phf v0.13.1
+   Compiling wasmtime-internal-wit-bindgen v36.0.12
+   Compiling postgres-types v0.2.14
+   Compiling clap v4.6.1
+   Compiling derive_more-impl v2.1.1
+   Compiling cap-rand v3.4.5
+   Compiling cap-net-ext v3.4.5
+   Compiling cap-time-ext v3.4.5
+   Compiling gethostname v1.1.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling whoami v2.1.2
+   Compiling is-docker v0.2.0
+   Compiling x11rb-protocol v0.13.2
+   Compiling arrayref v0.3.9
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling rayon-core v1.13.0
+   Compiling litrs v1.0.0
+   Compiling tokio-postgres v0.7.18
+   Compiling derive_more v2.1.1
+   Compiling cron v0.12.1
+   Compiling document-features v0.2.12
+   Compiling is-wsl v0.4.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling x509-cert v0.2.5
+   Compiling ed25519 v2.2.3
+   Compiling axum-core v0.4.5
+   Compiling wcore-user-model v0.12.25 (/root/wl-23bc3um-base/crates/wcore-user-model)
+   Compiling rstest_macros v0.26.1
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling is-terminal v0.4.17
+   Compiling matchit v0.7.3
+   Compiling mockall_derive v0.14.0
+   Compiling pathdiff v0.2.3
+   Compiling psl-types v2.0.11
+   Compiling predicates-core v1.0.10
+   Compiling base64 v0.21.7
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling ron v0.8.1
+   Compiling plotters-svg v0.3.7
+   Compiling psl v2.1.212
+   Compiling open v5.3.5
+   Compiling axum v0.7.9
+   Compiling x11rb v0.13.2
+   Compiling proc-macro-crate v3.5.0
+   Compiling crossterm v0.29.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling wcore-cron v0.12.25 (/root/wl-23bc3um-base/crates/wcore-cron)
+   Compiling wcore-permissions v0.12.25 (/root/wl-23bc3um-base/crates/wcore-permissions)
+   Compiling itertools v0.10.5
+   Compiling num_cpus v1.17.0
+   Compiling deadpool-runtime v0.1.4
+   Compiling termtree v0.5.1
+   Compiling cast v0.3.0
+   Compiling relative-path v1.9.3
+   Compiling mockall v0.14.0
+   Compiling predicates-tree v1.0.13
+   Compiling deadpool v0.12.3
+   Compiling rayon v1.12.0
+   Compiling plotters v0.3.7
+   Compiling criterion-plot v0.5.0
+   Compiling ciborium v0.2.2
+   Compiling predicates v3.1.4
+   Compiling tokio-stream v0.1.18
+   Compiling assert-json-diff v2.0.2
+   Compiling tinytemplate v1.2.1
+   Compiling serial_test_derive v3.5.0
+   Compiling fragile v2.1.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling downcast v0.11.0
+   Compiling futures-timer v3.0.4
+   Compiling tokio-test v0.4.5
+   Compiling wiremock v0.6.5
+   Compiling serial_test v3.5.0
+   Compiling criterion v0.5.1
+   Compiling wayland-ijfw v0.12.25 (/root/wl-23bc3um-base/crates/wayland-ijfw)
+   Compiling rstest v0.26.1
+   Compiling cranelift-native v0.123.12
+   Compiling cranelift-frontend v0.123.12
+   Compiling rustls-webpki v0.103.13
+   Compiling jsonwebtoken v10.3.0
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling hyper-rustls v0.27.9
+   Compiling lettre v0.11.22
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling tokio-tungstenite v0.24.0
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wl-23bc3um-base/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wl-23bc3um-base/crates/wcore-egress)
+   Compiling wayland-honcho v0.12.25 (/root/wl-23bc3um-base/crates/wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (/root/wl-23bc3um-base/crates/wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-channels v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channels)
+   Compiling wcore-observability v0.12.25 (/root/wl-23bc3um-base/crates/wcore-observability)
+   Compiling wcore-pricing v0.12.25 (/root/wl-23bc3um-base/crates/wcore-pricing)
+   Compiling aws-config v1.8.16
+   Compiling wcore-memory v0.12.25 (/root/wl-23bc3um-base/crates/wcore-memory)
+   Compiling wcore-channel-signal v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-signal)
+   Compiling wcore-channel-sms v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-sms)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-matrix)
+   Compiling wcore-channel-discord v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-discord)
+   Compiling wcore-channel-slack v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-slack)
+   Compiling wcore-channel-email v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-email)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-msteams)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-whatsapp)
+   Compiling wcore-providers v0.12.25 (/root/wl-23bc3um-base/crates/wcore-providers)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channel-telegram)
+   Compiling wcore-tools v0.12.25 (/root/wl-23bc3um-base/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wl-23bc3um-base/crates/wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (/root/wl-23bc3um-base/crates/wcore-channels-registry)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wl-23bc3um-base/crates/wcore-plugin-wasm)
+   Compiling wcore-mcp v0.12.25 (/root/wl-23bc3um-base/crates/wcore-mcp)
+   Compiling wcore-browser v0.12.25 (/root/wl-23bc3um-base/crates/wcore-browser)
+   Compiling wcore-cua v0.12.25 (/root/wl-23bc3um-base/crates/wcore-cua)
+   Compiling wcore-skills v0.12.25 (/root/wl-23bc3um-base/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wl-23bc3um-base/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wl-23bc3um-base/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wl-23bc3um-base/crates/wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (/root/wl-23bc3um-base/crates/wayland-ollama)
+   Compiling wcore-agent v0.12.25 (/root/wl-23bc3um-base/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 28s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/user_model_base_redproof.rs (target/debug/deps/user_model_base_redproof-116f3b48a5913cbd)
+
+running 2 tests
+test base_probe_is_alive ... ok
+test base_user_model_correction_never_reaches_the_provider ... FAILED
+
+failures:
+
+---- base_user_model_correction_never_reaches_the_provider stdout ----
+F24_CHANNEL_LEASE=observer owner_pid=2705981 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+BASE_CORRECTION_WRITE_REPORTED=true
+BASE_CORRECTION_IN_STORE_AFTER_SESSION_END=Some("\"blunt, no preamble QK7UM3NONCE\"")
+BASE_CORRECTION_ON_WIRE=false BASE_INFERENCE_STILL_ON_WIRE=true
+
+thread 'base_user_model_correction_never_reaches_the_provider' (2705983) panicked at crates/wcore-agent/tests/user_model_base_redproof.rs:247:5:
+BASE RED 1/2: the user's correction never reached the outbound provider body. Body was: {"max_tokens":256,"messages":[{"content":[{"text":"summarise the deployment plan","type":"text"},{"text":"Skill hint: based on what has worked before, the \"creative:excalidraw\" skill may help with this request — use it only if genuinely relevant.","type":"text"},{"cache_control":{"type":"ephemeral"},"text":"Current date: 2026-07-29","type":"text"}],"role":"user"}],"model":"claude-mock","stop_sequences":["\n\nLet me know if","\n\nI hope this helps","\n\nFeel free to","\n\nIs there anything else"],"stream":true,"system":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"You are an AI assistant that can use tools to help with tasks.\nYou are powered by the model claude-mock.\nWorking directory: /tmp/.tmpYyhLei\nWhen constructing time-bound queries (web searches, news, releases \"this week\"), use the current date provided in this turn as the authoritative \"today\". Do NOT substitute a different month or year — your training cutoff is older than the current date, and guessing a future month produces wrong queries.\n\n# Using your tools\n - Do NOT use Bash when a dedicated tool is available. Using dedicated tools allows the user to better understand and review your work:\n   - File search: Glob (not find or ls)\n   - Content search: Grep (not grep or rg)\n   - Read files: Read (not cat, head, or tail)\n   - Edit files: Edit (not sed or awk)\n   - Write files: Write (not echo redirection or cat with heredoc)\n - You can call multiple tools in a single response. If there are no dependencies between them, make all independent calls in parallel. However, if one call depends on a previous result, run them sequentially.\n - Batch independent shell commands into a single Bash call (joined with && or ;) when safe — each extra round-trip re-sends the whole conversation.\n - Prefer Edit over Write for modifying existing files — Edit sends only the diff, which is easier to review.\n - Always Read a file before editing it.\n - Some tools are deferred — only their names are visible. Before calling a deferred tool, use ToolSearch to load its full schema first.\n\nBe concise. Lead with the answer or the action; skip restating the question and ceremonial preamble/closing.\n\n# auto memory\n\nYou have a persistent, file-based memory system at `/root/.config/wayland-core/projects/-tmp--tmpYyhLei/memory`. This directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence).\n\nYou should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.\n\nIf the user explicitly asks you to remember something, save it immediately. If they ask you to forget something, find and remove the relevant entry.\n\nMemory types: user, feedback, project, reference. Each memory is a Markdown file with YAML frontmatter (name, description, type). MEMORY.md is the index — one line per entry, never write content directly into it.\n\nBefore saving, read existing memories to avoid duplicates. Verify file/function names from memory still exist before recommending them.\n\n## MEMORY.md\n\nYour MEMORY.md is currently empty. When you save new memories, they will appear here.\n\n## Durable memory\nYou have long-term memory that persists across sessions:\n- `session_search` — recall past sessions/episodes. Use proactively when the user references prior work (\"last time\", \"we did this before\") or asks about something not in the current context.\n- `record_episode` — log a meaningful event worth remembering (a decision, a fix, a learned preference).\n- `assert_fact` — store a durable (subject, predicate, object) truth (e.g. a user preference or a project fact).\nPrefer recalling before asking the user to repeat themselves; store sparingly — only what will matter in a later session.\n\n<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- creative:creative-ideation: Generate project ideas through creative constraints. Use when the user…\n- creative:ascii-art: Generate ASCII art using pyfiglet (571 fonts), cowsay, boxes, toilet, …\n- creative:excalidraw: Create hand-drawn style diagrams using Excalidraw JSON format. Generat…\n- creative:popular-web-designs: 54 production-quality design systems extracted from real websites. Loa…\n- creative:songwriting-and-ai-music: Songwriting craft, AI music generation prompts (Suno focus), parody/ad…\n- creative:architecture-diagram: Generate professional dark-themed system architecture diagrams as stan…\n- creative:manim-video: Production pipeline for mathematical and technical animations using Ma…\n- creative:ascii-video: Production pipeline for ASCII art video — any format. Converts video/a…\n- creative:p5js: Production pipeline for interactive and generative visual art using p5…\n- autonomous-ai-agents:wayland-agent: Complete guide to using and extending Wayland Agent — CLI usage, setup…\n- autonomous-ai-agents:echo-probe: Lightweight diagnostic skill invoked by DSM Cloudflare Workers to conf…\n- autonomous-ai-agents:opencode: Delegate coding tasks to OpenCode CLI agent for feature implementation…\n- autonomous-ai-agents:codex: Delegate coding tasks to OpenAI Codex CLI agent. Use for building feat…\n- autonomous-ai-agents:claude-code: Delegate coding tasks to Claude Code (Anthropic's CLI agent). Use for …\n- software-development:subagent-driven-development: Use when executing implementation plans with independent tasks. Dispat…\n- software-development:test-driven-development: Use when implementing any feature or bugfix, before writing implementa…\n- software-development:requesting-code-review: Pre-commit verification pipeline — static security scan, baseline-awar…\n- software-development:writing-plans: Use when you have a spec or requirements for a multi-step task. Create…\n- software-development:plan: Plan mode for Wayland — inspect context, write a markdown plan into th…\n- software-development:systematic-debugging: Use when encountering any bug, test failure, or unexpected behavior. 4…\n- leisure:find-nearby: Find nearby places (restaurants, cafes, bars, pharmacies, etc.) using …\n- note-taking:obsidian: Read, search, and create notes in the Obsidian vault.\n- apple:apple-reminders: Manage Apple Reminders via remindctl CLI (list, add, complete, delete).\n- apple:apple-notes: Manage Apple Notes via the memo CLI on macOS (create, view, search, ed…\n- apple:findmy: Track Apple devices and AirTags via FindMy.app on macOS using AppleScr…\n- apple:imessage: Send and receive iMessages/SMS via the imsg CLI on macOS.\n- mcp:native-mcp: Built-in MCP (Model Context Protocol) client that connects to external…\n- mcp:mcporter: Use the mcporter CLI to list, configure, auth, and call MCP servers/to…\n- email:himalaya: CLI to manage emails via IMAP/SMTP. Use himalaya to list, read, write,…\n- devops:webhook-subscriptions: Create and manage webhook subscriptions for event-driven agent activat…\n- productivity:ocr-and-documents: Extract text from PDFs and scanned documents. Use web_extract for remo…\n- productivity:notion: Notion API for creating and managing pages, databases, and blocks via …\n- productivity:linear: Manage Linear issues, projects, and teams via the GraphQL API. Create,…\n- productivity:nano-pdf: Edit PDFs with natural-language instructions using the nano-pdf CLI. M…\n- productivity:powerpoint: Use this skill any time a .pptx file is involved in any way — as input…\n- productivity:google-workspace: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Way…\n- media:heartmula: Set up and run HeartMuLa, the open-source music generation model famil…\n- media:gif-search: Search and download GIFs from Tenor using curl. No dependencies beyond…\n- media:songsee: Generate spectrograms and audio feature visualizations (mel, chroma, M…\n- media:youtube-content: Fetch YouTube video transcripts and transform them into structured con…\n- data-science:jupyter-live-kernel: Use a live Jupyter kernel for stateful, iterative Python execution via…\n- github:codebase-inspection: Inspect and analyze codebases using pygount for LOC counting, language…\n- github:github-pr-workflow: Full pull request lifecycle — create branches, commit changes, open PR…\n- github:github-issues: Create, manage, triage, and close GitHub issues. Search existing issue…\n- github:github-code-review: Review code changes by analyzing git diffs, leaving inline comments on…\n- github:github-auth: Set up GitHub authentication for the agent using git (universally avai…\n- github:github-repo-management: Clone, create, fork, configure, and manage GitHub repositories. Manage…\n- mlops:evaluation:weights-and-biases: Track ML experiments with automatic logging, visualize training in rea…\n- mlops:evaluation:lm-evaluation-harness: Evaluates LLMs across 60+ academic benchmarks (MMLU, HumanEval, GSM8K,…\n- mlops:inference:llama-cpp: Runs LLM inference on CPU, Apple Silicon, and consumer GPUs without NV…\n- mlops:inference:outlines: Guarantee valid JSON/XML/code structure during generation, use Pydanti…\n- mlops:inference:vllm: Serves LLMs with high throughput using vLLM's PagedAttention and conti…\n- mlops:inference:gguf: GGUF format and llama.cpp quantization for efficient CPU/GPU inference…\n- mlops:inference:guidance: Control LLM output with regex and grammars, guarantee valid JSON/XML/c…\n- mlops:inference:obliteratus: Remove refusal behaviors from open-weight LLMs using OBLITERATUS — mec…\n- mlops:cloud:modal: Serverless GPU cloud platform for running ML workloads. Use when you n…\n- mlops:training:trl-fine-tuning: Fine-tune LLMs using reinforcement learning with TRL - SFT for instruc…\n- mlops:training:grpo-rl-training: Expert guidance for GRPO/RL fine-tuning with TRL for reasoning and tas…\n- mlops:training:axolotl: Expert guidance for fine-tuning LLMs with Axolotl - YAML configs, 100+…\n- mlops:training:unsloth: Expert guidance for fast fine-tuning with Unsloth - 2-5x faster traini…\n- mlops:training:pytorch-fsdp: Expert guidance for Fully Sharded Data Parallel training with PyTorch …\n- mlops:training:peft: Parameter-efficient fine-tuning for LLMs using LoRA, QLoRA, and 25+ me…\n- mlops:models:stable-diffusion: State-of-the-art text-to-image generation with Stable Diffusion models…\n- mlops:models:segment-anything: Foundation model for image segmentation with zero-shot transfer. Use w…\n- mlops:models:whisper: OpenAI's general-purpose speech recognition model. Supports 99 languag…\n- mlops:models:audiocraft: PyTorch library for audio generation including text-to-music (MusicGen…\n- mlops:models:clip: OpenAI's model connecting vision and language. Enables zero-shot image…\n- mlops:research:dspy: Build complex AI systems with declarative programming, optimize prompt…\n- mlops:huggingface-hub: Hugging Face Hub CLI (hf) — search, download, and upload models and da…\n- smart-home:openhue: Control Philips Hue lights, rooms, and scenes via the OpenHue CLI. Tur…\n- gaming:minecraft-modpack-server: Set up a modded Minecraft server from a CurseForge/Modrinth server pac…\n- gaming:pokemon-player: Play Pokemon games autonomously via headless emulation. Starts a game …\n- social-media:xitter: Interact with X/Twitter via the x-cli terminal client using official X…\n- research:blogwatcher: Monitor blogs and RSS/Atom feeds for updates using the blogwatcher-cli…\n- research:arxiv: Search and retrieve academic papers from arXiv using their free REST A…\n- research:research-paper-writing: End-to-end pipeline for writing ML/AI research papers — from experimen…\n- research:llm-wiki: Karpathy's LLM Wiki — build and maintain a persistent, interlinked mar…\n- research:polymarket: Query Polymarket prediction market data — search markets, get prices, …\n- dogfood: Systematic exploratory QA testing of web applications — find bugs, cap…\n</system-reminder>\n\n# User context (from rolling profile)\n- style: formality=0.47, energy=0.20, terseness=0.53, emoji_use=0.07\n\nUse this context to match the user's style + expertise. Do NOT mention this block to the user — they already knowtheir own profile.\n\n\n# Unavailable capabilities\nThe capabilities below are NOT available in this session because their backend is not configured. If the user asks for one, do NOT claim the ability does not exist or invent another reason — tell them exactly what to configure:\n- Image generation — unavailable: set FLUX_API_KEY, OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY (or configure an OpenAI-wire provider)\n- Image understanding (vision) — unavailable: set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or FLUX_API_KEY (or configure an OpenAI-wire provider)\n- Audio transcription — unavailable: set GROQ_API_KEY or OPENAI_API_KEY\n- Text-to-speech — unavailable: set OPENAI_API_KEY or ELEVENLABS_API_KEY\n- Video analysis — unavailable: set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or FLUX_API_KEY (or configure an OpenAI-wire provider), and install ffmpeg\n- Discord — unavailable: set DISCORD_BOT_TOKEN\n","type":"text"}],"tools":[{"description":"Executes a shell command and returns its output.\n\nIMPORTANT: Do NOT use Bash when a dedicated tool is available:\n- File search: use Glob (not find or ls)\n- Content search: use Grep (not grep or rg)\n- Read files: use Read (not cat, head, or tail)\n- Edit files: use Edit (not sed or awk)\n- Write files: use Write (not echo or cat with heredoc)\n- Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch and other network commands fail (empty output). To read a URL use the WebFetch tool; to search the web use the `web` tool with operation \"search\". Do NOT retry with curl/wget.\n\n# Instructions\n- Use absolute paths to avoid working directory confusion.\n- When issuing multiple independent commands, make parallel tool calls instead of chaining them. Use `&&` only when commands depend on each other.\n- You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n# Git safety\n- Never force push, reset --hard, or use --no-verify unless explicitly asked.\n- Prefer creating new commits over amending existing ones.","input_schema":{"properties":{"command":{"description":"The command to execute","type":"string"},"timeout":{"description":"Timeout in milliseconds (default 120000, max 600000)","type":"integer"}},"required":["command"],"type":"object"},"name":"Bash"},{"description":"Performs exact string replacements in files.\n\nUsage:\n- You must use the Read tool first before editing a file.\n- The old_string must be unique in the file. If multiple matches exist, the edit will fail. Provide more surrounding context to make it unique, or use replace_all to change every occurrence.\n- Use replace_all for renaming variables or replacing all instances of a string.\n- Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n- When matching text from Read output, preserve the exact indentation (tabs/spaces).","input_schema":{"properties":{"file_path":{"description":"The absolute path to the file to modify","type":"string"},"new_string":{"description":"The replacement text","type":"string"},"old_string":{"description":"The text to replace","type":"string"},"replace_all":{"description":"Replace all occurrences (default false)","type":"boolean"}},"required":["file_path","old_string","new_string"],"type":"object"},"name":"Edit"},{"description":"Iterate-until-verified forge for work with a REAL executable gate (tests, build, typecheck). Use when the user wants work driven to a provable finish line — \"make sure it's right\", \"iterate until it's green/done\", \"this must be verified\" — and the workspace has (or the task implies) a checkable gate.\n\n- Forks a builder into an isolated git worktree; your tree is never touched. The winning change lands on a candidate branch for review.\n- Runs the gate sandboxed (network-denied) every round; only a passing gate earns the `verified` stamp. Returns a receipt: terminal state, checks, iterations, cost.\n- The gate comes from `[anvil] gate` config or is auto-detected (cargo/npm/go/pytest/just/make).\n- For judgment work with NO checkable reward (naming, prose, architecture opinions), do NOT use Forge — that is Crucible council territory.\n- Long-running: a climb can take several minutes.","input_schema":{"properties":{"task":{"description":"The change to forge, stated as intent with its finish line (e.g. \"fix the failing auth tests\", \"make `cargo test -p x` pass after adding retry backoff\"). Use paths RELATIVE to the repo root only — never absolute paths: the forge builds in its own isolated worktree and supplies the working directory itself.","type":"string"}},"required":["task"],"type":"object"},"name":"Forge"},{"description":"Fast file pattern matching tool that works with any codebase size.\n\n- Supports glob patterns like \"**/*.rs\" or \"src/**/*.ts\".\n- Returns matching file paths sorted by modification time (newest first).\n- Returns at most 100 results. Only returns files, not directories.\n- The path parameter defaults to the current working directory.\n- Use this tool when you need to find files by name or extension patterns.","input_schema":{"properties":{"path":{"description":"Root directory (default: cwd)","type":"string"},"pattern":{"description":"Glob pattern, e.g. \"**/*.rs\"","type":"string"}},"required":["pattern"],"type":"object"},"name":"Glob"},{"description":"Searches file contents using regex patterns (powered by ripgrep).\n\nIMPORTANT: ALWAYS use this Grep tool for content search. NEVER run grep or rg as a Bash command.\n\n- Supports full regex syntax (e.g., \"log.*Error\", \"fn\\\\s+\\\\w+\").\n- Use the glob parameter to filter by file pattern (e.g., \"*.rs\").\n- Output is truncated to 250 lines.\n- Set case_insensitive to true for case-insensitive search.","input_schema":{"properties":{"case_insensitive":{"description":"Case insensitive search","type":"boolean"},"glob":{"description":"File filter pattern, e.g. \"*.rs\"","type":"string"},"path":{"description":"Directory to search in (default: cwd)","type":"string"},"pattern":{"description":"The regex pattern to search for","type":"string"}},"required":["pattern"],"type":"object"},"name":"Grep"},{"description":"Reads a file from the local filesystem. Returns content with line numbers.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path.\n- By default, it reads the entire file. Use offset and limit for partial reads on large files.\n- To read just one definition from a large Rust/TypeScript/JavaScript file, pass symbol=\"name\" (a function, struct, enum, trait, impl, class, or interface). Returns only that symbol's lines plus a hint for expanding back to the full file. Saves tokens when you only need one definition.\n- Results are returned with line numbers (1-based) followed by a tab and the line content.\n- Binary files return \"(binary file, N bytes)\" instead of content.\n- This tool can only read files, not directories. To list a directory, use Bash with ls.","input_schema":{"properties":{"file_path":{"description":"The absolute path to the file to read","type":"string"},"limit":{"description":"Maximum number of lines to read","type":"integer"},"offset":{"description":"Line number to start reading from (0-based)","type":"integer"},"symbol":{"description":"Return only this named symbol (function/struct/enum/trait/impl/class/interface) from a Rust/TS/JS file, instead of the whole file. Ignored if the file type is unsupported or the symbol is not found (a recoverable message lists available names).","type":"string"}},"required":["file_path"],"type":"object"},"name":"Read"},{"description":"Search for deferred tools and load their full schema. Use this before calling any deferred tool. Deferred tools (name-only; load the full schema via this tool before calling): Archive, AskUserQuestion, Delegate, EnterPlanMode, Git, Jsonl, RepoMap, Skill, Spawn, WebFetch, Workflow, assert_fact, aws_cli, clarify, cronjob, doc_extract, email_parse, gcloud, github_api, gitlab_api, image_inspect, kubectl, linear_api, markdown_table, notion_api, pdf_extract, record_episode, send_message, session_search, sql_query, todo, wayland_status, wayland_telemetry_query, web.","input_schema":{"properties":{"query":{"description":"Tool name or keyword to search for","type":"string"}},"required":["query"],"type":"object"},"name":"ToolSearch"},{"cache_control":{"ttl":"1h","type":"ephemeral"},"description":"Writes content to a file, creating parent directories if needed.\n\nUsage:\n- This tool overwrites the existing file completely (not append).\n- If the file already exists, you must use Read first to see its current content.\n- Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n- Use Write only for creating new files or complete rewrites.","input_schema":{"properties":{"content":{"description":"The content to write to the file","type":"string"},"file_path":{"description":"The absolute path to the file to write","type":"string"}},"required":["file_path","content"],"type":"object"},"name":"Write"}]}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    base_user_model_correction_never_reaches_the_provider
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+error: test failed, to rerun pass `-p wcore-agent --test user_model_base_redproof`

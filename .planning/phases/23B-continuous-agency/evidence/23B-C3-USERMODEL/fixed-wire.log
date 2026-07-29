@@ -1,0 +1,13 @@
+   Compiling wcore-agent v0.12.25 (/root/wl-23bc3um/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.55s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/user_model_correction_wire.rs (target/debug/deps/user_model_correction_wire-9812594d5f9bcb31)
+
+running 3 tests
+test forgetting_a_correction_returns_the_subject_to_inference_on_the_wire ... ok
+test a_user_correction_survives_session_end_and_reaches_the_provider ... ok
+test the_control_proves_the_probe_can_fail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
