@@ -49,7 +49,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use common::configure_persisted_test_session;
+use common::{RECOVERY_TEST_KEY, configure_persisted_test_session};
 use serde_json::json;
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::null_sink::NullSink;
@@ -211,7 +211,18 @@ async fn drive_cold_session(server: &MockServer, cwd: &Path, msg_id: &str) {
         .build()
         .await
         .expect("bootstrap against the mock Anthropic endpoint");
-    let _ = built.engine.run(PROBE_QUESTION, msg_id).await;
+    built
+        .engine
+        .init_session(msg_id, cwd.to_str().unwrap(), None)
+        .expect("persisted session must bind the production budget authority");
+    built.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+    // Surface a run failure instead of swallowing it. A turn that errors before
+    // dispatch captures ZERO requests, and a silent `let _ =` turns that into
+    // "the value is absent from the outbound body" — a free pass for every
+    // absence assertion in this file.
+    if let Err(e) = built.engine.run(PROBE_QUESTION, msg_id).await {
+        panic!("turn {msg_id} failed before reaching the provider: {e}");
+    }
 }
 
 fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
