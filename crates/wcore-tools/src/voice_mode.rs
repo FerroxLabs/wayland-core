@@ -296,6 +296,19 @@ pub trait AudioRecorder: Send + Sync {
     /// Live RMS level — the host UI uses this for the audio-level
     /// indicator. 0 when not recording. Range: 0 .. i16::MAX as i32.
     fn current_rms(&self) -> i32;
+    /// Whether a real capture backend is wired behind this seam.
+    ///
+    /// **This is resolvability, not liveness** — it says a device was
+    /// bound, not that samples flow. It deliberately does NOT open the
+    /// device: [`VoiceMode::check_requirements`] used to probe with a
+    /// `start()` / `cancel()` dry-run, which (a) is no stronger a claim
+    /// (`start()` never looks at a sample either) and (b) would cancel a
+    /// user's in-flight recording if the readiness report were ever
+    /// consulted mid-capture. Defaults to `true`; the fail-loud
+    /// [`NullAudioRecorder`] overrides it to `false`.
+    fn is_wired(&self) -> bool {
+        true
+    }
 }
 
 /// Default no-op recorder — fails loudly on every `start()` so a
@@ -326,6 +339,9 @@ impl AudioRecorder for NullAudioRecorder {
     }
     fn current_rms(&self) -> i32 {
         0
+    }
+    fn is_wired(&self) -> bool {
+        false
     }
 }
 
@@ -663,7 +679,16 @@ impl VoiceMode {
 
     /// Begin audio capture. Returns the underlying recorder error
     /// verbatim so the CLI can surface it to the user.
+    ///
+    /// **Barge-in.** Any in-flight playback is interrupted first. A user
+    /// starting capture while the agent is talking IS the interruption
+    /// signal, and this is the single chokepoint every capture path goes
+    /// through (`VoiceModeTool`'s `start` / `toggle_record` actions, the
+    /// TUI Ctrl+Space binding via the same tool, and any future host).
+    /// It also keeps the agent's own output out of the microphone.
+    /// `stop()` is idempotent, so this costs nothing when silent.
     pub async fn start_capture(&self) -> Result<(), String> {
+        self.player.stop().await;
         self.recorder.start().await
     }
 
@@ -737,13 +762,14 @@ impl VoiceMode {
         self.env_probe.detect()
     }
 
-    /// Composite readiness check. The recorder seam is consulted via
-    /// a probe-style `start()` dry-run: a real recorder backend
-    /// would override [`AudioRecorder::current_rms`] or expose its
-    /// own probe; the conservative default here flags the recorder
-    /// as available when it is NOT the `NullAudioRecorder` (signalled
-    /// by the env probe + a successful first start/cancel cycle is
-    /// the host's contract — too expensive to do here).
+    /// Composite readiness check. Consumed in production by the host
+    /// at wiring time (`wcore-agent`'s bootstrap calls this and hands
+    /// the result to [`VoiceModeTool::with_requirements`], which gates
+    /// capture on it) — the report is computed ONCE there, never on the
+    /// per-keystroke capture path.
+    ///
+    /// The recorder seam is consulted via the non-destructive
+    /// [`AudioRecorder::is_wired`] — resolvability, not liveness.
     ///
     /// `stt_available` is true unless the wired transcriber returns
     /// an `Err` for a dry-run against a non-existent path.
@@ -767,19 +793,12 @@ impl VoiceMode {
             }
         };
 
-        // We can't truly probe the recorder without taking the mic.
-        // Treat the env probe's `available` as a proxy: if the env
-        // can host audio, and the recorder isn't the Null default
-        // (which fails on `start`), assume capture is available.
-        let recorder_dry = self.recorder.start().await;
-        let audio_capture_available = match recorder_dry {
-            Ok(()) => {
-                // Don't leave the recorder in a started state.
-                let _ = self.recorder.cancel().await;
-                true
-            }
-            Err(_) => false,
-        };
+        // Resolvability, NOT liveness — see `AudioRecorder::is_wired`.
+        // This used to be a `start()` / `cancel()` dry-run. That was no
+        // stronger a claim (a successful `start()` never looks at a
+        // sample) and it was destructive: consulted while the user was
+        // recording, the `cancel()` would have discarded their capture.
+        let audio_capture_available = self.recorder.is_wired();
 
         if audio_capture_available {
             details.push("Audio capture: OK".to_string());
@@ -856,6 +875,11 @@ pub struct VoiceModeTool {
     /// `ToolRegistry::register` drops the tool when this is `false` so
     /// the model never sees a tool it cannot successfully call.
     backend_configured: bool,
+    /// Readiness report computed once by the host at wiring time. When
+    /// present it GATES capture: a `start` / `toggle_record` with no STT
+    /// wired is refused with the report's own details, instead of
+    /// capturing audio that can never be transcribed.
+    requirements: Option<VoiceRequirements>,
 }
 
 impl Default for VoiceModeTool {
@@ -863,6 +887,7 @@ impl Default for VoiceModeTool {
         Self {
             inner: Arc::new(VoiceMode::null()),
             backend_configured: false,
+            requirements: None,
         }
     }
 }
@@ -882,7 +907,41 @@ impl VoiceModeTool {
         Self {
             inner: voice_mode,
             backend_configured: true,
+            requirements: None,
         }
+    }
+
+    /// Production constructor. Same as [`Self::new`] plus the readiness
+    /// report the host computed via [`VoiceMode::check_requirements`],
+    /// which then gates capture (see [`Self::readiness_block`]).
+    pub fn with_requirements(voice_mode: Arc<VoiceMode>, requirements: VoiceRequirements) -> Self {
+        Self {
+            inner: voice_mode,
+            backend_configured: true,
+            requirements: Some(requirements),
+        }
+    }
+
+    /// `Some(reason)` when the wired seams cannot complete a capture →
+    /// transcribe cycle, so capture should be refused up front. `None`
+    /// when ready, or when no report was supplied (the `new()` path,
+    /// used by tests and hosts that do their own gating).
+    ///
+    /// This is the sole consumer of `check_requirements`' verdict, and
+    /// it is what makes the resolver's promise real: the doc on
+    /// `build_voice_mode_backend` says a keyless environment should get
+    /// the clearer "STT provider: MISSING" message "rather than a silent
+    /// hide". Before this, nothing called the function, so the user got
+    /// exactly the silent hide the comment said they were spared.
+    fn readiness_block(&self) -> Option<String> {
+        let req = self.requirements.as_ref()?;
+        if req.stt_available && req.audio_capture_available {
+            return None;
+        }
+        Some(format!(
+            "voice_mode is not ready: {}",
+            req.details.join("; ")
+        ))
     }
 
     /// Direct synchronous toggle — called from the TUI Ctrl+Space
@@ -891,6 +950,12 @@ impl VoiceModeTool {
     /// TUI has no error surface for this binding; failures show up in
     /// the next `status` action or on `stop` via the transcript.
     pub async fn toggle_record(&self) -> bool {
+        if !self.inner.is_recording() {
+            if let Some(reason) = self.readiness_block() {
+                tracing::warn!("voice_mode: refusing to start capture — {reason}");
+                return false;
+            }
+        }
         if self.inner.is_recording() {
             // Stop fires fire-and-forget — transcription is a separate
             // user-initiated step (the LLM tool call wires it together
@@ -977,6 +1042,14 @@ can pick it up."
             Some(s) => s,
             None => return error_result("action is required"),
         };
+        // Readiness gate — only on the two actions that begin a
+        // capture. `stop` / `cancel` / `status` must stay reachable so a
+        // session that somehow started can always be wound down.
+        if matches!(action, "start" | "toggle_record") && !self.inner.is_recording() {
+            if let Some(reason) = self.readiness_block() {
+                return error_result(&reason);
+            }
+        }
         match action {
             "toggle_record" => {
                 let now_recording = self.toggle_record().await;
@@ -1337,14 +1410,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_requirements_does_not_disturb_a_live_recording() {
+        // Regression guard for the probe this lane replaced: the old
+        // `start()`/`cancel()` dry-run would have DISCARDED a user's
+        // in-flight capture the first time anything consulted the
+        // readiness report mid-session.
+        let (vm, rec, _tx, _player) = make_voice_mode_with_capturers();
+        vm.start_capture().await.unwrap();
+        let before = rec.events();
+        let req = vm.check_requirements().await;
+        assert!(req.audio_capture_available);
+        assert!(vm.is_recording(), "readiness check must not stop capture");
+        assert_eq!(
+            before,
+            rec.events(),
+            "readiness check must not touch the recorder at all"
+        );
+    }
+
+    /// STT-less wiring: capture is available, transcription is not.
+    fn make_voice_mode_without_stt() -> (Arc<VoiceMode>, Arc<CapturingAudioRecorder>) {
+        let rec = Arc::new(CapturingAudioRecorder::new());
+        let vm = Arc::new(VoiceMode::new(
+            rec.clone(),
+            Arc::new(NullTranscriptionBackend),
+            Arc::new(CapturingAudioPlayer::new(true)),
+            Arc::new(StaticAudioEnvironmentProbe(AudioEnvironment::default())),
+        ));
+        (vm, rec)
+    }
+
+    #[tokio::test]
+    async fn tool_refuses_capture_when_requirements_report_stt_missing() {
+        let (vm, rec) = make_voice_mode_without_stt();
+        let req = vm.check_requirements().await;
+        assert!(req.audio_capture_available, "capture IS wired here");
+        assert!(!req.stt_available, "STT is NOT wired here");
+        let tool = VoiceModeTool::with_requirements(vm, req);
+
+        for action in ["start", "toggle_record"] {
+            let r = tool.execute(json!({ "action": action })).await;
+            assert!(r.is_error, "`{action}` must be refused with no STT wired");
+            assert!(
+                r.content.contains("STT provider: MISSING"),
+                "`{action}` must name the missing piece, got: {}",
+                r.content
+            );
+        }
+        assert!(
+            !rec.events().contains(&"start".to_string()),
+            "a refused action must never touch the recorder, got {:?}",
+            rec.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_without_a_requirements_report_does_not_gate() {
+        // Control for the test above: identical seams, identical
+        // actions, no report — and it is allowed through. Proves the
+        // refusal comes from `check_requirements`' verdict and not from
+        // the action names or the Null transcriber being present.
+        let (vm, rec) = make_voice_mode_without_stt();
+        let tool = VoiceModeTool::new(vm);
+        let r = tool.execute(json!({ "action": "start" })).await;
+        assert!(
+            !r.is_error,
+            "ungated tool must still start capture: {}",
+            r.content
+        );
+        assert!(rec.events().contains(&"start".to_string()));
+    }
+
+    #[tokio::test]
     async fn voice_mode_shutdown_stops_playback_and_recorder() {
         let (vm, rec, _tx, player) = make_voice_mode_with_capturers();
         vm.start_capture().await.unwrap();
+        // start_capture interrupts playback (barge-in), so shutdown's
+        // stop is the SECOND one — asserted as a delta rather than a
+        // total so this test still fails if shutdown stops stopping.
+        let before = player.stop_count();
+        assert_eq!(before, 1, "start_capture must interrupt playback");
         vm.shutdown().await.unwrap();
-        // Player was asked to stop.
-        assert_eq!(player.stop_count(), 1);
+        assert_eq!(
+            player.stop_count(),
+            before + 1,
+            "shutdown must also stop playback"
+        );
         // Recorder shutdown was called.
         assert!(rec.events().contains(&"shutdown".to_string()));
+    }
+
+    #[tokio::test]
+    async fn start_capture_interrupts_in_flight_playback_barge_in() {
+        // C4 `interruption`: the user starting capture IS the barge-in
+        // signal. `start_capture` is the single chokepoint every capture
+        // path goes through (VoiceModeTool `start` / `toggle_record`,
+        // and the TUI Ctrl+Space binding via that same tool).
+        let (vm, _rec, _tx, player) = make_voice_mode_with_capturers();
+        assert_eq!(player.stop_count(), 0, "precondition: nothing stopped yet");
+        vm.start_capture().await.unwrap();
+        assert_eq!(
+            player.stop_count(),
+            1,
+            "starting capture must interrupt in-flight playback"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_start_and_toggle_actions_both_reach_the_barge_in_path() {
+        // The seam above is only worth anything if the ACTIONS a host
+        // actually dispatches go through it. Both do.
+        let (vm, _rec, _tx, player) = make_voice_mode_with_capturers();
+        let tool = VoiceModeTool::new(Arc::new(vm));
+
+        let r = tool.execute(json!({"action": "start"})).await;
+        assert!(!r.is_error, "start action failed: {}", r.content);
+        assert_eq!(player.stop_count(), 1, "`start` must barge in");
+
+        // toggle_record while recording stops capture (no barge-in);
+        // the next toggle starts it again and must barge in.
+        let _ = tool.execute(json!({"action": "stop"})).await;
+        let _ = tool.execute(json!({"action": "toggle_record"})).await;
+        assert_eq!(
+            player.stop_count(),
+            2,
+            "`toggle_record` starting capture must barge in too"
+        );
     }
 
     // ----- cleanup_temp_recordings -----

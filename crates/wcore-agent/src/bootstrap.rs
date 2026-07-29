@@ -1360,7 +1360,27 @@ impl AgentBootstrap {
         // libasound.so.2 (ALSA) on Linux.
         #[cfg(feature = "voice")]
         if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend(&self.config) {
-            registry.register(Box::new(wcore_tools::voice_mode::VoiceModeTool::new(vm)));
+            // The readiness report is computed ONCE, here, and handed to
+            // the tool, which refuses `start` / `toggle_record` when the
+            // seams cannot complete a capture → transcribe cycle. This
+            // is `check_requirements`' only production call site; before
+            // it, the function was advertised (by this file's own doc on
+            // `build_voice_mode_backend`) and dead, so a keyless user got
+            // the silent failure that comment says they were spared.
+            // Non-destructive: the recorder probe is `is_wired()`, so
+            // nothing opens the microphone at startup.
+            let requirements = vm.check_requirements().await;
+            if !requirements.available {
+                tracing::warn!(
+                    "voice_mode readiness: {} (capture={}, stt={})",
+                    requirements.details.join("; "),
+                    requirements.audio_capture_available,
+                    requirements.stt_available
+                );
+            }
+            registry.register(Box::new(
+                wcore_tools::voice_mode::VoiceModeTool::with_requirements(vm, requirements),
+            ));
         }
         // v0.9.0 W1 B5 — video_analyze: async ffmpeg probe + LLM vision
         // backend. Resolver is `pub async fn build_video_analyze_backend()`
