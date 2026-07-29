@@ -603,6 +603,62 @@ jobs:
       # only channel that distinguishes "ran and enforced" from "qualified out":
       # nextest captures a PASSING test's output, so a skip that merely prints is
       # invisible in the run that matters — the file is the load-bearing channel.
+      # ── Signed release-manifest drill (handed over by lane/release-trust-root) ──
+      # 2026-07-29. The ONLY check that the bundled release trust root agrees with
+      # the manifest-signing path. The real FerroxLabs trust root was substituted
+      # into RELEASE_TRUST_ROOT_JSON, replacing the placeholder that made
+      # `self-update` fail closed; if the CI signing secret ever drifts from the
+      # bundled public key then NOTHING PUBLISHES AND THE FAILURE IS SILENT. This
+      # drill is what makes that loud, so it has to run on every push, not once.
+      #
+      # WHY A STEP IN THIS JOB AND NOT A DEDICATED ONE. The handover described it
+      # as "about a minute", and that is true of the DRILL, but it is not true of
+      # a job: the script does `cargo build --release -p wcore-eval-scenarios
+      # --bin wayland-release` and then compiles a `wcore-cli` test binary. In a
+      # fresh job both are COLD — the comparable `Build (x86_64-unknown-linux-gnu)`
+      # release compile measures ~16 min, and ubuntu-latest is itself congested
+      # (live census 32 queued / 13 running). A standalone job would therefore
+      # spend ~20-40 min of a contended pool to run a 1-minute check. Here,
+      # target/ is already warm from this job's own pre-build and its
+      # `clippy --all-targets`, so the marginal cost really is about a minute, and
+      # it costs ZERO extra jobs and ZERO extra hops — the same reasoning that
+      # reverted the `budget` job at the top of this file.
+      #
+      # WHY `!cancelled()` AND NOT A PLAIN TRAILING STEP. A trailing step is
+      # skipped whenever an earlier step in the job fails, and clippy is red
+      # repo-wide as of 2026-07-29 — so a plain step would have run ZERO times
+      # while looking correctly configured, which is the always-on requirement
+      # silently unmet. `!cancelled()` decouples it from earlier reds without
+      # spawning work on a cancelled run. It is NOT `always()`: a cancelled job
+      # should not start a fresh compile.
+      #
+      # It is deliberately NOT on a macOS leg (it is pure Linux work and would
+      # compete for the single self-hosted Apple-silicon runner wired up at the
+      # bottom of this file), and release.yml is untouched.
+      #
+      # VERIFIED rather than taken on trust, before wiring: the script reads no
+      # credential (grep for secrets./_KEY/SEED/GITHUB_TOKEN/password returns
+      # zero, against a live known-positive of 9 `trust-root` matches in the same
+      # file), it mints throwaway keys at run time into a mktemp dir it traps away
+      # on exit, and it asserts the EXECUTED test count against EXPECTED_TESTS=10
+      # rather than trusting exit status — the anti-vacuity discipline this repo
+      # requires, already built in by its author.
+      - name: Signed release-manifest drill (trust root vs manifest-signing path)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          DRILL=.github/scripts/release-manifest-drill.sh
+          TARGET=crates/wcore-cli/tests/release_manifest_pipeline.rs
+          # Fail CLOSED and say which of the two states this is. A missing check
+          # must never read as a pass.
+          for f in "$DRILL" "$TARGET"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Release manifest drill::'$f' is ABSENT. On main or the integration branch this means the drill or its test target was DELETED — investigate, do not skip. On lane/ci-selfhosted-mac before lane/release-trust-root merges this is EXPECTED: the ci.yml wiring landed first by design, and importing that lane's crates/ changes is outside this lane's fence."
+              exit 1
+            fi
+          done
+          $DOCKER_RUN "$CI_IMAGE" bash "$DRILL"
+
       - name: Report sandbox skips (none expected now that the grant is in place)
         if: always()
         run: |
