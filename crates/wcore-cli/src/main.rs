@@ -86,9 +86,12 @@ fn build_slash_dispatcher(engine: &wcore_agent::engine::AgentEngine) -> SlashDis
     // 23B-C3: register `/usermodel` only when bootstrap actually opened a
     // correction store, so the command is absent rather than present-and-inert.
     if let Some((store, user_id)) = engine.user_correction_store() {
-        dispatcher.register(std::sync::Arc::new(
-            wcore_agent::slash::usermodel::UserModelHandler::new(store.clone(), user_id),
-        ));
+        let mut handler =
+            wcore_agent::slash::usermodel::UserModelHandler::new(store.clone(), user_id);
+        if let Some(backend) = engine.user_model_backend() {
+            handler = handler.with_backend(backend.clone());
+        }
+        dispatcher.register(std::sync::Arc::new(handler));
     }
     dispatcher
 }

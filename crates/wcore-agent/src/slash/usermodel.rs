@@ -21,17 +21,23 @@
 
 use std::sync::Arc;
 
-use wcore_user_model::{CorrectionStore, UserCorrection};
+use wcore_user_model::{CorrectionStore, UserCorrection, UserModelBackend};
 
 use super::{SlashError, SlashHandler, SlashInvocation, SlashOutcome};
 
 /// `/usermodel` handler. Carries the same `CorrectionStore` and `user_id` the
 /// bootstrap render site read from, so a correction made here is the one the
 /// next session's prompt is built from.
+///
+/// It also carries the `UserModelBackend` so `show` can display what the agent
+/// **inferred**, not only what the user corrected. A control that lets you
+/// change a belief without letting you read it is not "see and control" — it is
+/// asking the user to correct something they were never shown.
 #[derive(Clone)]
 pub struct UserModelHandler {
     store: CorrectionStore,
     user_id: Arc<str>,
+    backend: Option<Arc<dyn UserModelBackend>>,
 }
 
 impl std::fmt::Debug for UserModelHandler {
@@ -47,7 +53,16 @@ impl UserModelHandler {
         Self {
             store,
             user_id: Arc::from(user_id.as_ref()),
+            backend: None,
         }
+    }
+
+    /// Attach the inference backend so `show` can display the agent's inferred
+    /// beliefs alongside the user's corrections.
+    #[must_use]
+    pub fn with_backend(mut self, backend: Arc<dyn UserModelBackend>) -> Self {
+        self.backend = Some(backend);
+        self
     }
 }
 
@@ -79,27 +94,104 @@ impl SlashHandler for UserModelHandler {
 impl UserModelHandler {
     fn show(&self) -> Result<SlashOutcome, SlashError> {
         let corrections = block_on(self.store.corrections(&self.user_id));
-        let mut out = String::new();
+        let mut out = String::from("/usermodel: what the agent believes about you\n");
+
+        // --- what the agent INFERRED, and whether a correction is overriding
+        // it. Each line is marked with its origin so the two are never confused.
+        match self.backend.as_ref() {
+            None => out.push_str(
+                "\n  inferred: (no user-model backend is installed this session — \
+                 nothing is being inferred)\n",
+            ),
+            Some(b) => {
+                let brief = block_on(b.brief(&self.user_id)).unwrap_or_default();
+                let prefs = block_on(b.preferences(&self.user_id)).unwrap_or_default();
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(n) = brief.name.as_deref().filter(|n| !n.is_empty()) {
+                    lines.push(render_inferred("name", n, corrections.suppresses("name")));
+                }
+                if !brief.summary.is_empty() {
+                    lines.push(render_inferred(
+                        "summary",
+                        brief.summary.trim(),
+                        corrections.suppresses("summary"),
+                    ));
+                }
+                let s = &brief.style;
+                if s.formality.abs() > 0.05
+                    || s.energy.abs() > 0.05
+                    || s.terseness.abs() > 0.05
+                    || s.emoji_use.abs() > 0.05
+                {
+                    lines.push(render_inferred(
+                        "style",
+                        &format!(
+                            "formality={:.2}, energy={:.2}, terseness={:.2}, emoji_use={:.2}",
+                            s.formality, s.energy, s.terseness, s.emoji_use
+                        ),
+                        corrections.suppresses("style"),
+                    ));
+                }
+                for (domain, level) in &prefs.expertise {
+                    lines.push(render_inferred(
+                        &format!("expertise.{domain}"),
+                        &format!("{level:?}"),
+                        corrections.suppresses(&format!("expertise.{domain}")),
+                    ));
+                }
+                for (k, v) in &prefs.tags {
+                    lines.push(render_inferred(
+                        &format!("tags.{k}"),
+                        v,
+                        corrections.suppresses(&format!("tags.{k}")),
+                    ));
+                }
+                for inf in &brief.dialectic {
+                    lines.push(render_inferred(
+                        &format!("{}.{}", inf.kind, inf.subject),
+                        &format!(
+                            "{} (confidence {:.2}, {} observations)",
+                            inf.value, inf.confidence, inf.evidence_count
+                        ),
+                        corrections.suppresses(&format!("dialectic.{}", inf.subject))
+                            || corrections.suppresses(&format!("{}.{}", inf.kind, inf.subject)),
+                    ));
+                }
+                if lines.is_empty() {
+                    out.push_str(
+                        "\n  inferred: nothing yet — the agent has not observed enough \
+                         to form a view.\n",
+                    );
+                } else {
+                    out.push_str("\n  INFERRED from your behaviour:\n");
+                    for l in lines {
+                        out.push_str(&format!("    {l}\n"));
+                    }
+                }
+            }
+        }
+
+        // --- what the USER said, which outranks all of the above.
         if corrections.is_empty() {
             out.push_str(
-                "/usermodel: you have corrected nothing. The agent is running purely on \
-                 what it inferred from your behaviour.\n\
+                "\n  YOUR corrections: you have corrected nothing, so the agent is running \
+                 purely on what it inferred above.\n\
                  Correct it with: /usermodel correct <key> <value>   \
                  (e.g. /usermodel correct expertise.rust expert)\n",
             );
-            return Ok(handled(out));
+        } else {
+            out.push_str(&format!(
+                "\n  YOUR corrections ({}) — these override what the agent inferred:\n",
+                corrections.len()
+            ));
+            for c in corrections.iter() {
+                out.push_str(&format!("    - {} = {}{}\n", c.key, c.value, age(c)));
+            }
+            out.push_str(
+                "  These reach the model in the system prompt, and the inferred value each \
+                 one replaces is withheld.\n",
+            );
         }
-        out.push_str(&format!(
-            "/usermodel: {} correction(s), all of which override what the agent inferred:\n",
-            corrections.len()
-        ));
-        for c in corrections.iter() {
-            out.push_str(&format!("  - {} = {}{}\n", c.key, c.value, age(c)));
-        }
-        out.push_str(
-            "These reach the model in the system prompt, and the inferred value each one \
-             replaces is withheld.\n",
-        );
         Ok(handled(out))
     }
 
@@ -175,6 +267,18 @@ impl UserModelHandler {
                 removed.key, removed.value
             ))),
         }
+    }
+}
+
+/// One inferred belief, marked with whether a user correction is currently
+/// overriding it. An overridden inference is still shown — hiding it would stop
+/// the user seeing what the agent would fall back to if they dropped the
+/// correction, which is the question `/usermodel forget` asks.
+fn render_inferred(key: &str, value: &str, overridden: bool) -> String {
+    if overridden {
+        format!("- {key} = {value}   [OVERRIDDEN by your correction — not sent to the model]")
+    } else {
+        format!("- {key} = {value}   [inferred — sent to the model]")
     }
 }
 
@@ -307,6 +411,81 @@ mod tests {
         );
         let shown = run(&h, "/usermodel show");
         assert!(shown.contains("corrected nothing"), "got: {shown}");
+    }
+
+    /// `show` must display what the agent INFERRED, not only what the user
+    /// corrected. A control that lets you change a belief without showing it to
+    /// you is asking the user to correct something they were never shown.
+    #[test]
+    fn show_displays_inferred_beliefs_and_marks_which_are_overridden() {
+        use wcore_user_model::{LocalBackend, Observation};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let backend = Arc::new(LocalBackend::in_memory());
+        rt.block_on(async {
+            backend
+                .observe(
+                    "default",
+                    Observation {
+                        style_fingerprint: Some([0.8, 0.6, 0.6, 0.2]),
+                        ts_secs: 100,
+                        ..Observation::default()
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        let h = UserModelHandler::new(CorrectionStore::in_memory(), "default")
+            .with_backend(backend as Arc<dyn UserModelBackend>);
+
+        // Before any correction: the inference is shown AND marked as reaching
+        // the model.
+        let before = run(&h, "/usermodel show");
+        assert!(
+            before.contains("INFERRED from your behaviour"),
+            "the agent's own beliefs must be visible; got: {before}"
+        );
+        assert!(
+            before.contains("- style = formality="),
+            "the inferred style must be shown with its values; got: {before}"
+        );
+        assert!(
+            before.contains("[inferred — sent to the model]"),
+            "each inferred line must say whether it reaches the model; got: {before}"
+        );
+        assert!(
+            before.contains("you have corrected nothing"),
+            "got: {before}"
+        );
+
+        // After correcting it: the inference is STILL shown, now marked
+        // overridden, so the user can see what dropping the correction restores.
+        run(&h, "/usermodel correct style blunt");
+        let after = run(&h, "/usermodel show");
+        assert!(
+            after.contains("[OVERRIDDEN by your correction — not sent to the model]"),
+            "an overridden inference must be labelled as not reaching the model; got: {after}"
+        );
+        assert!(
+            after.contains("- style = formality="),
+            "an overridden inference must remain VISIBLE — it is what /usermodel forget \
+             restores; got: {after}"
+        );
+        assert!(after.contains("style = blunt"), "got: {after}");
+    }
+
+    #[test]
+    fn show_without_a_backend_says_so_rather_than_implying_nothing_is_inferred() {
+        // No backend installed is a different fact from "nothing inferred yet",
+        // and conflating them would tell the user their profile is empty when
+        // the truth is that nothing is looking.
+        let out = run(&handler(), "/usermodel show");
+        assert!(
+            out.contains("no user-model backend is installed"),
+            "got: {out}"
+        );
     }
 
     #[test]
