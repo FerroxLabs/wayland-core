@@ -1,0 +1,22 @@
+wayland-core.exe : warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was 
+supplied; storing credentials as plaintext-0600 at D:\lane-25c4-ev\cfg\allow\credentials.toml. To 
+encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or 
+WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS 
+keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+At D:\lane-25c4-win\proof2.ps1:61 char:12
++     $out = & $leg.exe $leg.args 2>&1 | Out-String
++            ~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: WAYLAN...r this profile.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[2m2026-07-29T16:34:50.223314Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped 
+traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m38
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+container  container  NO           daemon_ping            docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+cloud      cloud      NO           vendor_api_call        vendor API answered HTTP 401: {"error":"Authenticate: token validation error"}
+
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.

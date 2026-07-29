@@ -3,17 +3,17 @@ supplied; storing credentials as plaintext-0600 at D:\lane-25c4-ev\cfg\deny\cred
 encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or 
 WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS 
 keyring are not auto-imported into isolated profiles — re-enter them for this profile.
-At D:\lane-25c4-win\proof.ps1:58 char:12
-+     $out = & $leg.exe backend orphans --nonce $NONCE 2>&1 | Out-Strin ...
-+            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+At D:\lane-25c4-win\proof2.ps1:61 char:12
++     $out = & $leg.exe $leg.args 2>&1 | Out-String
++            ~~~~~~~~~~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (warning: WAYLAN...r this profile.:String) [], Remote 
    Exception
     + FullyQualifiedErrorId : NativeCommandError
  
-[2m2026-07-29T16:23:07.716649Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped 
+[2m2026-07-29T16:34:48.873661Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped 
 traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m36
 local      enumerated=true  found=0 via live-task registry UNION a real enumeration of the host process table
-container  enumerated=false found=0 via docker ps failed: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json?all=1&filters=%7B%22label%22%3A%7B%22wayland.task.nonce%3D1a830410860d5b5e4b4afebe8fd03857%22%3Atrue%7D%7D": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+container  enumerated=false found=0 via docker ps failed: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json?all=1&filters=%7B%22label%22%3A%7B%22wayland.task.nonce%3D19c7f4a1bc64eb26df0f7f0f27a0c723%22%3Atrue%7D%7D": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
 ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
 cloud      enumerated=false found=0 via vendor machine listing failed: egress denied: GET with a long or high-entropy path/query to a non-allowlisted host. Egress to `api.machines.dev` is blocked by the security policy. Add it under `[security] egress_allow = [..]` in your config, or disable the policy entirely with `[security] enabled = false` if you accept the exfiltration risk.
 

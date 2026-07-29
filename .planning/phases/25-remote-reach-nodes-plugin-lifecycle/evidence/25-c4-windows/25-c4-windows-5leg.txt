@@ -1,22 +1,23 @@
 F25-C4 EGRESS DENIAL — WINDOWS LEG
-host=SeanDesktop   date=2026-07-29T16:23:06Z   transport=ssh+PowerShell
+host=SeanDesktop   date=2026-07-29T16:34:46Z   transport=ssh+PowerShell
 exit codes read from a STATUS FILE (WLRC_* first, WLDONE last), read back by a
 SEPARATE ssh call, because every non-zero collapses to 1 over this transport.
 
 FIXED_BINARY=D:\lane-25c4-win\target\debug\wayland-core.exe
-FIXED_SHA256=8F77A2A17A3FF30191E96645343D0E693B3F821811A319BE52C166ACBFC28200
-FIXED_COMMIT=280b9cdf3287f4d32491150738d89c075e5631bc   (carries backend.rs arm_egress_policy)
+FIXED_SHA256=B05FD40BB8938940E76D80612A89D13AADFD17A1BD1E25FABA560A77175264F8
+FIXED_COMMIT=fa16cb53c87cf84602424559570ae858f049c2bb
 BASE_BINARY=C:\ferrox-25h\wayland-core.exe   BASE_VERSION=wayland-core 0.12.25
 BASE_SHA256=96E29E5252D711E669361D5611A4636A91D19B712E5A14F62F93660234C25751
 NONCE_LEN=32   (generated on the box, inside a script file, so it is in ZERO argvs)
+PROVIDER_KEY_SET=False   (no ANTHROPIC_API_KEY / OPENAI_API_KEY / API_KEY anywhere in the run)
 URL_SHAPE=/apps/wayland-f25-proof/machines?metadata.wayland_task_nonce=<32-hex>
 
-ONE command in all three legs:  wayland-core backend orphans --nonce <32-hex>
+ONE command in legs 1-3:  wayland-core backend orphans --nonce <32-hex>
 ONE variable between leg 1 and leg 2:  the egress allowlist in the config.
 
-  cfg/allow/config.toml            cfg/deny/config.toml
-  [security]                       [security]
-  enabled = true                   enabled = true
+  cfg\allow\config.toml                 cfg\deny\config.toml
+  [security]                            [security]
+  enabled = true                        enabled = true
   egress_allow = ["api.machines.dev"]   egress_allow = []
 
 
@@ -57,16 +58,38 @@ WLRC_BASE-deny=0
   ^ SAME deny config, SAME command, older binary: no "egress security ENFORCING"
     line at all, and the request went out anyway. This is the fail-open the fix
     closes, demonstrated on Windows. It also proves leg 2's denial is caused by
-    the fix and not by the network, the config file being unreadable, or the
-    host being offline — i.e. the gate CAN fail.
+    the fix and not by the network, an unreadable config file, or the host being
+    offline — i.e. the gate CAN fail.
+
+
+=== LEGS 4 & 5 — `backend list` with NO provider API key ===
+FIXED (fa16cb53):
+  INFO egress security ENFORCING — ... allowlisted=38
+  BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+  local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+  container  container  NO           daemon_ping            docker daemon refused the version ping: ...
+  ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+  cloud      cloud      NO           vendor_api_call        vendor API answered HTTP 401: {"error":"Authenticate: token validation error"}
+  WLRC_FIXED-list-nokey=0
+
+BASE (0.12.25):
+  no ENFORCING line — boundary unarmed
+  WLRC_BASE-list-nokey=0
+
+  ^ allowlisted=38 in leg 4 is the point: the operator's own
+    `egress_allow = ["api.machines.dev"]` is in effect even though no provider
+    credential exists. The intermediate cut of this lane's fix collapsed that to
+    the default empty allowlist and leg 1 DENIED — see the SUMMARY.
 
 
 === SUMMARY TABLE ===
-| leg | binary        | egress_allow           | ENFORCING line | cloud row                       |
-|-----|---------------|------------------------|----------------|---------------------------------|
-| 1   | fixed 280b9cd | ["api.machines.dev"]   | yes (38)       | HTTP 401 from Fly — LEFT THE BOX |
-| 2   | fixed 280b9cd | []                     | yes (36)       | egress denied by policy          |
-| 3   | base 0.12.25  | []                     | NO             | HTTP 401 from Fly — LEFT THE BOX |
+| leg | binary        | egress_allow           | ENFORCING | cloud row                        |
+|-----|---------------|------------------------|-----------|----------------------------------|
+| 1   | fixed fa16cb5 | ["api.machines.dev"]   | yes (38)  | HTTP 401 from Fly — LEFT THE BOX |
+| 2   | fixed fa16cb5 | []                     | yes (36)  | egress denied by policy          |
+| 3   | base 0.12.25  | []                     | NO        | HTTP 401 from Fly — LEFT THE BOX |
+| 4   | fixed fa16cb5 | ["api.machines.dev"]   | yes (38)  | `backend list`, exit 0           |
+| 5   | base 0.12.25  | ["api.machines.dev"]   | NO        | `backend list`, exit 0           |
 
 allowlisted=38 vs 36 is the identical delta the Linux proof recorded at
 b64695df on hetzner, from the identical pair of configs.
@@ -80,11 +103,12 @@ NET_CONTROL_HTTP=401
 
 
 === EXTRACTION (unproxied /usr/bin/grep, on the pulled UTF-8 captures) ===
-$ /usr/bin/grep -c "egress security ENFORCING" leg-FIXED-allow.txt leg-FIXED-deny.txt leg-BASE-deny.txt
-leg-FIXED-allow.txt:1        <- known-POSITIVE, proves the matcher is alive
-leg-FIXED-deny.txt:1         <- known-POSITIVE, proves the matcher is alive
-leg-BASE-deny.txt:0          <- the absence claim, made by an instrument shown alive
-                                in the SAME invocation
+$ /usr/bin/grep -c "egress security ENFORCING" leg-*.txt
+leg-FIXED-allow.txt:1         <- known-POSITIVE, proves the matcher is alive
+leg-FIXED-deny.txt:1          <- known-POSITIVE, proves the matcher is alive
+leg-FIXED-list-nokey.txt:1    <- known-POSITIVE, proves the matcher is alive
+leg-BASE-deny.txt:0           <- absence claim, instrument shown alive in the SAME invocation
+leg-BASE-list-nokey.txt:0     <- absence claim, same invocation
 
 
 === THE CREDENTIAL, STATED PLAINLY ===
