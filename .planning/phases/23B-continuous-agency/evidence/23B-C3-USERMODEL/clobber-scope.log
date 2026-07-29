@@ -1,0 +1,111 @@
+   Compiling smallvec v1.15.1
+   Compiling cc v1.2.63
+   Compiling typenum v1.20.1
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.228
+   Compiling zerocopy v0.8.50
+   Compiling mio v1.2.1
+   Compiling slab v0.4.12
+   Compiling num-traits v0.2.19
+   Compiling bitflags v2.11.1
+   Compiling rustls v0.23.40
+   Compiling indexmap v2.14.0
+   Compiling futures-channel v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-util v0.3.32
+   Compiling icu_normalizer v2.2.0
+   Compiling tracing v0.1.44
+   Compiling getrandom v0.4.2
+   Compiling parking_lot v0.12.5
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling tokio v1.52.3
+   Compiling generic-array v0.14.7
+   Compiling idna_adapter v1.2.2
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling idna v1.1.0
+   Compiling password-hash v0.5.0
+   Compiling chrono v0.4.44
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling url v2.5.8
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling ring v0.17.14
+   Compiling digest v0.10.7
+   Compiling libsqlite3-sys v0.30.1
+   Compiling inout v0.1.4
+   Compiling cipher v0.4.4
+   Compiling sha2 v0.10.9
+   Compiling universal-hash v0.5.1
+   Compiling poly1305 v0.8.0
+   Compiling chacha20 v0.9.1
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling fd-lock v4.0.4
+   Compiling argon2 v0.5.3
+   Compiling chacha20poly1305 v0.10.1
+   Compiling tempfile v3.27.0
+   Compiling wcore-types v0.12.25 (/root/wl-23bc3um-base/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wl-23bc3um-base/crates/wcore-budget)
+   Compiling sqlite-vec v0.1.9
+   Compiling wcore-compact v0.12.25 (/root/wl-23bc3um-base/crates/wcore-compact)
+   Compiling serde_ignored v0.1.14
+   Compiling proc-macro-crate v3.5.0
+   Compiling wcore-safety v0.12.25 (/root/wl-23bc3um-base/crates/wcore-safety)
+   Compiling humantime-serde v1.1.1
+   Compiling uuid v1.23.2
+   Compiling futures-executor v0.3.32
+   Compiling rstest_macros v0.26.1
+   Compiling bytemuck v1.25.0
+   Compiling serial_test v3.5.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling ahash v0.8.12
+   Compiling hashbrown v0.14.5
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.8.6
+   Compiling rand v0.9.4
+   Compiling hashlink v0.9.1
+   Compiling rstest v0.26.1
+   Compiling hyper v1.10.1
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling rand_distr v0.5.1
+   Compiling rustls-webpki v0.103.13
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling rusqlite v0.32.1
+   Compiling wcore-config v0.12.25 (/root/wl-23bc3um-base/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wl-23bc3um-base/crates/wcore-egress)
+   Compiling wcore-observability v0.12.25 (/root/wl-23bc3um-base/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wl-23bc3um-base/crates/wcore-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.53s
+     Running tests/clobber_scope.rs (target/debug/deps/clobber_scope-162b72ce5e7fb506)
+
+running 1 test
+DELTAS_WRITTEN=4
+INFERENCER_KEYS=["preferences.tool_order", "tool_habits.recent_top5", "language.primary", "working_hours.local_tz_window"]
+OWNED_KEY_AFTER_SESSION_END=Some(String("en"))   (user wrote "ja-USERSAID")
+UNOWNED_KEY_AFTER_SESSION_END=Some(String("blunt-USERSAID"))   (user wrote "blunt-USERSAID")
+
+thread 'measure_which_user_model_keys_the_session_end_inference_overwrites' (2725640) panicked at crates/wcore-memory/tests/clobber_scope.rs:50:5:
+assertion `left == right` failed: CLOBBER CONFIRMED: a user correction to a key the inferencer derives is silently reverted at session end
+  left: Some(String("en"))
+ right: Some(String("ja-USERSAID"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test measure_which_user_model_keys_the_session_end_inference_overwrites ... FAILED
+
+failures:
+
+failures:
+    measure_which_user_model_keys_the_session_end_inference_overwrites
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p wcore-memory --test clobber_scope`

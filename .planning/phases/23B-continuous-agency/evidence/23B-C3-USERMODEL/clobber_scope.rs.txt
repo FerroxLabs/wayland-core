@@ -1,0 +1,52 @@
+//! Precisely what `UserModelInferencer` does and does not clobber.
+//! Run at BASE eaff921d. G3c claims it "overwrites at every session end";
+//! this measures WHICH keys.
+use serde_json::{Value, json};
+use std::sync::Arc;
+use wcore_memory::MemoryApi;
+use wcore_memory::partition::UserModelInferencer;
+use wcore_memory::v2_types::AccessToken;
+use wcore_observability::trace::{ToolCallTrace, TurnTrace};
+
+fn turn_with_calls(turn: usize, tools: Vec<&str>) -> TurnTrace {
+    TurnTrace {
+        turn, model: "t".into(), provider: "t".into(),
+        input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0,
+        cache_hit_rate: 0.0, cost_usd: 0.0, cost_priced: false,
+        tool_calls: tools.into_iter().enumerate()
+            .map(|(i, n)| ToolCallTrace::new(format!("c-{turn}-{i}"), n.into(), json!({})))
+            .collect(),
+        hook_actions: vec![], source_product: "wcore-agent".into(),
+        agent_run_id: String::new(),
+    }
+}
+
+async fn read_key(mem: &Arc<dyn MemoryApi>, key: &str) -> Option<Value> {
+    mem.user_model(AccessToken::System).await.unwrap()
+        .entries.into_iter().find(|e| e.key == key).map(|e| e.value)
+}
+
+#[tokio::test]
+async fn measure_which_user_model_keys_the_session_end_inference_overwrites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mem: Arc<dyn MemoryApi> = Arc::new(wcore_memory::open_for_test(tmp.path()).await.unwrap());
+
+    // A user correction to a key the inferencer OWNS.
+    mem.update_user_model("language.primary", json!("ja-USERSAID"), AccessToken::System).await.unwrap();
+    // A user correction to a key the inferencer does NOT own.
+    mem.update_user_model("style", json!("blunt-USERSAID"), AccessToken::System).await.unwrap();
+
+    let traces = vec![turn_with_calls(0, vec!["Read", "Bash"]), turn_with_calls(1, vec!["Edit"])];
+    let inf = UserModelInferencer::new(mem.clone());
+    let n = inf.infer_and_persist(&traces).await.unwrap();
+
+    let owned = read_key(&mem, "language.primary").await;
+    let unowned = read_key(&mem, "style").await;
+    println!("DELTAS_WRITTEN={n}");
+    println!("INFERENCER_KEYS={:?}", inf.infer(&traces).iter().map(|(k,_)| k.clone()).collect::<Vec<_>>());
+    println!("OWNED_KEY_AFTER_SESSION_END={owned:?}   (user wrote \"ja-USERSAID\")");
+    println!("UNOWNED_KEY_AFTER_SESSION_END={unowned:?}   (user wrote \"blunt-USERSAID\")");
+
+    assert_eq!(owned, Some(json!("ja-USERSAID")),
+        "CLOBBER CONFIRMED: a user correction to a key the inferencer derives is silently reverted at session end");
+}

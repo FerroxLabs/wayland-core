@@ -56,16 +56,26 @@ impl SlashHandler for MemoryHandler {
                 "forget" => self.forget(rest),
                 "privacy" => self.privacy(rest),
                 "retention" => self.retention(rest),
-                // 23B-C3 additions: the two verbs of criterion 3 that had no
-                // user-reachable surface at all.
-                "nudge" | "nudges" => self.nudge(rest),
+                // 23B-C3: `activation` closed a verb that had no user-reachable
+                // surface at all.
+                //
+                // `nudge` was here and has been REMOVED. `NudgeBudget` is real,
+                // tested and settable, but `NudgeBudget::request()` has no
+                // production caller anywhere — there is no nudge delivery path
+                // in this product, so the command let a user move a bound on an
+                // event that never fires. A cross-model panel was unanimous
+                // (3/3) that an advertised control governing nothing is a
+                // defect in its own right, and that a self-disclaiming version
+                // ("no delivery path yet") is zombie UI rather than honesty.
+                // `NudgeBudget` stays as infrastructure for the phase that
+                // ships delivery; the surface returns when a real caller does.
                 "activation" | "activated" => self.activation(rest),
                 other => Err(SlashError::Bad(format!(
                     "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | \
                      /memory activation [on|off] | /memory why <query> | \
                      /memory correct <id> <text> | /memory forget <id> | \
                      /memory privacy <partition> [reason|--clear] | \
-                     /memory retention <partition> <days> | /memory nudge [on|off|cap <n>] | \
+                     /memory retention <partition> <days> | \
                      /memory clear <partition>"
                 ))),
             },
@@ -202,18 +212,26 @@ impl MemoryHandler {
                     .to_string(),
             ));
         }
+        let corrected_text = rest.join(" ");
         match block_on(api.correct_recalled(
             Tier::Project,
             id,
-            &rest.join(" "),
+            &corrected_text,
             "operator",
             AccessToken::MainAgent,
         )) {
+            // 23B-C3 (user-model lane): print WHAT the item now says, not only
+            // that something was corrected. Driving this live showed it printed
+            // a uuid and a partition and never the text — the identical defect
+            // found in `/memory why`, whose data was right and whose rendering
+            // was not. A user correcting the wrong item sees a success line
+            // either way; only the text tells them which.
             Ok(r) => Ok(handled(format!(
-                "/memory correct: {} corrected in {}/{}",
+                "/memory correct: {} corrected in {}/{}\n      now reads: {}",
                 r.id,
                 r.partition.as_str(),
-                r.tier.as_str()
+                r.tier.as_str(),
+                corrected_text
             ))),
             Err(e) => Ok(handled(format!("/memory correct refused: {e}"))),
         }
@@ -238,66 +256,6 @@ impl MemoryHandler {
                 r.tier.as_str()
             ))),
             Err(e) => Ok(handled(format!("/memory forget refused: {e}"))),
-        }
-    }
-
-    /// 23B-C3 — `/memory nudge [on|off|cap <n>]`.
-    ///
-    /// `NudgeBudget` shipped in F23-03 with a cap, an off switch and an atomic
-    /// claim, and with **no caller anywhere outside its own unit tests** — so
-    /// the criterion's "nudges" clause named a bound no user could see, let
-    /// alone move. This is the surface. With no argument it reports state; the
-    /// mutating forms report the previous value alongside the new one, so a
-    /// no-op is visibly a no-op instead of an unconditional "ok".
-    fn nudge(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let api = self.runtime_api("nudge")?;
-        let budget = api.nudge_budget().ok_or_else(|| {
-            SlashError::Bad(
-                "/memory nudge: this memory backend has no proactive-nudge path to bound"
-                    .to_string(),
-            )
-        })?;
-        let state = |b: &wcore_memory::NudgeBudget| {
-            format!(
-                "/memory nudge: {} — cap {} per session, {} used, {} remaining",
-                if b.enabled() { "enabled" } else { "OFF" },
-                b.cap(),
-                b.used(),
-                b.remaining()
-            )
-        };
-        match args.first().map(|s| s.as_str()) {
-            None | Some("show") => Ok(handled(state(&budget))),
-            Some("on") => {
-                let was = budget.set_enabled(true);
-                Ok(handled(format!(
-                    "{}\n  (was {})",
-                    state(&budget),
-                    if was { "already enabled" } else { "OFF" }
-                )))
-            }
-            Some("off") => {
-                let was = budget.set_enabled(false);
-                Ok(handled(format!(
-                    "{}\n  (was {})",
-                    state(&budget),
-                    if was { "enabled" } else { "already OFF" }
-                )))
-            }
-            Some("cap") => {
-                let n: u32 = args
-                    .get(1)
-                    .ok_or_else(|| SlashError::Bad("/memory nudge cap <n>".to_string()))?
-                    .parse()
-                    .map_err(|_| {
-                        SlashError::Bad("/memory nudge cap: <n> must be a number".to_string())
-                    })?;
-                let was = budget.set_cap(n);
-                Ok(handled(format!("{}\n  (cap was {was})", state(&budget))))
-            }
-            Some(other) => Err(SlashError::Bad(format!(
-                "/memory nudge: unknown argument '{other}'. Try: /memory nudge [show|on|off|cap <n>]"
-            ))),
         }
     }
 
@@ -548,7 +506,7 @@ fn parse_partition(name: &str) -> Result<Partition, String> {
 /// `Handle::current().block_on` is safe. Tests construct an `#[tokio::test]`
 /// runtime and call us through `tokio::task::block_in_place` only when
 /// they need to.
-fn block_on<F, T>(f: F) -> T
+pub(super) fn block_on<F, T>(f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
