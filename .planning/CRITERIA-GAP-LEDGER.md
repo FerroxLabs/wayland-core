@@ -71,6 +71,42 @@ the protocol, so their verdicts are correctly WITHHELD. **A withheld verdict is 
 equivalence.** Fan-out is additionally undetermined live on both surfaces (0 provider requests by a
 delegated child), and Windows is unmeasured at this SHA by anyone.
 
+> **CORRECTED 2026-07-30 by `lane/21-c3-equivalence` — this row budgets a protocol seam that does
+> not exist, and two of its measurements are false.**
+>
+> - **There is no fenced protocol seam here, and no Desktop re-pin is required.** `SubAgentConfig`
+>   and `ForkOverrides` live in **`wcore-types`**, not `wcore-protocol` — grep over
+>   `crates/wcore-protocol/` returns **0 hits**, against a control of 20+ files elsewhere — and
+>   **`ProtocolCommand` has no child-spawn variant at all.** The orchestrator predicted a red corpus
+>   and asked for new counts; the corpus stayed **15 passed / 0 failed** at **23 commands, 52 events,
+>   `CONTRACT_MINOR = 10`**, and the lane declined to manufacture a wire change to make the
+>   prediction true.
+> - **"Fan-out undetermined live on both surfaces" is false** — it measures **REFUSED on both** live
+>   surfaces at base. `21-c3-hostile` closed it earlier.
+> - The 11×4 dimension table was stale in **8 of 44 cells**.
+> - `ForkOverrides::default()` is hardcoded at `spawn_one_with_origin` (`spawner.rs:1867`), one frame
+>   below where this row pointed.
+>
+> **The gap was a REQUEST-path gap, not an enforcement hole.** Enforcement is equivalent by
+> construction: `build_tool_registry` has exactly one production call site (`spawner.rs:1186`), its
+> intersection has no skip arm (`spawner.rs:2756`), and both surfaces converge on it via
+> `spawn_durable`. Because `NOT-EXPRESSIBLE` is non-decisive, `assert_surface_equivalence` **skipped**
+> those pairings — and **tool was the only dimension with zero running pairs in either mode**.
+>
+> Closed additively (`spawn_host_child_with_overrides`, `HostChildController::spawn_child_with_authority`;
+> `spawn_host_child` byte-identical for existing callers). Differential now **29 passed / 0 failed**,
+> tool **REFUSED / REFUSED**, running pairs **15 → 16 of 22**, zero ALLOWED anywhere.
+>
+> **A dead gate was found and repaired on the way:** the known-positive keyed on a `Write` sentinel
+> that can *never* succeed (`path must be absolute`), while the same output already showed granted
+> `shell executed: true` against denied `false` + `Denied by policy`. A live differential had been
+> sitting unread since `f21-bwrap-overlap` fixed 21-C3-01.
+>
+> **Still NOT MET**: tool *live* cells remain open (host-protocol live blocked by the 21-C3-03
+> confirmer; standalone live REFUSED but attributed to containment), and **Windows is unmeasured**.
+> Host in-process fan-out was deliberately left open — closing it would require adding a host *batch*
+> entry point, i.e. adding attack surface in order to test it, and the live pair already proves it.
+
 The underlying safety property is in better shape than the proof: at HEAD there are **zero ALLOWED
 verdicts on any dimension, any surface, any mode** (`21-REVERIFICATION.md:170-184`). What is short
 is proof breadth, not enforcement.
