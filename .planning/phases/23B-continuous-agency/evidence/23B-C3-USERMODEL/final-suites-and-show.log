@@ -1,0 +1,12 @@
+=== full suites @ lane HEAD ===
+     Summary [  73.980s] 3711 tests run: 3711 passed (2 slow), 8 skipped
+
+=== /usermodel show, LIVE, with a correction in place ===
+/usermodel: what the agent believes about you
+
+  INFERRED from your behaviour:
+    - style = formality=0.30, energy=0.00, terseness=0.50, emoji_use=0.00   [OVERRIDDEN by your correction — not sent to the model]
+
+  YOUR corrections (1) — these override what the agent inferred:
+    - style = QK7UM3LIVE and never hedge   (set 0h ago)
+  These reach the model in the system prompt, and the inferred value each one replaces is withheld.
