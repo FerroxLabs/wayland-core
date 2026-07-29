@@ -39,6 +39,112 @@ fn node_signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
+/// Drive [`NodeIdentity::local`] in a CHILD PROCESS whose environment has the
+/// three machine-id override variables REMOVED, and read the derived values
+/// back as `KEY=VALUE` lines.
+///
+/// **Why a child process rather than an in-process call.** These two tests
+/// measure the *file-fallback* branch of `local_machine_id()`, which is only
+/// reached when `WAYLAND_NODE_MACHINE_ID`, `HOSTNAME` and `COMPUTERNAME` are
+/// all unset. The original pair asserted that as an ambient precondition and
+/// failed loudly when it did not hold — deliberately, because a skip is
+/// indistinguishable from a pass. That was the right instinct and the wrong
+/// instrument: **GitHub Actions containers always export `HOSTNAME`**, so on
+/// `CI (linux-containerized)` the Linux arm could never pass, and it went red
+/// on every run of the suite (run 30434804220, `TRY 3 FAIL` on all retries)
+/// while asserting nothing about the code.
+///
+/// Clearing the variables in-process is not an option either: `std::env::set_var`
+/// / `remove_var` are `unsafe` and process-global, and this binary runs its
+/// tests in parallel threads — a mutation here would race every other test.
+///
+/// A child process removes the ambient dependency entirely. The measurement
+/// becomes deterministic on ANY host, in CI or over non-login ssh, and the
+/// "never skip" property is kept because nothing is conditional: the child
+/// always runs and the parent always asserts.
+///
+/// The child is [`local_identity_probe_fixture`], `#[ignore]`d so nextest never
+/// schedules it on its own. Same re-exec idiom as
+/// `crates/wcore-swarm/tests/workspace_authority.rs`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn probe_local_identity_in_a_cleaned_environment() -> std::collections::BTreeMap<String, String> {
+    let exe = std::env::current_exe().expect("current test executable");
+    let mut command = wcore_config::shell::shell_command_argv(
+        &exe.to_string_lossy(),
+        &[
+            "--ignored",
+            "--exact",
+            "local_identity_probe_fixture",
+            "--nocapture",
+        ],
+    );
+    for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
+        command.env_remove(var);
+    }
+    let output = command
+        .output()
+        .expect("run the local-identity probe fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "the local-identity probe fixture failed: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+
+    let values: std::collections::BTreeMap<String, String> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("PROBE_"))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+
+    // Anti-vacuity (LANE-BRIEF 3.2). `libtest` exits 0 printing
+    // `0 passed; 0 filtered out` when `--exact <name>` matches NOTHING, so a
+    // renamed fixture would make every assertion below vanish rather than fail.
+    // Requiring the keys makes that impossible: an empty map fails here.
+    for key in [
+        "OS",
+        "MACHINE_ID",
+        "KEY_ID",
+        "SECOND_MACHINE_ID",
+        "SECOND_KEY_ID",
+        "VALIDATES",
+    ] {
+        assert!(
+            values.contains_key(key),
+            "the probe fixture did not report PROBE_{key} — it probably did not run \
+             (a `--exact` filter that matches no test exits 0 having run nothing).\
+             \nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+    values
+}
+
+/// The child half of [`probe_local_identity_in_a_cleaned_environment`]. Makes
+/// no assertion about the ambient environment — the PARENT owns the cleaning —
+/// so running it directly (`--run-ignored all`) can never produce a false
+/// claim; it only prints what this environment derived.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "child fixture: driven by the local-identity tests via a re-exec with a cleaned environment"]
+fn local_identity_probe_fixture() {
+    let identity =
+        NodeIdentity::local("probe-node", &node_signing_key(9)).expect("build a local identity");
+    let second = NodeIdentity::local("second-node", &node_signing_key(11))
+        .expect("build a second local identity");
+    let validates = match identity.validate() {
+        Ok(()) => "yes".to_string(),
+        Err(error) => format!("no:{error}"),
+    };
+    println!("PROBE_OS={}", identity.os);
+    println!("PROBE_MACHINE_ID={}", identity.machine_id);
+    println!("PROBE_KEY_ID={}", identity.key_id);
+    println!("PROBE_SECOND_MACHINE_ID={}", second.machine_id);
+    println!("PROBE_SECOND_KEY_ID={}", second.key_id);
+    println!("PROBE_VALIDATES={validates}");
+}
+
 /// `NodeIdentity::local()` — the ONLY function that derives a real host's
 /// identity — had no test on any platform before this one. Every other test in
 /// this file builds `NodeIdentity` from a struct literal via [`identity_for`],
@@ -59,22 +165,9 @@ fn node_signing_key(seed: u8) -> SigningKey {
 /// Distinguishes two nodes an operator happened to give confusingly similar
 /// names."* A constant discriminates nothing, and the value still passes
 /// `validate()`, so nothing downstream rejects it.
-///
-/// Asserted, not assumed: the environment preconditions are checked and the
-/// test FAILS (rather than skipping) if any of the three variables is set,
-/// because a skip here is indistinguishable from a pass.
 #[cfg(target_os = "macos")]
 #[test]
 fn on_darwin_local_identity_falls_back_to_a_constant_because_the_hostname_files_are_linux_only() {
-    for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
-        assert!(
-            std::env::var_os(var).is_none(),
-            "precondition: {var} is set, so this run measures the env branch, \
-             not the file-fallback branch. Unset it and re-run. Failing rather \
-             than skipping."
-        );
-    }
-
     // The two paths the fallback reads. Both absent on Darwin.
     for path in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
         assert!(
@@ -91,12 +184,11 @@ fn on_darwin_local_identity_falls_back_to_a_constant_because_the_hostname_files_
          results above are a measurement rather than a blind probe"
     );
 
-    let key = node_signing_key(9);
-    let identity = NodeIdentity::local("probe-node", &key).expect("build a local identity");
+    let probe = probe_local_identity_in_a_cleaned_environment();
 
-    assert_eq!(identity.os, "macos", "sanity: this arm is Darwin-only");
+    assert_eq!(probe["OS"], "macos", "sanity: this arm is Darwin-only");
     assert_eq!(
-        identity.machine_id, "unknown-host",
+        probe["MACHINE_ID"], "unknown-host",
         "on Darwin the machine_id fallback chain runs off its end. If this now \
          reads a real hostname, the Linux-shaped fallback has been repaired and \
          this test should be updated to assert the real value."
@@ -105,54 +197,43 @@ fn on_darwin_local_identity_falls_back_to_a_constant_because_the_hostname_files_
     // The consequence that makes it a defect rather than a cosmetic gap: the
     // degenerate value is accepted by the contract's own validator, so it
     // propagates into the registry and into `node list` unchallenged.
-    identity
-        .validate()
-        .expect("the degenerate machine_id still validates — nothing rejects it");
+    assert_eq!(
+        probe["VALIDATES"], "yes",
+        "the degenerate machine_id still validates — nothing rejects it"
+    );
 
     // machine_id carries ZERO host-distinguishing information here: it is a
     // compile-time constant, independent of this host. Two different Darwin
     // hosts therefore cannot be told apart by it. Demonstrated within one
     // process by showing the value does not vary with the identity's key.
-    let other = NodeIdentity::local("second-node", &node_signing_key(11))
-        .expect("build a second local identity");
     assert_eq!(
-        other.machine_id, identity.machine_id,
+        probe["SECOND_MACHINE_ID"], probe["MACHINE_ID"],
         "machine_id is a constant on Darwin"
     );
     assert_ne!(
-        other.key_id, identity.key_id,
+        probe["SECOND_KEY_ID"], probe["KEY_ID"],
         "key_id still differs — the security identity is unaffected, which is \
          why this is a MEDIUM operator-facing defect and not a key-forgery one"
     );
 
     println!(
         "DARWIN machine_id fallback: machine_id={} os={} validates=yes key_id_differs=yes",
-        identity.machine_id, identity.os
+        probe["MACHINE_ID"], probe["OS"]
     );
 }
 
 /// The Linux half of the divergence above, so the pair is executable on both
 /// sides rather than measured on one and inferred on the other.
 ///
-/// Same code, same env preconditions, opposite outcome: Linux publishes the
+/// Same code, same cleaned environment, opposite outcome: Linux publishes the
 /// hostname at `/etc/hostname` and `/proc/sys/kernel/hostname`, so the fallback
 /// returns a real per-host value and `machine_id` does the job it is documented
-/// to do. Run this on the Linux proof host over a NON-LOGIN ssh invocation —
-/// the shape a controller actually reaches a node with, and the shape in which
-/// `HOSTNAME` is not exported.
+/// to do. This is the shape a controller reaches a node with over non-login
+/// ssh — and, since the environment is cleaned by the probe rather than assumed,
+/// it is now also the shape it has inside a CI container that exports `HOSTNAME`.
 #[cfg(target_os = "linux")]
 #[test]
 fn on_linux_local_identity_reads_a_real_per_host_value_from_the_hostname_file() {
-    for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
-        assert!(
-            std::env::var_os(var).is_none(),
-            "precondition: {var} is set, so this run measures the env branch, \
-             not the file-fallback branch. Re-run over non-login ssh (`ssh host \
-             'cargo test …'`), which is how a controller reaches a node. \
-             Failing rather than skipping."
-        );
-    }
-
     // At least one of the two fallback paths must exist and be non-empty —
     // this is the thing Darwin lacks.
     let from_file = ["/etc/hostname", "/proc/sys/kernel/hostname"]
@@ -166,22 +247,54 @@ fn on_linux_local_identity_reads_a_real_per_host_value_from_the_hostname_file() 
         "instrument check: the hostname file read back empty"
     );
 
-    let key = node_signing_key(9);
-    let identity = NodeIdentity::local("probe-node", &key).expect("build a local identity");
+    let probe = probe_local_identity_in_a_cleaned_environment();
 
-    assert_eq!(identity.os, "linux", "sanity: this arm is Linux-only");
+    assert_eq!(probe["OS"], "linux", "sanity: this arm is Linux-only");
     assert_ne!(
-        identity.machine_id, "unknown-host",
+        probe["MACHINE_ID"], "unknown-host",
         "on Linux the fallback must find the hostname file. Reading \
          'unknown-host' here would mean the Darwin defect has spread."
     );
-    identity.validate().expect("identity validates");
+    assert_eq!(probe["VALIDATES"], "yes", "identity validates");
+    // The fallback must return THIS host's published hostname, not merely
+    // something that is not the constant — otherwise any non-empty string
+    // would satisfy the assertion above.
+    assert_eq!(
+        probe["MACHINE_ID"],
+        sanitized_hostname(&from_file),
+        "machine_id must be derived from the hostname file this host publishes"
+    );
 
     println!(
         "LINUX machine_id fallback: machine_id={} os={} hostname_file={} \
          (Darwin returns the constant 'unknown-host' here)",
-        identity.machine_id, identity.os, from_file
+        probe["MACHINE_ID"], probe["OS"], from_file
     );
+}
+
+/// Faithful mirror of the private `sanitize_identifier` in
+/// `crates/wcore-exec-backend/src/node/pairing.rs:117`, for the one assertion
+/// that compares the derived `machine_id` against the raw hostname file.
+/// If that function changes, change this one — a failure here is a real
+/// contract change, not noise.
+#[cfg(target_os = "linux")]
+fn sanitized_hostname(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "unknown-host".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn identity_for(node_id: &str, machine: &str, os: &str, key: &SigningKey) -> NodeIdentity {

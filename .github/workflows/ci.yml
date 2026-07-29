@@ -362,7 +362,31 @@ jobs:
       #   container + --init, LIVE child    -> ALIVE, /proc state 'S'  FAIL  <- control
       # That last arm is the one that matters: --init does NOT make these tests
       # unfailable. A genuinely surviving descendant still reds them.
-      DOCKER_RUN: docker run --rm --init --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      # `-e WAYLAND_BUILD_SOURCE_SHA` (2026-07-29) is load-bearing, not hygiene.
+      # `docker run` here has NO `-u`, so the container runs as **root** while the
+      # bind-mounted workspace is owned by the runner uid (1001). git refuses that:
+      # `fatal: detected dubious ownership in repository at '/work'`, rc=128
+      # (reproduced directly: as root a root-owned repo answers `rev-parse HEAD`
+      # rc=0, the same repo chowned to 1001 answers rc=128). `actions/checkout`
+      # DOES add a safe.directory exception, but for `/home/runner/work/...` in the
+      # RUNNER's git config — a different path, uid and HOME than this container.
+      #
+      # `crates/wcore-cli/build.rs` therefore got no `git rev-parse HEAD` and
+      # embedded `WAYLAND_SOURCE_SHA=unknown`, which
+      # `wcore-eval-scenarios::artifact` correctly refuses at seal time —
+      # `packaged_f04_run_is_repeatable_and_content_addressed` failed on every
+      # retry of CI run 30434804220 with `Probe("expected source identity is not
+      # 40 lowercase hexadecimal characters")`. The non-containerized Linux leg
+      # passed at the same commit, because it never lost git.
+      #
+      # `github.sha` is the authoritative identity of what was checked out (for
+      # `pull_request` it is the merge commit, which is what checkout materialises),
+      # so passing it is strictly better provenance than re-deriving it from a git
+      # invocation. Adding `-e GIT_CONFIG_*=safe.directory` was the alternative and
+      # was rejected: it repairs git-in-container generally but leaves provenance
+      # derived rather than pinned, and the `F01 packaged wayland-eval driver gate`
+      # step below already established the pinned-env idiom.
+      DOCKER_RUN: docker run --rm --init --network=host -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
 
       # Same as DOCKER_RUN plus the four grants bubblewrap needs. Applied ONLY to
       # the test step -- fmt, clippy, build and audit keep the default posture,
@@ -422,7 +446,14 @@ jobs:
       # container -- GitHub tightening userns, a base-image change, a dropped flag
       # -- this step goes RED instead of silently skipping. Mirrors the
       # WCORE_SMOKE_REQUIRE_PREBUILT idiom (#190).
-      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      #
+      # `-e WAYLAND_BUILD_SOURCE_SHA` is here for the same reason it is on
+      # DOCKER_RUN above (see that block): this is the step that runs the test
+      # suite, so it is the one that consumes the embedded source identity. The
+      # two variables MUST agree — a different value between the pre-build step
+      # and the test step re-triggers `cargo:rerun-if-env-changed` and rebuilds
+      # wcore-cli for no reason.
+      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
       # ── macOS runner budget report ────────────────────────────────────
       # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
