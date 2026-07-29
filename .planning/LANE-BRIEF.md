@@ -129,6 +129,35 @@ report. Convenience reads are fine unproxied; measurements are not.
 
 **If a number will appear in your summary, it must come from an unproxied tool.**
 
+### 3b-i. A known-negative assertion is SELF-PASSING on a dead instrument
+
+**Measured 2026-07-29, and it is the sharpest instance of the class this program has produced.** An
+unpiped `grep` was being rewritten by a hook: it reported **"9 matches in 7 files"** for a
+*one-file* search whose true answer was **zero**. Now notice what that means for the shape of the
+claim it was serving — the lane's central measurement was *"grep for a revoke surface returns
+zero."*
+
+**A broken grep produces a zero for free.** So does a typo'd path, a wrong flag, an unquoted glob
+zsh ate, a search of the wrong tree, and a tool that silently returns nothing. **Every one of those
+confirms a negative claim.**
+
+So: **"X does not exist" is the single easiest assertion to pass without doing any work**, and this
+program has now been wrong about at least three of them — a concept declared absent that existed
+under other names, a capability declared unreachable that was reachable, and a "sole path" that had
+three.
+
+**Before you report ANY absence:**
+
+1. **Prove the instrument alive on a known-positive in the same invocation** — search for something
+   you are certain is there, and show a non-zero count.
+2. **Use an unproxied tool** (`/usr/bin/grep`), and quote your globs — zsh eats `--include=*.rs`.
+3. **Search for the CONCEPT, not one keyword.** Vocabulary differs: liveness machinery existed under
+   `owner_pid` / `owner_is_live` while a grep for `stale` returned nothing and was reported as
+   proof the concept was absent.
+4. **State the search you ran**, so a reader can re-run it. An absence without its query is not a
+   measurement.
+
+
 ## 4. Cross-audit panel (for checkpoints and any judgement call)
 
 ```bash
