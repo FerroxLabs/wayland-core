@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_merely_NAMED_like_a_database_is_still_byte_identical() {
+    fn a_file_merely_named_like_a_database_is_still_byte_identical() {
         // This is the test that keeps the EXISTING interruption proofs valid.
         // `portability-migrate-rollback-proof.sh` writes a 22-byte text stub
         // called `memory.db`; if capture were selected by FILENAME that stub

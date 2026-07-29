@@ -95,12 +95,14 @@ def run(cmd: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
-def prefill(db: Path, mb: int) -> None:
-    """Grow `db` to ~`mb` MiB in WAL mode, checkpointing as it goes."""
+def prefill(db: Path, mb: int, journal_mode: str = "wal") -> None:
+    """Grow `db` to ~`mb` MiB in `journal_mode`, checkpointing as it goes."""
     conn = sqlite3.connect(str(db), isolation_level=None)
-    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-    if str(mode).lower() != "wal":
-        raise SystemExit(f"prefill: journal_mode={mode}, not WAL — wrong arm")
+    mode = conn.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()[0]
+    if str(mode).lower() != journal_mode:
+        raise SystemExit(
+            f"prefill: journal_mode={mode}, wanted {journal_mode} — wrong arm"
+        )
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("CREATE TABLE IF NOT EXISTS ballast (i INTEGER PRIMARY KEY, b BLOB)")
     conn.execute(
@@ -119,8 +121,10 @@ def prefill(db: Path, mb: int) -> None:
         )
         conn.execute("COMMIT")
         i += 2000
+        if journal_mode == "wal":
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if journal_mode == "wal":
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
 
 
@@ -242,6 +246,13 @@ def main() -> int:
         default=250,
         help="widen the payload-write window so the kill lands mid-flight",
     )
+    ap.add_argument(
+        "--journal-mode",
+        choices=["wal", "truncate"],
+        default="wal",
+        help="wal is the local-disk arm; truncate is what sqlite_journal selects "
+        "on a network filesystem, and exercises the -journal sidecar instead",
+    )
     ap.add_argument("--label", default="run")
     args = ap.parse_args()
 
@@ -266,7 +277,7 @@ def main() -> int:
 
     print(f"[{args.label}] prefilling memory.db to ~{args.prefill_mb} MiB ...")
     t0 = time.time()
-    prefill(db, args.prefill_mb)
+    prefill(db, args.prefill_mb, args.journal_mode)
     print(
         f"[{args.label}] prefill done in {time.time() - t0:.1f}s, "
         f"memory.db = {db.stat().st_size / 1048576:.1f} MiB"
@@ -278,7 +289,15 @@ def main() -> int:
     for w in wids:
         procs.append(
             subprocess.Popen(  # noqa: S603
-                [sys.executable, str(WRITER), str(db), w, str(markers), str(writer_duration)],
+                [
+                    sys.executable,
+                    str(WRITER),
+                    str(db),
+                    w,
+                    str(markers),
+                    str(writer_duration),
+                    args.journal_mode,
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=open(work / f"writer-{w}.err", "w"),
             )
@@ -315,9 +334,9 @@ def main() -> int:
     # --- G2: the arm is the arm we believe it is ---------------------------
     modes = {w: (markers / f"JOURNALMODE-{w}").read_text().strip() for w in wids}
     print(f"[{args.label}] journal modes reported by writers: {modes}")
-    if any(m.lower() != "wal" for m in modes.values()):
+    if any(m.lower() != args.journal_mode for m in modes.values()):
         stop_writers()
-        print("VERDICT: ABORTED-NOT-WAL")
+        print(f"VERDICT: ABORTED-NOT-{args.journal_mode.upper()}")
         return 5
 
     if args.arm == "sequenced":
@@ -482,6 +501,7 @@ def main() -> int:
 
     print("---- RESULT ----")
     print(f"ARM: {args.arm}")
+    print(f"JOURNAL-MODE: {args.journal_mode}")
     print(f"WRITERS: {len(wids)}")
     print(f"CAPTURE-SECONDS: {capture_secs:.2f}")
     print(f"PRE-RESTORE-COMMITTED: {sum(pre.values())}")
