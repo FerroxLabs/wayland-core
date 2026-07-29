@@ -1,0 +1,49 @@
+PROBE key_received=yes key_len=51   # length only, never the value
+PROBE config_written=/root/wayland-27c3-live/home/config.toml   # contains NO credential
+PROBE config_credential_tokens=0
+=== RUN p1-arm-readback
+RC_p1-arm-readback=0
+  stdout_bytes=10  stderr_bytes=3207
+--- P1 resolver arm line (the product's own output):
+[2m2026-07-29T13:44:08.019898Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+--- P1 turn actually ran? (a capture with no turn is not evidence):
+  probe_ok_in_output=1
+=== RUN p2-default-model
+RC_p2-default-model=0
+  stdout_bytes=181  stderr_bytes=4926
+--- P2 accounting blocks found in the protocol stream:
+0
+--- P2 media_cost tracing lines:
+[2m2026-07-29T13:45:38.342947Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
+=== RUN p3-entitled-model
+RC_p3-entitled-model=124
+  stdout_bytes=27931  stderr_bytes=5021
+--- P3 resolver arm line:
+[2m2026-07-29T13:45:40.447981Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+--- P3 media_cost tracing lines:
+[2m2026-07-29T13:46:28.173382Z[0m [32m INFO[0m media call accounted: image_generate via OpenAI flux-image (OpenAI flux-image): 1 image(s) 1792x1024 = 1.835 MP — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0mOpenAI flux-image [3mmodel[0m[2m=[0mOpenAI flux-image [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.835008 [3mcost_usd[0m[2m=[0mNone
+--- P3 accounting presence:
+  accounting_occurrences=0
+=== RUN p4-image-subcommand
+RC_p4-image-subcommand=0
+  artifact_bytes=155312
+--- P4 any cost/accounting token in either stream:
+  accounting_hits=0
+--- P4 liveness control for that grep (a known-positive in the SAME files):
+  control_hits_wrote=1
+  p4_stderr_verbatim: wrote /root/wayland-27c3-live/p4.png (155312 bytes)
+
+PROBE_DONE captures_in=/root/wayland-27c3-live
+total 260
+drwxr-xr-x   3 root root   4096 Jul 29 13:48 .
+drwx------ 238 root root  36864 Jul 29 13:47 ..
+drwxr-xr-x   6 root root   4096 Jul 29 13:48 home
+-rw-r--r--   1 root root   3207 Jul 29 13:44 p1-arm-readback.stderr
+-rw-r--r--   1 root root     10 Jul 29 13:44 p1-arm-readback.stdout
+-rw-r--r--   1 root root   4926 Jul 29 13:45 p2-default-model.stderr
+-rw-r--r--   1 root root    181 Jul 29 13:45 p2-default-model.stdout
+-rw-r--r--   1 root root   5021 Jul 29 13:46 p3-entitled-model.stderr
+-rw-r--r--   1 root root  27931 Jul 29 13:48 p3-entitled-model.stdout
+-rw-r--r--   1 root root     52 Jul 29 13:48 p4-image-subcommand.stderr
+-rw-r--r--   1 root root      0 Jul 29 13:48 p4-image-subcommand.stdout
+-rw-r--r--   1 root root 155312 Jul 29 13:48 p4.png
