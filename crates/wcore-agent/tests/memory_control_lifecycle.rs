@@ -55,7 +55,8 @@ use serde_json::json;
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::null_sink::NullSink;
 use wcore_config::compat::ProviderCompat;
-use wcore_config::config::{Config, DebugConfig, ProviderType};
+use wcore_config::config::{Config, ProviderType};
+use wcore_config::debug::DebugConfig;
 use wcore_memory::MemoryApi;
 use wcore_memory::v2_types::{AccessToken, Fact, FactId, Partition, Tier};
 use wcore_providers::LlmProvider;
@@ -185,7 +186,7 @@ async fn plant_fact(memory: &Arc<dyn MemoryApi>, nonce: &str) -> FactId {
     memory
         .assert_fact(
             Fact {
-                id: FactId(format!("fact-c3-{nonce}")),
+                id: FactId(uuid::Uuid::new_v4()),
                 tier: Tier::Project,
                 ts: chrono::Utc::now().timestamp(),
                 subject: "the user".into(),
@@ -272,7 +273,7 @@ async fn forgetting_a_fact_removes_it_from_the_outbound_provider_request_body() 
     let receipt = memory
         .forget_recalled(
             Tier::Project,
-            &fact_id.0,
+            &fact_id.0.to_string(),
             "operator",
             AccessToken::MainAgent,
         )
@@ -404,7 +405,7 @@ async fn a_semantic_retention_bound_removes_expired_facts_from_the_outbound_body
     memory
         .assert_fact(
             Fact {
-                id: FactId(format!("fact-c3-{nonce}")),
+                id: FactId(uuid::Uuid::new_v4()),
                 tier: Tier::Project,
                 ts: week_ago,
                 subject: "the user".into(),
@@ -506,7 +507,7 @@ async fn correcting_a_fact_replaces_it_in_the_outbound_body_rather_than_dropping
     let receipt = memory
         .correct_recalled(
             Tier::Project,
-            &fact_id.0,
+            &fact_id.0.to_string(),
             right,
             "operator",
             AccessToken::MainAgent,
@@ -562,13 +563,13 @@ async fn provenance_reports_the_partition_that_actually_reaches_the_prompt() {
     // Known-positive first: the hit list itself must contain the fact, so a
     // later claim about the provenance list is a claim about a real recall.
     assert!(
-        hits.iter().any(|h| h.id == fact_id.0),
+        hits.iter().any(|h| h.id == fact_id.0.to_string()),
         "the planted fact is not even in the hit list; provenance cannot be asserted over it"
     );
     let entry = report
         .provenance
         .iter()
-        .find(|p| p.id == fact_id.0)
+        .find(|p| p.id == fact_id.0.to_string())
         .unwrap_or_else(|| {
             panic!(
                 "no provenance entry for the semantic fact that IS in the prompt. \
