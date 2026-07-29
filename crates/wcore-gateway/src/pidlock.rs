@@ -299,43 +299,20 @@ pub fn process_is_alive(pid: u32) -> bool {
     // check that answers without looking. The Windows arm was already correct
     // (`OpenProcess(.., 0)` fails), so this restores agreement across
     // families rather than adding a platform quirk.
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-            return true;
-        }
-        // macOS has no /proc.
-        // SAFETY: kill(pid, 0) performs an existence/permission check and
-        // sends no signal.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-
-        // SAFETY: Win32 FFI. OpenProcess returns NULL on failure.
-        let handle: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
-        if handle.is_null() {
-            return false;
-        }
-        let mut exit_code: u32 = 0;
-        // SAFETY: handle is non-NULL and exit_code is a local u32.
-        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-        // SAFETY: opened by us, closed exactly once.
-        unsafe { CloseHandle(handle) };
-        ok != 0 && exit_code as i32 == STILL_ACTIVE
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
+    // ZOMBIE-PROBE lane: the pid-0 guard above, and every platform arm that
+    // used to live here, now sit in `wcore_types::process_liveness` — which is
+    // what the doc comment above always claimed ("so the workspace has ONE
+    // liveness story") but was not true of: fifteen other sites had their own.
+    //
+    // Two real defects went with the move. The unix arm returned `true` as
+    // soon as `/proc/<pid>` existed, and a **zombie** has a `/proc` entry — so
+    // a gateway whose process had exited without being reaped held its pidlock
+    // forever and every subsequent `gateway start` refused with
+    // `AlreadyHeld`. On macOS the fallback `kill(pid, 0)` had the same hole
+    // (measured) plus the opposite one: it fails with EPERM for a live
+    // process owned by another user, so a foreign-owned gateway read as gone
+    // and its lock was reclaimable.
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 /// Take an exclusive, non-blocking lock. `Ok(false)` means another open

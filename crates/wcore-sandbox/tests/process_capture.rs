@@ -1,22 +1,30 @@
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use tokio::process::Command;
     use wcore_sandbox::process_capture::{
         CaptureLimits, ProcessCaptureError, capture_bounded_process,
     };
+    use wcore_types::process_liveness::{process_is_alive, process_liveness};
 
+    /// Wait for a descendant to actually be gone.
+    ///
+    /// This used to poll `/proc/<pid>` for existence, which a **zombie**
+    /// satisfies: the `/proc` entry survives until the corpse is reaped, so on
+    /// a host with no reaping init (a container without `--init`) two tests
+    /// here reported a successfully-killed descendant as a survivor. The
+    /// zombie-aware probe is centralised in `wcore_types::process_liveness`;
+    /// see `.planning/ZOMBIE-PROBE.md`.
     async fn wait_until_gone(pid: u32) {
-        let proc_entry = format!("/proc/{pid}");
         let deadline = Instant::now() + Duration::from_secs(3);
-        while Path::new(&proc_entry).exists() && Instant::now() < deadline {
+        while process_is_alive(pid) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(
-            !Path::new(&proc_entry).exists(),
-            "captured process descendant {pid} survived tree cleanup"
+            !process_is_alive(pid),
+            "captured process descendant {pid} survived tree cleanup (state: {:?})",
+            process_liveness(pid)
         );
     }
 

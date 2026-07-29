@@ -280,20 +280,10 @@ mod tests {
     async fn dropping_stream_kills_direct_child_and_background_descendant() {
         use std::sync::Arc;
 
-        fn process_running(pid: u32) -> bool {
-            // SAFETY: signal 0 only checks whether the process exists.
-            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-                return false;
-            }
-            #[cfg(target_os = "linux")]
-            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                && let Some((_, fields)) = stat.rsplit_once(") ")
-                && fields.starts_with('Z')
-            {
-                return false;
-            }
-            true
-        }
+        // Second of the four hand-rolled zombie checks; Linux-only, so this
+        // containment assertion was still zombie-blind on macOS. Replaced by
+        // the single cross-platform probe. See `.planning/ZOMBIE-PROBE.md`.
+        use wcore_types::process_liveness::process_is_alive as process_running;
 
         async fn read_pid(path: &std::path::Path) -> u32 {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {

@@ -624,16 +624,25 @@ async fn failed_post_clone_setup_removes_only_the_owned_partial_transaction() {
     assert!(foreign.is_dir());
 }
 
+/// Wait for a worker descendant to actually be gone.
+///
+/// This used to poll `/proc/<pid>` for existence, which a **zombie**
+/// satisfies — the `/proc` entry outlives the process until something reaps
+/// it, so on a host with no reaping init two tests here read a
+/// successfully-killed descendant as a survivor. Centralised in
+/// `wcore_types::process_liveness`; see `.planning/ZOMBIE-PROBE.md`.
 #[cfg(target_os = "linux")]
 async fn wait_until_process_gone(pid: u32) {
-    let process = format!("/proc/{pid}");
+    use wcore_types::process_liveness::{process_is_alive, process_liveness};
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while Path::new(&process).exists() && tokio::time::Instant::now() < deadline {
+    while process_is_alive(pid) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        !Path::new(&process).exists(),
-        "process {pid} survived cleanup"
+        !process_is_alive(pid),
+        "process {pid} survived cleanup (state: {:?})",
+        process_liveness(pid)
     );
 }
 

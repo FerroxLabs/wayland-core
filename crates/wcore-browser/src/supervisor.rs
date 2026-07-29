@@ -468,46 +468,20 @@ fn terminate_session(session: &str, pid: u32) {
     }
 }
 
-/// Returns `true` if the process with `pid` is alive. Implementation:
-///   * Unix: `kill(pid, 0)` returns 0 on success → alive.
-///   * Windows: spawn `tasklist /FI "PID eq <pid>" /NH /FO CSV`; alive iff
-///     output contains the pid.
-#[cfg(unix)]
+/// Returns `true` if the process with `pid` is still RUNNING.
+///
+/// PRODUCTION path: the browser supervisor uses this to decide whether the
+/// parent it is supervising is still there, and therefore whether to tear the
+/// browser down. The unix arm was `kill(pid, 0)`, which a **zombie**
+/// satisfies, so a parent that had exited but not been reaped kept the
+/// supervisor waiting on a corpse and the browser alive. The Windows arm
+/// shelled out to `tasklist` and substring-matched the pid anywhere in the
+/// output, so `PID eq 42` also matched a row whose memory column contained
+/// "42".
+///
+/// Both are now the one zombie-aware probe; see `.planning/ZOMBIE-PROBE.md`.
 pub fn process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: `libc::kill` with signal 0 is the standard liveness probe.
-    // Returns 0 on success (process exists + signal could have been sent).
-    // ESRCH (3) means no such process; EPERM (1) means process exists but
-    // we don't have permission — treat as alive.
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if r == 0 {
-        true
-    } else {
-        let err = std::io::Error::last_os_error();
-        matches!(err.raw_os_error(), Some(libc::EPERM))
-    }
-}
-
-#[cfg(windows)]
-pub fn process_alive(pid: u32) -> bool {
-    use std::process::Command;
-    if pid == 0 {
-        return false;
-    }
-    // tasklist is shipped with Windows and is the safest way to probe
-    // without pulling the `windows-sys` crate in just for OpenProcess.
-    let out = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output();
-    match out {
-        Ok(o) => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            s.contains(&pid.to_string())
-        }
-        Err(_) => false,
-    }
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 /// Send SIGTERM to `pid`. On Windows uses `taskkill /PID <pid> /T` (no /F

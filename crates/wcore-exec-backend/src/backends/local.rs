@@ -370,19 +370,18 @@ pub(crate) fn kill_process_group(pid: u32) {
         .output();
 }
 
-#[cfg(unix)]
+/// Is the backend's child process still RUNNING?
+///
+/// PRODUCTION path, and the reason this matters more than the test probes it
+/// shares a defect with. The unix arm was `kill(pid, 0) == 0`, which a
+/// **zombie** satisfies, so a child that had already exited but had not been
+/// reaped read as still executing — on any host without a reaping init, which
+/// includes containers started without `--init`. The Windows arm shelled out
+/// to `tasklist` and substring-matched its output, which also matches the pid
+/// appearing in any other column.
+///
+/// Both are replaced by the one zombie-aware probe in
+/// `wcore_types::process_liveness`; see `.planning/ZOMBIE-PROBE.md`.
 pub(crate) fn process_alive(pid: u32) -> bool {
-    // Signal 0 probes for existence without delivering anything.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(windows)]
-pub(crate) fn process_alive(pid: u32) -> bool {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    wcore_types::process_liveness::process_is_alive(pid)
 }

@@ -1095,31 +1095,14 @@ mod tests {
         // returns 0. A zombie proves the rank-24 fix worked; only a still-RUNNING
         // orphan is a failure. Poll briefly because group teardown isn't instant.
         //
-        // Liveness probe that treats a zombie as reaped. SAFETY: signal 0 sends
-        // no signal; -1/ESRCH means the pid is gone.
-        let killed_or_zombie = |pid: i32| -> bool {
-            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-                return true; // ESRCH — fully gone.
-            }
-            #[cfg(target_os = "linux")]
-            {
-                // /proc/<pid>/stat: "pid (comm) STATE ...". The state char sits
-                // just after the final ')' of the (possibly paren-containing)
-                // comm field. 'Z' == zombie == killed-but-unreaped.
-                match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                    Ok(stat) => stat
-                        .rsplit_once(')')
-                        .map(|(_, rest)| rest.trim_start().starts_with('Z'))
-                        .unwrap_or(false),
-                    // Entry vanished between the kill probe and the read — gone.
-                    Err(_) => true,
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                false // Non-Linux runners have a reaper; ESRCH is the real signal.
-            }
-        };
+        // Fourth of the four hand-rolled zombie checks, and the one whose
+        // `#[cfg(not(target_os = "linux"))] { false }` arm assumed "non-Linux
+        // runners have a reaper" — true of a normal macOS host, not true of a
+        // macOS runner inside a container, and the assumption was never
+        // measured. The centralised probe handles macOS and Windows for real.
+        // See `.planning/ZOMBIE-PROBE.md`.
+        let killed_or_zombie =
+            |pid: i32| -> bool { !wcore_types::process_liveness::process_is_alive(pid as u32) };
 
         let mut reaped = false;
         for _ in 0..100 {

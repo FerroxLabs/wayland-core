@@ -780,10 +780,12 @@ mod tests {
         std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
     }
 
+    /// Was a `kill(pid, 0) == 0` probe, which a **zombie** satisfies — so two
+    /// tests here read a successfully-killed PTY descendant as a survivor
+    /// whenever the host had no reaping init. Centralised in
+    /// `wcore_types::process_liveness`; see `.planning/ZOMBIE-PROBE.md`.
     fn process_exists(pid: u32) -> bool {
-        // SAFETY: signal zero observes only process existence.
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        wcore_types::process_liveness::process_is_alive(pid)
     }
 
     fn assert_descendant_closes(state: ListenerState) {

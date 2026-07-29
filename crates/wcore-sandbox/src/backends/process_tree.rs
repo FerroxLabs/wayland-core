@@ -844,10 +844,13 @@ fn wait_for_recorded_pid(path: &std::path::Path) -> libc::pid_t {
     panic!("owned descendant never recorded its PID");
 }
 
+/// Was `kill(pid, 0) == 0`, which a **zombie** satisfies — so the
+/// process-tree containment tests below could not distinguish a descendant
+/// that was killed successfully from one that survived. Centralised in
+/// `wcore_types::process_liveness`; see `.planning/ZOMBIE-PROBE.md`.
 #[cfg(all(test, unix))]
 fn pid_is_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 only probes for existence/permission; it delivers nothing.
-    unsafe { libc::kill(pid, 0) == 0 }
+    wcore_types::process_liveness::process_is_alive(pid as u32)
 }
 
 #[cfg(all(test, unix))]
