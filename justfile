@@ -253,6 +253,19 @@ check-no-assertion-todos:
     fi
     echo "OK: no todo!() in eval-scenarios assertion paths"
 
+# ── Vacuous-green gate ─────────────────────────────────────────────────────
+# `cargo nextest` fails closed on a zero-test run (`no-tests = "fail"` in
+# .config/nextest.toml). `cargo test` does NOT: measured on this checkout, a
+# feature-gated target built without its feature prints `test result: ok.
+# 0 passed` and exits 0. 44 test binaries here carry a file-level `#![cfg(...)]`
+# and can compile to empty. This fails if a new bare `cargo test` appears in the
+# justfile, a workflow, or a script without `--no-run` or an explicit
+# executed-count assertion (`vacuity-checked:`).
+# Run: `just check-no-vacuous-cargo-test`
+check-no-vacuous-cargo-test:
+    python3 scripts/check-no-vacuous-cargo-test.py --self-test
+    python3 scripts/check-no-vacuous-cargo-test.py
+
 # ── P0 smoke gate (pre-release) ───────────────────────────────────────────
 # Runs the live P0 smoke suite (crates/wcore-cli/tests/smoke_p0.rs) via
 # scripts/smoke.sh: hermetic engine-behavior checks that MUST be green to ship,

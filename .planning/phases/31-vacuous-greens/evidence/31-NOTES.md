@@ -93,3 +93,47 @@ That is the real finding, and it is worse than "44 binaries could be vacuous": i
 - [ ] Reproduce failure AFTER the fix
 - [ ] Third assertion: old shape would have missed it
 - [ ] False-positive handling for legitimately-empty platform-gated binaries
+
+---
+
+## M5 — HIGH: `no-tests = "fail"` IS ITSELF VACUOUS (the guard is the defect)
+
+Measured on hetzner-dsm, cargo-nextest 0.9.137, on **every** nextest invocation
+(`run` and `list`, all 8 probe logs):
+
+    warning: in config file .config/nextest.toml, ignoring unknown
+             configuration key: profile.default.no-tests
+
+**`.config/nextest.toml:37` is dead.** nextest 0.9.137 has no
+`profile.default.no-tests` key; the docs' config schema (nexte.st/schemas/repo-config.json)
+lists no such profile key either. The fail-closed behaviour this repo relies on comes
+entirely from the **CLI default** of whichever nextest happens to be installed.
+
+That is precisely what the key's own comment says it exists to prevent:
+
+> "Set explicitly rather than relied upon: `vx.toml` pins nextest as
+>  `nextest = "cargo nextest"` with no version, so the CLI default of whatever
+>  version happens to be installed would otherwise decide this."
+
+The intent was right; the mechanism never worked. And `vx.toml` confirms the
+premise — it has **no nextest version pin** (`nextest = "cargo nextest"` is a
+script alias). CI installs are unpinned (`tool: nextest`) or `^0.9` (any 0.9.x).
+
+Both directions measured on the SAME empty binary, so this is not inferred:
+
+| invocation | result |
+|---|---|
+| `cargo nextest run --no-tests=fail  --test packaged_driver_gate` | `error: no tests to run`, **rc=4** |
+| `cargo nextest run --no-tests=pass  --test packaged_driver_gate` | Summary `0 tests run`, **rc=0** |
+| `cargo nextest run` (config key only, no flag)                   | rc=4 — from the DEFAULT, not the config |
+
+The `--no-tests=pass` run is the load-bearing one: it proves the CLI flag is
+honoured, which by contrast proves the ignored config key is doing nothing.
+
+**This is the twelfth recorded instance of an instrument carrying the defect
+class it hunts — and the sharpest: the repo's anti-vacuity control is itself a
+no-op that has been reporting reassurance for its entire life.** It was found
+only because a `nextest list` was run with enough of the log read back to see a
+`warning:` line that every previous run had also printed and nobody had read.
+
+**Disposition:** fixed in this lane, not merely written up (LANE-BRIEF §6b-ii).

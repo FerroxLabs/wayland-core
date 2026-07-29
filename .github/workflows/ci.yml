@@ -219,6 +219,19 @@ jobs:
       - name: Check formatting
         run: vx just fmt-check
 
+      # An instrument that cannot fail is not evidence. `cargo nextest` fails
+      # closed on a zero-test run (`no-tests = "fail"`); `cargo test` does not
+      # and never has. This gate fails the build if a new bare `cargo test`
+      # appears in the justfile, a workflow, or a script without either
+      # `--no-run` or an explicit executed-count assertion. Pure text scan,
+      # ~50ms, so it runs on Linux only. Self-test:
+      # `python3 scripts/check-no-vacuous-cargo-test.py --self-test`.
+      - name: No vacuous `cargo test` invocations
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/check-no-vacuous-cargo-test.py --self-test
+          python3 scripts/check-no-vacuous-cargo-test.py
+
       - name: Clippy (warnings = errors)
         run: vx just lint
 
