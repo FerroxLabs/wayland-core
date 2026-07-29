@@ -141,7 +141,9 @@ pub enum MediaOutcome {
     Ok,
     /// `category` is the backend's stable error class (e.g. `prompt_rejected`,
     /// `insufficient_credits`) so failures are comparable across presentations.
-    Failed { category: String },
+    Failed {
+        category: String,
+    },
 }
 
 /// A cost figure a backend actually observed on the wire. Backends construct
@@ -614,7 +616,10 @@ mod tests {
     #[test]
     fn rate_card_prefers_the_most_specific_entry() {
         let rc = card(&[("OpenAI", 0.02), ("OpenAI gpt-image-1", 0.08)]);
-        assert_eq!(rc.lookup("OpenAI gpt-image-1"), Some(("OpenAI gpt-image-1", 0.08)));
+        assert_eq!(
+            rc.lookup("OpenAI gpt-image-1"),
+            Some(("OpenAI gpt-image-1", 0.08))
+        );
         assert_eq!(rc.lookup("OpenAI dall-e-3"), Some(("OpenAI", 0.02)));
         assert_eq!(rc.lookup("FAL FLUX schnell"), None);
     }

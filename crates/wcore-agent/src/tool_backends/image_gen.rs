@@ -182,7 +182,11 @@ fn map_http_error(status: u16, body: &str, provider: &str) -> ImageGenerationErr
 /// channel at all. Reading the header is still correct: it costs nothing, and
 /// it is what makes the difference between "the provider said so" and "the
 /// operator estimated it" a real distinction rather than a dead branch.
-const COST_HEADERS: &[&str] = &["x-flux-cost-usd", "x-cost-usd", "openai-processing-cost-usd"];
+const COST_HEADERS: &[&str] = &[
+    "x-flux-cost-usd",
+    "x-cost-usd",
+    "openai-processing-cost-usd",
+];
 
 /// Extract a provider-reported cost from HTTP response headers.
 ///

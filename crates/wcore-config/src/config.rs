@@ -4079,6 +4079,15 @@ fn merge_config_files_with_trust(
     } else {
         global.tools.allow_list.clone()
     };
+    // F27-C3 — media prices merge key-by-key with the project layer winning,
+    // matching how the rest of this function resolves scalar overrides. A
+    // project that prices one backend must not silently drop the operator's
+    // global prices for every other backend.
+    let merged_media_pricing = {
+        let mut merged = global.tools.media_pricing.clone();
+        merged.extend(project.tools.media_pricing.clone());
+        merged
+    };
     let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
         ToolsConfig {
             auto_approve: clamped_auto_approve,
@@ -4098,6 +4107,7 @@ fn merge_config_files_with_trust(
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            media_pricing: merged_media_pricing,
         }
     } else {
         ToolsConfig {
@@ -4113,6 +4123,7 @@ fn merge_config_files_with_trust(
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            media_pricing: merged_media_pricing,
         }
     };
 
