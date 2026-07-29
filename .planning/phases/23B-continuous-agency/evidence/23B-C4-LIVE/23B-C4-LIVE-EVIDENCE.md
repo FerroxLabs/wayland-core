@@ -209,5 +209,122 @@ system/tools cache would keep `cache_read_tokens > 0`. It reached zero for a rea
 had not modelled — the whole prefix moved — and the label fired. The prediction was
 committed before the run precisely so it could be wrong in public.
 
-<!-- ferrox:write-continue -->
+---
+
+## 4. The fix, and the live A/B that demonstrates it
+
+C4L-F1 is a HIGH, so LANE-BRIEF §5 requires it fixed or disproved. It is fixed:
+`drop_unanswered_tool_calls` (`compact/auto.rs`) removes every `tool_use` block that
+is not answered by a `tool_result` in the immediately-following message before the
+summary prompt is appended, and drops any turn left empty. Text in the same assistant
+turn is preserved.
+
+**The known-negative is not synthetic — it is the pre-fix live run.** Same prompt,
+same config, same provider, same model, same box, same fixture; only the code differs.
+Re-running with the change reverted would produce strictly less evidence than the
+capture already taken at `57e6a9a5`, so no second billable run was spent on it.
+
+| | pre-fix `57e6a9a5` (session B) | post-fix `bc65e989` (session C) |
+|---|---|---|
+| `Autocompact failed` in engine log | **3** | **0** |
+| `compactions` | 3 | 1 |
+| `kind` | `auto_failed` ×3 | `auto` |
+| `failed` | **3** | **0** |
+| `tokens_reclaimed` | **0** | **16096** |
+| `items_collapsed` | 0 | 2 |
+| watermark after the compaction | 17132 — still climbing | **4634** |
+| pressure after the compaction | 2.1415 | **0.5793** |
+| `history_rewritten` | fires — **false positive** | fires — **true positive** |
+
+Post-fix `cache show`, verbatim:
+
+```
+F23_CACHE=compaction after_round_trip=1 kind=auto trigger=watermark watermark=16997
+  threshold=8000 pre_tokens=16997 tokens_freed=16096 items_collapsed=2 error=-
+```
+
+Post-fix `cache report`, verbatim:
+
+```
+F23_CACHE=invalidation distinct_causes=2 causes=expired:1,history_rewritten:1
+F23_CACHE=pressure peak_watermark=16997 autocompact_threshold=8000
+          emergency_limit=29000 peak_pressure=2.1246 compactions=1 micro=0 auto=1
+          failed=0 tokens_reclaimed=16096
+```
+
+**The load-bearing line is the watermark.** Pre-fix it went 16997 → 17132 → 17377:
+pressure rising with no relief, walking toward the 29000 emergency stop. Post-fix it
+goes 16997 → **4634**: the compactor ran and the pressure observable actually moved.
+That is the token-pressure clause demonstrated end to end, not merely reported.
+
+Gate, captured over ssh so no local `rtk` proxy could strip the anti-vacuity fields:
+
+```
+cargo test -p wcore-agent --lib compact::auto
+  test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 2194 filtered out
+```
+
+`0 ignored` and `0 filtered out`-with-a-real-count are stated explicitly, so this is
+not a suite that exited 0 having run nothing. `cargo fmt --all -- --check` → clean
+(rc=0, zero diff lines), run on the Mac, which is permitted.
+
+The new tests carry the three assertions LANE-BRIEF §6b-ii requires. The instrument —
+`violates_anthropic_pairing`, an independent implementation of Anthropic's stated rule
+— has its own test asserting it reports **both** answers, and
+`unanswered_tail_tool_call_is_dropped_and_the_old_path_would_not_have_been` asserts
+that **the pre-fix request shape violates the rule**. Without that third assertion the
+test would pass on a no-op sanitizer.
+
+### Findings
+
+| ID | Sev | Status | What |
+|---|---|---|---|
+| **C4L-F1** | **HIGH** | **FIXED + live re-proved** | Autocompact sent the provider a message list with unanswered `tool_use` blocks, so **every** autocompact attempt in a tool-using Anthropic session failed with a 400. Autocompaction was entirely non-functional in the commonest agent shape, and the ledger's own numbers (`failed=3, tokens_reclaimed=0`, pressure still climbing) are what exposed it. |
+| **C4L-F2** | MEDIUM | **NOT fixed — filed** | `compacted_since_last_round_trip()` filters on position only, not on outcome, so a **failed** compaction attributes the next miss to `history_rewritten` even though nothing was rewritten. Observed as a false positive pre-fix. Recording failed attempts is right; inheriting the rewrite attribution from them is not. Fix is a one-line predicate change (`error.is_none()`), but it belongs with a test that pins both directions and I did not want to bundle an unproved second change into a lane whose HIGH is already live-proved. |
+| **C4L-F3** | LOW | **NOT fixed — filed** | `attribute_cause` falls through to `TtlExpiry` (`expired`) whenever the hashes match, so a miss caused by the cache **breakpoint moving** — the message zone grew by an assistant `tool_use` block — is labelled "expired" when nothing expired. Seen live in both sessions (session A RT2, session C RT3). A cosmetically wrong label on a diagnostic surface, not a correctness bug. |
+
+C4L-F2 and C4L-F3 are MEDIUM and LOW, which LANE-BRIEF §5 routes to BACKLOG as
+non-blocking. Neither is invented scope creep: both were observed live in this lane.
+
+---
+
+## 5. Money, and the secret sweep
+
+### Spend
+
+From the product's own catalog-priced `F23_CACHE=cost usd=` figures — not my estimate:
+
+| Run | usd |
+|---|---|
+| Session A (cache hit) | 0.028670 |
+| Session B (pre-fix, compaction failure) | 0.048917 |
+| Session C (post-fix, compaction success) | 0.037402 |
+| **Total** | **≈ $0.115** |
+
+Roughly **eleven cents**. `claude-haiku-4-5` was chosen as the cheapest model that
+exercises prompt caching at all ($1/$5 per MTok); its 4096-token cache minimum is the
+highest of the current models, which is why the fixtures are ~24KB and ~48KB rather
+than arbitrary. `max_tokens=300`. Three billable runs, one per observation, no repeats
+— session C is not a repeat of B, it is the post-fix arm of the A/B. One further run
+cost nothing (`rc=1`, `No API key found`, before any request left the box).
+
+### Secret sweep — with the liveness control the brief demands
+
+The sweep pattern was supplied via a mode-600 file and a `-f` file descriptor, never
+`argv`. **Liveness control first:** the real key value was planted into a scratch file
+and the sweep was required to find it, so a zero on the real artifacts cannot be a
+zero from a dead instrument or an empty needle.
+
+```
+NEEDLE_LEN=108                    (non-empty needle — the whole point)
+SWEEP_LIVENESS_CONTROL_HITS=1     MUST be 1 — proves the sweep can match
+SWEEP_REPO_HITS=0                 committed source + evidence
+SWEEP_CAPTURES_HITS=0             all live stdout/stderr/report captures
+SWEEP_TOTAL_HITS=0
+```
+
+**0 hits, on an instrument proven to return 1 when the value is present.** The key was
+never printed, echoed, committed or written to a capture; the only thing recorded about
+it anywhere is its length.
+
 
