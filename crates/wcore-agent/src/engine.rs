@@ -3760,6 +3760,23 @@ impl AgentEngine {
         self.cancel_token = token;
     }
 
+    /// F23-04 — write this engine's cache/compaction ledger into `dir` instead
+    /// of `<wayland home>/cache-ledger`.
+    ///
+    /// Exists so the ledger's engine wiring can be tested by reading a real
+    /// file a real `run()` produced, without a process-global `WAYLAND_HOME`
+    /// that would make the suite order-dependent. Discards anything recorded
+    /// so far, so it must be called before the first turn.
+    pub fn set_cache_ledger_dir(&mut self, dir: impl Into<std::path::PathBuf>) {
+        self.cache_ledger = crate::cache_ledger::CacheLedgerRecorder::with_dir(dir);
+    }
+
+    /// Path of this engine's ledger on disk, once a round-trip has been
+    /// recorded. `None` before the first record.
+    pub fn cache_ledger_path(&self) -> Option<&std::path::Path> {
+        self.cache_ledger.path()
+    }
+
     /// M5.3 — install a `BudgetTracker` to enforce per-session / per-user
     /// caps and emit `BudgetEvent` telemetry. `AgentBootstrap` wires the
     /// tracker after construction when the user opts into M5.3 caps via
