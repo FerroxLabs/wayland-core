@@ -74,6 +74,34 @@ purpose — letting one lane obtain a macOS or Windows binary — and now denies
 branch its coverage as a side effect. That needs a narrower mechanism. **Assigned to
 `lane/ci-macos-budget`.**
 
+### CLOSED 2026-07-29 by `lane/ci-macos-budget`, and one of my candidate fixes was inert
+
+The diagnosis above held on its central claim, with sharper numbers: the hosted macOS ceiling is
+**5** (confirmed twice by independent methods), throughput **11.25 jobs/hr** against **22.4/hr**
+demand — permanently 2× oversubscribed — and **96.3% of macOS demand (234 of 243 jobs) is lane
+traffic**. The integration branch received **9 macOS jobs in 10.8 hours**.
+
+**Refuted:** I listed "give the integration branch its own concurrency group" as a candidate. The
+group is **already per-ref** (`CI-${{ github.ref }}`). Three lane runs created *inside* an
+integration run's lifetime did not cancel it; the **integration** push one second before the
+cancel did. Lane traffic **starves it of runners, it does not evict its runs** — so that fix
+would have changed nothing while looking like a repair. Recorded because a plausible fix aimed at
+the wrong mechanism is worse than no fix: it closes the ticket.
+
+**Shipped:** on `lane/**` pushes the three macOS jobs are opt-in (`[ci-darwin]` / `[ci-macos]`);
+`main`, integration and all PRs keep the full matrix; the trigger is not deleted and Windows stays
+unconditional. Three-arm live proof, one variable each — baseline 11 jobs/3 macOS, no token 8/0,
+token restored 11/3 — plus a counterfactual: in the same 22-minute window six integration runs
+had `jobs=0` on the unmodified config while the repaired branch dispatched 8 instantly.
+
+**Honest ceiling, stated rather than implied:** the critical path is `CI (linux-containerized)` at
+40 minutes, not macOS. Expect **a verdict roughly every 45 minutes on a ≤45-minute-old SHA, not
+per-push.** Better than zero-in-nine-hours by about 10×; not full coverage.
+
+**Not yet observed:** the integration branch surviving under the repaired config, because the
+config was not on that branch until this merge. That step is arithmetic (22.4 → ~0.83 jobs/hr
+against 11.25/hr capacity) and the lane labelled it as such rather than claiming it.
+
 This is the third distinct shape of the same structural problem in five days: CI dark because
 of four clippy lines, then CI reporting on a 16-day-old `main`, now CI starved out of its own
 queue. **The instrument keeps failing in a new way each time it is repaired**, which is the
