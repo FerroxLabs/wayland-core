@@ -77,7 +77,18 @@ without it no peer comparative can be re-taken at all.
 2. **Mint two trust roots in one sitting** — the release root *and* `INDEX_PUBKEY_HEX`, a second
    all-zeros placeholder that Phase 29 fences to Phase 25 and Phase 25 does not carry. It will
    surface as a release-day surprise otherwise.
-3. **Tag / publish**, with the Desktop digest re-pin on the same train.
+3. **Tag / publish**, with the Desktop digest re-pin on the same train. **The pair is now known —
+   hand these over verbatim.** `observation.rs:342-343` makes a source-digest mismatch a **hard
+   error at `ready`**, so a Desktop built on the old digest **will refuse to start** against this
+   Core:
+
+   - `source_inputs_digest` → `sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562`
+   - `fixture_digest` → `sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8`
+   - `schema_digest` **unchanged**; `minor` still 8.
+
+   The regeneration was proven **digest-only, zero shape leaves** — and note `git diff` could not
+   have established that, because each fixture is one line of JSON so a re-stamp and a smuggled wire
+   change look identical to it.
 4. **The core#254 reply** — drafted, precondition cleared, ready to paste unchanged.
 5. **Close #142** (quick-xml tracking; fixed at source).
 
