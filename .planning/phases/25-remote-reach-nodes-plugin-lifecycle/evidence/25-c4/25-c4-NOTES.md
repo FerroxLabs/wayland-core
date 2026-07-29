@@ -332,3 +332,85 @@ known-negative on the reversed value (proves the sweep is not matching everythin
 **Burn-key hit count: 0.** Cloud-credential hit count: 0. Neither value was printed,
 echoed, committed or transmitted; the cloud credential was consumed by sourcing the 0600
 file on the host that already held it, and never crossed the wire.
+
+---
+
+## M10 — REBASED ONTO INTEGRATION `4a872413` AND RE-PROVEN (orchestrator correction)
+
+I was based on `lane/grade-25`, which predates the 24-branch merge train. All evidence above
+was therefore taken on a tree missing 76 changed `crates/` files. **Merged
+`gh/plan/f20-unified-audit-repair` @ `4a872413` and re-ran every proof.** Zero merge
+conflicts; my change touches exactly one file (`crates/wcore-cli/src/backend.rs`) which is
+**unchanged on integration**, so there was nothing to collide with.
+
+**The central defect survives the merge — it is not an artifact of a stale base:**
+
+| | stale base `fd22dbf4` | integration `4a872413` |
+|---|---|---|
+| `TopCmd::Backend` dispatch | main.rs:1430 | main.rs:**1454** |
+| `install_egress_policy` | main.rs:1859 | main.rs:**1896** |
+| gap | 429 lines | **442 lines** |
+
+`crates/wcore-egress`, `crates/wcore-agent/src/egress` and `crates/wcore-exec-backend/src`
+are **untouched** by the merge train, so every source claim in M1–M9 holds verbatim.
+
+Re-proven on merged commit `7b99b699` (binary rebuilt, `Compiling wcore-cli` = 1):
+
+| proof | merged-tree result |
+|---|---|
+| receipt `egress_decision` | `shared-egress-policy-installed` (2925 B, liveness `backend_id`→2) |
+| egress 2×2 allow | `vendor machine listing failed: … HTTP 404 {"error":"app not found"}` |
+| egress 2×2 deny | `egress denied: GET with a long or high-entropy path/query …` |
+| identity positive (local vs local) | exit **0** |
+| identity negative (container vs local) | exit **1**, `INTEGRITY: OK` + `IDENTITY: REFUSED` |
+| identity default (no flag) | exit **0**, integrity-only preserved |
+
+### `gateway support-bundle` — read, NOT duplicated
+
+Checked as instructed. `wcore-gateway/src/support_bundle.rs` implements **Phase 24** SC4 /
+T-24-03-01: structural elision first (secret-bearing sources contribute KEY NAMES only),
+exact-secret scrubbing as an explicit backstop, `known_secrets` recorded so a reviewer can
+spot a bundle whose clean scan is vacuous, and `bundle_files()` exposing the full surface a
+canary scan must cover. It is a genuinely good design and its anti-vacuity instinct matches
+this programme's.
+
+**My work does not overlap it.** It denies a secret *leaving inside an artifact*; my work
+concerns (a) whether the egress boundary is *armed at all* on the `backend` command path and
+(b) whether a receipt's *signer identity* is checkable from the CLI. Different mechanisms,
+different code, no duplicated verb. I did **not** re-implement any secret scrubbing.
+
+I did not find, in `support_bundle.rs` or `wcore-cli/src/gateway/support.rs`, a hard
+post-condition that re-scans the finished bundle and *refuses to hand it over* on a hit —
+what I found is the `known_secrets == 0` operator warning and `bundle_files()` as the scan
+surface. I may simply have missed it, and I am **not** filing that as an absence: I did not
+run the concept-search discipline over it and an unqualified absence claim is the single
+easiest thing to get wrong here (§3b-i). Flagged for the owning lane, not graded.
+
+## M11 — regression suite on the merged tree
+
+`cargo test -p wcore-exec-backend` and `-p wcore-cli` at `7b99b699`, counts read back from
+the logs with `/usr/bin/grep` (never the `rtk`-proxied `cargo`, which strips `ignored` and
+`filtered out`):
+
+```
+57 test binaries reporting · 2355 passed · 1 failed · 19 ignored
+```
+
+The one failure was **not mine and not a regression**:
+`registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable`, in
+`wcore-exec-backend` — a crate whose source I did not touch at all (my entire diff is
+`crates/wcore-cli/src/backend.rs`). Re-run in isolation at the same commit per §6:
+
+```
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out
+```
+
+`1 passed` (not `0 passed`) and `87 filtered out` confirm the test genuinely executed rather
+than being filtered away — flavour (c) of the vacuity class. This is the documented shared-
+state contention on `hetzner-dsm`; the integration HEAD's own commit message is
+*"the anti-vacuity guard was itself vacuous; /tmp is shared on hetzner."*
+
+Also visible in the totals and worth passing on: **one binary reported
+`0 passed; 0 failed; 10 ignored`** and another `0 passed; 0 failed; 0 ignored` — suites that
+exit 0 having executed nothing. Pre-existing, not mine, but they are live instances of
+§3.2's flavour (a) still sitting in the tree.
