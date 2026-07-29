@@ -74,7 +74,9 @@ pub const MAX_PDF_INGEST_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_PDF_BYTES: u64 = 5;
 
 fn pdf_intake_policy() -> IntakePolicy {
-    IntakePolicy::new(MIN_PDF_BYTES, MAX_PDF_INGEST_BYTES).accepting(&[MediaKind::Pdf])
+    IntakePolicy::new(MIN_PDF_BYTES, MAX_PDF_INGEST_BYTES)
+        .accepting(&[MediaKind::Pdf])
+        .named("document")
 }
 
 /// Read-only PDF text-extraction tool.

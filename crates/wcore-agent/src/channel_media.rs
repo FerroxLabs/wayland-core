@@ -38,13 +38,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use wcore_channels::{Attachment, ChannelManager, MediaBounds, MediaKind};
+use wcore_tools::media_intake::admit_bytes;
 use wcore_tools::transcription_tools::{
-    TRANSCRIPTION_MAX_BYTES, TRANSCRIPTION_MIN_BYTES, TranscriptionBackend, TranscriptionOutcome,
-    detect_audio_mime,
+    TranscriptionBackend, TranscriptionOutcome, audio_intake_policy,
 };
-use wcore_tools::vision_tools::{
-    VISION_MAX_BYTES, VISION_MIN_BYTES, VisionBackend, VisionOutcome, detect_image_mime,
-};
+use wcore_tools::vision_tools::{VisionBackend, VisionOutcome, image_intake_policy};
 
 /// Max characters of derived text injected per attachment, to protect the
 /// turn's prompt budget. Longer transcripts/descriptions are truncated.
@@ -291,16 +289,22 @@ impl ChannelMediaEnricher {
 
     async fn describe_image(&self, bytes: &[u8], channel: &str) -> Option<String> {
         let backend = self.vision.as_ref()?;
-        if bytes.len() < VISION_MIN_BYTES || bytes.len() > VISION_MAX_BYTES {
-            tracing::debug!(
-                target: "wcore_agent::channel_media",
-                channel,
-                bytes = bytes.len(),
-                "image size out of bounds; skipping"
-            );
-            return None;
-        }
-        let mime = detect_image_mime(bytes)?;
+        // Connector-supplied bytes face the SAME caps and the SAME format
+        // decision a composer path faces, through the shared chokepoint — so a
+        // channel cannot introduce a class the composer would have refused.
+        let mime = match admit_bytes(bytes, &image_intake_policy()) {
+            Ok(kind) => kind.as_str(),
+            Err(reason) => {
+                tracing::debug!(
+                    target: "wcore_agent::channel_media",
+                    channel,
+                    bytes = bytes.len(),
+                    %reason,
+                    "inbound image refused by media intake; skipping"
+                );
+                return None;
+            }
+        };
         match tokio::time::timeout(
             self.analyze_timeout,
             backend.analyze(mime, bytes, IMAGE_DESCRIBE_PROMPT),
@@ -321,16 +325,20 @@ impl ChannelMediaEnricher {
 
     async fn transcribe_audio(&self, bytes: &[u8], channel: &str) -> Option<String> {
         let backend = self.transcription.as_ref()?;
-        if bytes.len() < TRANSCRIPTION_MIN_BYTES || bytes.len() > TRANSCRIPTION_MAX_BYTES {
-            tracing::debug!(
-                target: "wcore_agent::channel_media",
-                channel,
-                bytes = bytes.len(),
-                "audio size out of bounds; skipping"
-            );
-            return None;
-        }
-        let mime = detect_audio_mime(bytes)?;
+        // Same shared chokepoint, this surface's audio policy.
+        let mime = match admit_bytes(bytes, &audio_intake_policy()) {
+            Ok(kind) => kind.as_str(),
+            Err(reason) => {
+                tracing::debug!(
+                    target: "wcore_agent::channel_media",
+                    channel,
+                    bytes = bytes.len(),
+                    %reason,
+                    "inbound audio refused by media intake; skipping"
+                );
+                return None;
+            }
+        };
         match tokio::time::timeout(self.analyze_timeout, backend.transcribe(mime, bytes, None))
             .await
         {
