@@ -4,6 +4,9 @@ ok   R1c NO DUPLICATE: the replayed message arrives exactly once
 ok   R1d the replay is journalled, so a driver never has to infer it
 ok   R2 known-NEGATIVE: a message that was never dispatched is NOT reported as replayed
 ok   R2b known-NEGATIVE: a message dispatched BEFORE the resume point is NOT replayed again
+ok   T1 known-POSITIVE: a token this driver mints IS echoed by the shared llm fixture
+ok   T2 known-NEGATIVE: the fixture does not echo a wrong-shaped token (so T1 discriminates)
+ok   T3 THE SHAPE THIS LANE FIRST USED WOULD HAVE MISSED IT — and would have read as total loss
 ok   R4 the replay kill-switch actually suppresses the replay
 ok   C1 census known-POSITIVE: a clean run reports no loss, no duplicate, no leak
 ok   C2 census DETECTS A LOSS — the gap message missing is reported, not swallowed
@@ -16,4 +19,4 @@ ok   R3b the legacy failure is the SEQUENCE COLLISION, not a dead legacy client
      legacy ledger : [{"id":"BEFORE-1","s":2},{"id":"BEFORE-2","s":3},{"id":"DURING-1","s":3},{"id":"AFTER-1","s":4}]
      repaired ledger: [{"id":"BEFORE-1","s":2},{"id":"BEFORE-2","s":3},{"id":"DURING-1","s":4},{"id":"AFTER-1","s":5}]
 
-F24RECONNECT SELFTEST GREEN passed=14 failed=0
+F24RECONNECT SELFTEST GREEN passed=17 failed=0

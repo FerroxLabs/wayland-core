@@ -25,7 +25,7 @@
 // usage: node f24-reconnect-selftest.mjs [--base <sha>]
 // exit:  0 GREEN, 1 RED, 2 USAGE
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,7 +33,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DiscordFixture } from './f24-discord-fixture.mjs';
-import { census } from './f24-reconnect.mjs';
+import { census, mintToken } from './f24-reconnect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -308,6 +308,93 @@ async function main() {
     assert(!R.afterSeen.includes('BEFORE-1'), 'BEFORE-1 was replayed — that is a duplicate, not a recovery');
     assert(!R.afterSeen.includes('BEFORE-2'), 'BEFORE-2 was replayed — that is a duplicate, not a recovery');
   });
+
+  // ── T  the token shape, against the SHARED fixture's real behaviour ───────
+  //
+  // Run 1 of this lane was destroyed by a token-shape mismatch: the shared
+  // `f24-llm-fixture.mjs` echoes only `/f24c3-[a-z0-9-]+/i`, so every reply
+  // read `no-correlation`, and the driver reported 0/2 on its own control for
+  // 6 messages that had ALL arrived. It presented as total inbound message
+  // loss. This is asserted against the LIVE fixture rather than against a copy
+  // of its regex, because a re-implemented contract drifts away from the real
+  // one silently.
+  {
+    const journal = path.join(os.tmpdir(), `f24rc-selftest-${crypto.randomBytes(4).toString('hex')}.jsonl`);
+    const logFile = `${journal}.log`;
+    fs.writeFileSync(logFile, '');
+    const fd = fs.openSync(logFile, 'a');
+    const llm = spawn(process.execPath, [path.join(HERE, 'f24-llm-fixture.mjs'), '--port', '0', '--journal', journal], {
+      stdio: ['ignore', fd, fd],
+    });
+    let url = null;
+    for (let i = 0; i < 120 && !url; i++) {
+      const m = /http:\/\/127\.0\.0\.1:\d+/.exec(fs.readFileSync(logFile, 'utf8'));
+      if (m) url = m[0];
+      else await sleep(50);
+    }
+    const ask = (text) => {
+      const r = JSON.parse(
+        execFileSync(
+          'curl',
+          [
+            '-s',
+            '-X',
+            'POST',
+            `${url}/chat/completions`,
+            '-H',
+            'content-type: application/json',
+            '-d',
+            JSON.stringify({ model: 'x', stream: false, messages: [{ role: 'user', content: `hello ${text}` }] }),
+          ],
+          { encoding: 'utf8', timeout: 15_000 },
+        ),
+      );
+      return String(r?.choices?.[0]?.message?.content ?? '');
+    };
+
+    try {
+      assert(url, 'llm fixture never announced a URL');
+      const good = mintToken('deadbe', 'before', 0);
+      const legacyShape = 'f24rc-deadbe-before-0';
+      const goodReply = ask(good);
+      const legacyReply = ask(legacyShape);
+
+      await check('T1 known-POSITIVE: a token this driver mints IS echoed by the shared llm fixture', () => {
+        assert(goodReply.includes(good), `fixture answered "${goodReply}" for ${good}`);
+      });
+
+      await check('T2 known-NEGATIVE: the fixture does not echo a wrong-shaped token (so T1 discriminates)', () => {
+        assert(!legacyReply.includes(legacyShape), `fixture echoed the wrong-shaped token: "${legacyReply}"`);
+        assert(
+          legacyReply.includes('no-correlation'),
+          `expected the wrong shape to yield no-correlation, got "${legacyReply}"`,
+        );
+      });
+
+      await check('T3 THE SHAPE THIS LANE FIRST USED WOULD HAVE MISSED IT — and would have read as total loss', () => {
+        // The measured third assertion. The old prefix produces a reply the
+        // census cannot match, so an entire live run of a WORKING product
+        // grades as complete inbound message loss.
+        const c = census(
+          [{ token: legacyShape, phase: 'before', expect: 'reply' }],
+          [{ content: legacyReply }],
+        );
+        assert(c.lost.length === 1, 'the old token shape should have produced a LOSS against a real fixture reply');
+        const c2 = census([{ token: good, phase: 'before', expect: 'reply' }], [{ content: goodReply }]);
+        assert(c2.lost.length === 0, 'the repaired token shape must NOT produce a loss against a real fixture reply');
+      });
+    } catch (e) {
+      fail('T token-shape assertions', e);
+    } finally {
+      try {
+        llm.kill('SIGKILL');
+      } catch {
+        /* noop */
+      }
+      fs.rmSync(journal, { force: true });
+      fs.rmSync(logFile, { force: true });
+    }
+  }
 
   // ── R4  the negative control's own lever ──────────────────────────────────
   //

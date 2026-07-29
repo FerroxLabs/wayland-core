@@ -81,6 +81,26 @@ function control(url, method, body) {
 }
 
 /**
+ * Mint a correlation token.
+ *
+ * The `f24c3-` prefix is NOT decorative. `f24-llm-fixture.mjs` — shared with
+ * four other drivers, so not a file to change — extracts the correlation it
+ * echoes back with `/f24c3-[a-z0-9-]+/i` (`f24-llm-fixture.mjs:89`). A token
+ * outside that shape makes the fixture answer `F24C3-REPLY no-correlation` for
+ * EVERY turn, so the census can match nothing and reports total loss.
+ *
+ * This lane's run 1 did exactly that: 6 messages dispatched, all 6 admitted,
+ * 5 turns actually executed against the LLM fixture — and the driver reported
+ * 0/2 on its own pre-drop control. An instrument fault wearing the costume of
+ * complete inbound message loss, which is the single most expensive misreading
+ * available on this criterion. It was caught only because the known-positive
+ * control failed FIRST and refused to grade the run.
+ */
+export function mintToken(tag, phase, n) {
+  return `f24c3-rc-${tag}-${phase}-${n}`;
+}
+
+/**
  * The census. Given the planted plan and the fixture's outbound reply journal,
  * derive per-token reply counts, then losses and duplicates.
  *
@@ -271,7 +291,7 @@ class Driver {
 
   /** Plant a message and register it in the census plan. */
   send({ phase, expect, authorId }) {
-    const token = `f24rc-${this.tag}-${phase}-${this.plan.length}`;
+    const token = mintToken(this.tag, phase, this.plan.length);
     this.plan.push({ token, phase, expect });
     const sockets = control(`${this.fxApi}/__control/dispatch`, 'POST', {
       id: `${Date.now()}${crypto.randomBytes(3).toString('hex')}`,
@@ -285,9 +305,53 @@ class Driver {
 
   /** Register a token that is NEVER dispatched. Must score zero. */
   plantPhantom() {
-    const token = `f24rc-${this.tag}-phantom-never-dispatched`;
+    const token = mintToken(this.tag, 'phantom', 'never');
     this.plan.push({ token, phase: 'phantom', expect: 'silence' });
     return token;
+  }
+
+  /**
+   * PREFLIGHT: prove the correlation loop is alive BEFORE the scenario runs.
+   *
+   * Asks the LIVE llm fixture — not a re-implementation of its regex, which
+   * would drift away from it silently — to answer a probe carrying a token of
+   * the exact shape this driver mints, and requires the token back. Also sends
+   * a deliberately WRONG-shaped token and requires it NOT to come back, so a
+   * fixture that echoed its whole input would not pass this.
+   *
+   * Without it, a token-shape mismatch costs a 4-minute run and presents as
+   * total inbound loss. With it, the run stops in milliseconds and reports NOT
+   * MEASURED, which is the honest grade for a dead instrument.
+   */
+  preflightCorrelation() {
+    const good = mintToken(this.tag, 'preflight', 0);
+    const bad = `f24rc-${this.tag}-wrongshape-0`;
+    const ask = (text) => {
+      const r = control(`${this.llmUrl}/chat/completions`, 'POST', {
+        model: 'f24rc-fixture',
+        stream: false,
+        messages: [{ role: 'user', content: `hello ${text}` }],
+      });
+      return String(r?.choices?.[0]?.message?.content ?? '');
+    };
+    const goodReply = ask(good);
+    const badReply = ask(bad);
+    const ok = matchesToken(goodReply, good);
+    const decoyLeaked = matchesToken(badReply, bad);
+    this.note(
+      `preflight correlation: minted=${good} echoed=${ok} | wrong-shape=${bad} echoed=${decoyLeaked} (must be false)`,
+    );
+    if (!ok) {
+      throw new Error(
+        `the llm fixture did not echo a token of this driver's shape (got "${goodReply}"). ` +
+          'Every reply would read as no-correlation and the census would report total loss — NOT MEASURED.',
+      );
+    }
+    if (decoyLeaked) {
+      throw new Error(
+        'the llm fixture echoed a WRONG-shaped token too, so the correlation check cannot discriminate — NOT MEASURED.',
+      );
+    }
   }
 
   waitForIdentify(budgetMs) {
@@ -395,6 +459,7 @@ function main() {
   try {
     d.startFixture();
     d.startLlm();
+    d.preflightCorrelation();
     d.writeConfig();
     d.startGateway();
 
