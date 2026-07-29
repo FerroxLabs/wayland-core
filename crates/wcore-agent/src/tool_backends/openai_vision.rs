@@ -10,22 +10,70 @@ use super::build_ssrf_safe_tool_client;
 use base64::Engine as _;
 use wcore_tools::vision_tools::{VisionBackend, VisionOutcome};
 
-/// OpenAI vision backend (GPT-4o). Uses the chat-completions endpoint
-/// with an `image_url` content block carrying a base64 `data:` URL.
+/// OpenAI-**compatible** vision backend. Drives native OpenAI (GPT-4o) and
+/// our FluxRouter, since both serve the same chat-completions API shape with
+/// an `image_url` content block carrying a base64 `data:` URL.
+///
+/// **The `endpoint` field is the #310-class fix for vision** (`BL-F24-C3-H7`).
+/// This backend previously hardcoded `https://api.openai.com/v1/chat/completions`
+/// while accepting a caller-supplied `api_key`, so configuring a non-OpenAI
+/// key was not merely unsupported — it would have **sent that credential to a
+/// third party** instead of failing closed. Key and host are now always
+/// resolved together, by the same resolver, from the same source.
 pub struct OpenAiVisionBackend {
     client: Client,
     api_key: String,
+    endpoint: String,
     model: String,
+    backend_id: &'static str,
 }
 
 impl OpenAiVisionBackend {
+    /// Native OpenAI at `api.openai.com`. Preserves the pre-existing
+    /// behaviour of the `OPENAI_API_KEY` env arm exactly.
     pub fn new(api_key: String) -> Self {
         let model = std::env::var("WAYLAND_VISION_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        Self::with_endpoint(
+            api_key,
+            super::shared::join_openai_endpoint(super::shared::OPENAI_API_BASE, "chat/completions"),
+            model,
+            "openai",
+        )
+    }
+
+    /// Explicit endpoint + model, for a resolver that derived both from
+    /// `Config` (mirrors [`super::openai_compat_whisper::OpenAiCompatWhisperBackend::new`]).
+    pub fn with_endpoint(
+        api_key: String,
+        endpoint: String,
+        model: String,
+        backend_id: &'static str,
+    ) -> Self {
         Self {
             client: build_ssrf_safe_tool_client(),
             api_key,
+            endpoint,
             model,
+            backend_id,
         }
+    }
+
+    /// Resolved request endpoint. Exposed so the resolver wiring is
+    /// unit-assertable **without a network round-trip** — the property that
+    /// matters here is "the key never leaves with the wrong host", and that is
+    /// checkable offline.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Model sent in the request body.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Backend label used in log lines and error messages.
+    pub fn backend_id(&self) -> &str {
+        self.backend_id
     }
 }
 
@@ -47,7 +95,7 @@ impl VisionBackend for OpenAiVisionBackend {
         });
         let resp = match self
             .client
-            .post("https://api.openai.com/v1/chat/completions")
+            .post(&self.endpoint)
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {}", self.api_key),
@@ -61,7 +109,7 @@ impl VisionBackend for OpenAiVisionBackend {
             Ok(r) => r,
             Err(e) => {
                 return VisionOutcome::Err {
-                    message: format!("openai vision request failed: {e}"),
+                    message: format!("{} vision request failed: {e}", self.backend_id),
                 };
             }
         };
@@ -70,7 +118,8 @@ impl VisionBackend for OpenAiVisionBackend {
         if !status.is_success() {
             return VisionOutcome::Err {
                 message: format!(
-                    "openai vision returned HTTP {}: {}",
+                    "{} vision returned HTTP {}: {}",
+                    self.backend_id,
                     status.as_u16(),
                     txt.chars().take(400).collect::<String>()
                 ),
@@ -80,7 +129,7 @@ impl VisionBackend for OpenAiVisionBackend {
             Ok(v) => v,
             Err(e) => {
                 return VisionOutcome::Err {
-                    message: format!("openai vision JSON parse failed: {e}"),
+                    message: format!("{} vision JSON parse failed: {e}", self.backend_id),
                 };
             }
         };
@@ -91,7 +140,7 @@ impl VisionBackend for OpenAiVisionBackend {
             .unwrap_or_default();
         if analysis.is_empty() {
             return VisionOutcome::Err {
-                message: "openai vision returned no text content".to_string(),
+                message: format!("{} vision returned no text content", self.backend_id),
             };
         }
         VisionOutcome::Ok { analysis }

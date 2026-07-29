@@ -1,0 +1,358 @@
+# 27-VOICE-MAC — working notes (append-only, committed continuously)
+
+Lane `voice-mac`. Branch `lane/voice-mac`. Base `fab334935235ada806304d7223094dd5d6d18dfb`.
+Worktree `/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-voice-mac` (verified via
+`/usr/bin/git rev-parse --show-toplevel`).
+
+Criterion owned: **27-C4** — *"Streaming voice supports interruption, cancellation,
+compatibility, accounting, and ordered protocol events."* Graded **NOT MET** by lane
+`27-browser-voice` (`a9f818d0`) and deferred as hardware-blocked.
+
+---
+
+## Pre-registered priors and ranking (written BEFORE measuring, so it cannot be retrofitted)
+
+**Rank 1 — the shipping question.** Whether `voice` should be in `wcore-cli`'s
+default features. I rank this ABOVE the five C4 properties because if the answer
+is "no, and it never will be", then every property I prove is about a binary we
+do not ship, and the correct C4 grade is bounded by that regardless of how the
+interruption test goes. The dispatch names ten recorded instances of
+advertised-but-dead capability on this programme; this is a candidate eleventh.
+
+**Rank 2 — capture-device liveness.** Not a property of the product, a property
+of my instrument. A prior lane on this programme published *"audio flowed from a
+real microphone"* on RMS 5, which also matches a muted device with dither, and
+had to withdraw it. I will not report ANY of the five properties before I can
+discriminate live-mic from dead-mic with a stated threshold. Ranked above the
+properties themselves because a property proved on a dead instrument is worse
+than an unproved property.
+
+**Rank 3 — the five named properties**, in this order: interruption,
+cancellation, ordered protocol events, accounting, compatibility. Interruption
+first because it is the one the prior lane called hardware-blocked, i.e. the
+specific claim I was dispatched to correct.
+
+**Prior I hold going in (recorded so it can be scored):** I expect the
+streaming loop to exist and compile under `--features voice`, and I expect at
+least one of the five properties to be genuinely unimplemented rather than
+merely unexercised. The prior lane established the code is 94 KB across two
+files (38.6 KB backend + 55.3 KB tool); that is too much code for all five to be
+missing and too much for all five to be present without a protocol seam. If I
+find all five clean, I should distrust my own test before believing it.
+
+---
+
+## Established at minute 0 (from the prior lane, re-verified here, not taken on trust)
+
+| fact | source | my re-verification |
+|---|---|---|
+| `voice_mode` registration is `#[cfg(feature = "voice")]` | `bootstrap.rs:1361` | `/usr/bin/grep -rn 'feature = "voice"' crates/wcore-agent/src/` → 2 hits: `tool_backends/mod.rs:83`, `bootstrap.rs:1361` |
+| `voice` not in `wcore-cli` default | `wcore-cli/Cargo.toml` | read directly: `default = ["remote-registry", "workflow", "monitor", "review_artifact"]`; `voice = ["wcore-agent/voice"]` declared separately |
+| `voice` pulls cpal + hound | `wcore-agent/Cargo.toml:234` | `voice = ["dep:cpal", "dep:hound"]`, both `optional = true` |
+| stated reason for OFF-by-default | Cargo comment, Issue #14 | *"A TUI must not hard-require ALSA at runtime"* — i.e. the reason is **Linux-specific** (`libasound.so.2`). Flagged: that reason does not obviously transfer to Darwin, which uses CoreAudio. **This is my first lead on the shipping question.** |
+| `tts` + `transcribe_audio` are NOT feature-gated | `bootstrap.rs:1348`, `:1337` | to re-verify |
+
+The prior lane's correction stands and I adopt it: **"voice is absent" is FALSE.**
+TTS-out and STT-on-a-file ship. The streaming mic loop does not.
+
+---
+
+## The correction I was dispatched to make
+
+Prior lane deferred C4 with cost *"hetzner-dsm is headless with no capture device
+and cannot host it at any price"*. That is true of hetzner and **does not imply
+C4 is unreachable**, because `sean-mac-arm64` is a registered self-hosted runner
+with a microphone, and LANE-BRIEF §0's Darwin exception permits single-crate
+single-test runs on the Mac for platform behaviour Darwin alone can demonstrate.
+Mic capture is exactly that. I must disclose machine and method in the report.
+
+**I note the asymmetry honestly:** the prior lane was not wrong to defer given
+what it could see; it named the cost precisely enough that this lane could be
+dispatched. That is the deferral working as intended, not a failure.
+
+---
+
+## Anti-self-passing commitments (§3.2, §3b-i) — pre-registered
+
+1. **No absence claim without a known-positive in the same invocation.** Today a
+   lane on this programme found a proof where `grep -c` on a MISSING FILE
+   returned `0` and `0` was the success value. Before every absence I assert:
+   `test -s <file>` first, then search, and show a non-zero count for something
+   I know is there.
+2. **Every count from `/usr/bin/grep`, `/usr/bin/git`, `/usr/bin/wc`.** `rtk`
+   rewrites all three plus `cargo`, and strips `0 ignored` / `0 filtered out` —
+   the exact fields needed to catch a suite that runs zero tests.
+3. **Assert the executed test count** (`N passed`), never exit status. Three
+   measured flavours of zero-test-green: all-`#[ignore]`, env-gated early
+   return, filter matching no test name.
+4. **Capture-liveness control before any audio claim** — see Rank 2. Threshold
+   to be stated and justified, not chosen after seeing the numbers. I will
+   pre-register the threshold before running the live arm.
+5. **Interruption requires proof the stream was FLOWING first.** "It stopped" is
+   free on a stream that never started.
+
+---
+
+## Fences (LANE-BRIEF §6)
+
+`BASE=fab334935235ada806304d7223094dd5d6d18dfb`, captured once, quoted always.
+Shared fence: `crates/wcore-cli/src/{lib,main}.rs` — additive contiguous only,
+report line delta. Reserved: no merge, no PR, no tag, no release, no issue close,
+no `wcore-contract generate`, no `.github/workflows/*`, and **do not reconfigure,
+relabel or stop `sean-mac-arm64`** (cost two attempts to register).
+
+---
+
+## Log
+
+- **T+0** — worktree verified, LANE-BRIEF read in full, prior lane report
+  (`a9f818d0`, 27-BROWSER-VOICE.md) read in full. Priors and ranking pre-registered
+  above. Nothing measured yet beyond the table above.
+
+- **T+1 — M1. The prior lane's diagnosis is HALF WRONG, and the half that is wrong
+  is the half that matters.** Prior lane: *"the streaming mic-capture loop is compiled
+  OUT of the shipped artifact."* Measured:
+
+  | component | file | size | gated? |
+  |---|---|---|---|
+  | VoiceMode state machine + `VoiceModeTool` | `wcore-tools/src/voice_mode.rs` | 55.3 KB | **NO — `pub mod voice_mode;` at `lib.rs:240`, ungated** |
+  | cpal recorder / player (`CpalAudioRecorder`) | `wcore-agent/src/tool_backends/voice_mode.rs` | 38.6 KB | YES — `#[cfg(feature="voice")]` `mod.rs:83` |
+  | registration | `bootstrap.rs:1361` | — | YES |
+
+  `cpal` appears **1** time in `wcore-tools/Cargo.toml` and it is a **comment**;
+  `grep -E '^\s*(cpal|hound)\s*='` → rc=1. Instrument alive (the count of 1 proves
+  the file was read). So **the entire state machine that C4's five properties are
+  about — start/stop/cancel/toggle, the RMS surface, the hallucination filter — is
+  ALREADY COMPILED INTO THE DEFAULT SHIPPED BINARY.** What is compiled out is only
+  the concrete mic device and the registration line.
+
+  Consequence for the shipping question: turning `voice` on by default costs the
+  **cpal+hound link only**, not 55 KB of new code. That materially lowers the price
+  the prior lane implied.
+
+- **T+2 — M2. `wcore-protocol` has ZERO voice/audio event identity.** Concept
+  search (§3b-i.3 — concept, not keyword), whole crate, 20 files:
+
+  ```
+  liveness controls: "pub enum" 62   |  "tooluse|tool_" 182   (instrument alive)
+  voice 2   audio 0   microphone|mic 0   speech 0   transcri 1
+  capture 6  record 38  stt|whisper 0   tts 0   listen 0
+  ```
+  **The 2 `voice` hits are the substring in `"Re: invoice"`** (`events.rs:1777,1787`,
+  an email test). True voice count = **0**. The single `transcri` hit is a doc
+  comment stating the protocol carries *"never transcript text"* — i.e. the absence
+  is deliberate, not an oversight.
+
+  **This is the keyword trap firing in my favour and I nearly took it:** a naive
+  `grep -c voice` returns **2**, which reads as "voice events exist". They do not.
+
+- **T+3 — M3. Tool surface (this is what "ordered protocol events" can even mean).**
+  `VoiceModeTool` exposes 5 discrete actions — `toggle_record`, `start`, `stop`,
+  `cancel`, `status` (`voice_mode.rs:962`), each a separate LLM tool call. So
+  ordering is observable **only** through the generic ToolUse/ToolResult ladder;
+  there is no voice-specific event. `is_concurrency_safe() == false` — deliberately
+  serialised, comment: *"The recorder owns a single mic device — overlapping starts
+  would race on the audio handle."*
+
+- **T+4 — M4, and it is the sharpest thing in the lane so far.** `stop` collapses
+  three distinct states into one:
+  ```rust
+  Ok(RecordingOutcome::Empty) => ... "note": "recording was empty (too short / silent / cancelled)"
+  ```
+  **The product itself cannot distinguish silence from cancellation from a dead
+  capture device.** That is precisely the discrimination failure that made a prior
+  lane on this programme withdraw its RMS-5 claim — except here it is baked into
+  the shipped API, not into a lane's harness. Candidate finding; severity to be
+  argued, not asserted.
+
+- **T+5 — build.** `cargo test -p wcore-agent --features voice --lib --no-run` on
+  the Mac (Darwin exception, disclosed). `Compiling cpal|hound|coreaudio` → **4**
+  matches, so cpal links on Darwin via CoreAudio with no ALSA involved. Note the
+  Cargo comment justifying OFF-by-default says *"must not hard-require ALSA"* —
+  **an argument that does not apply to Darwin at all.**
+
+- **T+6 — LOW doc defect.** `voice_mode.rs:75` says *"60s at 16 kHz mono i16 =
+  ~1.92M samples ≈ 3.8 MB"*. `SAMPLE_RATE = 16_000` (`wcore-tools/src/voice_mode.rs:79`)
+  → 16_000 × 60 = **960,000 samples = 1.92 MB**. The comment states *samples* where
+  it means *bytes*; out by 2×. Cosmetic, recorded not fixed (not my fence).
+
+- **T+7 — candidate defect to measure, NOT yet claimed.** `RingBuffer::push` does
+  `self.samples.remove(0)` when at capacity — an O(n) memmove over 960,000 i16 on
+  **every sample** past 60 s, executed **inside the cpal input callback** (the
+  closure passed to `build_input_stream` locks `state_for_data` and pushes). At 16 kHz
+  that is ~1.9 MB moved 16,000×/s ≈ 30 GB/s. If real, the audio callback cannot keep
+  up and capture degrades past 60 s. **I have not measured this yet and will not
+  claim it until I have.** It is also only reachable on a >60 s recording.
+
+- **T+8 — the existing suite compiles 11 voice tests that NO DEFAULT INVOCATION RUNS.**
+  Built `cargo test -p wcore-agent --features voice --lib --no-run` on the Mac
+  (Darwin exception, disclosed; 2m22s, rc=0). Ran the test **binary directly** — not
+  through cargo — so `filtered out` survives the `rtk` cargo rewrite:
+  ```
+  test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 2169 filtered out
+  ```
+  11 executed, asserted, not inferred from exit status. Because `voice` is in no
+  default feature set, **every one of these 11 is dead in CI.**
+
+- **T+9 — device probe: `input device detected on this host: true`,** read from the
+  test's own `eprintln` under `--nocapture`. And `recording_drop_impl_releases_stream`
+  printed **no** `skip:` line → it took the **real** `CpalAudioRecorder::try_default()`
+  branch: real `start()`, real control channel, real join handle, real `cancel()`
+  teardown. **That is the first real execution of that code path anywhere on this
+  programme.** The prior lane's "no host can exercise this" is corrected.
+
+  **But `detected` is NOT `live`, and I am not treating it as such.** `try_default()`
+  + `build_input_stream()` succeeding is compatible with macOS TCC denying microphone
+  access and delivering all-zero buffers. This is the RMS-5 trap in its natural
+  habitat. Liveness control still owed — see T+11.
+
+- **T+10 — ★ THE LANE'S PRINCIPAL FINDING, and it needs NO microphone. ★**
+  **C4's `interruption` clause is structurally NOT MET in production code.**
+
+  `CpalAudioPlayer::stop()` — the barge-in seam — is an **empty body**:
+  ```rust
+  async fn stop(&self) {
+      // The OS shell player is a one-shot subprocess. We let it finish
+      // naturally — there is no cross-platform "stop a SoundPlayer"
+      // signal that's worth the complexity vs the rare interrupt need.
+  }
+  ```
+  (`wcore-agent/src/tool_backends/voice_mode.rs:628-632`, quoted byte-exact.)
+
+  Worse, `play()` calls `std::process::Command::...status()` — which **blocks until
+  `afplay` exits**. So playback is synchronous *and* the stop is a no-op: there is no
+  moment at which an interrupt could even be delivered, and if it were, it would do
+  nothing.
+
+  **And the test suite reports this surface as working.** `stop_count` is asserted
+  **twice** — `wcore-tools/src/voice_mode.rs:1198` and `:1345` — and **both are against
+  `CapturingAudioPlayer`, the mock**, which increments a counter. Enumerated all
+  **9** `CpalAudioPlayer` references in the tree (unpiped, so no line is hidden and no
+  status is stolen): production wiring at `:729`, tests at `:947` (missing file) and
+  `:958` (`os_shell_command`). **Not one calls `.stop()`.**
+
+  So the shape is: trait declares `stop` → mock implements it and counts → tests assert
+  the count → production implements it as `{}` → **zero tests touch production**. This
+  is the advertised-but-dead pattern the dispatch says has ten recorded instances; this
+  is a candidate eleventh, and unlike the others it is *self-documenting* — the code
+  comment states the omission was deliberate.
+
+  **This was gradeable from source at zero hardware cost.** The prior lane deferred C4
+  as hardware-blocked without reaching it. That is the second and larger sense in which
+  the write-off was wrong.
+
+  Adjacent, LOW: module doc `:17` calls `CpalAudioPlayer` an *"output stream via the
+  same host (primary)"*; the impl shells out to `afplay`/`aplay`/`powershell` and
+  contains no cpal output stream. Doc contradicts impl.
+
+- **T+11 — INSTRUMENT DEFECT #1 IN MY OWN HARNESS, caught by my own self-test,
+  repaired in-lane (§6b-ii), regression-guarded.** My first `tone_ratio` returned
+  `0.0` whenever the off-band floor was ≤ EPSILON, on the reasoning "zero floor =
+  all-zero buffer". **That conflated the two opposite states.** A mathematically pure
+  tone leaks exactly zero into other exact Goertzel bins, so **the purest possible
+  POSITIVE signal scored 0.0 — identical to a dead capture path.** Had the self-test
+  not carried a known-positive, this file would have reported "no tone" on every arm
+  and published a confident, wholly fabricated negative. That is the §3b-i failure
+  mode exactly, inside the instrument built to avoid it.
+
+  Repair: discriminate on **total** signal power (zero only for true silence) and
+  floor the denominator relative to it. Self-test assertion **(4)** is the regression
+  guard: pure tone and digital silence must never score within `TONE_PRESENT_RATIO`
+  of each other again.
+
+- **T+12 — ★ CAPTURE DEVICE PROVEN LIVE, with a discriminating control. ★**
+
+  Instrument self-test, 4 assertions, all pass:
+  ```
+  SELF-TEST(3): quiet-tone rms=42 ratio=499949020.7 | loud-dither rms=400 ratio=0.2
+  SELF-TEST(4): pure-tone ratio=5.000e8            | digital-silence ratio=0
+  ```
+  Assertion (3) is the executable refutation of the withdrawn RMS-5 claim: **RMS ranks
+  the DEAD dither (400) 9.5× ABOVE the LIVE tone (42). Goertzel ranks the tone 2.5
+  billion× above the dither.** Amplitude is not merely a weak discriminator here — it
+  is *inverted*.
+
+  Live arms, real `CpalAudioRecorder`, real default input device (HyperX QuadCast 2,
+  48 kHz → resampled to 16 kHz), **output volume left at the host's own setting of 6/100
+  — I did not change it, and verified 6 before and 6 after**:
+  ```
+  ARM B-control-no-tone : samples=48051 mid_rms=48  rms=49.0  tone_ratio=  1.15
+  ARM A-live-tone-playing: samples=48051 mid_rms=433 rms=433.3 tone_ratio=116.66
+  DISCRIMINATION: control 1.15 (<=3 req) | tone 116.66 (>=20 req) | separation 101.7x
+  ```
+  Thresholds were **pre-registered in the source before either arm ran** (`TONE_PRESENT_RATIO
+  = 20`, `TONE_ABSENT_RATIO = 3`) with the 13 dB justification, and the band between
+  them is an explicit INDETERMINATE zone rather than a split.
+
+  **Why this is a discrimination and not a bigger number:** the control arm is *not*
+  silence — it carries genuine ambient room noise at **rms 49, ten times the RMS-5 that
+  the withdrawn claim rested on** — and it still scores 1.15, i.e. no 1 kHz content. The
+  two arms differ only spectrally. Broadband noise cannot manufacture a 1 kHz peak at
+  any amplitude, and a TCC-denied path would score rms 0 / ratio 0 in **both** arms.
+  48051 samples ≈ 3 s × 16 kHz confirms the stream was genuinely flowing.
+
+- **T+13 — C4 `cancellation`: MET, live, with the pre-condition proved.**
+  ```
+  PRE-CANCEL : is_recording=true current_rms=98   <- stream PROVEN FLOWING first
+  POST-CANCEL: is_recording=false rms=0 stop=Empty
+  ```
+  "It stopped" is free on a stream that never started, so the test hard-fails if
+  `current_rms == 0` before the cancel. It did not. Full file:
+  **`3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`** — executed count
+  asserted, not inferred from exit status.
+
+- **T+14 — DECISION: I am NOT implementing barge-in, and here is the reasoning,
+  including the case against me.**
+  I can implement `CpalAudioPlayer::stop` (hold the `Child`, kill it on stop) in ~30
+  lines in a file I own. I am declining, on LANE-BRIEF §5's severity policy:
+  the capability is **unreachable in every shipped build** (voice is in no default
+  feature set), so real-world impact today is **zero** → **MEDIUM → BACKLOG,
+  non-blocking**, and §5 says explicitly *"Do not invent a stricter rule — that is
+  what turned Phase 20 into a 74-plan loop."*
+  **Against myself:** it is a small, contained fix in my own file, and declining
+  leaves a known gap. **Why that does not move me:** the gap's value is higher as a
+  *finding* than as a patch, because it is the precise, checkable precondition that
+  blocks the shipping recommendation I was asked to make. Fixing it silently would
+  convert a blocking gate into an invisible one. Recorded as a decision, not a
+  deferral.
+
+- **T+15 — INSTRUMENT DEFECT #2 in the overflow gate, repaired in-lane.** Run 1 FAILED
+  (tail ratio 0.41 → "capture degraded"); an immediate re-run PASSED (11227.13,
+  retained exactly 960000 samples = the documented 60 s cap, stop took 45 ms). **A gate
+  that reports a product defect on one run and a clean pass on the next is not measuring
+  the product, and publishing run 1 would have been a fabricated HIGH.** Repaired rather
+  than merely noted (§6b-ii): (a) speaker wake-up pre-roll before capture — the host's
+  default output is a Bluetooth speaker that sleeps and eats the first seconds of
+  playback; (b) the tone is now scored over the **whole retained buffer** as well as the
+  tail, separating the two causes the single assertion conflated — *whole LOW* = the
+  tone never reached the mic (acoustic path, INDETERMINATE, says nothing about the
+  ring), *whole HIGH + tail LOW* = a real degradation. **I do not claim the
+  `Vec::remove(0)` defect.** T+7's arithmetic stands as a concern; the measurement does
+  not support a finding on this hardware.
+
+- **T+16 — ★ THE SHIPPING ANSWER, and I refuted the panel's own escape hatch. ★**
+  Both panel legs turned on whether ALSA is a hard load-time link. Gemini's stated
+  strongest counter-argument to itself was: *"If the ALSA linkage is actually deferred
+  via runtime `dlopen` … the headless Linux risk is zero."* So I measured rather than
+  accept either answer.
+
+  Resolved the **Linux** dependency graph from the Mac without building
+  (`cargo tree --target x86_64-unknown-linux-gnu`), with a control:
+  ```
+  --features voice : cpal v0.15.3 -> alsa v0.9.1 -> alsa-sys v0.3.1
+  without feature  : 0 matches for alsa|cpal      (control: the query discriminates)
+  ```
+  Then read `alsa-sys 0.3.1`'s `build.rs` from the registry cache — it is
+  `pkg_config::probe_library("alsa")`, which emits `cargo:rustc-link-lib=asound`.
+  **That is a hard dynamic `NEEDED libasound.so.2`, not `dlopen`.** The escape hatch
+  does not exist: on a Linux host without ALSA, `ld.so` fails **before `main()`**, so
+  the self-hide of Fact 4 never runs — no Rust code runs at all.
+  **Defaulting `voice` would convert a missing audio library into total failure of the
+  CLI for every headless Linux user who will never own a microphone.** The Cargo
+  comment's rationale is therefore correct, and correct for a reason it does not state.
+
+- **T+17 — restart.** The orchestrator process exited mid-flight (account switch). All
+  five commits survived; one modified file (`voice_live_capture_mac.rs`) was in the tree,
+  verified complete + compiling before being committed as `3d060f9d`. Two background jobs
+  died and were re-run. Nothing was lost, because the notes-first discipline meant every
+  measurement above was already on disk.

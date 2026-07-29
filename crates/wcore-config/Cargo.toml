@@ -57,6 +57,27 @@ serde_yaml.workspace        = true
 
 workspace-hack.workspace = true
 
+# sqlite_journal: `apply()` needs a connection to set pragmas on. Optional so
+# the many consumers of this crate that never touch SQLite do not pay for it.
+rusqlite = { workspace = true, optional = true }
+
+[features]
+# Enables SqliteJournalMode::{apply, configure}. Enabled by the crates that
+# open SQLite databases (wcore-memory, wcore-repomap, wcore-swarm).
+sqlite = ["dep:rusqlite"]
+
+# statfs(2) — the backing-filesystem probe behind sqlite_journal.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# GetVolumePathNameW + GetDriveTypeW — the same probe on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_WindowsProgramming",
+] }
+
 [dev-dependencies]
 wiremock.workspace   = true
 tokio-test.workspace = true

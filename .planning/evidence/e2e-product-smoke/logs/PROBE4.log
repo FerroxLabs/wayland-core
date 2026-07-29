@@ -1,0 +1,42 @@
+### self-test (3 assertions)
+  selftest 3/3 INCONCLUSIVE (wrapper had no separate child here)
+  selftest 1/3 known-positive PASS (exec'd pid 794768 cmdline is '/bin/sleep 8 ')
+  selftest 2/3 known-negative PASS (reaped pid not reported alive)
+
+### A -- read containment reach, re-graded
+  permitted  in-workspace read      : inside=1 rc=0 | Exit code: 0 STDOUT: workspace token NEEDLE_ALPHA_7731  STDERR: 
+  contained  arbitrary outside file : inside=0 rc=1 | Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p4/outside.txt: No such file or directory 
+  contained  product credential store: inside=0 rc=1 | Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p4/home/credentials.toml: No such file or directory 
+  bwrap /etc bind  /etc/hostname    : inside=1 rc=0 | Exit code: 0 STDOUT: Ubuntu-2404-noble-amd64-base  STDERR: 
+  denylist   /etc/shadow            : inside=0 rc=1 | Refused: command pattern matches credential-exfiltration denylist. If you need an environment variable's value
+  LIVENESS CONTROLS outside the sandbox: outside_file=1 credential_store=1 etc_shadow=1 (all must be >=1)
+E2E_STEP=A RESULT=PASS permitted=ok outside_file=BLOCKED credential_store=BLOCKED etc_shadow=BLOCKED (/etc/hostname=1 is the read-only /etc bind)
+
+### B -- orphans after SIGKILL DELIVERED TO wayland-core ITSELF
+  victim pid=796395 cmdline=[/root/wayland-e2e/target/release/wayland-core -m flux-standard --force --no-tui --session-id e2]
+  VERIFIED: the SIGKILL target IS the product, not a wrapper (this is the probe-3 defect closed)
+  waiting for a shell-tool descendant: iter 1 live_descendants=5 07:15:43
+  descendants of the PRODUCT before kill: [797407 797408 797409 797410 797411]
+     pid=797407 ppid=796395 cmd=/usr/bin/bwrap --die-with-parent --unshare-all --clearenv --new-session --info-f
+     pid=797408 ppid=796395 cmd=/root/wayland-e2e/target/release/wayland-core -m flux-standard --force --no-tui 
+     pid=797409 ppid=797407 cmd=/usr/bin/bwrap --die-with-parent --unshare-all --clearenv --new-session --info-f
+     pid=797410 ppid=797409 cmd=sh -c sleep 300 
+     pid=797411 ppid=797410 cmd=sleep 300 
+  a real sandboxed shell child (sleep 300) was alive at kill time: 1
+  8s after SIGKILL to the product -- survivors=0 []
+E2E_STEP=B RESULT=PASS product SIGKILLed with a live sandboxed child: every descendant gone within 8s (owns_descendants_hard holds)
+
+### C -- is the product still usable after the crash, and what is left on disk?
+  lock/lease files left in WAYLAND_HOME after the crash: 5
+     $HOME/.credentials.confidential-backend.lock
+     $HOME/channels/channel-poll.lock
+     $HOME/sessions/e2c109b9e4c5.journal.writer.lock
+     $HOME/cron/schedule.lock
+     $HOME/credentials.confidential-key.lock
+  post-crash run: rc=0 token=1 out=[* RECOVERED]
+E2E_STEP=C RESULT=PASS product fully usable after a crash exit; 5 lock files present but non-wedging
+
+########## PROBE 4 SUMMARY ##########
+E2E_STEP=A RESULT=PASS permitted=ok outside_file=BLOCKED credential_store=BLOCKED etc_shadow=BLOCKED (/etc/hostname=1 is the read-only /etc bind)
+E2E_STEP=B RESULT=PASS product SIGKILLed with a live sandboxed child: every descendant gone within 8s (owns_descendants_hard holds)
+E2E_STEP=C RESULT=PASS product fully usable after a crash exit; 5 lock files present but non-wedging

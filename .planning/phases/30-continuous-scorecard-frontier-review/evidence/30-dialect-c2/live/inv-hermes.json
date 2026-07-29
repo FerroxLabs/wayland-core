@@ -1,0 +1,12 @@
+{
+  "tool": "hermes",
+  "program": "/root/c2/hermes-venv/bin/hermes",
+  "args": ["--yolo","--ignore-user-config","--provider","fixture","-m","fixture-chat-v1",
+           "-z","Create a file named TRIAL-ARTIFACT.txt containing the text frontier-trial-oracle-v1"],
+  "base_url_env": "OPENAI_BASE_URL",
+  "base_url_suffix": "/v1",
+  "extra_env": {"OPENAI_API_KEY":"wayland-frontier-trial-not-a-secret"},
+  "workspace_seed_files": {
+    ".hermes/config.yaml": "provider: fixture\nmodel: fixture-chat-v1\ncustom_providers:\n  - name: fixture\n    base_url: {{BASE_URL}}\n    model: fixture-chat-v1\n    api_key: wayland-frontier-trial-not-a-secret\n"
+  }
+}

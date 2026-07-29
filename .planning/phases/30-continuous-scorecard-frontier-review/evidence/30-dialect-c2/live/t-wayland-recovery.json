@@ -1,0 +1,30 @@
+{
+  "vocabulary_version": "F30-DIALECT-VOCAB-V1",
+  "dimension": "recovery",
+  "canonical_script_sha256": "dc1baf9f07f341dcdd536b97d22c51ec6294211ed68d85397fdd8bb197c5a365",
+  "corpus_sha256": "10c85fbd29ba89bdd08539c63d73744efb5616f584ed84c7f96e4c4a9e8f1323",
+  "steps": [
+    {
+      "kind": "http_error",
+      "status": 503
+    },
+    {
+      "kind": "tool_call",
+      "id": "call_1",
+      "tool_name": "Write",
+      "arguments": {
+        "content": "frontier-trial-oracle-v1\n",
+        "file_path": "TRIAL-ARTIFACT.txt"
+      },
+      "slot_bindings": {
+        "path": "file_path",
+        "content": "content"
+      }
+    },
+    {
+      "kind": "text",
+      "text": "Wrote TRIAL-ARTIFACT.txt."
+    }
+  ],
+  "translation_sha256": "1da202f3a0b1b06183c06b08bf2f3deeb4dec5c962f3049cc8313854fc5ccb5b"
+}

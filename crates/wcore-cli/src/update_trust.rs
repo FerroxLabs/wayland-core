@@ -40,11 +40,14 @@
 //!    `WAYLAND_HOME`-honouring config-root resolver used for its own persisted
 //!    state. Testability comes from the decision being a PURE function the
 //!    tests drive directly.
-//! 3. **Fail closed on a placeholder trust root.** [`RELEASE_TRUST_ROOT_JSON`]
-//!    ships EMPTY and [`ReleaseVerifier::bundled`] refuses it, exactly as
-//!    `plugin::index::IndexVerifier::bundled` refuses its own all-zeros
-//!    placeholder (finding F-021). The all-zeros key is the Ed25519 identity
-//!    point and signatures against it can be forged with no secret.
+//! 3. **Fail closed on a placeholder trust root.** [`ReleaseVerifier::bundled`]
+//!    refuses an empty key set and refuses the all-zeros Ed25519 identity
+//!    point, whose signatures can be forged with no secret — exactly as
+//!    `plugin::index::IndexVerifier::bundled` refuses its own placeholder
+//!    (finding F-021). [`RELEASE_TRUST_ROOT_JSON`] shipped EMPTY until
+//!    2026-07-29 and the binary therefore installed nothing; it now carries the
+//!    real FerroxLabs release-acceptance key, and the refusal is what still
+//!    stands between a regressed constant and a forgeable install.
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -59,21 +62,24 @@ use sha2::{Digest, Sha256};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// The bundled release trust root, and the ONE production step this plan
-/// cannot perform.
+/// The bundled release trust root.
 ///
-/// It ships with an empty key set on purpose. Sean's real release public keys
-/// do not exist in this tree, and a permissive default here would neutralise
-/// every check in this module. [`ReleaseVerifier::bundled`] therefore REFUSES
-/// to construct from it, so the shipped binary fails closed today.
+/// **Substituted 2026-07-29** with the real FerroxLabs root, minted by
+/// `wayland-release trust-root-init`. It shipped with an empty key set until
+/// then, and [`ReleaseVerifier::bundled`] refused to construct from it, so the
+/// binary failed closed rather than trusting a placeholder.
 ///
-/// **To turn release-manifest verification on:** replace the empty `keys`
-/// array below with the real trust-root document produced by
-/// `wayland-release trust-root init`, holding the PUBLIC halves only, with each
-/// key bound to `role: "release_acceptance"` and a `valid_from` at or before
-/// the first release it vouches for. Nothing else in this file changes.
-pub const RELEASE_TRUST_ROOT_JSON: &str =
-    r#"{"schema":"wayland.release.trust-root","schema_version":1,"keys":[]}"#;
+/// PUBLIC halves only — the seeds were written to owner-only files on the
+/// minting machine and never entered this tree. Only the `release_acceptance`
+/// key is bundled: [`RELEASE_MANIFEST_ROLE`] is the sole role the updater will
+/// accept, so the other three (`packaging`, `deployment_preparation`,
+/// `rollback_rehearsal`) could never authorise an install and would add trust
+/// surface for no function. They stay in the minting machine's root, which is
+/// what makes the four-state ledger's separation meaningful.
+///
+/// `valid_from: 0` vouches for every release including the first, as required —
+/// a later value would refuse the release it was minted for.
+pub const RELEASE_TRUST_ROOT_JSON: &str = r#"{"schema":"wayland.release.trust-root","schema_version":1,"keys":[{"key_id":"release-acceptance-key","public_key_base64":"ycwkW1xZnCxruh59zJnQiuoN5xuXYkMurhquhHMBXXY=","role":"release_acceptance","valid_from":0,"retired_at":null}]}"#;
 
 /// A release manifest that authorises an INSTALL must be signed by a key bound
 /// to the final release state. Reaching packaging is not reaching acceptance.
@@ -1082,13 +1088,87 @@ pub fn check_only_report(
 mod tests {
     use super::*;
 
+    /// The bundled constant held the empty placeholder until 2026-07-29 and
+    /// this test asserted `bundled()` REFUSED it. The real root was
+    /// substituted, so the assertion is re-aimed rather than deleted: the
+    /// refusal behaviour is proved against an INJECTED placeholder (which is
+    /// what `bundled()` would become again if the constant regressed), and the
+    /// bundled constant is separately proved to be real and to construct.
     #[test]
-    fn the_bundled_constant_is_the_empty_placeholder_and_is_refused() {
-        assert!(RELEASE_TRUST_ROOT_JSON.contains("\"keys\":[]"));
+    fn a_placeholder_root_is_refused_and_the_bundled_root_is_not_one() {
+        let empty = r#"{"schema":"wayland.release.trust-root","schema_version":1,"keys":[]}"#;
         assert!(matches!(
-            ReleaseVerifier::bundled(),
+            ReleaseVerifier::with_trust_root_json(empty.as_bytes()),
             Err(UpdateTrustError::PlaceholderTrustRoot(_))
         ));
+
+        let zeros = format!(
+            r#"{{"schema":"wayland.release.trust-root","schema_version":1,"keys":[{{"key_id":"k","public_key_base64":"{}","role":"release_acceptance","valid_from":0,"retired_at":null}}]}}"#,
+            BASE64.encode([0u8; 32])
+        );
+        assert!(matches!(
+            ReleaseVerifier::with_trust_root_json(zeros.as_bytes()),
+            Err(UpdateTrustError::PlaceholderTrustRoot(_))
+        ));
+
+        // The control. Without it the two refusals above pass against a
+        // constructor that refuses everything, which would brick every install.
+        assert!(
+            !RELEASE_TRUST_ROOT_JSON.contains("\"keys\":[]"),
+            "the bundled root regressed to the empty placeholder"
+        );
+        ReleaseVerifier::bundled().expect("the bundled trust root must construct");
+    }
+
+    /// Only the role the updater will act on belongs in the bundled root.
+    /// `resolve` refuses every other role, so a `packaging`,
+    /// `deployment_preparation` or `rollback_rehearsal` key bundled here could
+    /// never authorise an install — it would be trust surface with no function,
+    /// and it would weaken the four-state ledger's separation.
+    #[test]
+    fn the_bundled_root_carries_only_the_role_the_updater_accepts() {
+        let root: WireTrustRoot =
+            serde_json::from_slice(RELEASE_TRUST_ROOT_JSON.as_bytes()).expect("must parse");
+        assert_eq!(root.keys.len(), 1, "exactly one key belongs here");
+        assert_eq!(root.keys[0].role, RELEASE_MANIFEST_ROLE);
+        assert_eq!(
+            root.keys[0].valid_from, 0,
+            "must vouch for the first release it signs"
+        );
+        assert!(
+            root.keys[0].retired_at.is_none(),
+            "a retired key installs nothing"
+        );
+        assert_eq!(
+            decode_public_key_bytes(&root.keys[0].public_key_base64)
+                .expect("must decode")
+                .len(),
+            32
+        );
+
+        // The refusal this bundling relies on, proved live rather than assumed:
+        // a non-acceptance role does not resolve.
+        let verifier = ReleaseVerifier::with_trust_root(WireTrustRoot {
+            schema: TRUST_ROOT_SCHEMA.to_string(),
+            schema_version: TRUST_ROOT_SCHEMA_VERSION,
+            keys: vec![WireTrustedKey {
+                role: "packaging".to_string(),
+                ..root.keys[0].clone()
+            }],
+        })
+        .expect("a well-formed root constructs regardless of role");
+        assert!(matches!(
+            verifier.resolve(&root.keys[0].key_id, 1_800_000_000),
+            Err(UpdateTrustError::RoleMismatch { .. })
+        ));
+        // Control: the same key under its real role DOES resolve, so the
+        // refusal above is about the role and not about the key.
+        assert!(
+            ReleaseVerifier::bundled()
+                .expect("bundled must construct")
+                .resolve(&root.keys[0].key_id, 1_800_000_000)
+                .is_ok()
+        );
     }
 
     #[test]

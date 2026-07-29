@@ -259,6 +259,33 @@ Note `hetzner-dsm` genuinely **cannot** reach `seandesktop` (`Permission denied 
 that one is real, and is a separate authorization request pending with Sean. Do not conflate the
 two: your Mac reaches both hosts; the two hosts cannot reach each other.
 
+### On SeanDesktop, work on `D:\` — NOT `C:\` (Sean, 2026-07-29)
+
+`C:` is 1862 GB with only **167 GB free**. `D:` is 7452 GB with **5413 GB free**, and `E:` is
+1863 GB essentially untouched. **New working directories go under `D:\`.**
+
+**We are why C: is full.** Lanes have been creating working directories at the *root of* `C:\` —
+~50 of them (`ferrox-win` 174 GB, `wayland-dev` 147 GB, `ferrox-win-f0403`, `ferrox-win-p21`,
+`wl-test-99`, `p22*`, `wl-uat-*`, `f2[0-8]*`, `C:\tmp`) totalling **512 GB**, of which **471 GB is
+Rust `target/`**. The evidence directories are ~0 GB — the cost is entirely build output.
+
+Rules:
+- Do not create directories at the root of `C:\`. Use `D:\<lane-name>\`.
+- **Never delete `C:\actions-runner-{core,ferrox,wayland}`** — three live self-hosted runner
+  services. Check for running `Runner.Worker`/`cargo`/`rustc` before any cleanup; two CI jobs were
+  mid-build when this was written.
+- Clean up your own `target/` when your lane ends. Do not delete another lane's tree.
+
+## 6a-ii. `/tmp` on hetzner is SHARED between lanes — your glob will catch their files
+
+A lane on 2026-07-29 ran a post-fix check that reported its defect still present. The evidence
+came from `/tmp/final-types.log` — **another lane's file**, caught by an over-broad glob. Many
+lanes run on `hetzner-dsm` at once and they all share `/tmp`.
+
+Write evidence to a path unique to your lane (`/tmp/<lane-name>-*` or inside your worktree), and
+**scope every glob you read back.** A measurement that silently includes another lane's output is
+not your measurement, and it can point either way — a false red as here, or a false green.
+
 ## 6b. A silent wait looks exactly like a hung agent — this has killed four lanes
 
 A stream watchdog kills an agent after **600s with no output**. A polling loop that prints
@@ -352,3 +379,25 @@ Keep it under ~40 lines: per plan — landed / partial / blocked, the honest ver
 results with real numbers, live evidence one-liner, any HIGH finding, your lane branch name
 and HEAD SHA, and anything the orchestrator must serialize (protocol seams, contract
 requests, shared-file edits). State clearly what you did NOT do.
+
+---
+
+## §3b-ii — hetzner injects a provider credential you did not set
+
+**Added 2026-07-29 after `27-media-intake` nearly published a false live proof.**
+
+`/root/.wayland/.env` on `hetzner-dsm` injects **`ANTHROPIC_API_KEY`** into the product's process
+**regardless of what you `unset` in the shell.** A lane proving "provider X was selected" can
+therefore be silently running on a different arm than the one it believes.
+
+That lane's first live vision proof ran on **arm 1 (Anthropic)** while it believed it was proving
+**arm 5 (Flux)**. It was caught only because the lane read the *resolver's own arm line* back out
+of the log instead of trusting its environment setup.
+
+**The rule:** if your claim depends on which provider, backend or credential was selected, **read
+the selection back from the product's own output** and assert on it. Do not infer it from what you
+exported or unset. An env var you did not set is not a hypothetical on this host — it is the
+default.
+
+This is the same family as the self-passing assertion: the environment you *think* you configured
+is an unverified premise, and on this box it is a **false** one.
