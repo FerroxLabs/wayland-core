@@ -175,20 +175,28 @@ having something the original filing never had, a deterministic reproduction.
 
 ## 8. Open / not done
 
-- **The snapshot digest is the same defect, unfixed.**
+- **The snapshot digest is structurally the same shape — INFERRED BY READING,
+  NOT MEASURED. I did not reproduce it and I am not grading it.**
   `reducer.rs:15 ReducedSessionState::digest` is `sha256(serde_json::to_vec(self))`
   — the same re-serialization dependency — and `session_journal.rs:2538` carries
   a parallel `"session snapshot"` allowlist of ~10 blessed encodings, guarded by
-  `known_explicit_snapshot_defaults_are_wire_compatible`, which is vacuous in
-  exactly the same way (it injects into a value whose `state_digest` was computed
-  from the clean state). Failure mode is `SnapshotDigestMismatch` and it
-  propagates out of `recovered_state`, so the impact is the same: session
-  unreadable. The raw bytes are available at `snapshot.rs:359`, so the same fix
-  applies almost verbatim.
-  **I did not change it.** Deliberate: it is a second integrity surface and I
-  was not willing to ship a change to one without the same depth of red-before-
-  green proof I gave the journal. Named here rather than left in a comment;
-  this should be the next lane and it is small.
+  `known_explicit_snapshot_defaults_are_wire_compatible`, which appears vacuous
+  in the same way (it injects into a value whose `state_digest` was computed
+  from the clean state). If it fires, the failure is `SnapshotDigestMismatch`,
+  which propagates out of `recovered_state`, so the impact would be the same:
+  session unreadable. The raw bytes are available at `snapshot.rs:359`, so the
+  same fix looks like it applies almost verbatim, and
+  `snapshot.rs:111 state_digest_under_stored_encoding` is the single call site
+  to change.
+
+  **Why I stopped here rather than fixing it.** I have no red-before-green
+  reproduction for the snapshot, and shipping a change to a second integrity
+  surface on a reading is precisely the standard I held the two previous lanes
+  to in §1 and §7. An unmeasured structural argument is how this finding
+  accumulated three partial fixes already. The next lane should **measure it
+  first** — build a snapshot fixture whose `state_digest` covers its own bytes,
+  the way `journal_wire_blessed_defaults.rs` does for the journal — and only
+  then decide. That is maybe an hour, and the harness to copy now exists.
 - The original 23B-01 field sighting is **still not re-explained**. See
   LIVE-EVIDENCE §6.
 - No macOS or Windows leg — pure-serde, platform-independent path; nothing
