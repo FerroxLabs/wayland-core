@@ -211,11 +211,21 @@ built-in tools (Read, Write, Edit, Bash, Grep, Glob, Spawn), supports MCP
 servers, skills, hooks, and long-term memory. It also exposes a JSON stream
 protocol for host integration (e.g. the Electron-based Wayland desktop app).
 
-Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
+Tech stack: **Rust 2024 edition** (`Cargo.toml:156`), stable toolchain, Cargo workspace under
+`crates/` with **56 members**.
+
+> **Corrected 2026-07-29.** This line read "Rust 2021 edition" and was false. A recon lane nearly
+> published "the peer is on 2024, we are on 2021" as a competitive finding on the strength of it.
+> **Verify edition and member count against `Cargo.toml`, never against this file.**
 
 ### Crate Map
 
 Dependencies flow **downward** — never introduce circular or upward references.
+
+> **This table is PARTIAL and always has been: it names ~18 of 56 workspace members.** It is a
+> guide to the layering, not an inventory. `ls crates/` is the inventory. Do not conclude a crate
+> does not exist because it is absent here — that is a known-negative assertion against a document
+> proven incomplete.
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|

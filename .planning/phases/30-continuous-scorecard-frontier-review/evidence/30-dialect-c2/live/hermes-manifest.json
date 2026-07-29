@@ -1,0 +1,9 @@
+{
+  "tool_label": "hermes",
+  "tool_version": "0.17.0 dbe734be",
+  "captured_at_utc": "unix:1785309810",
+  "corpus_sha256": "13c077fcc332bc182da91b0008112e542ffc72862e38608aefd87466d0f0ddd5",
+  "requests_observed": 1,
+  "model_requested": "fixture-chat-v1",
+  "notes": []
+}

@@ -1,0 +1,4 @@
+{"corpus_version":1,"tools":[
+ {"name":"write_file","description":"","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}},
+ {"name":"read_file","description":"","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
+]}

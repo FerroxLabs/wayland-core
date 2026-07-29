@@ -1,0 +1,723 @@
+{
+  "corpus_version": 1,
+  "tools": [
+    {
+      "name": "clarify",
+      "description": "Ask the user a question when you need clarification, feedback, or a decision before proceeding. Supports two modes:\n\n1. **Multiple choice** — provide up to 4 choices. The user picks one or types their own answer via a 5th 'Other' option.\n2. **Open-ended** — omit choices entirely. The user types a free-form response.\n\nCRITICAL: when you are offering options, put each option ONLY in the `choices` array — NEVER enumerate the options inside the `question` text. The UI renders `choices` as selectable rows; options written into the question string render as dead prose the user can't pick. Right: question='Which deployment target?', choices=['staging', 'prod']. Wrong: question='Which target? 1) staging 2) prod', choices=[].\n\nUse this tool when:\n- The task is ambiguous and you need the user to choose an approach\n- You want post-task feedback ('How did that work out?')\n- You want to offer to save a skill or update memory\n- A decision has meaningful trade-offs the user should weigh in on\n\nDo NOT use this tool for simple yes/no confirmation of dangerous commands (the terminal tool handles that). Prefer making a reasonable default choice yourself when the decision is low-stakes.",
+      "parameters": {
+        "properties": {
+          "choices": {
+            "description": "REQUIRED whenever you are presenting selectable options: each distinct option is its own array element (up to 4). The UI renders these as pickable rows and auto-appends an 'Other (type your answer)' option. Omit this parameter entirely ONLY for a genuinely open-ended free-text question.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
+          "question": {
+            "description": "The question itself, and ONLY the question (e.g. 'Which deployment target?'). Do NOT embed the answer options here — pass them as separate elements in `choices`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "delegate_task",
+      "description": "Spawn one or more subagents to work on tasks in isolated contexts. Each subagent gets its own conversation, terminal session, and toolset. Only the final summary is returned -- intermediate tool results never enter your context window.\n\nTWO MODES (one of 'goal' or 'tasks' is required):\n1. Single task: provide 'goal' (+ optional context, toolsets).\n2. Batch (parallel): provide 'tasks' array with up to 3 items concurrently for this user (configured via delegation.max_concurrent_children in config.yaml). Nested delegation is OFF for this user (max_spawn_depth=1): every child is a leaf and cannot delegate further. Raise delegation.max_spawn_depth in config.yaml to enable nesting.\n\nBOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — you and the user keep working, and each subagent's full result re-enters the conversation as its own new message when it finishes. A batch is just N independent background subagents (N handles, each completes on its own). Do NOT wait or poll; just continue with other work after dispatching.\n\nWHEN TO USE delegate_task:\n- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n- Tasks that would flood your context with intermediate data\n- Parallel independent workstreams (research A and B simultaneously)\n\nWHEN NOT TO USE (use these instead):\n- Mechanical multi-step work with no reasoning needed -> use execute_code\n- Single tool call -> just call the tool directly\n- Tasks needing user interaction -> subagents cannot use clarify\n- Durable long-running work that must outlive the current turn -> use cronjob (action='create') or terminal(background=True, notify_on_complete=True) instead. Background delegations are NOT durable: if the parent session is closed (/new) or the process exits before a subagent finishes, that subagent's work is discarded, and /stop cancels every running background subagent.\n\nIMPORTANT:\n- Subagents have NO memory of your conversation. Pass all relevant info (file paths, error messages, constraints) via the 'context' field.\n- If the user is writing in a non-English language, or asked for output in a specific language / tone / style, say so in 'context' (e.g. \"respond in Chinese\", \"return output in Japanese\"). Otherwise subagents default to English and their summaries will contaminate your final reply with the wrong language.\n- Subagent summaries are SELF-REPORTS, not verified facts. A subagent that claims \"uploaded successfully\" or \"file written\" may be wrong. For operations with external side-effects (HTTP POST/PUT, remote writes, file creation at shared paths, publishing), require the subagent to return a verifiable handle (URL, ID, absolute path, HTTP status) and verify it yourself — fetch the URL, stat the file, read back the content — before telling the user the operation succeeded.\n- Leaf subagents (role='leaf', the default) CANNOT call: delegate_task, clarify, memory, send_message, execute_code.\n- Orchestrator subagents (role='orchestrator') retain delegate_task so they can spawn their own workers, but still cannot use clarify, memory, send_message, or execute_code. Orchestrators are bounded by max_spawn_depth=1 for this user and can be disabled globally via delegation.orchestrator_enabled=false.\n- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n- Each subagent gets its own terminal session (separate working directory and state).\n- Results are always returned as an array, one entry per task.",
+      "parameters": {
+        "properties": {
+          "acp_args": {
+            "description": "Arguments for the ACP command (default: ['--acp', '--stdio']). Only used when acp_command is set. Leave empty unless acp_command is explicitly provided.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "acp_command": {
+            "description": "Override ACP command for child agents (e.g. 'copilot'). When set, children use ACP subprocess transport instead of inheriting the parent's transport. Requires an ACP-compatible CLI (currently GitHub Copilot CLI via 'copilot --acp --stdio'). See agent/copilot_acp_client.py for the implementation. IMPORTANT: Do NOT set this unless the user has explicitly told you a specific ACP-compatible CLI is installed and configured. Leave empty to use the parent's default transport (Hermes subagents).",
+            "type": "string"
+          },
+          "background": {
+            "description": "DEPRECATED / IGNORED. Single-task delegations always run in the background automatically — you do not need to (and cannot) opt in or out. The result re-enters the conversation as a new message when the subagent finishes; just continue working in the meantime. Setting this has no effect; the parameter remains only for backward compatibility.",
+            "type": "boolean"
+          },
+          "context": {
+            "description": "Background information the subagent needs: file paths, error messages, project structure, constraints. The more specific you are, the better the subagent performs.",
+            "type": "string"
+          },
+          "goal": {
+            "description": "What the subagent should accomplish. Be specific and self-contained -- the subagent knows nothing about your conversation history.",
+            "type": "string"
+          },
+          "role": {
+            "description": "Role of the child agent. 'leaf' (default) = focused worker, cannot delegate further. 'orchestrator' = can use delegate_task to spawn its own workers. Nesting is OFF for this user (max_spawn_depth=1); 'orchestrator' is silently forced to 'leaf'. Raise delegation.max_spawn_depth in config.yaml to enable.",
+            "enum": [
+              "leaf",
+              "orchestrator"
+            ],
+            "type": "string"
+          },
+          "tasks": {
+            "description": "Batch mode: tasks to run in parallel (up to 3 for this user, set via delegation.max_concurrent_children). Each gets its own subagent with isolated context and terminal session. When provided, top-level goal/context/toolsets are ignored.",
+            "items": {
+              "properties": {
+                "acp_args": {
+                  "description": "Per-task ACP args override. Leave empty unless acp_command is set.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "acp_command": {
+                  "description": "Per-task ACP command override (e.g. 'copilot'). Overrides the top-level acp_command for this task only. Do NOT set unless the user explicitly told you an ACP CLI is installed.",
+                  "type": "string"
+                },
+                "context": {
+                  "description": "Task-specific context",
+                  "type": "string"
+                },
+                "goal": {
+                  "description": "Task goal",
+                  "type": "string"
+                },
+                "role": {
+                  "description": "Per-task role override. See top-level 'role' for semantics.",
+                  "enum": [
+                    "leaf",
+                    "orchestrator"
+                  ],
+                  "type": "string"
+                },
+                "toolsets": {
+                  "description": "Toolsets for this specific task. Available: 'browser', 'coding', 'computer_use', 'discord', 'discord_admin', 'feishu_doc', 'feishu_drive', 'file', 'homeassistant', 'image_gen', 'kanban', 'project', 'search', 'session_search', 'skills', 'spotify', 'terminal', 'todo', 'tts', 'video', 'video_gen', 'vision', 'web', 'x_search', 'yuanbao'. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "toolsets": {
+            "description": "Toolsets to enable for this subagent. Default: inherits your enabled toolsets. Available toolsets: 'browser', 'coding', 'computer_use', 'discord', 'discord_admin', 'feishu_doc', 'feishu_drive', 'file', 'homeassistant', 'image_gen', 'kanban', 'project', 'search', 'session_search', 'skills', 'spotify', 'terminal', 'todo', 'tts', 'video', 'video_gen', 'vision', 'web', 'x_search', 'yuanbao'. Common patterns: ['terminal', 'file'] for code work, ['web'] for research, ['browser'] for web interaction, ['terminal', 'file', 'web'] for full-stack tasks.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "execute_code",
+      "description": "Run a Python script that can call Hermes tools programmatically. Use this when you need 3+ tool calls with processing logic between them, need to filter/reduce large tool outputs before they enter your context, need conditional branching (if X then Y else Z), or need to loop (fetch N pages, process N files, retry on failure).\n\nUse normal tool calls instead when: single tool call with no processing, you need to see the full result and apply complex reasoning, or the task requires interactive user input.\n\nAvailable via `from hermes_tools import ...`:\n\n  read_file(path: str, offset: int = 1, limit: int = 500) -> dict\n    Lines are 1-indexed. Returns {\"content\": \"...\", \"total_lines\": N}\n  write_file(path: str, content: str) -> dict\n    Always overwrites the entire file.\n  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n    target: \"content\" (search inside files) or \"files\" (find files by name). Returns {\"matches\": [...]}\n  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n    Replaces old_string with new_string in the file.\n  terminal(command: str, timeout=None, workdir=None) -> dict\n    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N}\n\nLimits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script. terminal() is foreground-only (no background or pty).\n\nScripts run in the session's working directory with the active venv's python, so project deps (pandas, etc.) and relative paths work like in terminal().\n\nPrint your final result to stdout. Use Python stdlib (json, re, math, csv, datetime, collections, etc.) for processing between tool calls.\n\nAlso available (no import needed — built into hermes_tools):\n  json_parse(text: str) — json.loads with strict=False; use for terminal() output with control chars\n  shell_quote(s: str) — shlex.quote(); use when interpolating dynamic strings into shell commands\n  retry(fn, max_attempts=3, delay=2) — retry with exponential backoff for transient failures",
+      "parameters": {
+        "properties": {
+          "code": {
+            "description": "Python code to execute. Import tools with `from hermes_tools import terminal, ...` and print your final result to stdout.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "image_generate",
+      "description": "Generate high-quality images from text prompts (text-to-image), or edit / transform an existing image (image-to-image) when the active model supports it. Pass `image_url` to edit that image; add `reference_image_urls` for style/composition references; omit both for text-to-image. The underlying backend (FAL, OpenAI, xAI, etc.) and model are user-configured and not selectable by the agent. Returns the result in the `image` field — either a URL or an absolute file path. To show it to the user, reference that path/URL in your response using the file-delivery convention for the current platform (your platform guidance describes how files are delivered here). When the active terminal backend has a different filesystem, successful local-file results may also include `agent_visible_image` for follow-up terminal/file operations.\n\nActive backend: FAL.ai · model: FLUX 2 Klein 9B\n- supports both text-to-image (omit image_url) and image-to-image / editing (pass image_url); up to 9 reference image(s) via reference_image_urls — routes automatically",
+      "parameters": {
+        "properties": {
+          "aspect_ratio": {
+            "default": "landscape",
+            "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
+            "enum": [
+              "landscape",
+              "square",
+              "portrait"
+            ],
+            "type": "string"
+          },
+          "image_url": {
+            "description": "Optional source image to edit/transform (image-to-image). When provided, the active backend routes to its image editing endpoint; when omitted, it generates from text alone. Pass a public URL or an absolute local file path from the conversation. Only honored by models that support editing — the description above indicates whether the active model does.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "The text prompt describing the desired image (text-to-image) or the edit to apply (image-to-image). Be detailed and descriptive.",
+            "type": "string"
+          },
+          "reference_image_urls": {
+            "description": "Optional list of additional reference image URLs / paths (style, character, or composition references) to guide an image-to-image edit. Supported only by some models and capped per-model; the description above indicates the max.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "memory",
+      "description": "Save durable facts to persistent memory that survive across sessions. Memory is injected into every future turn, so keep entries compact and high-signal.\n\nHOW: make ALL your changes in ONE call via an 'operations' array (each item: {action, content?, old_text?}). The batch applies atomically and the char limit is checked only on the FINAL result — so a single call can remove/replace stale entries to free room AND add new ones, even when an add alone would overflow. The response reports current/limit chars and confirms completion; one batch call finishes the update, so don't repeat it. Use the bare action/content/old_text fields only for a single lone change.\n\nWHEN: save proactively when the user states a preference, correction, or personal detail, or you learn a stable fact about their environment, conventions, or workflow. Priority: user preferences & corrections > environment facts > procedures. The best memory stops the user repeating themselves.\n\nIF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that removes or shortens enough stale entries and adds the new one together.\n\nTARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your notes (environment, conventions, tool quirks, lessons).\n\nSKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, completed-work logs, temporary TODO state (use session_search for those). Reusable procedures belong in a skill, not memory.",
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "The action to perform (single-op shape). Omit when using 'operations'.",
+            "enum": [
+              "add",
+              "replace",
+              "remove"
+            ],
+            "type": "string"
+          },
+          "content": {
+            "description": "The entry content. Required for 'add' and 'replace' (single-op shape).",
+            "type": "string"
+          },
+          "old_text": {
+            "description": "REQUIRED for 'replace' and 'remove' (single-op shape): a short unique substring identifying the existing entry to modify. Omit only for 'add'.",
+            "type": "string"
+          },
+          "operations": {
+            "description": "Batch shape: a list of operations applied atomically in one call against the final char budget. Preferred when making multiple changes or consolidating to make room. Each item is {action, content?, old_text?}.",
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "add",
+                    "replace",
+                    "remove"
+                  ],
+                  "type": "string"
+                },
+                "content": {
+                  "description": "Entry content for add/replace.",
+                  "type": "string"
+                },
+                "old_text": {
+                  "description": "Substring identifying the entry for replace/remove.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "target": {
+            "description": "Which memory store: 'memory' for personal notes, 'user' for user profile.",
+            "enum": [
+              "memory",
+              "user"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "patch",
+      "description": "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. Returns a unified diff. Auto-runs syntax checks after editing.\n\nREPLACE MODE (mode='replace', default): find a unique string and replace it. REQUIRED PARAMETERS: mode, path, old_string, new_string.\nPATCH MODE (mode='patch'): apply V4A multi-file patches for bulk changes. REQUIRED PARAMETERS: mode, patch.",
+      "parameters": {
+        "properties": {
+          "cross_profile": {
+            "default": false,
+            "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories.",
+            "type": "boolean"
+          },
+          "mode": {
+            "default": "replace",
+            "description": "Edit mode. 'replace' (default): requires path + old_string + new_string. 'patch': requires patch content only.",
+            "enum": [
+              "replace",
+              "patch"
+            ],
+            "type": "string"
+          },
+          "new_string": {
+            "description": "REQUIRED when mode='replace'. Replacement text. Pass empty string '' to delete the matched text.",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "REQUIRED when mode='replace'. Exact text to find and replace. Must be unique in the file unless replace_all=true. Include surrounding context lines to ensure uniqueness.",
+            "type": "string"
+          },
+          "patch": {
+            "description": "REQUIRED when mode='patch'. V4A format patch content. Format:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch",
+            "type": "string"
+          },
+          "path": {
+            "description": "REQUIRED when mode='replace'. File path to edit.",
+            "type": "string"
+          },
+          "replace_all": {
+            "default": false,
+            "description": "Replace all occurrences instead of requiring a unique match (default: false)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "process",
+      "description": "Manage background processes started with terminal(background=true). Actions: 'list' (show all), 'poll' (check status + new output), 'log' (full output with pagination), 'wait' (block until done or timeout), 'kill' (terminate), 'write' (send raw stdin data without newline), 'submit' (send data + Enter, for answering prompts), 'close' (close stdin/send EOF).",
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "Action to perform on background processes",
+            "enum": [
+              "list",
+              "poll",
+              "log",
+              "wait",
+              "kill",
+              "write",
+              "submit",
+              "close"
+            ],
+            "type": "string"
+          },
+          "data": {
+            "description": "Text to send to process stdin (for 'write' and 'submit' actions)",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Max lines to return for 'log' action",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Line offset for 'log' action (default: last 200 lines)",
+            "type": "integer"
+          },
+          "session_id": {
+            "description": "Process session ID (from terminal background output). Required for all actions except 'list'.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Max seconds to block for 'wait' action. Returns partial output on timeout.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 500,
+            "description": "Maximum number of lines to read (default: 500, max: 2000)",
+            "maximum": 2000,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 1,
+            "description": "Line number to start reading from (1-indexed, default: 1)",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Path to the file to read (absolute, relative, or ~/path)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_files",
+      "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+      "parameters": {
+        "properties": {
+          "context": {
+            "default": 0,
+            "description": "Number of context lines before and after each match (grep mode only)",
+            "type": "integer"
+          },
+          "file_glob": {
+            "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Maximum number of results to return (default: 50)",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Skip first N results for pagination (default: 0)",
+            "type": "integer"
+          },
+          "output_mode": {
+            "default": "content",
+            "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file",
+            "enum": [
+              "content",
+              "files_only",
+              "count"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "default": ".",
+            "description": "Directory or file to search in (default: current working directory)",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search",
+            "type": "string"
+          },
+          "target": {
+            "default": "content",
+            "description": "'content' searches inside file contents, 'files' searches for files by name",
+            "enum": [
+              "content",
+              "files"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "session_search",
+      "description": "Search past sessions stored in the local session DB, or scroll inside one. FTS5-backed retrieval over the SQLite message store. No LLM calls — every shape returns actual messages from the DB.\n\nSOURCE-FIRST LIMIT\n\n  This tool searches Hermes conversation history only. It is not evidence about the current contents of external sources. If the user provided a direct source such as a URL, phone number/contact, app/thread, file path, account, website, or live system, inspect that original source before or instead of session_search when accessible. Use session_search as secondary context for what was previously said, not as primary proof of what the source currently contains. If the original source is inaccessible, say so and why before falling back to session history. Do not conclude 'not found' or 'no prior correspondence' from session_search alone when a direct source was provided.\n\nFOUR CALLING SHAPES\n\n  1) DISCOVERY — pass `query`:\n     session_search(query=\"auth refactor\", limit=3)\n     Runs FTS5, dedupes hits by session lineage, returns the top N sessions. Each result carries:\n       - session_id, title, when, source\n       - snippet: FTS5-highlighted match excerpt\n       - bookend_start: first 3 user+assistant messages of the session (the goal / kickoff)\n       - messages: ±5 messages around the FTS5 match, with the anchor message flagged (the hit in context)\n       - bookend_end: last 3 user+assistant messages of the session (the resolution / decisions)\n       - match_message_id, messages_before, messages_after\n     Bookends + window together let you reconstruct goal → match → resolution without paying for the whole transcript.\n\n  2) SCROLL — pass `session_id` + `around_message_id`:\n     session_search(session_id=\"...\", around_message_id=12345, window=10)\n     Returns a window of ±`window` messages centered on the anchor. No FTS5, no bookends — just the slice. Use after a discovery call when you need more context than the ±5 default window.\n       - To scroll FORWARD: pass messages[-1].id back as around_message_id.\n       - To scroll BACKWARD: pass messages[0].id back as around_message_id.\n       - The boundary message appears in both windows — orientation marker.\n       - When messages_before or messages_after is < window, you're at the start or end of the session.\n\n  3) READ — pass `session_id` only (no around_message_id):\n     session_search(session_id=\"...\", profile=\"work\")\n     Dumps the whole session by id (first 20 + last 10 messages when large). This is how you resolve an `@session:<profile>/<id>` link the user dropped into the chat: split the value on `/` into profile + id and call session_search(session_id=id, profile=profile).\n\n  4) BROWSE — no args:\n     session_search()\n     Returns recent sessions chronologically: titles, previews, timestamps. Use when the user asks \"what was I working on\" without naming a topic.\n\nFTS5 SYNTAX\n\n  AND is the default — multi-word queries require all terms. Use OR explicitly for broader recall (`alpha OR beta OR gamma`), quoted phrases for exact match (`\"docker networking\"`), boolean (`python NOT java`), or prefix wildcards (`deploy*`).\n\nWHEN TO USE\n\n  Reach for this on questions about Hermes conversation history itself, such as \"what did we do about X\", \"where did we leave Y\", or \"find the session where Z\". If the user provided a direct source identifier, inspect that source first when accessible; session_search can then supply historical context. The session DB carries what was said when; external tools show current source/world state.",
+      "parameters": {
+        "properties": {
+          "around_message_id": {
+            "description": "Scroll shape. Message id to center the window on. From a discovery result use match_message_id, or any id seen in a prior window. To scroll forward pass the last window message's id; to scroll backward pass the first.",
+            "type": "integer"
+          },
+          "limit": {
+            "default": 3,
+            "description": "Discovery shape only. Max sessions to return (default 3, max 10). Bump to 5–10 when the topic likely spans several sessions and you want to pick the right one to scroll into.",
+            "type": "integer"
+          },
+          "profile": {
+            "description": "Optional. Read sessions from another Hermes profile's database (read-only). Use when resolving an `@session:<profile>/<id>` link: pass the profile segment here with session_id as the id segment. Omit to use the current profile.",
+            "type": "string"
+          },
+          "query": {
+            "description": "Search query (discovery shape). Keywords, phrases, or boolean expressions to find in past sessions. Omit to browse recent sessions. Ignored when session_id + around_message_id are set (scroll shape).",
+            "type": "string"
+          },
+          "role_filter": {
+            "description": "Optional. Comma-separated roles to include. Discovery defaults to 'user,assistant' (tool output is usually noise). Pass 'user,assistant,tool' to include tool output (debugging tool behaviour) or 'tool' to search tool output only.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Scroll shape. Session to read inside. Use the session_id returned from a prior discovery call. Must be paired with around_message_id.",
+            "type": "string"
+          },
+          "sort": {
+            "description": "Discovery shape only. Temporal bias on top of FTS5 ranking. Omit to keep relevance-only ordering (suitable for exploratory recall — \"what do we know about X\"). Set 'newest' for recency-shaped questions (\"where did we leave X\"). Set 'oldest' for origin-shaped questions (\"how did X start\"). Ignored in scroll and browse shapes.",
+            "enum": [
+              "newest",
+              "oldest"
+            ],
+            "type": "string"
+          },
+          "window": {
+            "default": 5,
+            "description": "Scroll shape only. Messages to return on each side of the anchor (anchor itself always included). Clamped to [1, 20]. Default 5.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "skill_manage",
+      "description": "Manage skills (create, update, delete). Skills are your procedural memory — reusable approaches for recurring task types. New skills go to ~/.hermes/skills/; existing skills can be modified wherever they live.\n\nActions: create (full SKILL.md + optional category), patch (old_string/new_string — preferred for fixes), edit (full SKILL.md rewrite — major overhauls only), delete, write_file, remove_file.\n\nOn delete, pass `absorbed_into=<umbrella>` when you're merging this skill's content into another one, or `absorbed_into=\"\"` when you're pruning it with no forwarding target. This lets the curator tell consolidation from pruning without guessing, so downstream consumers (cron jobs that reference the old skill name, etc.) get updated correctly. The target you name in `absorbed_into` must already exist — create/patch the umbrella first, then delete.\n\nCreate when: complex task succeeded (5+ calls), errors overcome, user-corrected approach worked, non-trivial workflow discovered, or user asks you to remember a procedure.\nUpdate when: instructions stale/wrong, OS-specific failures, missing steps or pitfalls found during use. If you used a skill and hit issues not covered by it, patch it immediately.\n\nAfter difficult/iterative tasks, offer to save as a skill. Skip for simple one-offs. Confirm with user before creating/deleting.\n\nGood skills: trigger conditions, numbered steps with exact commands, pitfalls section, verification steps. Use skill_view() to see format examples.\n\nPinned skills are protected from deletion only — skill_manage(action='delete') will refuse with a message pointing the user to `hermes curator unpin <name>`. Patches and edits go through on pinned skills so you can still improve them as pitfalls come up; pin only guards against irrecoverable loss.",
+      "parameters": {
+        "properties": {
+          "absorbed_into": {
+            "description": "For 'delete' only — declares intent so the curator can tell consolidation from pruning without guessing. Pass the umbrella skill name when this skill's content was merged into another (the target must already exist). Pass an empty string when the skill is truly stale and being pruned with no forwarding target. Omitting the arg on delete is supported for backward compatibility but downstream tooling (e.g. cron-job skill reference rewriting) will have to guess at intent.",
+            "type": "string"
+          },
+          "action": {
+            "description": "The action to perform.",
+            "enum": [
+              "create",
+              "patch",
+              "edit",
+              "delete",
+              "write_file",
+              "remove_file"
+            ],
+            "type": "string"
+          },
+          "category": {
+            "description": "Optional category/domain for organizing the skill (e.g., 'devops', 'data-science', 'mlops'). Creates a subdirectory grouping. Only used with 'create'.",
+            "type": "string"
+          },
+          "content": {
+            "description": "Full SKILL.md content (YAML frontmatter + markdown body). Required for 'create' and 'edit'. For 'edit', read the skill first with skill_view() and provide the complete updated text.",
+            "type": "string"
+          },
+          "file_content": {
+            "description": "Content for the file. Required for 'write_file'.",
+            "type": "string"
+          },
+          "file_path": {
+            "description": "Path to a supporting file within the skill directory. For 'write_file'/'remove_file': required, must be under references/, templates/, scripts/, or assets/. For 'patch': optional, defaults to SKILL.md if omitted.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Skill name (lowercase, hyphens/underscores, max 64 chars). Must match an existing skill for patch/edit/delete/write_file/remove_file.",
+            "type": "string"
+          },
+          "new_string": {
+            "description": "Replacement text (required for 'patch'). Can be empty string to delete the matched text.",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "Text to find in the file (required for 'patch'). Must be unique unless replace_all=true. Include enough surrounding context to ensure uniqueness.",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "For 'patch': replace all occurrences instead of requiring a unique match (default: false).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "skill_view",
+      "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
+      "parameters": {
+        "properties": {
+          "file_path": {
+            "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The skill name (use skills_list to see available skills). For plugin-provided skills, use the qualified form 'plugin:skill' (e.g. 'superpowers:writing-plans').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "skills_list",
+      "description": "List available skills (name + description). Use skill_view(name) to load full content.",
+      "parameters": {
+        "properties": {
+          "category": {
+            "description": "Optional category filter to narrow results",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "terminal",
+      "description": "Execute shell commands on a Linux environment. Filesystem, current working directory, and exported environment variables persist between calls.\n\nDo NOT use cat/head/tail to read files — use read_file instead.\nDo NOT use grep/rg/find to search — use search_files instead.\nDo NOT use ls to list directories — use search_files(target='files') instead.\nDo NOT use sed/awk to edit files — use patch instead.\nDo NOT use echo/cat heredoc to create files — use write_file instead.\nReserve terminal for: builds, installs, git, processes, scripts, network, package managers, and anything that needs a shell.\nBecause exported environment state persists, activate a virtualenv or export setup variables once per session; do not re-source the same environment before every command unless a command proves the shell state was reset.\n\nForeground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for short commands.\nBackground: Set background=true to get a session_id. Almost always pair with notify_on_complete=true — bg without notify runs SILENTLY and you have no way to learn it finished short of calling process(action='poll') yourself. Two legitimate uses:\n  (1) Long-lived processes that never exit (servers, watchers, daemons) — silent is correct, there's no exit to notify on.\n  (2) Long-running bounded tasks (tests, builds, deploys, CI pollers, batch jobs) — MUST set notify_on_complete=true. Without it you'll either forget to poll or sit blocked waiting for the user to surface the result.\nFor servers/watchers, do NOT use shell-level background wrappers (nohup/disown/setsid/trailing '&') in foreground mode. Use background=true so Hermes can track lifecycle and output.\nAfter starting a server, verify readiness with a health check or log signal, then run tests in a separate terminal() call. Avoid blind sleep loops.\nUse process(action=\"poll\") for progress checks, process(action=\"wait\") to block until done.\nWorking directory: Use 'workdir' for per-command cwd.\nPTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).\n\nDo NOT use vim/nano/interactive tools without pty=true — they hang without a pseudo-terminal. Pipe git output to cat if it might page.\n",
+      "parameters": {
+        "properties": {
+          "background": {
+            "default": false,
+            "description": "Run the command in the background. Almost always pair with notify_on_complete=true — without it, the process runs silently and you'll have no way to learn it finished short of calling process(action='poll') yourself (easy to forget, leading to silent blindness on long jobs). Two legitimate patterns: (1) Long-lived processes that never exit (servers, watchers, daemons) — these stay silent because there's no exit to notify on. (2) Long-running bounded tasks (tests, builds, deploys, CI pollers, batch jobs) — these MUST set notify_on_complete=true. For short commands, prefer foreground with a generous timeout instead.",
+            "type": "boolean"
+          },
+          "command": {
+            "description": "The command to execute on the VM",
+            "type": "string"
+          },
+          "notify_on_complete": {
+            "default": false,
+            "description": "When true (and background=true), you'll be automatically notified exactly once when the process finishes. **This is the right choice for almost every long-running task** — tests, builds, deployments, multi-item batch jobs, anything that takes over a minute and has a defined end. Use this and keep working on other things; the system notifies you on exit. MUTUALLY EXCLUSIVE with watch_patterns — when both are set, watch_patterns is dropped.",
+            "type": "boolean"
+          },
+          "pty": {
+            "default": false,
+            "description": "Run in pseudo-terminal (PTY) mode for interactive CLI tools like Codex, Claude Code, or Python REPL. Only works with local and SSH backends. Default: false.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "Max seconds to wait (default: 180, foreground max: 600). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily. Foreground timeout above 600s is rejected; use background=true for longer commands.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "watch_patterns": {
+            "description": "Strings to watch for in background process output. HARD RATE LIMIT: at most 1 notification per 15 seconds per process — matches arriving inside the cooldown are dropped. After 3 consecutive 15-second windows with dropped matches, watch_patterns is automatically disabled for that process and promoted to notify_on_complete behavior (one notification on exit, no more mid-process spam). USE ONLY for truly rare, one-shot mid-process signals on LONG-LIVED processes that will never exit on their own — e.g. ['Application startup complete'] on a server so you know when to hit its endpoint, or ['migration done'] on a daemon. DO NOT use for: (1) end-of-run markers like 'DONE'/'PASS' — use notify_on_complete instead; (2) error patterns like 'ERROR'/'Traceback' in loops or multi-item batch jobs — they fire on every iteration and you'll hit the strike limit fast; (3) anything you'd ever combine with notify_on_complete. When in doubt, choose notify_on_complete. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "workdir": {
+            "description": "Working directory for this command (absolute path). Defaults to the session working directory.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "text_to_speech",
+      "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+      "parameters": {
+        "properties": {
+          "output_path": {
+            "description": "Optional custom file path to save the audio. Defaults to ~/.hermes/audio_cache/<timestamp>.mp3",
+            "type": "string"
+          },
+          "text": {
+            "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model); over-long input is truncated.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "todo",
+      "description": "Manage your task list for the current session. Use for complex tasks with 3+ steps or when the user provides multiple tasks. Call with no parameters to read the current list.\n\nWriting:\n- Provide 'todos' array to create/update items\n- merge=false (default): replace the entire list with a fresh plan\n- merge=true: update existing items by id, add any new ones\n\nEach item: {id: string, content: string, status: pending|in_progress|completed|cancelled}\nList order is priority. Only ONE item in_progress at a time.\nMark items completed immediately when done. If something fails, cancel it and add a revised item.\n\nAlways returns the full current list.",
+      "parameters": {
+        "properties": {
+          "merge": {
+            "default": false,
+            "description": "true: update existing items by id, add new ones. false (default): replace the entire list.",
+            "type": "boolean"
+          },
+          "todos": {
+            "description": "Task items to write. Omit to read current list.",
+            "items": {
+              "properties": {
+                "content": {
+                  "description": "Task description",
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Unique item identifier",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "Current status",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "content",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "vision_analyze",
+      "description": "Load an image into the conversation so you can see it. Accepts a URL, local file path, or data URL. When your active model has native vision, the image is attached to your context directly and you read the pixels yourself on the next turn — call this any time the user references an image (filepath in their message, URL in tool output, screenshot from the browser, etc.). For non-vision models, falls back to an auxiliary vision model that returns a text description.",
+      "parameters": {
+        "properties": {
+          "image_url": {
+            "description": "Image URL (http/https), local file path, or data: URL to load.",
+            "type": "string"
+          },
+          "question": {
+            "description": "Your specific question or request about the image. Optional context the model uses on the next turn after seeing the image.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_url",
+          "question"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write content to a file, completely replacing existing content. Use this instead of echo/cat heredoc in terminal. Creates parent directories automatically. OVERWRITES the entire file — use 'patch' for targeted edits. Auto-runs syntax checks on .py/.json/.yaml/.toml and other linted languages; only NEW errors introduced by this write are surfaced (pre-existing errors are filtered out).",
+      "parameters": {
+        "properties": {
+          "content": {
+            "description": "Complete content to write to the file",
+            "type": "string"
+          },
+          "cross_profile": {
+            "default": false,
+            "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories — by default these writes are blocked with a warning because they affect a different profile than the one this session is running under.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

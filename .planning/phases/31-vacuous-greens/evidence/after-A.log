@@ -1,0 +1,10 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+────────────
+ Nextest run ID d4332f87-5a7c-4f7d-87da-8c8d7ad30178 with nextest profile: default
+    Starting 0 tests across 1 binary
+────────────
+     Summary [   0.000s] 0 tests run: 0 passed, 0 skipped
+error: no tests to run
+(hint: use `--no-tests` to customize)
+WLRC=4

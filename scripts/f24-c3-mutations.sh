@@ -21,6 +21,8 @@ say() { echo "$*" | tee -a "$OUT"; }
 # executes zero tests exits 0 and would otherwise read as a pass.
 run_named() {
   local pkg="$1" testfile="$2" name="$3" log="$4"
+  # vacuity-checked: `N passed`/`N failed` parsed from the log below; a run that
+  # executed nothing returns state 3 ("ran nothing"), graded apart from a pass.
   cargo test -p "$pkg" --test "$testfile" -- --exact "$name" > "$log" 2>&1
   local rc=$?
   local ran

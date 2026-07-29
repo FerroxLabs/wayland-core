@@ -191,10 +191,12 @@ impl AuditTrail {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| SwarmError::Audit(format!("open audit db: {e}")))?;
-        // Forge sets WAL for crash safety + concurrent reads. Mirror it.
-        // pragma_update returns an error only for invalid pragmas; surface it.
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| SwarmError::Audit(format!("set WAL journal_mode: {e}")))?;
+        // Forge sets WAL for crash safety + concurrent reads. Mirror it —
+        // but only where WAL is safe. On a network filesystem WAL corrupts
+        // the database outright (measured), so the mode is selected from the
+        // filesystem backing `path` rather than hardcoded.
+        wcore_config::sqlite_journal::SqliteJournalMode::configure(&conn, path)
+            .map_err(|e| SwarmError::Audit(format!("set journal_mode: {e}")))?;
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| SwarmError::Audit(format!("apply audit schema: {e}")))?;
         Ok(Self { conn })

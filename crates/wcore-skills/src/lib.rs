@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod paths;
 pub mod permissions;
 pub mod prioritizer;
+pub mod promote;
 pub mod prompt;
 pub mod refs;
 pub mod router;
