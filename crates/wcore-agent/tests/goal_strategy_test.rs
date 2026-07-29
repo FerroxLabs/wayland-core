@@ -29,7 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_agent::goal::strategy::{
-    AnvilOutcome, DirectOutcome, FleetOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
+    AnvilOutcome, CouncilRunOutcome, DirectOutcome, FleetOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
 };
 use wcore_agent::goal::{GoalKernel, GoalLifecycle};
 use wcore_agent::orchestration::anvil::TerminalState;
@@ -199,7 +199,7 @@ async fn each_of_the_five_strategies_produces_exactly_one_canonical_transition()
                     .run_council(&id, |owner| async move {
                         StrategyTermination::from_council(
                             owner,
-                            Err(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
+                            CouncilRunOutcome::Failed(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
                         )
                     })
                     .await
@@ -326,7 +326,7 @@ async fn a_strategy_the_durable_record_did_not_authorize_is_refused() {
         .run_council(&id, |owner| async move {
             StrategyTermination::from_council(
                 owner,
-                Ok(&wcore_agent::orchestration::council::driver::CouncilRunResult::Cancelled),
+                CouncilRunOutcome::Ran(&wcore_agent::orchestration::council::driver::CouncilRunResult::Cancelled),
             )
         })
         .await;
@@ -643,7 +643,7 @@ async fn a_council_that_could_not_be_priced_is_unpriced_and_not_blocked() {
         .run_council(&id, |owner| async move {
             StrategyTermination::from_council(
                 owner,
-                Err(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
+                CouncilRunOutcome::Failed(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
             )
         })
         .await

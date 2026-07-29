@@ -246,6 +246,43 @@ pub enum FleetOutcome<'a> {
     DriverFailed { detail: String },
 }
 
+/// What a Council run produced.
+///
+/// Exists for the same reason as [`FleetOutcome`] and [`AnvilOutcome`]: the
+/// SHIPPED council entry point (`drive_council`) returns
+/// `anyhow::Result<CouncilRunResult>`, not `Result<_, CouncilError>`. The typed
+/// arm is kept and preferred — [`Self::from_anyhow`] downcasts, so a wrapped
+/// `CouncilError` still reaches its exact terminal category (`Unpriced`,
+/// `Exhausted{Resource}`, …) rather than being flattened. Only an error that is
+/// genuinely not a `CouncilError` falls through to `DriverFailed`.
+#[derive(Debug)]
+pub enum CouncilRunOutcome<'a> {
+    /// The council ran and produced a result.
+    Ran(&'a CouncilRunResult),
+    /// The council failed with its own typed error.
+    Failed(&'a CouncilError),
+    /// The driver failed around the council, for a stated reason.
+    DriverFailed { detail: String },
+}
+
+impl<'a> CouncilRunOutcome<'a> {
+    /// Classify a shipped-driver error, preferring the typed mapping.
+    ///
+    /// Written as a constructor rather than left to each call site because a
+    /// caller that forgot to downcast would silently lose `Unpriced` — the one
+    /// carrier the 22-02 census said the lifted taxonomy had to ADD, on the
+    /// grounds that folding it into `Blocked` loses why the run never started.
+    #[must_use]
+    pub fn from_anyhow(error: &'a anyhow::Error) -> Self {
+        error.downcast_ref::<CouncilError>().map_or_else(
+            || Self::DriverFailed {
+                detail: error.to_string(),
+            },
+            Self::Failed,
+        )
+    }
+}
+
 /// What an Anvil climb produced.
 ///
 /// Modelled like [`FleetOutcome`] rather than as a bare `Result<_, &EngineError>`
@@ -398,29 +435,29 @@ impl StrategyTermination {
     /// [`GoalStrategy::can_produce_host_observed_evidence`] is false for it.
     /// This adapter has no route to `Verified` at all — see the `compile_fail`
     /// proof on [`Self::from_anvil`].
-    pub fn from_council(
-        owner: LoopOwner<CouncilTag>,
-        result: Result<&CouncilRunResult, &CouncilError>,
-    ) -> Self {
+    pub fn from_council(owner: LoopOwner<CouncilTag>, result: CouncilRunOutcome<'_>) -> Self {
         let terminal = match result {
-            Ok(CouncilRunResult::Council { outcome, .. }) => {
+            CouncilRunOutcome::DriverFailed { detail } => {
+                return owner.terminate(GoalTerminalState::Blocked { reason: detail });
+            }
+            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. }) => {
                 GoalTerminalState::PartiallyCompleted {
                     completed: outcome.chosen_from.len() as u64,
                     failed: outcome.skipped.len() as u64,
                 }
             }
             // One model's answer, no roster to count and no verification owner.
-            Ok(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
-            Ok(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
-            Err(CouncilError::UnpriceableRoster) => GoalTerminalState::Unpriced {
+            CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
+            CouncilRunOutcome::Ran(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
+            CouncilRunOutcome::Failed(CouncilError::UnpriceableRoster) => GoalTerminalState::Unpriced {
                 detail: CouncilError::UnpriceableRoster.to_string(),
             },
-            Err(error @ CouncilError::OverBudget { .. }) => GoalTerminalState::Exhausted {
+            CouncilRunOutcome::Failed(error @ CouncilError::OverBudget { .. }) => GoalTerminalState::Exhausted {
                 kind: ExhaustionKind::Resource,
                 attempts: 0,
                 detail: error.to_string(),
             },
-            Err(error @ CouncilError::DailyBudgetExhausted { .. }) => {
+            CouncilRunOutcome::Failed(error @ CouncilError::DailyBudgetExhausted { .. }) => {
                 GoalTerminalState::Exhausted {
                     kind: ExhaustionKind::Resource,
                     attempts: 0,
@@ -428,14 +465,14 @@ impl StrategyTermination {
                 }
             }
             // Usable proposals ran short: a quality wall, not a resource one.
-            Err(error @ CouncilError::InsufficientProposals { got, .. }) => {
+            CouncilRunOutcome::Failed(error @ CouncilError::InsufficientProposals { got, .. }) => {
                 GoalTerminalState::Exhausted {
                     kind: ExhaustionKind::Quality,
                     attempts: *got as u64,
                     detail: error.to_string(),
                 }
             }
-            Err(error @ CouncilError::NoResolver) => GoalTerminalState::Blocked {
+            CouncilRunOutcome::Failed(error @ CouncilError::NoResolver) => GoalTerminalState::Blocked {
                 reason: error.to_string(),
             },
         };

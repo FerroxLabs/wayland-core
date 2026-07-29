@@ -22,7 +22,7 @@ use wcore_agent::orchestration::council::{
     GateConfig, ProposerSpec, Roster, Stakes, classify_task, drive_council, log_assembly,
     run_council, validate_and_build,
 };
-use wcore_agent::goal::StrategyTermination;
+use wcore_agent::goal::{CouncilRunOutcome, StrategyTermination};
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
@@ -498,16 +498,24 @@ async fn run_crucible_auto(
                 .run_council(&goal_id, |owner| async {
                     match drive_once().await {
                         Ok(result) => {
-                            let termination =
-                                StrategyTermination::from_council(owner, Ok(&result));
+                            let termination = StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::Ran(&result),
+                            );
                             *carried.borrow_mut() = Some(result);
                             termination
                         }
                         // Carried into the terminal transition as the real
                         // error, never swallowed into a clean terminal.
+                        // `from_anyhow` downcasts, so a wrapped `CouncilError`
+                        // still lands on its exact category rather than being
+                        // flattened into `Blocked`.
                         Err(error) => {
                             eprintln!("crucible: {error}");
-                            StrategyTermination::from_council(owner, Err(&error))
+                            StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::from_anyhow(&error),
+                            )
                         }
                     }
                 })
