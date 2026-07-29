@@ -131,10 +131,26 @@ pub enum ReceiptCmd {
 /// this is a no-op.
 ///
 /// A config that fails to resolve must NOT silently leave the boundary down:
-/// the whole point is that an unarmed policy is a fail-open. We surface the
-/// error and refuse to run the command.
-fn arm_egress_policy() -> Result<()> {
-    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
+/// the whole point is that an unarmed policy is a fail-open. But refusing to run
+/// is not the only way to avoid that, and it was the wrong one:
+/// `Config::resolve` fails with *"No API key found"* on any machine with no
+/// provider credential configured, and `backend` needs no provider at all. The
+/// first version of this function propagated that error, which killed the whole
+/// operator surface — `list`, `probe`, `run`, `cancel`, `orphans`, `scan` — on
+/// such a machine. Measured on `seandesktop` 2026-07-29 by lane
+/// `25-c4-windows`: `backend list` exits 0 with a full table on 0.12.25 and
+/// exits 1 with *"No API key found"* on the fixed binary. It was invisible on
+/// the Linux proof host only because `/root/.wayland/.env` there injects
+/// `ANTHROPIC_API_KEY` into every process.
+///
+/// So on a resolution failure we arm the boundary from
+/// [`Config::default`] instead, which is `[security] enabled = true` with an
+/// EMPTY operator allowlist — strictly *stricter* than any resolved config
+/// could have been, since `egress_allow` only ever adds hosts. That is
+/// fail-closed in the direction that matters, and it is loud rather than
+/// silent.
+fn arm_egress_policy() {
+    let config = match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
         provider: None,
         api_key: None,
         base_url: None,
@@ -145,14 +161,24 @@ fn arm_egress_policy() -> Result<()> {
         profile: None,
         auto_approve: false,
         project_dir: None,
-    })
-    .context("resolving config to arm the egress policy for `backend`")?;
+    }) {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not resolve config to arm the egress boundary for `backend`; \
+                 arming it from defaults instead — enforcing, with NO operator \
+                 allowlist entries, so any `[security] egress_allow` you configured \
+                 is NOT in effect for this command"
+            );
+            wcore_config::config::Config::default()
+        }
+    };
     wcore_agent::egress::install_egress_policy(&config);
-    Ok(())
 }
 
 pub async fn run(args: BackendArgs) -> Result<()> {
-    arm_egress_policy()?;
+    arm_egress_policy();
     match args.cmd {
         BackendCmd::List { json } => list(json).await,
         BackendCmd::Probe { name } => probe(&name).await,
