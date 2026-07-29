@@ -259,7 +259,86 @@ function selfTest() {
     pass: gradingCountersStillFatal === true,
   });
 
+  // ── the keepalive-window repair, on the REAL measured timeline ──────────
+  // These are the actual offsets from `/root/f24na-run7/telegram-K-keepalive`,
+  // read back out of the fixture journal (seconds after the inbound submit):
+  //   0.1 👀 | 0.1 typing | 5.1 typing | 10.1 typing | 12.7 ✅ + reply | watch to ~17
+  // A correct instrument must call this ABORTED (3 during, 0 after).
+  const realTimeline = {
+    typingAt: [100, 5100, 10100],
+    terminalAt: 12700,
+    replyAt: 12700,
+    watchEndAt: 17000,
+  };
+  const v = keepaliveVerdict(realTimeline);
+  out.push({
+    name: 'known-positive (real measured timeline): 3 refreshes during a 12.7s turn, 0 after — loop ran AND guard aborted',
+    pass: v.gradeable && v.during === 3 && v.after === 0 && v.loop_ran === true && v.aborted === true,
+  });
+
+  // A genuine leak: the loop keeps firing past the terminal reaction. If the
+  // gate cannot redden here it cannot detect the defect it exists for.
+  const leaked = keepaliveVerdict({
+    typingAt: [100, 5100, 10100, 15100, 20100],
+    terminalAt: 12700,
+    replyAt: 12700,
+    watchEndAt: 27000,
+  });
+  out.push({
+    name: 'known-negative (synthetic leak): refreshes continuing past the terminal reaction grade NOT-ABORTED',
+    pass: leaked.aborted === false && leaked.after === 2,
+  });
+
+  // THE REPAIR, third assertion (§6b-ii). The old marker opened the window at
+  // turn-OBSERVATION + 3s (= 3100ms here) instead of at the guard drop. On the
+  // very same real timeline it counts 2 in-turn refreshes as leakage — the
+  // false alarm this gate actually produced on its first run.
+  const oldMarker = 3100;
+  const oldAfter = realTimeline.typingAt.filter((t) => t > oldMarker).length;
+  out.push({
+    name: 'THE REPAIR (keepalive window): the OLD turn-observation marker reports 2 phantom post-turn signals on the same real timeline the repaired marker grades as 0',
+    pass: oldAfter === 2 && v.after === 0,
+  });
+
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// The keepalive-lifecycle verdict, and WHY its window marker is what it is
+// ---------------------------------------------------------------------------
+// FIRST VERSION OF THIS GATE WAS WRONG AND RAISED A FALSE LEAK ALARM. It marked
+// the start of the "after the turn" window at `turn_ran` + 3s. But `turn_ran`
+// is observed when the LLM fixture RECEIVES the request, and on the keepalive
+// leg the fixture then holds the response open for 12s. So the window opened
+// ~9s BEFORE the turn actually ended, and counted two in-turn keepalive
+// refreshes as post-turn leakage. Measured verdict: `typing_after=2`, i.e. a
+// reported product leak that did not exist.
+//
+// The faithful marker is PLATFORM-SIDE and comes from `run_turn` itself
+// (`channel_inbound.rs:544-555`): the typing guard is dropped FIRST, and only
+// then is the terminal reaction sent and the reply dispatched. So the first
+// terminal reaction (or, on an adapter with no `react`, the reply) is the
+// earliest observable that is guaranteed to be AFTER the guard drop. Anything
+// counted after it is genuine leakage.
+export function keepaliveVerdict({ typingAt, terminalAt, replyAt, watchEndAt }) {
+  // Prefer the terminal reaction; fall back to the reply for adapters with no
+  // `react` override. The reply is strictly LATER than the guard drop, so the
+  // fallback shrinks the window — conservative, and cannot manufacture a leak.
+  const end = terminalAt ?? replyAt ?? null;
+  if (end === null) return { gradeable: false, reason: 'no post-guard-drop marker observed', during: 0, after: 0 };
+  const during = typingAt.filter((t) => t <= end).length;
+  const after = typingAt.filter((t) => t > end).length;
+  return {
+    gradeable: true,
+    during,
+    after,
+    watch_ms_after_end: watchEndAt !== null && watchEndAt !== undefined ? watchEndAt - end : null,
+    // The LOOP must be proven to iterate, not merely to have fired once: the
+    // keepalive sends immediately and then every 5s, so `>= 2` is the weakest
+    // assertion that distinguishes "the loop runs" from "the first send ran".
+    loop_ran: during >= 2,
+    aborted: after === 0,
+  };
 }
 
 /** Read an adapter fixture's ack ledger. See the self-test above for why the
@@ -1136,19 +1215,35 @@ async function runLeg({ adapter, ack, label, binary, rootDir, budgetMs, llmDelay
   }
 
   // ── the keepalive-lifecycle window ──────────────────────────────────────
-  // Everything counted from `turnEndedAt` onward is a signal emitted AFTER the
-  // turn finished. `AbortOnDrop` claims there should be none.
-  let typingAfterTurn = 0;
+  // The window is anchored to a PLATFORM-SIDE post-guard-drop marker, NOT to
+  // when the turn was observed starting. See `keepaliveVerdict` for the false
+  // leak alarm the turn-observation marker produced.
+  let keepalive = null;
   if (postTurnWatchMs > 0 && ready) {
-    const mark = fx.typing.length;
+    // Wait for the terminal reaction (or the reply, for a no-`react` adapter)
+    // — that is the guard drop becoming observable.
+    const gotMarker = await waitFor(
+      async () => fx.reactions.some((r) => r.emoji === OK || r.emoji === BAD) || (Array.isArray(fx.replies) && fx.replies.length > 0),
+      budgetMs,
+      500,
+    );
+    note(`post-guard-drop marker observed=${gotMarker}`);
     const until = Date.now() + postTurnWatchMs;
     while (Date.now() < until) {
+      // Emits every iteration and is bounded — a silent poll is indistinguish-
+      // able from a hung agent and the watchdog kills it (LANE-BRIEF §6b).
       // eslint-disable-next-line no-await-in-loop
       await sleep(2000);
       process.stderr.write(`[${adapter}/${label}] keepalive watch: ${Math.round((until - Date.now()) / 1000)}s left, typing=${fx.typing.length}\n`);
     }
-    typingAfterTurn = fx.typing.length - mark;
-    note(`typing signals AFTER the turn completed: ${typingAfterTurn}`);
+    const terminal = fx.reactions.find((r) => r.emoji === OK || r.emoji === BAD);
+    keepalive = keepaliveVerdict({
+      typingAt: fx.typing.map((t) => t.at),
+      terminalAt: terminal ? terminal.at : null,
+      replyAt: Array.isArray(fx.replies) && fx.replies.length ? fx.replies[0].at : null,
+      watchEndAt: Date.now(),
+    });
+    note(`keepalive verdict: during=${keepalive.during} after=${keepalive.after} loop_ran=${keepalive.loop_ran} aborted=${keepalive.aborted} (watched ${Math.round((keepalive.watch_ms_after_end ?? 0) / 1000)}s past the guard drop)`);
   }
 
   // `DiscordFixture` is the one fixture here NOT derived from `AckLedger` — it
@@ -1193,7 +1288,9 @@ async function runLeg({ adapter, ack, label, binary, rootDir, budgetMs, llmDelay
     reactions_total: ledger.reactions.length,
     reaction_emojis: ledger.reactions.map((r) => r.emoji),
     typing_total: ledger.typing.length,
-    typing_after_turn: typingAfterTurn,
+    typing_at_ms: ledger.typing.map((t) => t.at),
+    reaction_at_ms: ledger.reactions.map((r) => r.at),
+    keepalive,
     replies_total: ledger.replies.length,
     affordances: graded,
     gateway_log_bytes: fs.existsSync(gwLog) ? fs.statSync(gwLog).size : 0,
@@ -1302,9 +1399,9 @@ async function main() {
       id: `G-${adapter}-K`,
       adapter,
       kind: 'KEEPALIVE LIFECYCLE',
-      desc: 'a ~12s turn refreshes typing at least twice (the LOOP runs), and ZERO typing arrives in the 14s after it completes (AbortOnDrop aborts)',
-      pass: ka.ready && ka.turn_ran && ka.typing_total >= 2 && ka.typing_after_turn === 0,
-      detail: `typing_during=${ka.typing_total} typing_after=${ka.typing_after_turn}`,
+      desc: 'a ~12s turn refreshes typing at least twice (the LOOP runs, not just its first send), and ZERO typing arrives after the guard drop becomes observable (AbortOnDrop actually aborts)',
+      pass: Boolean(ka.ready && ka.turn_ran && ka.keepalive?.gradeable && ka.keepalive.loop_ran && ka.keepalive.aborted),
+      detail: `gradeable=${ka.keepalive?.gradeable} during=${ka.keepalive?.during} after=${ka.keepalive?.after} loop_ran=${ka.keepalive?.loop_ran} aborted=${ka.keepalive?.aborted} watched_past_end_ms=${ka.keepalive?.watch_ms_after_end}`,
     });
   }
 
