@@ -19,8 +19,18 @@ build-release:
 # ── Test ───────────────────────────────────────────────────────────────────
 
 # Unit + integration tests with nextest (default profile — local dev)
+#
+# `scripts/fd-budget.sh` guarantees RLIMIT_NOFILE is large enough for
+# `test-threads = "num-cpus"` before handing off, or refuses to run and names
+# the resource. nextest holds ~3 pipe fds per concurrently-running test in the
+# RUNNER process, so peak demand is ~3 x nproc; when that crosses the fd limit
+# the spawn fails with EMFILE and nextest reports "exec failed" — which is
+# counted like a test failure but means the test never ran, hits a different
+# set of tests every run, and disappears under --test-threads=1. Measured
+# 2026-07-29: 96 such failures at --test-threads=384, 0 real test failures.
+# It is a pass-through on Windows and a no-op wherever the budget already fits.
 test:
-    vx cargo nextest run --workspace --profile default
+    scripts/fd-budget.sh vx cargo nextest run --workspace --profile default
 
 # Unit + integration tests with nextest (CI profile — used in GitHub Actions)
 #
@@ -31,8 +41,10 @@ test:
 # the next first-deterministic Windows failure. Costs an extra few
 # minutes on cold cache when something fails; saves orders of
 # magnitude on iteration loops.
+#
+# scripts/fd-budget.sh: see the `test` recipe above.
 test-ci:
-    vx cargo nextest run --workspace --profile ci --no-fail-fast
+    scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
 
 # Run a single test by name
 test-one NAME:
