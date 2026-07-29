@@ -1,7 +1,8 @@
 # 26-SC3-ROLLBACK — working notes (append-only, committed as taken)
 
-Lane `26-sc3-rollback`. Base `lane/grade-26`. Worktree
-`/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-sc3-rollback`.
+Lane `26-sc3-rollback`. Base `lane/grade-26`, later merged onto
+`gh/plan/f20-unified-audit-repair @ 4a872413` per orchestrator correction.
+Worktree `/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-sc3-rollback`.
 
 **SC3 (verbatim):** *Backup, restore, profile migration, and reciprocal portability
 survive interruption and restore exact pre-operation state on rollback.* Graded
@@ -9,102 +10,135 @@ survive interruption and restore exact pre-operation state on rollback.* Graded
 
 ---
 
-## M0 — what the verdict already established, and what it left open (minute ~15)
+## M0 — what the verdict established, and what it left open (minute ~15)
 
-Re-read from `26-PHASE-VERDICT.md` "Criterion 3", not inherited as fact — each claim
-below is re-derived in source in M1/M2.
-
-| noun | verdict grade | what is open |
+| noun | verdict grade | what was open |
 |---|---|---|
-| backup | MET | — |
-| restore | MET (Linux + real Windows, `TerminateProcess`, `DIGEST-EQUAL: yes`) | — |
-| profile migration | interruption MET, **rollback NOT** | `migrate` has NO rollback; converges forward on re-drive |
+| backup | MET | — (but no interruption arm of its own) |
+| restore | MET (Linux + real Windows, `TerminateProcess`, `DIGEST-EQUAL: yes`) | single kill point only |
+| profile migration | interruption MET, **rollback NOT** | `migrate` has NO rollback |
 | reciprocal portability | same as migration | same |
 
 Named gap **G3**: *"Rollback for `migrate` — a journal + reverse-apply so an
-interrupted migration restores the pre-operation home."* That is the literal unmet
-clause and it is my primary target.
-
-Residual the verdict did not round off: `ORPHAN-PAYLOAD-TRIALS` still 9 (hermes) /
-11 (openclaw) — a quarantine payload can be written before its index entry exists.
+interrupted migration restores the pre-operation home."*
 
 ## M1 — the backup/restore journal, read in source (minute ~20)
 
-`crates/wcore-cli/src/backup/journal.rs` (568 lines) is a genuine write-ahead journal:
+`crates/wcore-cli/src/backup/journal.rs` is a genuine write-ahead journal: durable
+intent before the first mutation, whole-tree undo store, dead-owner-only recovery
+(the #181 rule), idempotent, prunes itself so a recovered tree digests identically.
 
-- `begin()` writes a durable intent record BEFORE the target is touched, scoped per
-  op AND per owning pid (the #181 rule).
-- `preserve_target()` copies the ENTIRE prior tree into an undo store, then flips
-  `preserved: true`.
-- `recover()` / `recover_with()` roll back every record whose owner is **dead**,
-  newest-first; skips live owners; idempotent; prunes the journal dir so a recovered
-  tree digests identically to a tree that never carried one.
-- `restore.rs:97` is the ONLY `journal::begin` call site in the workspace
-  (`/usr/bin/grep -rn --include='*.rs' "journal::begin" crates/` → 1 hit).
+`restore.rs:97` was the ONLY `journal::begin` call site in the workspace
+(`/usr/bin/grep -rn --include='*.rs' "journal::begin" crates/` → 1 hit; the same
+grep for `journal::recover` → 1 hit, `backup/mod.rs:246`, the manual
+`backup recover` subcommand).
 
-So restore writes into the **live** target (`clear_target()` then per-payload
-`atomic_write`) rather than staging-and-swapping — the same shape as the
-`wcore-skills` `rollback()` defect `F23A-C1-H3` — but unlike that one it is
-**covered by a whole-tree undo store captured before the first mutation**, so the
-lost-update window is closed by the journal rather than by atomicity of the swap.
-
-### D1 — SUSPECTED DEFECT: a stale undo store can clobber a later completed op
-
-`restore_archive()` calls `journal::begin()` **without first recovering pending
-dead-owner records**. Hypothesised sequence:
-
-1. restore #1 → record A, undo-A = pristine tree. **SIGKILL mid-write.** Tree is now
-   damaged (`clear_target` runs first, so it is near-empty).
-2. User re-runs `backup restore --replace` (the natural thing to do; they do not know
-   `backup recover` exists). Record B's `pre_digest` is the DAMAGED tree; undo-B is
-   the damaged tree. Restore #2 **succeeds**; `commit()` → `close()` removes B, then
-   `prune_journal_root` finds undo-A still present so the journal root SURVIVES with
-   record A + undo-A intact.
-3. Any later `backup recover` (or a third op's recovery) finds record A, owner dead,
-   `preserved: true` → `restore_from_undo` **clears the target and restores the
-   pristine pre-op tree**, destroying the successfully restored content of step 2.
-
-If real this is user-facing data loss, severity HIGH. **Status: hypothesis from
-source reading. Must be proven by an executable test that fails at base before any
-fix.** Not yet proven — do not report it until it is.
-
-### D2 — recovery is manual-only
-
-`journal::recover` has exactly one call site in the workspace,
-`backup/mod.rs:246` = the `backup recover --home` subcommand. Nothing calls it on
-startup, and `restore_archive` does not call it. A user killed mid-restore is left
-with a damaged home and no signal. Severity depends on D1.
+Restore writes into the **live** target — `clear_target()` then per-payload
+`atomic_write` — the same shape as `F23A-C1-H3` in `wcore-skills`. Unlike that
+one it is covered by a whole-tree undo store captured before the first mutation,
+so the window is closed by the journal rather than by an atomic swap.
 
 ## M2 — the migrate write set, read in source (minute ~25)
 
-`migrate/mod.rs:597 apply_plan` production write set is exactly two things:
+`apply_plan` wrote exactly two things: `QuarantineStore::admit()` once per
+executable item (incremental, interruptible) and `patch_global_config()` once at
+the end (atomic). **No journal, no undo store, no reverse-apply.** Verdict
+re-derived independently.
 
-1. `QuarantineStore::admit()` — called **once per executable item**, each call writing
-   payload bytes under `<home>/quarantine/payloads/…` and then rewriting the WHOLE
-   index (`quarantine.rs:369 save_index` → `wcore_config::atomic_write`, the
-   F26-GAPS-H1 fix, confirmed present at my base).
-2. `patch_global_config()` — ONE call at `mod.rs:786`, at the very end, writing
-   `f.profiles` and `f.mcp.servers` into `config.toml`.
+---
 
-So the operation is **N incremental live mutations followed by one atomic mutation**,
-with **no journal, no undo store and no reverse-apply**. A kill inside the admit loop
-leaves k of N items admitted and `config.toml` untouched — self-consistent, but NOT
-the pre-operation state. That is precisely the verdict's finding, re-derived.
+# FINDINGS
 
-Bounded write set ⇒ a **scoped** journal is exact here: `<home>/quarantine/**` and
-`<home>/config.toml`. Whole-tree preservation (as restore does) would copy `memory.db`
-and every asset on every migrate, which is not acceptable for an import command.
+## F26-SC3-H1 — HIGH — a stale undo store clobbers a later COMPLETED restore
 
-**Ownership note:** lane `26-sc2-import` owns import/export + quarantine
-classification, so I will journal at the `apply_plan` boundary in a NEW file and will
-NOT edit `migrate/quarantine.rs` or `migrate/select.rs`.
+**FIXED. Proven failing at base first.**
 
-## Plan
+`restore_archive` opened its own journal without settling records left by a dead
+owner. Sequence a real user produces, because `backup recover` is a command they
+have never heard of:
 
-- P1. Prove or kill D1 with a test that fails at base. Fix if real.
-- P2. Add a scoped operation journal + reverse-apply to `migrate` apply (G3).
-- P3. Multi-point kill harness: capture pre-op digest, SIGKILL at several distinct
-  windows, roll back, assert byte-identity. Include a **known-negative** run with
-  rollback disabled that must FAIL, or the proof is self-passing.
-- P4. Out-of-scope-write guard: digest everything outside the declared scope before
-  and after, so "the write set is bounded" is a measurement, not a claim.
+1. restore #1 → record A, undo-A = the pristine home. **SIGKILL mid-write.**
+2. The user runs the restore again. It **succeeds**. `commit()` removes record B
+   and undo-B, then `prune_journal_root` finds undo-A still present, so the
+   journal root survives with record A + undo-A intact.
+3. Any later recovery pass finds record A, owner dead, `preserved: true` →
+   clears the target and restores the pristine tree, **destroying the content of
+   the successful restore**.
+
+Measured at base (`32bf7478`, hetzner, `cargo test -p wcore-cli --lib
+backup::restore::`): `8 passed; 1 failed; 0 ignored; 0 measured; 1837 filtered
+out` — the new test failing on exactly this assertion.
+
+**Fix:** recovery runs before `journal::begin`, and before the OCCUPANCY
+decision. The ordering matters twice: an interrupted restore clears the target
+first, so its wreckage looks EMPTY, and judging occupancy against it let a plain
+`restore` — no `--replace` — past the refusal that protects a live home.
+
+## F26-SC3-H2 — HIGH — the digest counted Wayland's own bookkeeping as home state
+
+**FIXED. Found by the live proof, not by inspection.**
+
+The first passing-instrument run of the migrate rollback proof reported every
+rolled-back home as differing from PRE. `diff -rq` against the template showed
+**exactly one difference**: `.dirty-death.<pid>`, the crash-sentinel marker the
+SIGKILLed process left behind. Every user file was byte-identical.
+
+The digest is the comparand SC3's "exact pre-operation state" is judged on, so
+bookkeeping inside it makes an exact rollback report as inexact — and the only
+way to reach a green would have been to weaken the assertion. Excluded through
+the same predicate as the journal directory, importing `crash_sentinel`'s
+constants rather than respelling them.
+
+The proof now also runs an **independent `diff -rq`** with a two-name allowlist,
+so the digest's exclusion list cannot become a place to hide a difference.
+
+## F26-SC3-M1 — MEDIUM — `dir_holds_state` counted the journal directory
+
+**FIXED.** A home that was empty, whose restore was then killed, afterwards "held
+state", so the retry was refused until the operator passed `--replace` to
+overwrite nothing at all. It also meant the occupied-target refusal was surviving
+an interruption only by accident.
+
+## F26-SC3-S1 — SCOPE DRIFT caught by the probe, within hours of the probe existing
+
+`MIGRATE_SCOPE` began as two entries because that WAS the write set. Merging
+`gh/plan/f20-unified-audit-repair` brought `migrate/content.rs`, which imports
+data skills into the **live `skills/` directory** and stages personas and memory
+notes under `migrate-imported/`. Neither was in the scope; a rollback would have
+reported success while leaving those writes behind.
+
+`skills/` is a live user directory — the same shape as `F23A-C1-H3`. The drift
+test now asks each store where it writes rather than restating paths.
+
+## INSTRUMENT DEFECT — `$!` named the subshell, not the product
+
+**Repaired in this lane, per LANE-BRIEF §6b-ii.** The first harness backgrounded
+a shell *function*, so `$!` was the subshell's pid; `kill -9` killed the wrapper
+and the product ran to completion. 27 of 27 trials measured a fully-imported
+home. It was visible only because the byte-identity gate was strict — a gate
+reading "the home is not corrupt" would have PASSED having interrupted nothing.
+
+Repair: background the product directly, plus a **PID-TARGETING-CONTROL** that
+measures BOTH launch mechanisms and fails if it cannot tell them apart (the third
+assertion §6b-ii requires: the broken version must fail the new check).
+Classification also moved from a digest comparison to an **open journal record** —
+`config.toml` embeds the absolute home, so two homes never digest equal even
+after identical complete imports.
+
+---
+
+# LIVE EVIDENCE (hetzner-dsm, release binary, merged tree)
+
+All four nouns, multi-point uncatchable `SIGKILL`, byte-identity against a
+captured pre-operation state. Three arms each: the property, a known-negative
+with rollback removed, and a no-kill control.
+
+| proof | mid-apply kills | interrupted → byte-identical | known-negative differed | no-kill recovered | verdict |
+|---|---|---|---|---|---|
+| migrate hermes | 7/9 | 9/9 | 4/4 | 0 | **PASS** |
+| migrate openclaw | 6/9 | 8/8 | 5/5 | 0 | **PASS** |
+| backup + restore | 9/9 | 9/9 | 9/9 | 0 | **PASS** |
+
+`BYTE-DIFF-UNEXPLAINED: 0` on every arm — the independent `diff -rq` found no
+difference beyond the two allowlisted bookkeeping names.
+`backup create`: 9 kills, source home moved 0 times, 0 unverifiable archives.
