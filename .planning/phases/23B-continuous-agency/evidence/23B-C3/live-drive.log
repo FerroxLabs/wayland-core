@@ -1,0 +1,57 @@
+HOST=Ubuntu-2404-noble-amd64-base COMMIT=488dd9ff DATE=2026-07-29T13:47:21Z
+=== 0. the binary is alive (guards every later capture) ===
+F23_C3_LIVE=PASS  binary reports its version (found 'wayland-core')
+=== 1. plant a fact THROUGH the product (real assert_fact tool call) ===
+F23_C3_LIVE_RC=0 session=plant sid=c30f1fee0001
+F23_C3_LIVE=PASS  plant turn really invoked the assert_fact tool (found 'assert_fact')
+=== 2. the planted fact reaches the OUTBOUND PROVIDER BODY ===
+F23_C3_LIVE_RC=0 session=recall1 sid=c30f1fee0002
+F23_C3_LIVE=PASS  outbound body carries THIS turn's user message (not a stale capture) (found 'what is my recorded deployment region')
+F23_C3_LIVE=PASS  outbound body carries the planted fact BEFORE forgetting (found 'QK7ZC3LIVE')
+=== 3. /memory why surfaces the fact, its partition and its id ===
+F23_C3_LIVE_RC=0 session=why sid=c30f1fee0003
+F23_C3_LIVE=PASS  /memory why surfaces the planted fact itself (found 'QK7ZC3LIVE')
+F23_C3_LIVE=PASS  /memory why names the semantic partition and tier (found 'semantic/project')
+F23_C3_LIVE=PASS  /memory why names the modality that selected it (found 'via vector')
+F23_C3_LIVE_FACT_ID=019fae21-4566-7110-b80b-7b93826abcbb
+F23_C3_LIVE=PASS  provenance output carries an addressable fact id
+=== 4. activation: state and off switch ===
+F23_C3_LIVE_RC=0 session=act-show sid=c30f1fee0004
+F23_C3_LIVE=PASS  activation reports its default ON state (found 'automatic recall is ON')
+F23_C3_LIVE_RC=0 session=act-off sid=c30f1fee0005
+F23_C3_LIVE=PASS  activation off switch reports OFF (found 'automatic recall is OFF')
+=== 5. nudges are visible and settable ===
+F23_C3_LIVE_RC=0 session=nudge-show sid=c30f1fee0006
+F23_C3_LIVE=PASS  nudge bound is visible with its default cap (found 'cap 3 per session')
+F23_C3_LIVE_RC=0 session=nudge-off sid=c30f1fee0007
+F23_C3_LIVE=PASS  nudge off switch reports OFF (found 'OFF')
+F23_C3_LIVE_RC=0 session=nudge-cap sid=c30f1fee0008
+F23_C3_LIVE=PASS  nudge cap is settable (found 'cap 9')
+=== 6. forget refuses out loud for an id that is not there ===
+F23_C3_LIVE_RC=0 session=forget-bogus sid=c30f1fee0009
+F23_C3_LIVE=PASS  forget refuses a bogus id instead of reporting success (found 'refused')
+=== 7. FORGET the fact, then prove it left the OUTBOUND BODY ===
+F23_C3_LIVE_RC=0 session=forget sid=c30f1fee000a
+F23_C3_LIVE=PASS  forget reports the SEMANTIC partition (found 'removed from semantic')
+F23_C3_LIVE_RC=0 session=recall2 sid=c30f1fee000b
+F23_C3_LIVE=PASS  post-forget body carries THIS turn's user message (instrument alive) (found 'what is my recorded deployment region')
+F23_C3_LIVE=PASS  post-forget outbound body no longer carries the forgotten fact ('QK7ZC3LIVE' absent from a proven-non-empty capture)
+=== 8. re-plant as a control, then prove PRIVACY reaches the wire ===
+F23_C3_LIVE_RC=0 session=replant sid=c30f1fee000c
+F23_C3_LIVE_RC=0 session=on-check sid=c30f1fee000d
+F23_C3_LIVE=PASS  re-plant control: body carries this turn's message (found 'what is my recorded deployment region')
+F23_C3_LIVE=PASS  re-plant control: the fact is back in the prompt, so section 7's absence was the forget (found 'QK7ZC3LIVE')
+F23_C3_LIVE_RC=0 session=privacy sid=c30f1fee000e
+F23_C3_LIVE=PASS  privacy scope reports the exclusion (found 'excluded from recall')
+F23_C3_LIVE_RC=0 session=priv-check sid=c30f1fee000f
+F23_C3_LIVE=PASS  privacy-check body carries this turn's message (found 'what is my recorded deployment region')
+F23_C3_LIVE=PASS  a scoped partition sends NOTHING to the provider ('QK7ZC3LIVE' absent from a proven-non-empty capture)
+=== 9. retention reports its bound ===
+F23_C3_LIVE_RC=0 session=retention sid=c30f1fee0010
+F23_C3_LIVE=PASS  retention bound reports the bound (found 'bounded to 7 day')
+F23_C3_LIVE_TOTALS pass=23 fail=0 expected=23
+F23_C3_LIVE_RESULT=OK
+=== SAMPLE: /memory why as a user sees it ===
+/memory why: 1 item(s) recalled
+  #0 019fae21-4566-7110-b80b-7b93826abcbb [semantic/project] via vector score=0.65465 age=5s fresh
+      the user recorded deployment region is QK7ZC3LIVE

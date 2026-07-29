@@ -226,20 +226,106 @@ fn episode_timestamps(
 /// Returns an empty `Vec` (NOT an error) when the table is empty or no row
 /// carries an embedding, so callers degrade cleanly to episodic-only results.
 pub async fn facts_search(db: &Db, embedder: &dyn Embedder, q: &Query) -> Result<Vec<Hit>> {
-    let tc = db.tier_or_global(q.tier);
-    let qvec = embedder.embed(&q.text).await?;
-    facts_cosine_pass(&tc.conn, &qvec, q.tier, q.limit_per_modality)
+    Ok(facts_search_with_provenance(db, embedder, q).await?.0)
 }
 
+/// 23B-C3 — the semantic-fact equivalent of [`search_basic_with_provenance`],
+/// and the fix for the gap that made Criterion 3 unmeetable.
+///
+/// Before this existed, [`facts_search`] read the `facts` table with **no
+/// privacy predicate and no retention predicate**, and reported no provenance.
+/// The single enforcement call site for each control
+/// (`read_privacy_scope`/`read_retention` in [`search_basic_with_provenance`])
+/// hardcoded `Partition::Episodic`. That mattered because the semantic
+/// partition is the ONLY one the engine auto-injects into the outbound
+/// provider request body (`AgentEngine::recall_relevant_facts` keeps
+/// `Partition::Semantic` hits and discards the rest). So every control a user
+/// could reach acted on content that never reached their prompt, while the
+/// content that did reach it was uncontrollable — and `/memory privacy
+/// semantic <reason>` reported success while changing nothing about what was
+/// sent.
+///
+/// The semantic pass is a single cosine ranking, so its provenance reports
+/// exactly one contributing modality ([`RecallModality::Vector`]) and its
+/// `fused_score` is that cosine. Claiming a fusion here would be a
+/// fabrication; reporting one honest modality is not.
+pub async fn facts_search_with_provenance(
+    db: &Db,
+    embedder: &dyn Embedder,
+    q: &Query,
+) -> Result<(Vec<Hit>, RecallReport)> {
+    let mut report = RecallReport::default();
+
+    // Decided before any row is read, exactly as the episodic path does it:
+    // an excluded cell must not have its contents loaded into this process.
+    if let Some(scope) = read_privacy_scope(db, Partition::Semantic, q.tier)? {
+        report.exclusions.push(RecallExclusion {
+            partition: Partition::Semantic,
+            tier: q.tier,
+            id: None,
+            cause: ExclusionCause::PrivacyScope {
+                reason: scope.reason,
+            },
+        });
+        return Ok((Vec::new(), report));
+    }
+    let retention = read_retention(db, Partition::Semantic, q.tier)?.map(|r| r.max_age_secs);
+
+    let tc = db.tier_or_global(q.tier);
+    let qvec = embedder.embed(&q.text).await?;
+    let scored = facts_cosine_pass(&tc.conn, &qvec, q.tier, q.limit_per_modality)?;
+
+    // Retention: an expired fact is excluded and REPORTED as expired. As on
+    // the episodic path the row is not deleted, so relaxing the bound brings
+    // it back — which is the only thing that makes reporting it worth having.
+    let now = crate::audit::now_secs();
+    let ctx = RecallContext {
+        now,
+        max_age_secs: retention,
+    };
+    let mut hits = Vec::with_capacity(scored.len());
+    for (rank, (hit, ts)) in scored.into_iter().enumerate() {
+        let age = crate::provenance::age_secs_at(now, ts);
+        if let StalenessVerdict::Expired { max_age_secs } =
+            crate::staleness::verdict_for_age(age, retention)
+        {
+            report.exclusions.push(RecallExclusion {
+                partition: Partition::Semantic,
+                tier: q.tier,
+                id: Some(hit.id.clone()),
+                cause: ExclusionCause::RetentionExpired {
+                    max_age_secs,
+                    age_secs: age,
+                },
+            });
+            continue;
+        }
+        report.provenance.push(provenance_for(
+            &hit,
+            vec![ModalityContribution {
+                modality: RecallModality::Vector,
+                rank,
+            }],
+            hits.len(),
+            ts,
+            ctx,
+        ));
+        hits.push(hit);
+    }
+    Ok((hits, report))
+}
+
+/// Rank the live facts at `tier` by cosine against `qvec`, returning each
+/// surviving hit with the `ts` the retention bound is measured against.
 fn facts_cosine_pass(
     conn: &parking_lot::Mutex<rusqlite::Connection>,
     qvec: &[f32],
     tier: Tier,
     limit_per_modality: usize,
-) -> Result<Vec<Hit>> {
+) -> Result<Vec<(Hit, i64)>> {
     let conn = conn.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, subject, predicate, object, embedding FROM facts
+        "SELECT id, subject, predicate, object, embedding, ts FROM facts
          WHERE tier = ?1 AND superseded_by IS NULL AND embedding IS NOT NULL",
     )?;
     let rows = stmt.query_map([tier.as_str()], |r| {
@@ -248,11 +334,12 @@ fn facts_cosine_pass(
         let predicate: String = r.get(2)?;
         let object: String = r.get(3)?;
         let blob: Vec<u8> = r.get(4)?;
-        Ok((id, subject, predicate, object, blob))
+        let ts: i64 = r.get(5)?;
+        Ok((id, subject, predicate, object, blob, ts))
     })?;
-    let mut scored: Vec<(f32, Hit)> = Vec::new();
+    let mut scored: Vec<(f32, Hit, i64)> = Vec::new();
     for r in rows {
-        let (id, subject, predicate, object, blob) = r.map_err(MemoryError::Db)?;
+        let (id, subject, predicate, object, blob, ts) = r.map_err(MemoryError::Db)?;
         if let Ok(v) = decode_blob(&blob) {
             let s = cosine(qvec, &v);
             scored.push((
@@ -265,6 +352,7 @@ fn facts_cosine_pass(
                     session_id: None,
                     preview: format!("{subject} {predicate} {object}"),
                 },
+                ts,
             ));
         }
     }
@@ -272,7 +360,7 @@ fn facts_cosine_pass(
     Ok(scored
         .into_iter()
         .take(limit_per_modality.max(1))
-        .map(|(_, h)| h)
+        .map(|(_, h, ts)| (h, ts))
         .collect())
 }
 

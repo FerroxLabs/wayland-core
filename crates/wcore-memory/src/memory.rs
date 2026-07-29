@@ -288,6 +288,38 @@ impl MemoryApi for Memory {
     fn controls(&self) -> Option<crate::provenance::MemoryControls> {
         self.dispatcher.controls()
     }
+    // 23B-C3 — these three MUST be forwarded, not left on the trait default.
+    // `Memory` wraps the dispatcher, so an unforwarded default would silently
+    // route the production control path around the dispatcher's override: the
+    // fact-correction re-embed would be replaced by a refusal, and
+    // `nudge_budget` would report `None` for a backend that has one.
+    async fn forget_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::ForgetReceipt> {
+        self.dispatcher.forget_recalled(tier, id, actor, tok).await
+    }
+    async fn correct_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::CorrectionReceipt> {
+        self.dispatcher
+            .correct_recalled(tier, id, corrected, actor, tok)
+            .await
+    }
+    fn nudge_budget(&self) -> Option<std::sync::Arc<crate::provenance::NudgeBudget>> {
+        self.dispatcher.nudge_budget()
+    }
+    fn activation_log(&self) -> Option<std::sync::Arc<crate::activation::ActivationLog>> {
+        self.dispatcher.activation_log()
+    }
     async fn search_with_provenance(
         &self,
         q: Query,

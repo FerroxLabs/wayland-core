@@ -15,6 +15,7 @@ pub mod store;
 pub mod types;
 
 // ----- v2 surface (W5) -----
+pub mod activation;
 pub mod api;
 pub mod audit;
 pub mod auto_memorize;
@@ -39,6 +40,7 @@ pub mod tier;
 pub mod v2_prompt;
 pub mod v2_types;
 
+pub use activation::{ActivatedItem, ActivationLog, RecallActivation};
 pub use api::MemoryApi;
 pub use contradiction::{
     ContradictionCandidate, ContradictionResolution, ContradictionResolver, ResolutionResult,

@@ -56,11 +56,17 @@ impl SlashHandler for MemoryHandler {
                 "forget" => self.forget(rest),
                 "privacy" => self.privacy(rest),
                 "retention" => self.retention(rest),
+                // 23B-C3 additions: the two verbs of criterion 3 that had no
+                // user-reachable surface at all.
+                "nudge" | "nudges" => self.nudge(rest),
+                "activation" | "activated" => self.activation(rest),
                 other => Err(SlashError::Bad(format!(
                     "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | \
-                     /memory why <query> | /memory correct <id> <text> | /memory forget <id> | \
+                     /memory activation [on|off] | /memory why <query> | \
+                     /memory correct <id> <text> | /memory forget <id> | \
                      /memory privacy <partition> [reason|--clear] | \
-                     /memory retention <partition> <days> | /memory clear <partition>"
+                     /memory retention <partition> <days> | /memory nudge [on|off|cap <n>] | \
+                     /memory clear <partition>"
                 ))),
             },
         }
@@ -110,11 +116,25 @@ impl MemoryHandler {
             Ok(v) => v,
             Err(e) => return Ok(handled(format!("/memory why: {e}"))),
         };
+        // 23B-C3: index the previews by id so each provenance line can show
+        // WHAT the item says, not only where it came from. Found by driving
+        // this live: the command printed a uuid, a partition and a modality
+        // and never the text, so a user could see that *something* was in
+        // their prompt but not what — which is most of the question
+        // "why is this in my context window" asks.
+        let previews: std::collections::HashMap<&str, &str> = hits
+            .iter()
+            .map(|h| (h.id.as_str(), h.preview.as_str()))
+            .collect();
         let mut out = format!("/memory why: {} item(s) recalled\n", hits.len());
         for p in &report.provenance {
             out.push_str(&format!(
                 "  #{rank} {id} [{partition}/{tier}] via {modality} score={score:.5} \
-                 age={age}s {staleness}\n",
+                 age={age}s {staleness}\n      {preview}\n",
+                preview = previews
+                    .get(p.id.as_str())
+                    .copied()
+                    .unwrap_or("(no preview)"),
                 rank = p.rank,
                 id = p.id,
                 partition = p.partition.as_str(),
@@ -156,8 +176,23 @@ impl MemoryHandler {
         Ok(handled(out))
     }
 
+    /// 23B-C3: routes through [`wcore_memory::MemoryApi::correct_recalled`]
+    /// rather than `MemoryControls::correct_episode` directly.
+    ///
+    /// `correct_episode` hardcodes `Partition::Episodic`, so before this a
+    /// user who ran `/memory why`, saw a semantic fact sitting in their
+    /// prompt, and tried to correct it was told `NotFound` while the wrong
+    /// claim kept being sent to the provider on every cold turn. The dispatch
+    /// tries the episode store first — byte-identical behaviour for every id
+    /// that already resolved — and falls through to the fact store, where the
+    /// corrected triple is re-embedded in the same statement as the text.
     fn correct(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let (_api, controls) = self.controls("correct")?;
+        // Pre-check preserved from before 23B-C3: a backend with NO store at
+        // all must refuse as a SlashError, not as a "refused" success line.
+        // "There is nothing here to act on" and "that id is not in the store"
+        // are different answers, and the first one is a misconfiguration the
+        // user needs to see as an error.
+        let (api, _) = self.controls("correct")?;
         let (id, rest) = args
             .split_first()
             .ok_or_else(|| SlashError::Bad("/memory correct <id> <corrected text>".to_string()))?;
@@ -167,13 +202,13 @@ impl MemoryHandler {
                     .to_string(),
             ));
         }
-        match controls.correct_episode(
-            &AccessToken::MainAgent,
+        match block_on(api.correct_recalled(
             Tier::Project,
             id,
             &rest.join(" "),
             "operator",
-        ) {
+            AccessToken::MainAgent,
+        )) {
             Ok(r) => Ok(handled(format!(
                 "/memory correct: {} corrected in {}/{}",
                 r.id,
@@ -184,12 +219,18 @@ impl MemoryHandler {
         }
     }
 
+    /// 23B-C3: routes through [`wcore_memory::MemoryApi::forget_recalled`].
+    /// Same reason as [`Self::correct`] — see that doc comment. The receipt
+    /// names the partition the item was actually found in, so a user can tell
+    /// an episode forget from a fact forget rather than having to trust that
+    /// "removed" meant the thing they saw.
     fn forget(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let (_api, controls) = self.controls("forget")?;
+        // See `correct` — the no-store refusal stays a SlashError.
+        let (api, _) = self.controls("forget")?;
         let id = args
             .first()
             .ok_or_else(|| SlashError::Bad("/memory forget <id>".to_string()))?;
-        match controls.forget_episode(&AccessToken::MainAgent, Tier::Project, id, "operator") {
+        match block_on(api.forget_recalled(Tier::Project, id, "operator", AccessToken::MainAgent)) {
             Ok(r) => Ok(handled(format!(
                 "/memory forget: {} removed from {}/{} and recorded in the changelog",
                 r.id,
@@ -198,6 +239,169 @@ impl MemoryHandler {
             ))),
             Err(e) => Ok(handled(format!("/memory forget refused: {e}"))),
         }
+    }
+
+    /// 23B-C3 — `/memory nudge [on|off|cap <n>]`.
+    ///
+    /// `NudgeBudget` shipped in F23-03 with a cap, an off switch and an atomic
+    /// claim, and with **no caller anywhere outside its own unit tests** — so
+    /// the criterion's "nudges" clause named a bound no user could see, let
+    /// alone move. This is the surface. With no argument it reports state; the
+    /// mutating forms report the previous value alongside the new one, so a
+    /// no-op is visibly a no-op instead of an unconditional "ok".
+    fn nudge(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let api = self.runtime_api("nudge")?;
+        let budget = api.nudge_budget().ok_or_else(|| {
+            SlashError::Bad(
+                "/memory nudge: this memory backend has no proactive-nudge path to bound"
+                    .to_string(),
+            )
+        })?;
+        let state = |b: &wcore_memory::NudgeBudget| {
+            format!(
+                "/memory nudge: {} — cap {} per session, {} used, {} remaining",
+                if b.enabled() { "enabled" } else { "OFF" },
+                b.cap(),
+                b.used(),
+                b.remaining()
+            )
+        };
+        match args.first().map(|s| s.as_str()) {
+            None | Some("show") => Ok(handled(state(&budget))),
+            Some("on") => {
+                let was = budget.set_enabled(true);
+                Ok(handled(format!(
+                    "{}\n  (was {})",
+                    state(&budget),
+                    if was { "already enabled" } else { "OFF" }
+                )))
+            }
+            Some("off") => {
+                let was = budget.set_enabled(false);
+                Ok(handled(format!(
+                    "{}\n  (was {})",
+                    state(&budget),
+                    if was { "enabled" } else { "already OFF" }
+                )))
+            }
+            Some("cap") => {
+                let n: u32 = args
+                    .get(1)
+                    .ok_or_else(|| SlashError::Bad("/memory nudge cap <n>".to_string()))?
+                    .parse()
+                    .map_err(|_| {
+                        SlashError::Bad("/memory nudge cap: <n> must be a number".to_string())
+                    })?;
+                let was = budget.set_cap(n);
+                Ok(handled(format!("{}\n  (cap was {was})", state(&budget))))
+            }
+            Some(other) => Err(SlashError::Bad(format!(
+                "/memory nudge: unknown argument '{other}'. Try: /memory nudge [show|on|off|cap <n>]"
+            ))),
+        }
+    }
+
+    /// 23B-C3 — `/memory activation [on|off]`.
+    ///
+    /// The criterion's first clause, and the one that had no surface at all.
+    /// `AgentEngine::recall_relevant_facts` puts durable memory into the
+    /// outbound prompt on the first turn of every session without the user
+    /// asking on that turn; before this there was no way to see that it had
+    /// happened and no way to stop it.
+    ///
+    /// The three states are reported distinctly on purpose. "No turn has run a
+    /// recall yet", "a turn ran and matched nothing", and "you switched this
+    /// off" all look like an empty prompt from the outside, and only the last
+    /// two are things the user can act on.
+    fn activation(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let api = self.runtime_api("activation")?;
+        let log = api.activation_log().ok_or_else(|| {
+            SlashError::Bad(
+                "/memory activation: this memory backend never injects memory into the prompt"
+                    .to_string(),
+            )
+        })?;
+        match args.first().map(|s| s.as_str()) {
+            Some("on") => {
+                let was = log.set_enabled(true);
+                return Ok(handled(format!(
+                    "/memory activation: automatic recall is ON (was {})",
+                    if was { "already on" } else { "off" }
+                )));
+            }
+            Some("off") => {
+                let was = log.set_enabled(false);
+                return Ok(handled(format!(
+                    "/memory activation: automatic recall is OFF — no durable memory will be \
+                     placed in your prompt (was {})",
+                    if was { "on" } else { "already off" }
+                )));
+            }
+            None | Some("show") => {}
+            Some(other) => {
+                return Err(SlashError::Bad(format!(
+                    "/memory activation: unknown argument '{other}'. \
+                     Try: /memory activation [show|on|off]"
+                )));
+            }
+        }
+
+        let mut out = format!(
+            "/memory activation: automatic recall is {}\n",
+            if log.enabled() { "ON" } else { "OFF" }
+        );
+        match log.last() {
+            None => out.push_str(
+                "  no turn in this session has run a memory recall yet\n\
+                   (this is NOT the same as a turn that recalled nothing)\n",
+            ),
+            Some(a) => {
+                out.push_str(&format!("  last recall ran against: {:?}\n", a.query));
+                if !a.enabled {
+                    out.push_str(
+                        "  it injected nothing because automatic recall was switched off\n",
+                    );
+                } else if a.injected.is_empty() {
+                    out.push_str("  it injected NOTHING into your prompt\n");
+                } else {
+                    out.push_str(&format!(
+                        "  it placed {} item(s) into your prompt:\n",
+                        a.injected.len()
+                    ));
+                    for i in &a.injected {
+                        out.push_str(&format!(
+                            "    {id} [{p}/{t}] {preview}\n",
+                            id = i.id,
+                            p = i.partition.as_str(),
+                            t = i.tier.as_str(),
+                            preview = i.preview
+                        ));
+                    }
+                    out.push_str(
+                        "  correct or remove any of these with /memory correct <id> <text> \
+                         or /memory forget <id>\n",
+                    );
+                }
+                for x in &a.excluded {
+                    out.push_str(&format!(
+                        "  WITHHELD {}{}: {}\n",
+                        x.partition.as_str(),
+                        x.id.as_ref()
+                            .map(|i| format!(" {i}"))
+                            .unwrap_or_else(|| " (whole cell)".to_string()),
+                        match &x.cause {
+                            wcore_memory::ExclusionCause::PrivacyScope { reason } =>
+                                format!("privacy scope ({reason})"),
+                            wcore_memory::ExclusionCause::RetentionExpired {
+                                max_age_secs,
+                                age_secs,
+                            } => format!("expired: {age_secs}s old, bound is {max_age_secs}s"),
+                        }
+                    ));
+                }
+            }
+        }
+        Ok(handled(out))
     }
 
     fn privacy(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
