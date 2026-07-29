@@ -60,3 +60,32 @@ for ~$0.0001 without paying for an image. That is the first thing to try.
 ## Log
 
 - [t0] Worktree created, toplevel verified, NOTES committed. Nothing measured yet.
+
+## MEASURED — defect 2 (image 401) is DETERMINED
+
+Free probes only (`f27-image-entitlement-probe.sh`, no image generated, ~$0 spend):
+
+| Probe | HTTP | Body (36 bytes, byte-identical across the three 401s) |
+|---|---|---|
+| `/v1/models` (real key) | 200 | 77 models; **`flux-image-together-flux` ABSENT**, `flux-image` present |
+| POST images, `flux-image-together-flux` (the product default) | **401** | `{"error":{"message":"unauthorized"}}` |
+| POST images, `definitely-not-a-real-model-xyz` (control) | **401** | `{"error":{"message":"unauthorized"}}` |
+| POST images, **genuinely invalid key** (control) | **401** | `{"error":{"message":"unauthorized"}}` |
+| POST images, `flux-image` + empty prompt | 400 | `{"error":{"message":"prompt required"}}` — key authenticates fine on this route |
+
+`/v1/models` is key-scoped: a bogus key gets HTTP 500 with a *named* auth error, so the
+77-model catalogue is what THIS key is served. The only image arm in it is `flux-image`.
+
+**Determination.** Upstream returns a byte-identical 401 for THREE distinct causes: unknown
+model, unavailable-for-this-key model, and bad credential. So the upstream 401 is *not*
+truthful-about-cause — it is *uninformative*. It follows that:
+ - the product's default arm is not merely unentitled, it is **absent from the catalogue**;
+ - the product **cannot** correctly infer "your key is bad" from a 401 on this route, because
+   the same 401 means "unknown model". Rendering it as a credential failure is the defect.
+ - `flux_image.rs:246` only maps `402 premium_locked` to a typed entitlement error. Flux
+   never sends 402 here, so that mapper is dead on this route and everything falls to
+   `ProviderError::Api{401}`.
+
+Open question for the fix (cross-audit next): change `DEFAULT_IMAGE_MODEL` to `flux-image`,
+or fix the message, or both. Changing a default has cost implications (contract documents
+together-flux as the ~$0.01 cheapest arm; measured image ≈ $0.08).
