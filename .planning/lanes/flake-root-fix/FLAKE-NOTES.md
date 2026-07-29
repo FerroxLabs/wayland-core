@@ -217,6 +217,40 @@ protected and still race.
    Scoped to the MODULE; the contention unit is the BINARY, and `adapter.rs`
    mutates the same variable.
 
+## FIX 2 — config serialization determinism (Kind A) — PROVEN
+
+`#[serde(serialize_with)]` sorting on `providers`, `profiles`, `mcp.servers` and
+`McpServerConfig::{env,headers}`. Chosen over changing the field types to `BTreeMap`
+because `&HashMap<String, McpServerConfig>` / `HashMap<String, ProviderConfig>` appear
+in signatures across `wcore-mcp`, `wcore-agent` and `wcore-cli` — **including two in
+`crates/wcore-cli/src/main.rs`, which LANE-BRIEF §6 fences to minimal ADDITIVE edits.**
+A type change would have pushed signature churn through that fence into every
+concurrent lane. Same determinism, zero public API change, zero cross-crate ripple;
+`mcp_cred_refs.rs` ends byte-identical to base.
+
+| measurement | reps | PASS | FAIL | rate |
+|---|---|---|---|---|
+| `migrate_hermes::import_is_idempotent_without_overwrite` BEFORE | 25 | 12 | 13 | **13/25 = 52%** |
+| `migrate_hermes::import_is_idempotent_without_overwrite` AFTER | 25 | 25 | 0 | **0/25 = 0%** |
+| new `serializing_the_same_config_twice_is_byte_identical` AFTER | 30 | 30 | 0 | **0/30** |
+| same test, **sorting attributes stripped** (known-negative) | 10 | 0 | 10 | **10/10 = 100%** |
+
+The known-negative is the important row: it proves the new gate CAN fail, so 30/30 is
+not a vacuous green.
+
+### A trap this lane fell into and had to fix
+
+The determinism test's FIRST version called `ConfigFile::default()` twice and compared.
+It failed 4 of 5 reps — but **not because sorting was broken**. In every failing diff
+all `[providers.*]`/`[profiles.*]` sections were already correctly ordered in BOTH
+outputs; the only difference was
+`directory = "/tmp/.tmpyk9wKI/sessions"` vs `"/root/.config/wayland-core/sessions"`.
+`ConfigFile::default()` is **not pure** — `default_session_dir()` resolves through
+`wayland_config_dir()`, which reads `WAYLAND_HOME` — so the two `default()` calls
+straddled another test's mutation. The test I wrote to prove the fix had become a
+VICTIM of the race it sits beside. Fixed by pinning `session.directory`. Had I read
+only the pass/fail bit and not the diff, I would have wrongly concluded the fix failed.
+
 ## NOT A DEFECT — do not "fix"
 
 `always_fails` (`crates/wcore-cli/src/plugin/scaffold.rs:274`) is a **string literal the
