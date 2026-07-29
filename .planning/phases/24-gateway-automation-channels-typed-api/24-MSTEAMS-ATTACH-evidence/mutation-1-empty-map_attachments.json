@@ -1,0 +1,126 @@
+{
+  "at": "2026-07-29T05:48:52.320Z",
+  "host": "Ubuntu-2404-noble-amd64-base",
+  "ports": {
+    "webhook": 19631,
+    "bf": 19632,
+    "llm": 19633
+  },
+  "binary": "/root/wayland-24-msteams-attach/target/debug/wayland-core",
+  "matcher_self_test": "PASS (3/3)",
+  "results": [
+    {
+      "clause": "M1-turn",
+      "ok": true,
+      "detail": "POST=200 turn=yes | STATUS 200"
+    },
+    {
+      "clause": "M2-control-no-attachments",
+      "ok": true,
+      "detail": "block=null want=null"
+    },
+    {
+      "clause": "M2-attach",
+      "ok": false,
+      "detail": "POST=200 block=null kind_ok=false ref_ok=false wrapper_suppressed=false"
+    },
+    {
+      "clause": "M3-no-phantom",
+      "ok": true,
+      "detail": "POST=200 turn=yes block=null want=null"
+    },
+    {
+      "clause": "M4-auth",
+      "ok": true,
+      "detail": "POST=401 (want non-200) turn=none accepts_valid_in_same_run=true jwks_was_fetched=true | STATUS 401"
+    }
+  ],
+  "passed": 4,
+  "total": 5,
+  "notes": [
+    "bf fixture answering; starting binary",
+    "webhook host up after 6s",
+    "bf fixture journal: [\"token\",\"openid\",\"jwks\",\"activity_out\",\"activity_out\",\"activity_out\"]",
+    "turns observed: 3"
+  ],
+  "bf_journal": [
+    {
+      "seq": 1,
+      "kind": "token",
+      "at": "2026-07-29T05:48:25.635Z"
+    },
+    {
+      "seq": 2,
+      "kind": "openid",
+      "at": "2026-07-29T05:48:25.638Z"
+    },
+    {
+      "seq": 3,
+      "kind": "jwks",
+      "at": "2026-07-29T05:48:25.639Z",
+      "kids": [
+        "f24msteams-kid-1"
+      ]
+    },
+    {
+      "seq": 4,
+      "kind": "activity_out",
+      "at": "2026-07-29T05:48:33.587Z",
+      "path": "/amer/v3/conversations/19%3Af24msteams%40thread.v2/activities",
+      "type": "message",
+      "text": "F24C3-REPLY f24c3-msteams-plain-78464792",
+      "raw_len": 89
+    },
+    {
+      "seq": 5,
+      "kind": "activity_out",
+      "at": "2026-07-29T05:48:34.126Z",
+      "path": "/amer/v3/conversations/19%3Af24msteams%40thread.v2/activities",
+      "type": "message",
+      "text": "F24C3-REPLY f24c3-msteams-file-78464792",
+      "raw_len": 88
+    },
+    {
+      "seq": 6,
+      "kind": "activity_out",
+      "at": "2026-07-29T05:48:35.179Z",
+      "path": "/amer/v3/conversations/19%3Af24msteams%40thread.v2/activities",
+      "type": "message",
+      "text": "F24C3-REPLY f24c3-msteams-nophantom-78464792",
+      "raw_len": 93
+    }
+  ],
+  "turns": [
+    {
+      "seq": 1,
+      "kind": "chat.completions",
+      "at": "2026-07-29T05:48:33.415Z",
+      "model": "f24c3-fixture",
+      "stream": true,
+      "user_text": "hello f24c3-msteams-plain-78464792\nCurrent date: 2026-07-29",
+      "correlation": "f24c3-msteams-plain-78464792",
+      "reply": "F24C3-REPLY f24c3-msteams-plain-78464792"
+    },
+    {
+      "seq": 2,
+      "kind": "chat.completions",
+      "at": "2026-07-29T05:48:34.001Z",
+      "model": "f24c3-fixture",
+      "stream": true,
+      "user_text": "see this f24c3-msteams-file-78464792\nCurrent date: 2026-07-29",
+      "correlation": "f24c3-msteams-file-78464792",
+      "reply": "F24C3-REPLY f24c3-msteams-file-78464792"
+    },
+    {
+      "seq": 3,
+      "kind": "chat.completions",
+      "at": "2026-07-29T05:48:35.027Z",
+      "model": "f24c3-fixture",
+      "stream": true,
+      "user_text": "formatted f24c3-msteams-nophantom-78464792\nCurrent date: 2026-07-29",
+      "correlation": "f24c3-msteams-nophantom-78464792",
+      "reply": "F24C3-REPLY f24c3-msteams-nophantom-78464792"
+    }
+  ],
+  "core_log_tail": "\u001b[2m2026-07-29T05:48:21.917848Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24msteams \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mmsteams\n[gateway] channels registered=1\n[gateway] inbound: subscriber spawned, webhook host listening bind=127.0.0.1:19631 policies=1\n[gateway] started pid=3212921 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0\n\u001b[2m2026-07-29T05:48:25.665847Z\u001b[0m \u001b[32m INFO\u001b[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)\n\u001b[2m2026-07-29T05:48:25.665891Z\u001b[0m \u001b[32m INFO\u001b[0m M3.2: memory.enabled ON — decay scheduler spawned \u001b[3minterval_secs\u001b[0m\u001b[2m=\u001b[0m3600\n\u001b[2m2026-07-29T05:48:25.669998Z\u001b[0m \u001b[32m INFO\u001b[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)\n\u001b[2m2026-07-29T05:48:25.671539Z\u001b[0m \u001b[32m INFO\u001b[0m channel engine tool posture applied \u001b[3mposture\u001b[0m\u001b[2m=\u001b[0mConversational \u001b[3msandbox_enforces_read_deny\u001b[0m\u001b[2m=\u001b[0mtrue\n\u001b[2m2026-07-29T05:48:25.858911Z\u001b[0m \u001b[32m INFO\u001b[0m another process owns the schedule; this session observes and will not fire \u001b[3mdir\u001b[0m\u001b[2m=\u001b[0m/tmp/f24-msteams-uQ1Xkw/home/cron\n[gateway] shutdown signal received\n[gateway] drain Clean: observations=1 abandoned=0 flushed=true\n[gateway] stopped (clean=true)\n"
+}
