@@ -72,14 +72,58 @@ returns the new count), and `gateway.rs`'s reload block calls it.
 - **The instrument must be shown able to see a denial** before any "no denials" claim.
 - Byte-count every capture; `${PIPESTATUS[0]}` returns empty here.
 
+## T+95 — hazard found while wiring, and fixed in-lane
+
+Wiring the reload exposed a second way to reach the same defect, which I would have
+*introduced* by fixing the first naively:
+
+- `wcore_channels_registry::auto_register_from_dir` **SKIPS** an unparseable `*.toml` (warn +
+  `continue`) and returns `Ok` with the rest registered;
+- `ChannelConfigLoader::load_all` **stops at the first failure** and returns `Err`, which
+  `load_channel_policy_configs`'s `unwrap_or_default()` converts into an **EMPTY** Vec.
+
+At startup that only shows up as `policies=0`. At *reload* it is destructive: one newly typo'd
+file would swap every running channel's policy out for the fail-closed default and convert a
+working gateway into universal denial. So `reload_policies` returns `Result` and **refuses to
+swap on a load error, keeping the policies already in effect**, and the gateway reports
+`policies=KEPT-STALE (<err>)` plus a `registration_error`. The startup path keeps its historical
+lossy behaviour so no existing deployment changes how it boots.
+
+## T+120 — MEASURED: the gates can fail, and the half-fix is caught
+
+`f24-h5-mutate.py`, run on hetzner at `44a7cc16`. Executed counts parsed from `test result:`,
+never exit status alone.
+
+| suite | M1 "the bug" (no swap) | M2 "the half-fix" (policies swap, postures stale) | unmutated |
+|---|---|---|---|
+| unit-registry | 2 passed / **3 failed** | 2 passed / **3 failed** | 5 passed / 0 failed |
+| unit-subscriber (arrivals) | 0 passed / **2 failed** | **2 passed / 0 failed — rc=0** | 2 passed / 0 failed |
+| unit-dispatcher (posture) | 0 passed / **2 failed** | 0 passed / **2 failed** | 10 passed / 0 failed |
+| integration-reload | 0 passed / **1 failed** | 0 passed / **1 failed** | 1 passed / 0 failed |
+
+**The M2 row for the arrivals suite is the whole point of this lane.** On the half-fix, the
+arrivals test is GREEN, rc=0 — a lane that had written only "the reloaded channel receives a
+message" would have shipped a channel running under the wrong tool posture and called it done.
+The posture assertions are what redden. That is the third mandatory assertion (§6b-ii): the
+old, weaker test shape *would have missed it*, measured rather than asserted.
+
+The two registry tests that survive M1 and M2 are `an_absent_channel_still_fails_closed` and
+`the_default_workspace_root_is_used_only_when_the_config_names_none` — neither exercises a
+swap, so both surviving is correct and the mutation discriminates rather than blanket-failing.
+
+Evidence: `mutation/mutation-M1.json` (1491 B), `mutation/mutation-M2.json` (1294 B), both
+stderr empty (0 B). Harness restores the source in a `finally:` and re-verifies; `git status
+--porcelain` on the build worktree is clean afterwards apart from a pre-existing `build.log`.
+
 ## Status ledger (append-only)
 
 - [x] T+0 read `LANE-BRIEF.md`, `24-C3-FINISH.md`
 - [x] T+10 all call sites verified at base
 - [x] T+12 design fixed, NOTES committed
-- [ ] registry + both hosts migrated
-- [ ] gateway reload calls it
-- [ ] unit tests (in-crate) incl. posture-equality and the old-shape-would-have-missed-it assertion
-- [ ] hetzner build + targeted tests
+- [x] registry + both hosts migrated (`channel_policy.rs`, subscriber, dispatcher, bootstrap)
+- [x] gateway reload calls it (`gateway.rs`, with the KEPT-STALE refusal)
+- [x] unit tests incl. posture-equality; mutation-proved they can fail (M1 + M2)
+- [x] hetzner build + targeted tests: 5 + 2 + 10 + 1 executed, 0 failed at `44a7cc16`
+- [ ] clippy + wider wcore-agent regression
 - [ ] live driver run: reload leg green, posture asserted, denial still denied
 - [ ] SUMMARY

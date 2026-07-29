@@ -1,0 +1,53 @@
+{
+  "mutation": "M1",
+  "results": [
+    {
+      "suite": "unit-registry",
+      "rc": 101,
+      "executed": 5,
+      "passed": 2,
+      "failed": 3,
+      "failed_tests": [
+        "channel_policy::tests::a_reloaded_channel_gets_the_same_posture_as_one_present_at_startup",
+        "channel_policy::tests::a_removed_channel_reverts_to_fail_closed",
+        "channel_policy::tests::replace_refreshes_the_policy_and_the_posture_in_one_swap"
+      ],
+      "output_bytes": 3102
+    },
+    {
+      "suite": "unit-subscriber-arrivals",
+      "rc": 101,
+      "executed": 2,
+      "passed": 0,
+      "failed": 2,
+      "failed_tests": [
+        "channel_inbound::tests::a_registry_swap_admits_a_channel_the_running_subscriber_never_saw",
+        "channel_inbound::tests::a_registry_swap_revokes_a_channel_removed_from_disk"
+      ],
+      "output_bytes": 1844
+    },
+    {
+      "suite": "unit-dispatcher-posture",
+      "rc": 101,
+      "executed": 2,
+      "passed": 0,
+      "failed": 2,
+      "failed_tests": [
+        "channel_dispatch::tests::a_posture_added_after_construction_is_visible_to_the_dispatcher",
+        "channel_dispatch::tests::a_removed_posture_falls_back_to_the_safe_floor"
+      ],
+      "output_bytes": 1899
+    },
+    {
+      "suite": "integration-reload",
+      "rc": 101,
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "failed_tests": [
+        "a_reloaded_channel_carries_its_policy_and_its_posture"
+      ],
+      "output_bytes": 1395
+    }
+  ]
+}
