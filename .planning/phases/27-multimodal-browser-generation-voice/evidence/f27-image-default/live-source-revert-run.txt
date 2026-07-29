@@ -1,15 +1,15 @@
 key_received=yes key_len=51
 === STAGE 1 — REVERTED: flux_router_defaults declares no image model
-error: could not find `Cargo.toml` in `/root` or any parent directory
-  [2m2026-07-29T15:52:28.166790Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
-  reverted_MODEL=flux-image  turn_reached=1
+  build_ok stage=reverted rc=0 stamp 1785340535:334366280 -> 1785340562:334366136
+  [2m2026-07-29T15:56:02.712178Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+  reverted_MODEL=gpt-image-1  turn_reached=1
 === STAGE 2 — RESTORED
   source restored byte-identical
-error: could not find `Cargo.toml` in `/root` or any parent directory
-  [2m2026-07-29T15:53:12.325763Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+  build_ok stage=restored rc=0 stamp 1785340562:334366136 -> 1785340624:334366280
+  [2m2026-07-29T15:57:04.733485Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
   restored_MODEL=flux-image  turn_reached=1
 
 === VERDICT
-  reverted_model=flux-image  restored_model=flux-image
-LIVE_SOURCE_REVERT=FAIL
+  reverted_model=gpt-image-1  restored_model=flux-image
+LIVE_SOURCE_REVERT=PASS  removing the compat default live-restores the defect; restoring it fixes it again
 DONE captures_in=/root/wayland-f27imgdef-revert

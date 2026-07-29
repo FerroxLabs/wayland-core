@@ -1,0 +1,17 @@
+=== SELF-TEST of the repaired build step
+-- A (known-positive): a real build in the right directory is graded ok
+  build_ok stage=selftest-a rc=0 stamp 1785339985:334366280 -> 1785340535:334366280
+  [OK]   A: a genuine rebuild passes
+-- B (known-negative): the EXACT v1 defect — build run from the wrong
+   directory — must be graded VOID, not passed through as a result
+  BUILD_VOID stage=selftest-b rc=101  error: could not find `Cargo.toml` in `/root` or any parent directory 
+  [OK]   B: a failed build is VOID
+-- C: the OLD (v1) instrument would have MISSED B.
+   v1's build step was:  $CARGO build -p wcore-cli 2>&1 | tail -1
+   with no cd, no rc check and no binary-freshness check.
+   v1 observed rc=0 (the pipe's status, i.e. tail's) and text:
+     "error: could not find `Cargo.toml` in `/root` or any parent directory"
+  [OK]   C: v1 saw rc=0 for a build that did NOT happen — it could not have caught B
+
+SELF_TEST_PASSES=3 SELF_TEST_FAILS=0
+INSTRUMENT_SELF_TEST=PASS
