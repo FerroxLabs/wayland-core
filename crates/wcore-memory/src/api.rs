@@ -187,6 +187,16 @@ pub trait MemoryApi: Send + Sync {
         None
     }
 
+    /// 23B-C3 — the record of what memory was injected into the prompt on the
+    /// user's behalf, and the switch that stops it being injected.
+    ///
+    /// Returns `None` for backends that never inject anything. See
+    /// [`crate::activation`] for why this is a different question from
+    /// provenance.
+    fn activation_log(&self) -> Option<std::sync::Arc<crate::activation::ActivationLog>> {
+        None
+    }
+
     /// F23-03 — search, plus the provenance of everything it selected and
     /// everything it excluded.
     ///

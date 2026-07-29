@@ -317,6 +317,9 @@ impl MemoryApi for Memory {
     fn nudge_budget(&self) -> Option<std::sync::Arc<crate::provenance::NudgeBudget>> {
         self.dispatcher.nudge_budget()
     }
+    fn activation_log(&self) -> Option<std::sync::Arc<crate::activation::ActivationLog>> {
+        self.dispatcher.activation_log()
+    }
     async fn search_with_provenance(
         &self,
         q: Query,

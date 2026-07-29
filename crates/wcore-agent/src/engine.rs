@@ -13344,7 +13344,32 @@ impl AgentEngine {
         // Clone the Arc so the search awaits don't hold a borrow of `self`
         // across the `self.messages.push` below.
         let memory_api = self.memory_api.clone();
+
+        // 23B-C3 — activation. This injection puts durable memory into the
+        // user's prompt without the user asking for it on this turn, and until
+        // now it reported that to nobody but a `tracing::debug!` line. The log
+        // below is both halves of the criterion's "activation" clause: the off
+        // switch is honoured HERE, before any search runs, and what actually
+        // went in is recorded at the point of injection rather than recomputed
+        // afterwards (a second computation could disagree with what was sent).
+        let activation = memory_api.activation_log();
+        if let Some(log) = activation.as_ref()
+            && !log.enabled()
+        {
+            log.record(wcore_memory::RecallActivation::disabled(
+                chrono::Utc::now().timestamp(),
+                query,
+            ));
+            tracing::debug!(
+                target: "wcore_agent::memory",
+                "session-start recall is switched off by the user; injecting nothing"
+            );
+            return;
+        }
+
         let mut previews: Vec<String> = Vec::new();
+        let mut activated: Vec<wcore_memory::ActivatedItem> = Vec::new();
+        let mut exclusions: Vec<wcore_memory::RecallExclusion> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tier in [Tier::Project, Tier::Global] {
             let q = Query {
@@ -13356,13 +13381,29 @@ impl AgentEngine {
                 kg_depth: 1,
                 token_budget: None,
             };
-            match memory_api.search(q, AccessToken::MainAgent).await {
-                Ok(hits) => {
+            // `search_with_provenance` returns the SAME hits `search` does
+            // (both run the episodic fusion then append the semantic-fact
+            // pass), plus the exclusions a privacy scope or retention bound
+            // caused. Taking the reporting variant here is what lets
+            // `/memory activation` tell a user what was WITHHELD from their
+            // prompt, which nothing else in the system can answer.
+            match memory_api
+                .search_with_provenance(q, AccessToken::MainAgent)
+                .await
+            {
+                Ok((hits, report)) => {
+                    exclusions.extend(report.exclusions);
                     for h in hits {
                         // Only durable facts are worth pre-injecting; episodic
                         // previews are noisier and the model can still reach
                         // them via `session_search` on demand.
                         if h.partition == Partition::Semantic && seen.insert(h.preview.clone()) {
+                            activated.push(wcore_memory::ActivatedItem {
+                                id: h.id.clone(),
+                                partition: h.partition,
+                                tier: h.tier,
+                                preview: h.preview.clone(),
+                            });
                             previews.push(h.preview);
                         }
                     }
@@ -13376,11 +13417,34 @@ impl AgentEngine {
             }
         }
         if previews.is_empty() {
+            // Record the empty activation before returning. "This turn
+            // injected nothing, and here is what was excluded" is a different
+            // and more useful answer than the silence this path used to give,
+            // and it is the answer a user needs when a privacy scope is why.
+            if let Some(log) = activation.as_ref() {
+                log.record(wcore_memory::RecallActivation {
+                    at: chrono::Utc::now().timestamp(),
+                    query: query.to_string(),
+                    enabled: true,
+                    injected: Vec::new(),
+                    excluded: exclusions,
+                });
+            }
             return;
         }
         // Cap to keep the injection tight; top hits are first (search returns
         // facts ranked by embedding similarity to the query).
         previews.truncate(6);
+        activated.truncate(6);
+        if let Some(log) = activation.as_ref() {
+            log.record(wcore_memory::RecallActivation {
+                at: chrono::Utc::now().timestamp(),
+                query: query.to_string(),
+                enabled: true,
+                injected: activated,
+                excluded: exclusions,
+            });
+        }
         // HIGH-3 / F1: recalled previews are untrusted memory content. Defang any
         // host trust-tag delimiters so a stored fact can't forge or escape this
         // <system-reminder> block. Same helper as the plugin-hook envelope (DRY).

@@ -59,9 +59,11 @@ impl SlashHandler for MemoryHandler {
                 // 23B-C3 additions: the two verbs of criterion 3 that had no
                 // user-reachable surface at all.
                 "nudge" | "nudges" => self.nudge(rest),
+                "activation" | "activated" => self.activation(rest),
                 other => Err(SlashError::Bad(format!(
                     "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | \
-                     /memory why <query> | /memory correct <id> <text> | /memory forget <id> | \
+                     /memory activation [on|off] | /memory why <query> | \
+                     /memory correct <id> <text> | /memory forget <id> | \
                      /memory privacy <partition> [reason|--clear] | \
                      /memory retention <partition> <days> | /memory nudge [on|off|cap <n>] | \
                      /memory clear <partition>"
@@ -277,6 +279,109 @@ impl MemoryHandler {
                 "/memory nudge: unknown argument '{other}'. Try: /memory nudge [show|on|off|cap <n>]"
             ))),
         }
+    }
+
+    /// 23B-C3 — `/memory activation [on|off]`.
+    ///
+    /// The criterion's first clause, and the one that had no surface at all.
+    /// `AgentEngine::recall_relevant_facts` puts durable memory into the
+    /// outbound prompt on the first turn of every session without the user
+    /// asking on that turn; before this there was no way to see that it had
+    /// happened and no way to stop it.
+    ///
+    /// The three states are reported distinctly on purpose. "No turn has run a
+    /// recall yet", "a turn ran and matched nothing", and "you switched this
+    /// off" all look like an empty prompt from the outside, and only the last
+    /// two are things the user can act on.
+    fn activation(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let api = self.runtime_api("activation")?;
+        let log = api.activation_log().ok_or_else(|| {
+            SlashError::Bad(
+                "/memory activation: this memory backend never injects memory into the prompt"
+                    .to_string(),
+            )
+        })?;
+        match args.first().map(|s| s.as_str()) {
+            Some("on") => {
+                let was = log.set_enabled(true);
+                return Ok(handled(format!(
+                    "/memory activation: automatic recall is ON (was {})",
+                    if was { "already on" } else { "off" }
+                )));
+            }
+            Some("off") => {
+                let was = log.set_enabled(false);
+                return Ok(handled(format!(
+                    "/memory activation: automatic recall is OFF — no durable memory will be \
+                     placed in your prompt (was {})",
+                    if was { "on" } else { "already off" }
+                )));
+            }
+            None | Some("show") => {}
+            Some(other) => {
+                return Err(SlashError::Bad(format!(
+                    "/memory activation: unknown argument '{other}'. \
+                     Try: /memory activation [show|on|off]"
+                )));
+            }
+        }
+
+        let mut out = format!(
+            "/memory activation: automatic recall is {}\n",
+            if log.enabled() { "ON" } else { "OFF" }
+        );
+        match log.last() {
+            None => out.push_str(
+                "  no turn in this session has run a memory recall yet\n\
+                   (this is NOT the same as a turn that recalled nothing)\n",
+            ),
+            Some(a) => {
+                out.push_str(&format!("  last recall ran against: {:?}\n", a.query));
+                if !a.enabled {
+                    out.push_str(
+                        "  it injected nothing because automatic recall was switched off\n",
+                    );
+                } else if a.injected.is_empty() {
+                    out.push_str("  it injected NOTHING into your prompt\n");
+                } else {
+                    out.push_str(&format!(
+                        "  it placed {} item(s) into your prompt:\n",
+                        a.injected.len()
+                    ));
+                    for i in &a.injected {
+                        out.push_str(&format!(
+                            "    {id} [{p}/{t}] {preview}\n",
+                            id = i.id,
+                            p = i.partition.as_str(),
+                            t = i.tier.as_str(),
+                            preview = i.preview
+                        ));
+                    }
+                    out.push_str(
+                        "  correct or remove any of these with /memory correct <id> <text> \
+                         or /memory forget <id>\n",
+                    );
+                }
+                for x in &a.excluded {
+                    out.push_str(&format!(
+                        "  WITHHELD {}{}: {}\n",
+                        x.partition.as_str(),
+                        x.id.as_ref()
+                            .map(|i| format!(" {i}"))
+                            .unwrap_or_else(|| " (whole cell)".to_string()),
+                        match &x.cause {
+                            wcore_memory::ExclusionCause::PrivacyScope { reason } =>
+                                format!("privacy scope ({reason})"),
+                            wcore_memory::ExclusionCause::RetentionExpired {
+                                max_age_secs,
+                                age_secs,
+                            } => format!("expired: {age_secs}s old, bound is {max_age_secs}s"),
+                        }
+                    ));
+                }
+            }
+        }
+        Ok(handled(out))
     }
 
     fn privacy(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {

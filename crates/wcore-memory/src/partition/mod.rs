@@ -77,6 +77,11 @@ pub struct PartitionDispatcher {
     /// Reaching it through `MemoryApi::nudge_budget` is what makes the bound
     /// a control a user can see rather than a constant in a struct.
     pub nudges: Arc<crate::provenance::NudgeBudget>,
+    /// 23B-C3 — what durable memory was injected into the prompt on the last
+    /// turn, plus the user's on/off switch for that injection. Shared with
+    /// every clone so the engine's write and `/memory activation`'s read see
+    /// the same record.
+    pub activation: Arc<crate::activation::ActivationLog>,
 }
 
 impl PartitionDispatcher {
@@ -115,6 +120,7 @@ impl PartitionDispatcher {
                 crate::provenance::DEFAULT_NUDGE_CAP,
                 true,
             )),
+            activation: Arc::new(crate::activation::ActivationLog::new()),
         }
     }
 
@@ -338,6 +344,10 @@ impl MemoryApi for PartitionDispatcher {
 
     fn nudge_budget(&self) -> Option<Arc<crate::provenance::NudgeBudget>> {
         Some(self.nudges.clone())
+    }
+
+    fn activation_log(&self) -> Option<Arc<crate::activation::ActivationLog>> {
+        Some(self.activation.clone())
     }
 
     fn controls(&self) -> Option<crate::provenance::MemoryControls> {

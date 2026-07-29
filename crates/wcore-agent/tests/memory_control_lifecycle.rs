@@ -692,3 +692,163 @@ async fn controls_refuse_out_loud_on_a_backend_with_no_store() {
         "the refusal must say why: {err}"
     );
 }
+
+/// **Activation: the record must describe what really went into the prompt.**
+/// Criterion 3's first clause had no surface at all — the engine injected
+/// durable memory into the outbound body on the first turn of every session
+/// and reported it to nobody but a `tracing::debug!` line. This asserts the
+/// record and the wire agree, item for item, in the same run: anything the log
+/// names must be findable in the captured body, and the captured body must
+/// carry the nonce the log claims it placed.
+#[tokio::test]
+async fn the_activation_record_matches_what_reached_the_outbound_body() {
+    let server = start_mock_anthropic().await;
+    let memory: Arc<dyn MemoryApi> = Arc::new(
+        wcore_memory::open_for_test(&std::env::temp_dir())
+            .await
+            .expect("in-memory memory backend"),
+    );
+    let log = memory
+        .activation_log()
+        .expect("the real backend must expose an activation log");
+    assert!(
+        log.last().is_none(),
+        "before any turn there must be no activation record; an empty record here would make \
+         'nothing was injected' indistinguishable from 'no recall has run'"
+    );
+
+    let nonce = "af-south-QK7ZC3ACTIVATION";
+    let _ = plant_fact(&memory, nonce).await;
+    drive_cold_turn(&server, &memory, "msg-act-1").await;
+
+    let bodies = captured_bodies(&server).await;
+    assert_body_is_a_live_instrument(&bodies, 0, "activation turn 1");
+    let record = log.last().expect("a recall ran, so a record must exist");
+    assert!(record.enabled);
+    assert!(
+        !record.injected.is_empty(),
+        "the activation record claims nothing was injected, but the wire says otherwise. \
+         Body was: {}",
+        bodies[0]
+    );
+    // Every item the record names must actually be in the bytes that were sent.
+    // A record that over-claims is worse than no record: it tells a user their
+    // prompt contains something it does not, so they forget the wrong thing.
+    for item in &record.injected {
+        assert!(
+            bodies[0].contains(&item.preview),
+            "activation record names {:?} as injected, but it is NOT in the outbound body",
+            item.preview
+        );
+    }
+    assert!(
+        record.injected.iter().any(|i| i.preview.contains(nonce)),
+        "the planted nonce reached the wire but the activation record does not name it"
+    );
+}
+
+/// **Activation is a CONTROL, not just a report.** With it switched off, no
+/// durable memory may reach the outbound body at all — and the record must say
+/// the off switch is why, not that nothing matched.
+#[tokio::test]
+async fn switching_activation_off_stops_memory_reaching_the_outbound_body() {
+    let server = start_mock_anthropic().await;
+    let memory: Arc<dyn MemoryApi> = Arc::new(
+        wcore_memory::open_for_test(&std::env::temp_dir())
+            .await
+            .expect("in-memory memory backend"),
+    );
+    let nonce = "ca-central-QK7ZC3ACTOFF";
+    let _ = plant_fact(&memory, nonce).await;
+    let log = memory.activation_log().expect("activation log");
+
+    // Known-positive first: with the switch ON the value must reach the wire,
+    // or the absence asserted below would be free.
+    drive_cold_turn(&server, &memory, "msg-actoff-1").await;
+    let bodies = captured_bodies(&server).await;
+    assert_body_is_a_live_instrument(&bodies, 0, "activation-off turn 1");
+    assert!(
+        bodies[0].contains(nonce),
+        "with activation ON the fact must reach the wire. Body was: {}",
+        bodies[0]
+    );
+
+    assert!(
+        log.set_enabled(false),
+        "set_enabled must report the previous state"
+    );
+    drive_cold_turn(&server, &memory, "msg-actoff-2").await;
+    let bodies = captured_bodies(&server).await;
+    assert_eq!(bodies.len(), 2, "expected two outbound requests");
+    assert_body_is_a_live_instrument(&bodies, 1, "activation-off turn 2");
+    assert!(
+        !bodies[1].contains(nonce),
+        "ACTIVATION OFF DID NOT REACH THE PROMPT: memory is still being injected. Body was: {}",
+        bodies[1]
+    );
+    let record = log.last().expect("the disabled turn must still record");
+    assert!(
+        !record.enabled,
+        "the record must say the off switch is why nothing was injected — 'nothing matched' \
+         and 'you turned this off' are different answers"
+    );
+}
+
+/// **A withheld item must be reported as withheld.** With a privacy scope set,
+/// the activation record must name the exclusion rather than simply showing an
+/// empty injection list — "missing" and "withheld" are different answers to
+/// "why is this not in my prompt".
+#[tokio::test]
+async fn activation_reports_what_a_privacy_scope_withheld() {
+    let server = start_mock_anthropic().await;
+    let memory: Arc<dyn MemoryApi> = Arc::new(
+        wcore_memory::open_for_test(&std::env::temp_dir())
+            .await
+            .expect("in-memory memory backend"),
+    );
+    let nonce = "eu-south-QK7ZC3WITHHELD";
+    let _ = plant_fact(&memory, nonce).await;
+    memory
+        .controls()
+        .expect("controls")
+        .set_privacy_scope(
+            &AccessToken::MainAgent,
+            Partition::Semantic,
+            Tier::Project,
+            "withheld for the activation test",
+            "operator",
+        )
+        .expect("scoping");
+
+    drive_cold_turn(&server, &memory, "msg-withheld-1").await;
+    let bodies = captured_bodies(&server).await;
+    assert_body_is_a_live_instrument(&bodies, 0, "withheld turn 1");
+    assert!(
+        !bodies[0].contains(nonce),
+        "a scoped fact must not reach the wire. Body was: {}",
+        bodies[0]
+    );
+
+    let record = log_of(&memory);
+    assert!(
+        record.injected.is_empty(),
+        "nothing should have been injected"
+    );
+    assert!(
+        record
+            .excluded
+            .iter()
+            .any(|x| x.partition == Partition::Semantic
+                && matches!(x.cause, wcore_memory::ExclusionCause::PrivacyScope { .. })),
+        "the activation record must NAME the privacy scope as the reason. Excluded: {:?}",
+        record.excluded
+    );
+}
+
+fn log_of(memory: &Arc<dyn MemoryApi>) -> wcore_memory::RecallActivation {
+    memory
+        .activation_log()
+        .expect("activation log")
+        .last()
+        .expect("a recall ran, so a record must exist")
+}
