@@ -2105,12 +2105,57 @@ impl AgentBootstrap {
             } else {
                 None
             };
+        // 23B-C3 (user-model half) — the user-authored correction layer.
+        //
+        // Opened independently of `want_memory` and of the backend choice: a
+        // correction is the user's own statement about themselves, so it must
+        // survive both "memory is off" and a swap from the local backend to
+        // Honcho. It lives in its own file for the reason given in
+        // `wcore_user_model::correction` — `user-model.json` is rewritten
+        // wholesale by the inference fold.
+        //
+        // A failure to OPEN the store is logged and degrades to no
+        // corrections. A failure to WRITE one propagates to the user at the
+        // slash-command surface — telling someone their correction was saved
+        // when it was not is the defect this layer exists to prevent.
+        let correction_store: Option<wcore_user_model::CorrectionStore> = {
+            let path = wcore_memory::paths::auto_memory_dir(cwd_path)
+                .map(|d| d.join("user-corrections.json"))
+                .unwrap_or_else(|| cwd_path.join(".wayland").join("user-corrections.json"));
+            match wcore_user_model::CorrectionStore::with_persistence(&path) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "wcore_agent::bootstrap",
+                        error = %e,
+                        "user-model correction store unavailable; \
+                         corrections will NOT reach the prompt this session"
+                    );
+                    None
+                }
+            }
+        };
+        let corrections = match correction_store.as_ref() {
+            Some(s) => s.corrections(user_id).await,
+            None => wcore_user_model::Corrections::default(),
+        };
+        // Corrections render even when no user-model backend is installed:
+        // an explicit statement about oneself should not be conditional on
+        // the inference machinery being switched on.
         let user_ctx_block = if let Some(b) = user_model_backend.as_ref() {
             let brief = b.brief(user_id).await.unwrap_or_default();
             let prefs = b.preferences(user_id).await.unwrap_or_default();
-            crate::user_context::render_user_context_block(&brief, &prefs)
+            crate::user_context::render_user_context_block_with_corrections(
+                &brief,
+                &prefs,
+                &corrections,
+            )
         } else {
-            None
+            crate::user_context::render_user_context_block_with_corrections(
+                &wcore_user_model::UserBrief::default(),
+                &wcore_user_model::Preferences::default(),
+                &corrections,
+            )
         };
         let mut system_prompt = system_prompt;
         if let Some(block) = user_ctx_block {
@@ -2941,6 +2986,14 @@ impl AgentBootstrap {
         // observations land in the store the next bootstrap reads from.
         if let Some(backend) = user_model_backend {
             engine.set_user_model_backend(backend);
+        }
+        // 23B-C3 — install the correction store so `/usermodel correct` can
+        // reach the same store this bootstrap just rendered from. The block
+        // above is built once per session, so a correction made mid-session
+        // reaches the provider on the NEXT session's prompt; the slash
+        // command says exactly that rather than implying it took effect now.
+        if let Some(store) = correction_store {
+            engine.set_user_correction_store(store, user_id);
         }
         // M3.2: hand the decay-scheduler handle (if any) to the engine so
         // its `Drop` impl aborts the task on shutdown. No-op when memory

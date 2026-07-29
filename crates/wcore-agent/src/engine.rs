@@ -2753,6 +2753,28 @@ pub struct AgentEngine {
     /// preserves pre-v0.8.0 behaviour byte-identical when no backend
     /// is installed.
     user_model_backend: Option<Arc<dyn wcore_user_model::UserModelBackend>>,
+    /// 23B-C3 — user-authored corrections to the user model, paired with the
+    /// user-id they are keyed by.
+    ///
+    /// Deliberately a separate handle from `user_model_backend`: that
+    /// backend's only mutation is `observe`, an inference fold, and a
+    /// correction must not be reachable from it.
+    ///
+    /// The id is carried **with** the store rather than read from
+    /// `user_model_user_id` because those two are not the same value.
+    /// `bootstrap.rs` renders the user-context block under a hardcoded
+    /// `"default"`, while `user_model_user_id` resolves `WAYLAND_USER_ID`.
+    /// Keying a correction by the latter would write it into a bucket the
+    /// render site never reads — a correction that reports success and never
+    /// reaches the model, which is precisely the defect class this work
+    /// closes. Pairing them here makes write-bucket and read-bucket the same
+    /// value by construction. (The pre-existing divergence on the *inferred*
+    /// brief is reported as a separate finding, not fixed here.)
+    ///
+    /// `None` means no correction store opened (path unwritable); the
+    /// `/usermodel` control then refuses out loud rather than reporting a
+    /// correction it did not store.
+    user_correction_store: Option<(wcore_user_model::CorrectionStore, String)>,
     /// v0.8.0 Task M — user-id key used for write-back. Defaults to
     /// `"default"` (mirrors the bootstrap read site at
     /// `bootstrap.rs::user_ctx_block`); overridable via the
@@ -3179,6 +3201,7 @@ impl AgentEngine {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -3417,6 +3440,7 @@ impl AgentEngine {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -4449,6 +4473,26 @@ impl AgentEngine {
     /// installed (memory disabled, or backend init failed in bootstrap).
     pub fn user_model_backend(&self) -> Option<&Arc<dyn wcore_user_model::UserModelBackend>> {
         self.user_model_backend.as_ref()
+    }
+
+    /// 23B-C3 — install the user-authored correction store together with the
+    /// user-id the caller rendered the user-context block under. Both are
+    /// supplied by the same bootstrap scope so they cannot drift apart.
+    pub fn set_user_correction_store(
+        &mut self,
+        store: wcore_user_model::CorrectionStore,
+        user_id: impl Into<String>,
+    ) {
+        self.user_correction_store = Some((store, user_id.into()));
+    }
+
+    /// 23B-C3 — the correction store and the user-id it is keyed by. `None`
+    /// when the store could not be opened; callers must refuse rather than
+    /// report a correction as applied.
+    pub fn user_correction_store(&self) -> Option<(&wcore_user_model::CorrectionStore, &str)> {
+        self.user_correction_store
+            .as_ref()
+            .map(|(s, id)| (s, id.as_str()))
     }
 
     /// v0.8.0 Task M — override the user-id key used for write-back.
@@ -15803,6 +15847,7 @@ mod set_config_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -17486,6 +17531,7 @@ mod phase6_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -17804,6 +17850,7 @@ mod compact_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -19196,6 +19243,7 @@ mod plan_mode_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -19647,6 +19695,7 @@ mod hook_integration_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -20508,6 +20557,7 @@ mod approval_bridge_engine_tests {
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -21563,6 +21613,7 @@ mod user_model_writeback_tests {
             skill_catalog: None,
             template_router: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: "test-user".to_string(),
             // v0.8.1 U1 — test harness defaults to no router; the
             // router-specific tests below install one explicitly.
