@@ -8,6 +8,14 @@ live in `CRITERIA-GAP-LEDGER.md`; the dated correction blocks there are authorit
 **This file exists because the headlines misled.** Of 18 rows, **11 were stale** and 2 were graded
 off instruments that could never pass.
 
+> **The re-grade that produced this file was itself caught by the same defect.** It graded `27-C2(b)`
+> "unchanged" off `bootstrap.rs:754`, a line that reads `true` forever, while the actual fix
+> (`85b60a2f`, *"advertise browser/CUA capabilities on liveness, not linkage"*, 2026-07-28) was
+> **already in its own ancestry**. Readiness is published 187 lines later via
+> `PluginCapabilitySet::from_verified(..).narrowed_to_live()`, which runs real liveness probes.
+> Found by `lane/27-c2b-readiness`, verified independently. **No audit is immune to the failure mode
+> it is auditing for** — which is the strongest argument there is for the both-direction control.
+
 | Criterion | Grade | One-sentence justification |
 |---|---|---|
 | `21-C3` | **NOT MET** | Tool *live* cells remain open and Windows is unmeasured; enforcement is equivalent by construction, so this is a proof gap, not an enforcement hole. |
@@ -24,7 +32,7 @@ off instruments that could never pass.
 | `25-C2` | **MET** (as written) ↑ | Carries a recorded **dissenting reading**, deliberately carried forward rather than resolved. |
 | `25-C4` | **PARTIAL** ↑ | The row's named unmet clause is **closed**; two open items it never knew about take its place. |
 | `27-C1` | **PARTIAL** | Grade unchanged, **but the row's RED gate is now GREEN** — that sentence must not be read forward. |
-| `27-C2` | **PARTIAL** ↑ | (a) closed; (b) and (c) unchanged. Still release-blocking, **but for (b) only**. |
+| `27-C2` | **PARTIAL** ↑↑ | (a) and **(b) both CLOSED — see the 2026-07-30 late correction; (b) was already fixed on 2026-07-28 and the re-grade could not see it.** Only **(c)**, the three policy baselines, remains, and **two of its three legs are blocked on a display-capable host**. |
 | `27-C3` | **PARTIAL** ↑ | `F-27C3-04` (image tool broken by default on FluxRouter) fixed and live-proved through `ProviderCompat`. |
 | `27-C4` | **NOT MET** | Grade survives **for a different reason than the row states**: its "nothing was exercised" sentence is false (live capture at ratio 116.66 vs a 1.15 control; barge-in proven against the real player), but `voice` is absent from every `default` list, so the feature is not in the shipped artifact. |
 | `27-C5` | **PARTIAL** ↑ | Three packaged smokes ran on real macOS/Linux/Windows — 8 PASS / 1 RED, byte-identical on all three. **MET for the shipped release, NOT MET for the candidate**; two aarch64 targets are NOT MEASURED (neither zero nor passing). |
