@@ -128,6 +128,37 @@ export class DiscordFixture {
     // Dispatch journal: every MESSAGE_CREATE this fixture pushed, and to how
     // many sockets. deliveries > dispatched is the duplication signal.
     this.dispatched = [];
+
+    // SESSION-global monotonic dispatch sequence. Discord numbers `s` per
+    // SESSION, not per socket, and a RESUME continues that same numbering —
+    // which is the whole reason `op 6` can replay.
+    //
+    // This used to be derived per-connection (`conn.seq += 1`) with a fallback
+    // of `this.dispatched.length + 1` for a dispatch that reached no socket.
+    // That fallback FORGOT THAT READY CONSUMED SEQUENCE 1, so a message
+    // dispatched during a disconnect window was numbered one LOWER than it
+    // should be and collided with an already-delivered sequence. Measured on
+    // 2026-07-29:
+    //
+    //     PRE-1 s=2   PRE-2 s=3   GAP-1 s=3 (collision)   POST-1 s=4
+    //
+    // With the client resuming from `seq=3`, the replay filter `x.s > after`
+    // then discarded the gap message BY ITS OWN SEQUENCE NUMBER. The fixture
+    // was structurally incapable of expressing "delivered while disconnected,
+    // replayed on RESUME" — so any reconnect probe built on it reported
+    // inbound message LOSS for every product, including a correct one.
+    //
+    // A single allocator makes the two paths inexpressible separately.
+    this.seq = 0;
+
+    // Reconnect journals. Both exist so a driver never has to INFER that the
+    // disconnect happened or that the replay happened — inferring either from
+    // an arrival count is how "no messages were lost" becomes self-passing.
+    this.drops = [];
+    this.resumeReplays = [];
+    // Default ON — the shipped behaviour. Only `/__control/replay` turns it
+    // off, and only a driver's negative control does that.
+    this.replayOnResume = true;
     // Outbound journal: every message the binary POSTed back (the replies).
     this.sent = [];
     this.typing = [];
@@ -139,6 +170,18 @@ export class DiscordFixture {
 
   note(msg) {
     this.faults.push(msg);
+  }
+
+  /**
+   * Allocate the next SESSION sequence number.
+   *
+   * The only place `s` is minted. Subclasses that dispatch their own frame
+   * shapes (`f24-media-actions.mjs`) call this rather than re-deriving it —
+   * the re-derivation is what carried the collision bug into a second file.
+   */
+  nextSeq() {
+    this.seq += 1;
+    return this.seq;
   }
 
   // What this fixture does and does not implement — reported into the result
@@ -255,6 +298,28 @@ export class DiscordFixture {
       }
       if (p === '/__control/report' && req.method === 'GET') {
         return json(200, this.report());
+      }
+      // Induce a genuine upstream disconnect. The fixture runs as its own OS
+      // process, so the driver cannot reach `dropAllSockets()` directly — this
+      // is the only way to drop the socket from OUTSIDE the binary without
+      // signalling or killing the binary itself, which would be a process
+      // restart and a different event entirely.
+      if (p === '/__control/drop' && req.method === 'POST') {
+        return json(200, { dropped: this.dropAllSockets() });
+      }
+      // Turn the RESUME replay off. This exists ONLY to serve a driver's
+      // one-variable negative control: with the replay suppressed, a message
+      // dispatched during a disconnect window is genuinely unreachable, so a
+      // loss detector MUST fire. A run in this mode that reports no loss has a
+      // dead detector, and its normal-mode green is worthless.
+      //
+      // It is a fixture capability rather than a driver flag because the
+      // ONLY variable that may change between the two runs is this one — the
+      // binary, the config, the tokens and the message plan are identical.
+      if (p === '/__control/replay' && req.method === 'POST') {
+        const spec = JSON.parse(body || '{}');
+        this.replayOnResume = spec.enabled !== false;
+        return json(200, { replay_on_resume: this.replayOnResume });
       }
       if (p === '/__control/replies' && req.method === 'GET') {
         return json(200, { sent: this.sent });
@@ -418,7 +483,7 @@ export class DiscordFixture {
       conn.identified = true;
       conn.intents = msg.d?.intents ?? null;
       conn.sessionId = `f24c3-sess-${conn.n}-${crypto.randomBytes(4).toString('hex')}`;
-      conn.seq += 1;
+      conn.seq = this.nextSeq();
       this.send(conn, {
         op: 0,
         t: 'READY',
@@ -446,11 +511,22 @@ export class DiscordFixture {
       conn.identified = true;
       conn.sessionId = msg.d?.session_id ?? conn.sessionId;
       const after = Number(msg.d?.seq ?? 0);
-      for (const d of this.dispatched.filter((x) => x.s > after)) {
+      const replayed = this.replayOnResume ? this.dispatched.filter((x) => x.s > after) : [];
+      for (const d of replayed) {
         this.send(conn, { op: 0, t: 'MESSAGE_CREATE', s: d.s, d: d.payload });
         conn.delivered += 1;
+        // A replayed frame reached one more socket. Without this the
+        // duplication detector (`dispatch_socket_deliveries` vs
+        // `dispatched_total`) is BLIND to a replay, so a product that resumed
+        // twice and took the same message twice would look identical to one
+        // that resumed once — and duplicate-freedom is half of what this
+        // criterion's reconnect clause asks.
+        d.sockets += 1;
       }
-      conn.seq = Math.max(conn.seq, after);
+      this.resumeReplays.push({ conn: conn.n, after, replayed: replayed.map((x) => x.id), at: Date.now() });
+      // The resumed socket is caught up to the SESSION, not merely to the seq
+      // it asked from — otherwise the next dispatch's `s` would appear to jump.
+      conn.seq = this.seq;
       this.send(conn, { op: 0, t: 'RESUMED', s: conn.seq, d: {} });
       return;
     }
@@ -476,15 +552,47 @@ export class DiscordFixture {
     };
     if (guildId) payload.guild_id = guildId;
 
-    let s = 0;
+    // Minted ONCE, before the fan-out, and minted whether or not anyone is
+    // listening. That is the repair: a dispatch into an empty connection set
+    // still consumes a real sequence number, so it sorts strictly after
+    // everything already delivered and RESUME can replay it.
+    const s = this.nextSeq();
     for (const c of targets) {
-      c.seq += 1;
-      s = Math.max(s, c.seq);
-      this.send(c, { op: 0, t: 'MESSAGE_CREATE', s: c.seq, d: payload });
+      c.seq = s;
+      this.send(c, { op: 0, t: 'MESSAGE_CREATE', s, d: payload });
       c.delivered += 1;
     }
-    this.dispatched.push({ id, s: s || this.dispatched.length + 1, payload, sockets: targets.length, at: Date.now() });
+    this.dispatched.push({ id, s, payload, sockets: targets.length, at: Date.now() });
     return targets.length;
+  }
+
+  /**
+   * Force every live gateway socket down WITHOUT a WebSocket close frame.
+   *
+   * `socket.destroy()` rather than a clean op-8 close, because a clean close is
+   * the easy case: the client is TOLD the session ended. A destroyed socket is
+   * what a real network drop looks like — the peer learns about it from a read
+   * error or from a heartbeat that never gets ACKed, which is the path
+   * `gateway.rs`'s `Err(e) => ... ReconnectReason::Resumable` branch exists to
+   * serve and the path that has never been driven.
+   *
+   * Returns how many sockets it dropped, so a driver can prove the drop
+   * HAPPENED. A probe that induces a disconnect it cannot confirm grades the
+   * product on an event that may never have occurred — the reconnect-clause
+   * flavour of a self-passing gate.
+   */
+  dropAllSockets() {
+    const n = this.conns.size;
+    for (const c of this.conns) {
+      try {
+        c.socket.destroy();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.conns.clear();
+    this.drops.push({ dropped: n, at: Date.now() });
+    return n;
   }
 
   report() {
@@ -505,6 +613,17 @@ export class DiscordFixture {
       heartbeats: this.heartbeats,
       dispatched_total: this.dispatched.length,
       dispatch_socket_deliveries: this.dispatched.reduce((a, d) => a + d.sockets, 0),
+      // Per-message ledger, so a driver derives losses and duplicates from the
+      // fixture's own journal rather than trusting an aggregate.
+      dispatch_ledger: this.dispatched.map((d) => ({ id: d.id, s: d.s, sockets: d.sockets })),
+      // Sequence collisions. Must be 0. A non-zero here means the fixture
+      // cannot express a replay and NO reconnect verdict from this run is
+      // trustworthy — it is a NOT-MEASURED signal, not a product FAIL.
+      duplicate_seq_numbers: this.dispatched.length - new Set(this.dispatched.map((d) => d.s)).size,
+      forced_drops: this.drops.length,
+      forced_drop_sockets: this.drops.reduce((a, d) => a + d.dropped, 0),
+      resume_replays: this.resumeReplays,
+      resume_replayed_total: this.resumeReplays.reduce((a, r) => a + r.replayed.length, 0),
       sent_total: this.sent.length,
       sent: this.sent,
       typing_total: this.typing.length,
