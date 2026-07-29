@@ -1,0 +1,9 @@
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[storage.credentials]
+backend = "plaintext"
+
+[session]
+enabled = true

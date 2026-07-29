@@ -58,6 +58,44 @@ In `run()`, before `run_json_stream_mode` is ever called:
 4. Whether other startup refusals (list above) can be covered by one chokepoint or need
    per-site emits.
 
+## T+60min — LIVE BASELINE MEASURED (pre-fix), hetzner-dsm, debug build, BUILDRC=0
+
+Binary built from `c731ce5b` on `hetzner-dsm`. Harness
+`.planning/evidence/json-stream-refusal/run-cases.sh`, captures under `/tmp/jsr-prefix/`.
+Instrument self-test PASSED (3/3) at the top of the same run.
+
+| case | condition | rc | stdout bytes | frames | verdict |
+|---|---|---|---|---|---|
+| **P_OK** | session off, plaintext creds | 0 | **4480** | **27** (incl. 1 `ready`) | positive control — harness proven |
+| **N_REFUSE** | session ON, plaintext creds | 1 | **0** | **0** | **DEFECT — zero frames** |
+| **D_PARSE** | corrupt `config.toml` | 1 | **0** | **0** | **DEFECT** |
+| **D_NOKEY** | no API key | 1 | 496 | **1** `error`/`init_failed` | already covered by #186 |
+| **D_PROFILE** | `--profile` w/o `WAYLAND_HOME` | 1 | **0** | **0** | **DEFECT** |
+
+P_OK and N_REFUSE differ in exactly ONE config key (`session.enabled`), and P_OK emits 27
+frames in the same run — so N_REFUSE's zero is the product's behaviour, not a broken
+invocation. That is the specific trap that produced the earlier false HIGH on this area.
+
+N_REFUSE stdout is 0 bytes confirmed by `wc -c` AND an empty `xxd`. Its reason is the LAST
+line of a 6015-byte **stderr**:
+
+```
+Error: storage.credentials.backend is set to "plaintext", which cannot hold the confidential
+key that durable session recovery requires. ...
+```
+
+**Three of four refusal doors emit nothing; one of four emits.**
+
+Two facts this baseline settles that the static read could not:
+
+1. **D_NOKEY proves the emit mechanism and the output pump both work** — 496 bytes reach
+   stdout even though the process exits immediately afterwards. So a chokepoint emit will
+   also arrive; no flush redesign is needed (an explicit `flush_bounded` is still added as
+   belt-and-braces).
+2. **D_PARSE confirms the statically-predicted gap INSIDE #186's own fix.** `ConfigLoadError`
+   returns at `main.rs:1732`, above the emit at `1789`. #186 believed it covered config
+   failure; it covers the credential half and not the corrupt-file half.
+
 ## Harness rules I am binding myself to in this lane (§6b-ii)
 
 - Byte-count every capture (`wc -c`), never infer emptiness from a visual blank.
