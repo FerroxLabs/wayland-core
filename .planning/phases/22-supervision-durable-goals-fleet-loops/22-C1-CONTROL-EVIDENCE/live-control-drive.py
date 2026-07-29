@@ -48,6 +48,24 @@ env["WAYLAND_CONFIG_PATH"] = os.path.join(workdir, "config.toml")
 with open(env["WAYLAND_CONFIG_PATH"], "w") as handle:
     handle.write("[provider]\nname = \"anthropic\"\n")
 
+# Durable sessions refuse to start against a plaintext credential backend, and
+# durable sessions are the whole point here — a Goal lives in the session
+# journal. So this drive unlocks a THROWAWAY vault scoped to `workdir`, which
+# is deleted with it.
+#
+# The passphrase is generated here, written to a file the child reads by FILE
+# DESCRIPTOR, and never placed in argv, never printed, and never written to any
+# capture. `WAYLAND_VAULT_PASSPHRASE_FD` is the product's own preferred route
+# for exactly this reason; `WAYLAND_VAULT_PASSPHRASE` would put it in the
+# process environment where a diagnostics dump could surface it.
+passphrase_path = os.path.join(workdir, ".vault-pass")
+with open(passphrase_path, "w") as handle:
+    handle.write(os.urandom(24).hex())
+os.chmod(passphrase_path, 0o600)
+pass_fd = os.open(passphrase_path, os.O_RDONLY)
+os.set_inheritable(pass_fd, True)
+env["WAYLAND_VAULT_PASSPHRASE_FD"] = str(pass_fd)
+
 proc = subprocess.Popen(
     [BIN, "--json-stream"],
     cwd=workdir,
@@ -57,6 +75,7 @@ proc = subprocess.Popen(
     text=True,
     bufsize=1,
     env=env,
+    pass_fds=(pass_fd,),
 )
 
 
