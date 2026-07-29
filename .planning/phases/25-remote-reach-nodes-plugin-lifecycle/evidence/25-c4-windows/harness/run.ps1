@@ -56,6 +56,16 @@ $NONCE = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ""
 $env:WAYLAND_F25_CLOUD_TOKEN = "INVALID-PLACEHOLDER-NOT-A-CREDENTIAL-25c4-windows"
 $env:WAYLAND_F25_CLOUD_ORG   = "wayland-f25-proof"
 
+# --- provider key: required by the FIX, not by the command -------------------
+# arm_egress_policy() calls Config::resolve(), which hard-fails with "No API key
+# found" when no provider credential is configured. `backend orphans` never talks
+# to a provider, so this is a coupling the fix introduced. It was invisible on
+# Linux only because hetzner's /root/.wayland/.env injects ANTHROPIC_API_KEY into
+# every process (LANE-BRIEF §3b-ii). Recorded as a finding; here a clearly-invalid
+# placeholder, IDENTICAL in both arms, satisfies config resolution so the arms
+# still differ by exactly one variable. No provider request is made on this path.
+$env:ANTHROPIC_API_KEY = "INVALID-PLACEHOLDER-NOT-A-CREDENTIAL-25c4-windows"
+
 "HOST=$(hostname)"                              | Out-File "$EV\meta.txt" -Encoding ascii
 "UTC=$([DateTime]::UtcNow.ToString('o'))"       | Out-File "$EV\meta.txt" -Encoding ascii -Append
 "BINARY=$B"                                     | Out-File "$EV\meta.txt" -Encoding ascii -Append
