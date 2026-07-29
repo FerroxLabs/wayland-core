@@ -63,7 +63,7 @@ case "$CAL_GRADE" in
 esac
 
 ABSENT=0; WHOLE=0; PARTIAL=0; NOT_STARTED=0; COMPLETED=0; IN_WINDOW=0
-STAGED=0; RETRY_OK=0; RETRY_FAIL=0
+STAGED=0; STAGED_SKILL=0; RETRY_OK=0; RETRY_FAIL=0
 DETAIL="$WORK/trials.tsv"
 : > "$DETAIL"
 
@@ -90,6 +90,7 @@ for i in $(seq 1 "$TRIALS"); do
   BEGAN=$(echo "$G"  | grep -o 'BEGAN=[01]'    | head -1 | cut -d= -f2)
   DONEF=$(echo "$G"  | grep -o 'DONE=[01]'     | head -1 | cut -d= -f2)
   STAGEDF=$(echo "$G"| grep -o 'STAGED=[01]'   | head -1 | cut -d= -f2)
+  STAGEDSK=$(echo "$G"| grep -o 'STAGEDSKILL=[01]' | head -1 | cut -d= -f2)
   printf '%s\t%sms\t%s\n' "$i" "$DELAY_MS" "$G" >> "$DETAIL"
 
   if [ "${BEGAN:-0}" != "1" ]; then
@@ -104,6 +105,7 @@ for i in $(seq 1 "$TRIALS"); do
       PARTIAL) PARTIAL=$((PARTIAL+1)) ;;
     esac
     [ "${STAGEDF:-0}" = "1" ] && STAGED=$((STAGED+1))
+    [ "${STAGEDSK:-0}" = "1" ] && STAGED_SKILL=$((STAGED_SKILL+1))
 
     # Recovery: a killed restore must be retryable to a whole state without manual repair.
     if "$BIN" restore "$T" "$ID" "$MODE" >/dev/null 2>&1; then
@@ -124,7 +126,8 @@ echo "===== F23A-C1-H3 KILL DISTRIBUTION: mode=$MODE trials=$TRIALS ====="
 echo "window_ms=$WINDOW_MS"
 echo "not_started=$NOT_STARTED  completed_before_kill=$COMPLETED  IN_WINDOW=$IN_WINDOW"
 echo "of the IN_WINDOW kills:  ABSENT=$ABSENT  WHOLE=$WHOLE  PARTIAL=$PARTIAL"
-echo "staging_left=$STAGED  retry_to_whole=$RETRY_OK  retry_failed=$RETRY_FAIL"
+echo "staging_left=$STAGED  staging_with_SKILL_md=$STAGED_SKILL  (F23A-C1-H4 exposure)"
+echo "retry_to_whole=$RETRY_OK  retry_failed=$RETRY_FAIL"
 echo "per-trial detail: $DETAIL"
 
 if [ "$IN_WINDOW" -eq 0 ]; then

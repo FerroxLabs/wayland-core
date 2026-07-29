@@ -38,9 +38,13 @@
 //! - `WHOLE`   — every file present at its exact size, nothing extra.
 //! - `PARTIAL` — present but not whole. **This is the defect.**
 //!
-//! A staging directory left behind by a kill is reported separately as `STAGED=1`; it is not
-//! a partial skill (the loader skips the prefix, see `govern::ROLLBACK_STAGING_PREFIX`) but
-//! the driver still asserts a retry clears it.
+//! A staging tree left behind by a kill is reported separately as `STAGED=1`, and whether it
+//! holds a discoverable `SKILL.md` as `STAGEDSKILL=1`. That second field is the F23A-C1-H4
+//! measurement: for the namespaced layout this harness uses, staging lands INSIDE the skills
+//! root, so a leftover tree with a `SKILL.md` in it is a half-built skill sitting where the
+//! loader walks. It is not a partial *target* directory -- `GRADE` covers that -- and it is
+//! fenced by name in `loader::collect_skill_md`, but the harness reports it rather than
+//! assuming the fence holds.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -52,6 +56,9 @@ use wcore_skills::govern::GovernanceStore;
 const FILES: usize = 320;
 const FILE_BYTES: usize = 64 * 1024;
 const SKILL_NAME: &str = "auto-killtest";
+/// `promote::STAGING`, which is crate-private. Duplicated as a literal so a rename breaks
+/// this harness loudly instead of silently making it measure nothing.
+const STAGING_DIR: &str = ".promote-staging";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -77,8 +84,17 @@ fn main() {
 fn skills_dir(root: &Path) -> PathBuf {
     root.join("skills")
 }
+/// The **namespaced** layout the auto-skill drafter actually writes
+/// (`$WAYLAND_HOME/skills/auto/auto-<sig>/`). Deliberately not a flat `<root>/<name>`: for a
+/// flat skill `promote::staging_root_for` puts staging outside the skills tree, and this
+/// harness would then never exercise the F23A-C1-H4 path at all.
 fn target_dir(root: &Path) -> PathBuf {
-    skills_dir(root).join(SKILL_NAME)
+    skills_dir(root).join("auto").join(SKILL_NAME)
+}
+
+/// Where `rollback` stages a restore of a namespaced skill: `<skills_root>/.promote-staging`.
+fn staging_root(root: &Path) -> PathBuf {
+    skills_dir(root).join(STAGING_DIR)
 }
 fn store(root: &Path) -> GovernanceStore {
     GovernanceStore::new(root.join("governance"))
@@ -186,14 +202,13 @@ fn grade(root: &Path) {
     let began = marks.join("BEGIN").exists();
     let done = marks.join("DONE").exists();
 
-    let staged = std::fs::read_dir(skills_dir(root))
-        .map(|rd| {
-            rd.flatten().any(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with(wcore_skills::govern::ROLLBACK_STAGING_PREFIX))
-            })
-        })
+    // Is a staging tree left behind, and does it hold a discoverable `SKILL.md`? The second
+    // question is the F23A-C1-H4 one: a leftover empty directory is litter, a leftover tree
+    // with a SKILL.md in it is a half-built skill sitting inside the loader's walk.
+    let staged = staging_root(root).is_dir();
+    let staged_skill = staging_root(root)
+        .read_dir()
+        .map(|rd| rd.flatten().any(|e| e.path().join("SKILL.md").is_file()))
         .unwrap_or(false);
 
     let dir = target_dir(root);
@@ -219,8 +234,8 @@ fn grade(root: &Path) {
     // One line, all fields, parsed by the driver. Written to stdout by a process that is not
     // being killed, so it is safe here in a way it is not inside `restore`.
     println!(
-        "GRADE={state} BEGAN={} DONE={} STAGED={}",
-        began as u8, done as u8, staged as u8
+        "GRADE={state} BEGAN={} DONE={} STAGED={} STAGEDSKILL={}",
+        began as u8, done as u8, staged as u8, staged_skill as u8
     );
 }
 
