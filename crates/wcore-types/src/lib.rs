@@ -11,6 +11,12 @@ pub mod goal;
 pub mod llm;
 pub mod message;
 pub mod model_aliases;
+// Cross-platform process-liveness probe. Lives here, not in a probe-local
+// helper, because a liveness check that reads a zombie as a live process is
+// how thirteen containment tests came to certify a corpse as a survivor —
+// and because AGENTS.md requires platform differences to sit in exactly one
+// function rather than being re-derived per crate.
+pub mod process_liveness;
 pub mod skill_types;
 pub mod spawner;
 pub mod tool;
