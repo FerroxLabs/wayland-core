@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use wcore_config::config::{Config, ProviderType};
 use wcore_egress::EgressClient as Client;
 use wcore_tools::url_safety::{SsrfSafeResolver, ssrf_safe_redirect_policy};
 
@@ -336,12 +337,99 @@ pub fn build_vision_backend() -> Option<Arc<dyn VisionBackend>> {
     None
 }
 
+/// Speech-to-text arm used when the **active OpenAI-wire provider is
+/// FluxRouter**. A live round-trip proved `flux-voice-fast` serves
+/// `/audio/transcriptions` in the exact `verbose_json` shape
+/// [`OpenAiCompatWhisperBackend`] already sends (verbatim transcript, with a
+/// silence negative control returning different text, so the match is real
+/// and not an echo).
+pub const FLUX_ROUTER_STT_MODEL: &str = "flux-voice-fast";
+
+/// Speech-to-text arm for native OpenAI (and the `OPENAI_API_KEY` fallback).
+pub const OPENAI_STT_MODEL: &str = "whisper-1";
+
 /// Pick the best available transcription backend.
 ///
-/// Order:
+/// Order (first match wins):
 /// 1. `GROQ_API_KEY` → Groq Whisper Large v3 Turbo (free tier; fast)
 /// 2. `OPENAI_API_KEY` → OpenAI whisper-1 (paid)
-pub fn build_transcription_backend() -> Option<Arc<dyn TranscriptionBackend>> {
+/// 3. **Active OpenAI-wire provider** (native OpenAI or FluxRouter) — resolved
+///    key + `base_url` from `Config`, so a configured
+///    `[providers.flux-router].base_url` is honoured and the key is never sent
+///    to the wrong host (the #310 class of bug).
+/// 4. `FLUX_API_KEY` → FluxRouter at its default base URL, for the case where
+///    the key is in the environment but FluxRouter is not the active provider.
+///
+/// **Why 3 and 4 are appended rather than given priority** (this deviates from
+/// [`image_gen::build_image_gen_backend`], which puts the active provider
+/// first): Groq's arm is a *free* tier, while a Flux transcription is billed at
+/// `$0.016670` with a **10-second floor**. Putting the active provider first
+/// would silently move every existing Groq user onto a paid arm. Arms 3 and 4
+/// are therefore strictly additive — no previously-resolving configuration
+/// changes backend.
+pub fn build_transcription_backend(config: &Config) -> Option<Arc<dyn TranscriptionBackend>> {
+    if let Some(backend) = transcription_backend_from_env() {
+        return Some(backend);
+    }
+    // 3. Active OpenAI-wire provider (native OpenAI or FluxRouter).
+    if let Some(backend) = transcription_backend_from_config(config) {
+        tracing::info!(
+            "transcription: using {} at {} (active OpenAI-wire provider)",
+            backend.model(),
+            backend.endpoint()
+        );
+        return Some(Arc::new(backend));
+    }
+    // 4. FLUX_API_KEY in the environment without FluxRouter being active.
+    if let Some(key) = read_env_key("FLUX_API_KEY") {
+        tracing::info!(
+            "transcription: using FluxRouter {FLUX_ROUTER_STT_MODEL} (FLUX_API_KEY found)"
+        );
+        return Some(Arc::new(OpenAiCompatWhisperBackend::new(
+            key,
+            shared::join_openai_endpoint(
+                wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
+                "audio/transcriptions",
+            ),
+            FLUX_ROUTER_STT_MODEL.to_string(),
+            "flux-router",
+        )));
+    }
+    tracing::warn!(
+        "transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no \
+         OpenAI-wire provider configured) — tool hidden"
+    );
+    None
+}
+
+/// Arm 3 of [`build_transcription_backend`] — the active OpenAI-wire provider
+/// (native OpenAI or FluxRouter), resolved from `Config`.
+///
+/// Returns the concrete backend (not a trait object) so the resolved endpoint
+/// and model are unit-assertable without a network round-trip, mirroring
+/// [`image_gen::dalle_backend_from_config`].
+pub(crate) fn transcription_backend_from_config(
+    config: &Config,
+) -> Option<OpenAiCompatWhisperBackend> {
+    if config.api_key.trim().is_empty() {
+        return None;
+    }
+    let base = shared::openai_wire_media_base(config)?;
+    let (model, backend_id) = match config.provider {
+        ProviderType::FluxRouter => (FLUX_ROUTER_STT_MODEL, "flux-router"),
+        _ => (OPENAI_STT_MODEL, "openai"),
+    };
+    Some(OpenAiCompatWhisperBackend::new(
+        config.api_key.clone(),
+        shared::join_openai_endpoint(&base, "audio/transcriptions"),
+        model.to_string(),
+        backend_id,
+    ))
+}
+
+/// Arms 1-2 of [`build_transcription_backend`] — the env-only chain. Split out
+/// so the config-aware resolver can try it first without duplicating it.
+fn transcription_backend_from_env() -> Option<Arc<dyn TranscriptionBackend>> {
     if let Some(key) = read_env_key("GROQ_API_KEY") {
         tracing::info!("transcription: using Groq Whisper (GROQ_API_KEY found, free tier)");
         return Some(Arc::new(OpenAiCompatWhisperBackend::new(
@@ -356,13 +444,10 @@ pub fn build_transcription_backend() -> Option<Arc<dyn TranscriptionBackend>> {
         return Some(Arc::new(OpenAiCompatWhisperBackend::new(
             key,
             "https://api.openai.com/v1/audio/transcriptions".to_string(),
-            "whisper-1".to_string(),
+            OPENAI_STT_MODEL.to_string(),
             "openai",
         )));
     }
-    tracing::warn!(
-        "transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden"
-    );
     None
 }
 
@@ -488,6 +573,91 @@ mod tests {
     use wcore_tools::notion_tool::{HttpMethod as NoMethod, NotionOutcome, NotionRequest};
     use wcore_tools::url_safety::is_safe_url;
     use wcore_tools::web_fetch::{FetchOutcome, FetchRequest};
+
+    /// The defect this closes: with a working FluxRouter credential present the
+    /// product said "transcription: no API key found (GROQ_API_KEY or
+    /// OPENAI_API_KEY) — tool hidden", because the resolver recognised only
+    /// those two env vars. FluxRouter serves `/v1/audio/transcriptions` in the
+    /// exact `verbose_json` shape this backend already sends (proven by a live
+    /// verbatim round-trip with a silence negative control).
+    #[test]
+    fn flux_router_config_resolves_a_transcription_backend() {
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux".into(),
+            base_url: String::new(), // Tier-2 newtype supplies the default
+            ..Config::default()
+        };
+        let backend = transcription_backend_from_config(&cfg)
+            .expect("a FluxRouter config with a key must resolve an STT backend");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.fluxrouter.ai/v1/audio/transcriptions"
+        );
+        assert_eq!(backend.model(), FLUX_ROUTER_STT_MODEL);
+        assert_eq!(backend.backend_id(), "flux-router");
+    }
+
+    /// A configured `[providers.flux-router].base_url` must be honoured rather
+    /// than the key being sent to a hardcoded host (the #310 bug class).
+    #[test]
+    fn transcription_honours_a_configured_base_url() {
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux".into(),
+            base_url: "https://flux.internal.example/v1".into(),
+            ..Config::default()
+        };
+        let backend = transcription_backend_from_config(&cfg).expect("must resolve");
+        assert_eq!(
+            backend.endpoint(),
+            "https://flux.internal.example/v1/audio/transcriptions"
+        );
+    }
+
+    /// Native OpenAI keeps `whisper-1`; only FluxRouter gets the flux arm.
+    #[test]
+    fn openai_wire_config_keeps_whisper_one() {
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-o".into(),
+            base_url: "https://api.openai.com".into(),
+            ..Config::default()
+        };
+        let backend = transcription_backend_from_config(&cfg).expect("must resolve");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
+        assert_eq!(backend.model(), OPENAI_STT_MODEL);
+    }
+
+    /// Providers that do not serve the OpenAI-wire media routes must NOT be
+    /// routed transcription (it would 404), and an empty key resolves nothing.
+    #[test]
+    fn non_media_provider_and_empty_key_resolve_nothing() {
+        for p in [
+            ProviderType::Anthropic,
+            ProviderType::Gemini,
+            ProviderType::Groq,
+        ] {
+            let cfg = Config {
+                provider: p,
+                api_key: "k".into(),
+                ..Config::default()
+            };
+            assert!(
+                transcription_backend_from_config(&cfg).is_none(),
+                "{p:?} has no OpenAI-wire transcription route"
+            );
+        }
+        let empty = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "   ".into(),
+            ..Config::default()
+        };
+        assert!(transcription_backend_from_config(&empty).is_none());
+    }
 
     #[test]
     fn resolve_backend_choice_maps_overrides() {

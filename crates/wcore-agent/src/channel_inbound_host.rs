@@ -183,7 +183,7 @@ pub async fn spawn(
     // honest degraded notice rather than a blind answer.
     let media_enricher = {
         let vision = crate::tool_backends::build_vision_backend();
-        let transcription = crate::tool_backends::build_transcription_backend();
+        let transcription = crate::tool_backends::build_transcription_backend(config);
         let source = Arc::new(crate::channel_media::ManagerMediaSource::new(Arc::clone(
             &manager,
         )));

@@ -715,7 +715,7 @@ pub async fn transcribe_with_timeout(
 /// [`VoiceMode::check_requirements`] rather than a silent hide. The
 /// `VoiceModeTool` still hides because *capture* is not available
 /// without a recorder; the STT layer is checked at probe-time.
-pub fn build_voice_mode_backend() -> Option<Arc<VoiceMode>> {
+pub fn build_voice_mode_backend(config: &wcore_config::config::Config) -> Option<Arc<VoiceMode>> {
     let recorder: Arc<dyn AudioRecorder> = match CpalAudioRecorder::try_default() {
         Some(r) => Arc::new(r),
         None => {
@@ -727,16 +727,18 @@ pub fn build_voice_mode_backend() -> Option<Arc<VoiceMode>> {
         }
     };
     let player: Arc<dyn AudioPlayer> = Arc::new(CpalAudioPlayer::new());
-    let transcriber: Arc<dyn TranscriptionBackend> = match super::build_transcription_backend() {
-        Some(external) => Arc::new(TranscriptionAdapter { inner: external }),
-        None => {
-            tracing::info!(
-                "voice_mode: no STT backend configured — capture works, transcribe will error \
-                 (set GROQ_API_KEY or OPENAI_API_KEY)"
-            );
-            Arc::new(wcore_tools::voice_mode::NullTranscriptionBackend)
-        }
-    };
+    let transcriber: Arc<dyn TranscriptionBackend> =
+        match super::build_transcription_backend(config) {
+            Some(external) => Arc::new(TranscriptionAdapter { inner: external }),
+            None => {
+                tracing::info!(
+                    "voice_mode: no STT backend configured — capture works, transcribe will error \
+                 (set GROQ_API_KEY, OPENAI_API_KEY or FLUX_API_KEY, or configure an \
+                 OpenAI-wire provider)"
+                );
+                Arc::new(wcore_tools::voice_mode::NullTranscriptionBackend)
+            }
+        };
     let env_probe = Arc::new(OsAudioEnvironmentProbe);
     Some(Arc::new(VoiceMode::new(
         recorder,
@@ -816,7 +818,7 @@ mod tests {
         // outcomes are valid; what matters is that we report cleanly.
         let detected = CpalAudioRecorder::try_default().is_some();
         eprintln!("voice_mode: input device detected on this host: {detected}");
-        let backend = build_voice_mode_backend();
+        let backend = build_voice_mode_backend(&wcore_config::config::Config::default());
         if detected {
             assert!(
                 backend.is_some(),
@@ -839,7 +841,7 @@ mod tests {
         // wiring is B13's job).
         // We don't unset env vars here — the resolver hides based on the
         // cpal device probe, not on env state.
-        let backend = build_voice_mode_backend();
+        let backend = build_voice_mode_backend(&wcore_config::config::Config::default());
         let detected = CpalAudioRecorder::try_default().is_some();
         assert_eq!(
             backend.is_some(),

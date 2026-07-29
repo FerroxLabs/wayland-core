@@ -1302,10 +1302,11 @@ impl AgentBootstrap {
                 crate::tool_backends::build_image_fetcher(),
             )));
         }
-        // `transcribe_audio` — Groq Whisper free tier preferred,
-        // OpenAI Whisper fallback. If neither key is set the tool
-        // hides itself via `Tool::is_available()`.
-        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend() {
+        // `transcribe_audio` — Groq Whisper free tier preferred, OpenAI
+        // Whisper next, then the active OpenAI-wire provider (Flux Router /
+        // OpenAI) resolved from config, then `FLUX_API_KEY`. If none resolves
+        // the tool hides itself via `Tool::is_available()`.
+        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend(&self.config) {
             registry.register(Box::new(
                 wcore_tools::transcription_tools::TranscribeAudioTool::new(
                     stt_backend,
@@ -1330,7 +1331,7 @@ impl AgentBootstrap {
         // default binary ships without cpal so it does not hard-link
         // libasound.so.2 (ALSA) on Linux.
         #[cfg(feature = "voice")]
-        if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend() {
+        if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend(&self.config) {
             registry.register(Box::new(wcore_tools::voice_mode::VoiceModeTool::new(vm)));
         }
         // v0.9.0 W1 B5 — video_analyze: async ffmpeg probe + LLM vision
@@ -3225,7 +3226,8 @@ impl AgentBootstrap {
                 // answers an unseen image blind from a bare URL.
                 let media_enricher = {
                     let vision = crate::tool_backends::build_vision_backend();
-                    let transcription = crate::tool_backends::build_transcription_backend();
+                    let transcription =
+                        crate::tool_backends::build_transcription_backend(&self.config);
                     let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
                         std::sync::Arc::clone(&lifted),
                     ));
