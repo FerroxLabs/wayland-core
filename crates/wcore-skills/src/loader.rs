@@ -394,6 +394,31 @@ fn collect_skill_md<'a>(
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
+
+            // F23A-C1-H4: never discover a promotion/rollback staging tree.
+            //
+            // `promote::staging_root_for` aims to put staging beside the skills root, and for
+            // a flat `<root>/<name>` skill it does. For the layout the auto-drafter actually
+            // writes — `skills/auto/auto-<sig>/` — the skill's parent is `skills/auto`, so
+            // staging resolves to `skills/.promote-staging`, INSIDE this walk. A kill between
+            // the copy and the `rename(2)` then leaves a half-built tree holding a `SKILL.md`
+            // right where the loader will find it: the same "present, loadable, incomplete"
+            // state F23A-C1-H3 removed from the target directory, arriving via the staging
+            // directory instead.
+            //
+            // Fenced by name because the location cannot be guaranteed — `rename(2)` needs
+            // staging on the target's filesystem, and skills roots nest arbitrarily through
+            // `--add-dir`, `$WAYLAND_HOME` and project roots. Matched on this one directory
+            // name rather than by a blanket dotted-directory rule, which would change which
+            // skills load for users who never touched governance.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n == crate::promote::STAGING)
+            {
+                continue;
+            }
+
             // Follow symlinks: entry.file_type() does NOT traverse symlinks,
             // so use tokio::fs::metadata() which resolves the target type.
             let is_dir = match tokio::fs::metadata(&path).await {

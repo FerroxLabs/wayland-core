@@ -111,8 +111,16 @@ async fn a_staging_tree_inside_the_skills_root_is_not_discovered_as_a_skill() {
     );
 }
 
-/// **The cause.** For the layout the auto-drafter actually writes, staging lands *inside* the
-/// skills root rather than beside it.
+/// **The cause, asserted as the fact it is.** For the layout the auto-drafter actually
+/// writes, staging lands *inside* the skills root rather than beside it.
+///
+/// This test asserts the behaviour rather than demanding it change, because the location
+/// cannot be guaranteed in general (see `promote::STAGING`): `rename(2)` needs the staging
+/// area on the target's filesystem, and skills roots nest arbitrarily. The fix is the
+/// loader's name fence, verified by the test above. **This test is what makes that fence
+/// load-bearing rather than defensive** — if a later change moved staging genuinely outside
+/// every skills root, this test would fail and the fence could then be reconsidered on
+/// evidence instead of assumption.
 ///
 /// Driven through the real `rollback`, not by hand: a payload deeper than `copy_tree`'s depth
 /// cap makes the restore fail after `create_dir_all` has made the staging directory and
@@ -160,10 +168,22 @@ fn a_failed_restore_of_a_namespaced_skill_stages_inside_the_skills_root() {
         outside.display()
     );
     assert!(
-        !inside.is_dir(),
-        "F23A-C1-H4: a namespaced (auto-drafted) skill stages at {}, INSIDE the skills root \
-         the loader walks. govern.rs states the hazard and relies on staging being outside \
-         the tree; for skills/auto/<name> it is not.",
+        inside.is_dir(),
+        "F23A-C1-H4 appears to have been fixed at the source: a namespaced skill no longer \
+         stages at {}. If staging is now genuinely outside every skills root, the loader's \
+         name fence in `collect_skill_md` can be revisited -- but only with a measurement \
+         like this one, never by assumption.",
         inside.display()
+    );
+
+    // The staging tree is left behind (the train's `rollback` only cleans up on a rename
+    // failure, not a copy failure), which is exactly why the loader fence has to hold for
+    // the whole life of the profile and not merely for the width of a restore.
+    assert!(
+        std::fs::read_dir(&inside)
+            .map(|rd| rd.count() > 0)
+            .unwrap_or(false),
+        "a failed restore left no staging content, so the discovery risk this file \
+         documents would not arise"
     );
 }
