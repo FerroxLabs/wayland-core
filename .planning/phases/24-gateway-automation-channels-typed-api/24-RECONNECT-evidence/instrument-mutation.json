@@ -1,13 +1,13 @@
 {
   "baseline": {
     "rc": 0,
-    "verdict": "F24RECONNECT SELFTEST GREEN passed=8 failed=0",
+    "verdict": "F24RECONNECT SELFTEST GREEN passed=14 failed=0",
     "failed_assertions": []
   },
   "mutations": {
     "MI1-drop-is-a-lie": {
       "rc": 1,
-      "verdict": "F24RECONNECT SELFTEST RED passed=6 failed=2",
+      "verdict": "F24RECONNECT SELFTEST RED passed=12 failed=2",
       "failed_assertions": [
         "R1b the disconnect is CONFIRMED, not assumed",
         "R1d the replay is journalled, so a driver never has to infer it"
@@ -17,7 +17,7 @@
     },
     "MI2-replay-everything": {
       "rc": 1,
-      "verdict": "F24RECONNECT SELFTEST RED passed=6 failed=2",
+      "verdict": "F24RECONNECT SELFTEST RED passed=12 failed=2",
       "failed_assertions": [
         "R1d the replay is journalled, so a driver never has to infer it",
         "R2b known-NEGATIVE: a message dispatched BEFORE the resume point is NOT replayed again"
@@ -25,9 +25,18 @@
       "applied": true,
       "REDDENED": true
     },
+    "MI4-replay-switch-is-inert": {
+      "rc": 1,
+      "verdict": "F24RECONNECT SELFTEST RED passed=13 failed=1",
+      "failed_assertions": [
+        "R4 the replay kill-switch actually suppresses the replay"
+      ],
+      "applied": true,
+      "REDDENED": true
+    },
     "MI3-replay-not-journalled": {
       "rc": 1,
-      "verdict": "F24RECONNECT SELFTEST RED passed=7 failed=1",
+      "verdict": "F24RECONNECT SELFTEST RED passed=13 failed=1",
       "failed_assertions": [
         "R1d the replay is journalled, so a driver never has to infer it"
       ],
@@ -36,7 +45,7 @@
     }
   },
   "restored_byte_identical": true,
-  "sha256_before": "200287fdf6b917ff661ac10dc1947024ec1fdfd6ff1f1d1f119b1cb48b6613d3",
-  "sha256_after": "200287fdf6b917ff661ac10dc1947024ec1fdfd6ff1f1d1f119b1cb48b6613d3",
+  "sha256_before": "921c22f0c76716b52a5980f7ff1b6f5f36986cc84207bed9f8ac0b4eec17816e",
+  "sha256_after": "921c22f0c76716b52a5980f7ff1b6f5f36986cc84207bed9f8ac0b4eec17816e",
   "EVERY_MUTATION_REDDENED": true
 }

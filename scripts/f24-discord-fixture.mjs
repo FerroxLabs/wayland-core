@@ -156,6 +156,9 @@ export class DiscordFixture {
     // an arrival count is how "no messages were lost" becomes self-passing.
     this.drops = [];
     this.resumeReplays = [];
+    // Default ON — the shipped behaviour. Only `/__control/replay` turns it
+    // off, and only a driver's negative control does that.
+    this.replayOnResume = true;
     // Outbound journal: every message the binary POSTed back (the replies).
     this.sent = [];
     this.typing = [];
@@ -303,6 +306,20 @@ export class DiscordFixture {
       // restart and a different event entirely.
       if (p === '/__control/drop' && req.method === 'POST') {
         return json(200, { dropped: this.dropAllSockets() });
+      }
+      // Turn the RESUME replay off. This exists ONLY to serve a driver's
+      // one-variable negative control: with the replay suppressed, a message
+      // dispatched during a disconnect window is genuinely unreachable, so a
+      // loss detector MUST fire. A run in this mode that reports no loss has a
+      // dead detector, and its normal-mode green is worthless.
+      //
+      // It is a fixture capability rather than a driver flag because the
+      // ONLY variable that may change between the two runs is this one — the
+      // binary, the config, the tokens and the message plan are identical.
+      if (p === '/__control/replay' && req.method === 'POST') {
+        const spec = JSON.parse(body || '{}');
+        this.replayOnResume = spec.enabled !== false;
+        return json(200, { replay_on_resume: this.replayOnResume });
       }
       if (p === '/__control/replies' && req.method === 'GET') {
         return json(200, { sent: this.sent });
@@ -494,7 +511,7 @@ export class DiscordFixture {
       conn.identified = true;
       conn.sessionId = msg.d?.session_id ?? conn.sessionId;
       const after = Number(msg.d?.seq ?? 0);
-      const replayed = this.dispatched.filter((x) => x.s > after);
+      const replayed = this.replayOnResume ? this.dispatched.filter((x) => x.s > after) : [];
       for (const d of replayed) {
         this.send(conn, { op: 0, t: 'MESSAGE_CREATE', s: d.s, d: d.payload });
         conn.delivered += 1;

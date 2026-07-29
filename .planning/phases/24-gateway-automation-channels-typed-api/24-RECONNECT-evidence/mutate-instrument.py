@@ -39,8 +39,17 @@ MUTATIONS = {
     # delivered message arrives a second time. This is the DUPLICATE half of the
     # clause, and a probe that only asked "did the gap arrive?" would pass.
     "MI2-replay-everything": (
-        "const replayed = this.dispatched.filter((x) => x.s > after);",
-        "const replayed = this.dispatched.filter((x) => x.s > 0);",
+        "this.replayOnResume ? this.dispatched.filter((x) => x.s > after) : []",
+        "this.replayOnResume ? this.dispatched.filter((x) => x.s > 0) : []",
+    ),
+    # The negative control's own kill switch, stuck ON. If `/__control/replay`
+    # could not actually suppress the replay, the `--control-no-replay` run
+    # would replay normally, report no loss, and be read as "the loss detector
+    # is dead" — or worse, be read as a product PASS. This mutation proves the
+    # control lever moves something.
+    "MI4-replay-switch-is-inert": (
+        "this.replayOnResume ? this.dispatched.filter((x) => x.s > after) : []",
+        "this.dispatched.filter((x) => x.s > after)",
     ),
     # The replay happens but is not journalled and not counted as a delivery.
     # The message arrives, so a naive probe is green, while the fixture's own

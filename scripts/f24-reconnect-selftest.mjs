@@ -33,6 +33,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DiscordFixture } from './f24-discord-fixture.mjs';
+import { census } from './f24-reconnect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -306,6 +307,79 @@ async function main() {
     // useless.
     assert(!R.afterSeen.includes('BEFORE-1'), 'BEFORE-1 was replayed — that is a duplicate, not a recovery');
     assert(!R.afterSeen.includes('BEFORE-2'), 'BEFORE-2 was replayed — that is a duplicate, not a recovery');
+  });
+
+  // ── R4  the negative control's own lever ──────────────────────────────────
+  //
+  // The live driver's `--control-no-replay` run is what proves its loss
+  // detector fires. If the lever were inert, that run would replay normally,
+  // report no loss, and the only honest reading would be "the detector is
+  // dead" — while the tempting reading is "the product passed". So the lever
+  // itself needs a measurement.
+  class NoReplayFixture extends DiscordFixture {
+    constructor(o) {
+      super(o);
+      this.replayOnResume = false;
+    }
+  }
+  const N = await runScenario(NoReplayFixture, { dropVia: 'fixture' });
+  await check('R4 the replay kill-switch actually suppresses the replay', () => {
+    assert(N.before.length === 2, `control run pre-drop control: ${N.before.length} arrivals`);
+    assert(N.resumed, 'control run: RESUME was not accepted — the suppression must be of the REPLAY, not of the resume');
+    assert(N.afterAlive, 'control run: post-resume control did not arrive, so its zero would be free');
+    assert(!N.duringReplayed, 'the kill-switch is INERT — the gap was replayed anyway');
+    assert(N.collisions === 0, `the kill-switch must not reintroduce a collision; got ${N.collisions}`);
+  });
+
+  // ── C  the census itself ──────────────────────────────────────────────────
+  //
+  // The census is the thing that turns a pile of replies into the two numbers
+  // this lane reports. It is pure, so it is exercised directly here rather than
+  // only through a 3-minute live run — a detector that can only be reached
+  // through a live run is a detector nobody proves can fail.
+  const PLAN = [
+    { token: 'tok-before-1', phase: 'before', expect: 'reply' },
+    { token: 'tok-during-1', phase: 'during', expect: 'reply' },
+    { token: 'tok-decoy-1', phase: 'during-decoy', expect: 'silence' },
+    { token: 'tok-phantom-1', phase: 'phantom', expect: 'silence' },
+  ];
+  const reply = (t) => ({ content: `F24-REPLY ${t}` });
+
+  await check('C1 census known-POSITIVE: a clean run reports no loss, no duplicate, no leak', () => {
+    const c = census(PLAN, [reply('tok-before-1'), reply('tok-during-1')]);
+    assert(c.lost.length === 0, `lost=[${c.lost}]`);
+    assert(c.duplicated.length === 0, `duplicated=[${c.duplicated}]`);
+    assert(c.leaked.length === 0, `leaked=[${c.leaked}]`);
+  });
+
+  await check('C2 census DETECTS A LOSS — the gap message missing is reported, not swallowed', () => {
+    const c = census(PLAN, [reply('tok-before-1')]);
+    assert(c.lost.length === 1 && c.lost[0] === 'tok-during-1', `expected the gap token lost, got [${c.lost}]`);
+    // Attribution: the surviving control must NOT also be reported lost, or the
+    // detector is failing everything rather than discriminating.
+    assert(!c.lost.includes('tok-before-1'), 'the pre-drop control was also reported lost — detector is blanket-failing');
+  });
+
+  await check('C3 census DETECTS A DUPLICATE — two turns for one message is reported', () => {
+    const c = census(PLAN, [reply('tok-before-1'), reply('tok-during-1'), reply('tok-during-1')]);
+    assert(c.duplicated.length === 1 && c.duplicated[0] === 'tok-during-1', `duplicated=[${c.duplicated}]`);
+    assert(c.lost.length === 0, `a duplicate must not also read as a loss; lost=[${c.lost}]`);
+  });
+
+  await check('C4 census DETECTS A LEAK — a decoy or phantom that replied invalidates the run', () => {
+    const c = census(PLAN, [reply('tok-before-1'), reply('tok-during-1'), reply('tok-decoy-1')]);
+    assert(c.leaked.length === 1 && c.leaked[0] === 'tok-decoy-1', `leaked=[${c.leaked}]`);
+    const c2 = census(PLAN, [reply('tok-before-1'), reply('tok-during-1'), reply('tok-phantom-1')]);
+    assert(c2.leaked.includes('tok-phantom-1'), 'a reply to a NEVER-DISPATCHED token must be reported');
+  });
+
+  await check('C5 census survives the mangling that has already destroyed one pass on this program', () => {
+    // MarkdownV2 escaping turned a token into `f24c3\-h4\-pre\-0\-ab12` and a
+    // driver reported 0/8 for eight replies that had all arrived. A console
+    // line wrap did the same to a later lane. If the census used a naive
+    // includes(), a WRAPPED reply would read as LOSS — a fabricated HIGH.
+    const c = census(PLAN, [{ content: 'F24-REPLY tok\\-before\\-1' }, { content: 'F24-REPLY tok-during\n-1' }]);
+    assert(c.lost.length === 0, `escaped/wrapped replies were read as losses: lost=[${c.lost}]`);
   });
 
   // ── R3  THE THIRD ASSERTION ───────────────────────────────────────────────
