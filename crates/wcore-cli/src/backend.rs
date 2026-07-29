@@ -97,7 +97,47 @@ pub enum ReceiptCmd {
     Verify { path: PathBuf },
 }
 
+/// Resolve config and arm the process-global egress boundary for this command.
+///
+/// SECURITY (F25 Criterion 4): `TopCmd::Backend` early-returns from `main`'s
+/// dispatch (`main.rs`, the `TopCmd::Backend` arm returns an `ExitCode`
+/// directly) hundreds of lines BEFORE main's own `install_egress_policy`
+/// chokepoint. Without this call the `cloud` backend's three
+/// `wcore_egress::EgressClient::new()` sites — `api_get`, `api_post_json` and
+/// `api_delete` in `wcore-exec-backend/src/backends/cloud.rs` — run under
+/// `GlobalDefaultPolicy`, which falls back to `EgressDecision::Allow` when
+/// nothing is installed. Every outbound request this operator surface makes was
+/// therefore ungated, and the receipt said so out loud:
+/// `"egress_decision": "allow-all-default-no-policy-installed"`.
+///
+/// This is the same defect, and the same fix, as `acp.rs` and `workflow.rs`
+/// already carry; `backend` was simply not on the list. The install is one-shot
+/// and idempotent, so a parent process that already installed a policy wins and
+/// this is a no-op.
+///
+/// A config that fails to resolve must NOT silently leave the boundary down:
+/// the whole point is that an unarmed policy is a fail-open. We surface the
+/// error and refuse to run the command.
+fn arm_egress_policy() -> Result<()> {
+    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
+        provider: None,
+        api_key: None,
+        base_url: None,
+        model: None,
+        max_tokens: None,
+        max_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: false,
+        project_dir: None,
+    })
+    .context("resolving config to arm the egress policy for `backend`")?;
+    wcore_agent::egress::install_egress_policy(&config);
+    Ok(())
+}
+
 pub async fn run(args: BackendArgs) -> Result<()> {
+    arm_egress_policy()?;
     match args.cmd {
         BackendCmd::List { json } => list(json).await,
         BackendCmd::Probe { name } => probe(&name).await,
