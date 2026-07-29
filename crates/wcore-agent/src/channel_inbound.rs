@@ -645,7 +645,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    use wcore_channels::{Channel, ChannelError, ChatType, DmPolicy, MessageReceipt};
+    use wcore_channels::{
+        Channel, ChannelError, ChatType, DmPolicy, InboundPolicy, MessageReceipt,
+    };
 
     /// Shared outbound log handle — what a `CapturingChannel` records.
     type OutboundLog = Arc<Mutex<Vec<OutgoingMessage>>>;
