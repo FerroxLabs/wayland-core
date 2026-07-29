@@ -99,3 +99,54 @@ as a parameter).
 
 Open: whether to also delete/reconcile the hardcoded constants, or keep them as the
 *declared* value's source. Leaning: the declaration becomes the single source, constants die.
+
+## T+20 — choke point found, and it is single
+
+`wcore-agent/src/channel_media.rs:106` → `ChannelManager::fetch_media_on`
+(`manager.rs:774-785`) → `guard.fetch_media(attachment)`. That is the **only** production
+path to adapter media. So there is exactly one central site where a declared bound could be
+enforced for all adapters at once, and it already has `guard` — i.e. `media_bounds()` is in
+scope there. It simply is not called.
+
+## T+22 — contract exposure: NONE. Checked with a live control.
+
+First control I tried was dead: `grep max_message_len` over non-`.rs` files returned empty,
+so it could not have distinguished "absent" from "broken search". Replaced with a control I
+could verify: `grep -rlc session crates/wcore-protocol/contracts/` →
+`session_resync.genesis.json:1`. Instrument alive.
+
+`grep -rn "MediaBounds|media_bounds|max_attachments" crates/wcore-protocol/contracts/` → **0**.
+
+`MediaBounds` is `Serialize`/`Deserialize` but does not appear in any Desktop wire-contract
+fixture. **No contract regeneration is owed by this lane** (LANE-BRIEF §0 fence). I am also
+adding NO field to `MediaBounds`, only changing declared values and adding enforcement, so
+the schema is untouched regardless.
+
+## T+25 — the design decision, and why it went the way it did
+
+The trap: "make enforcement match the declaration" and "make the declaration match
+enforcement" are both defensible and they produce opposite runtime behaviour.
+
+- **Enforcement follows declaration** would drop discord's fetch cap 100 MiB → 25 MiB. Real
+  regression: boosted/Nitro Discord uploads legitimately exceed 25 MiB and would start
+  degrading. I cannot validate that against a live boosted server, and inventing product
+  policy I cannot test is out of scope for a divergence fix.
+- **Declaration follows enforcement** relabels 100 MiB as declared. Feels like loosening.
+
+Resolved by reading what the field actually means rather than what the comments imply.
+`MediaBounds.max_bytes` doc (`media.rs:30-31`): *"Largest attachment this adapter will
+normalise for **fetch**"*. That is an **intake policy**, not a platform upload ceiling.
+Discord's `25 MiB` comment — *"Discord's per-attachment ceiling for a non-boosted upload"* —
+records a **platform fact in a field that means an intake policy**. The declaration was
+simply wrong about its own field's semantics.
+
+So the fix is not a loosening: **the declarations are corrected to state the intake policy
+each adapter has always had**, and enforcement is then wired to read them so they cannot
+drift again. Zero effective runtime change; the divergence closes because the numbers become
+true.
+
+Same reasoning for email in the opposite direction: the operative intake cap genuinely IS
+2 MiB (that is what the IMAP parser inlines, `imap.rs:847`); the declared 10 MiB was never
+real. Declaration drops 10 → 2.
+
+Next: cross-audit this before implementing (§4), because it is the lane's central call.
