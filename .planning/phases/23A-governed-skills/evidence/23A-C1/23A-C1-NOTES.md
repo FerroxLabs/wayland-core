@@ -245,3 +245,21 @@ exact status is stated in the SUMMARY rather than silently left out.
   clear tombstone → journal. `is_revoked()` → consulted by `SkillDrafter::draft`.
 - Surface: a crate binary (`wcore-eval`/`wcore-evolve`/`wcore-contract` establish the pattern),
   because `wcore-cli/src/main.rs` is fenced. Seam request covers the eventual flag.
+
+---
+
+## 8. Final state — lane complete
+
+Landed: `wcore_skills::govern` + drafter suppression + `wcore-skill-govern` binary,
+21 new tests (15 + 6), live-driven on hetzner, mutation-proven, clippy/fmt clean, fence
+respected. Criterion moves NOT MET → PARTIAL; promotion deliberately not attempted.
+
+Two coordinator notes actioned:
+- The unbound-matcher defect: `list` re-rendered so every fact sits on its skill's own
+  line, checker binds to one line, three-assertion self-test with opposite-status rows.
+- The census claim: NOT inherited. §6.1's no-execute finding is labelled a source
+  measurement of three call sites, not a live drive.
+- 23A-04-PLAN.md:150 `read_first`s two never-committed files; not chased, not this lane's.
+
+Full verdict in `23A-C1-SUMMARY.md`; live transcript in `LIVE-EVIDENCE.md`;
+seam requests in `.planning/SEAM-REQUESTS/23A-C1.md`.
