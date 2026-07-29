@@ -48,3 +48,14 @@ provenance, append-only history, revoke, or rollback — the rest of the criteri
 
 **F23-01 is NOT marked complete.** The `observe` clause is partially met (visibility only,
 no provenance or history); `revoke` and `rollback` are entirely unmet.
+
+---
+
+> **STATUS CORRECTION (2026-07-29, lane/record-truth).** This document records
+> `F23A-01-H2` as open. **It was fixed at `32a5fc90` on 2026-07-27**, with five
+> wired regression tests in
+> `crates/wcore-agent/src/orchestration/d1_refusal_terminal_tests.rs`. The body
+> above is left as written on purpose. See `23A-STATUS-CORRECTION.md` in this
+> directory for the evidence — and for the gap underneath it: the 16-route
+> quarantine census is **still unmeasured at HEAD**, and `WAYLAND_F23A_SELFTEST`
+> was never shown to fire. H2 being fixed does not close the census.

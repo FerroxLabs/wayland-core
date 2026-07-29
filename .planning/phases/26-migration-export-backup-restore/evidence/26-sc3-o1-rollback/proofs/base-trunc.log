@@ -1,0 +1,32 @@
+[base-trunc] donor archive: donor.tar.gz
+[base-trunc] prefilling memory.db to ~300 MiB ...
+[base-trunc] prefill done in 0.7s, memory.db = 307.7 MiB
+[base-trunc] waiting for writers: 0/3 started (iter 0, 1785345999)
+[base-trunc] waiting for writers: 3/3 started (iter 1, 1785346000)
+[base-trunc] journal modes reported by writers: {'w0': 'truncate', 'w1': 'truncate', 'w2': 'truncate'}
+[base-trunc] pre-restore committed high-water marks: {'w0': 781, 'w1': 610, 'w2': 369}
+[base-trunc] restore --replace launched pid=818489
+[base-trunc] preserved=True after 0.96s op_id=1785345999988-818489
+[base-trunc] post-capture committed high-water marks: {'w0': 1537, 'w1': 1161, 'w2': 689}
+[base-trunc] commits during capture window: w0=+756, w1=+551, w2=+320
+[base-trunc] restore killed, reaped rc=-9
+[base-trunc] open journal records after kill: 1
+[base-trunc] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785345999988-818489
+[base-trunc] home entries after rollback: ['config.toml', 'memory.db', 'memory.db-journal']
+---- RESULT ----
+ARM: concurrent
+JOURNAL-MODE: truncate
+WRITERS: 3
+CAPTURE-SECONDS: 0.96
+PRE-RESTORE-COMMITTED: 1760
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: ['memory.db-journal']
+INTEGRITY-CHECK: row 2 missing from index sqlite_autoindex_rows_committed_1
+INTEGRITY-PROBLEM-LINES: 100
+MISSING-COMMITTED-ROWS: 56
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 56}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: FAIL

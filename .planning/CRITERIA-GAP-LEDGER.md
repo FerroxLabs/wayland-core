@@ -102,18 +102,43 @@ symptom; the property holds, the proof is narrow.
 **The specific unmet clause: *identical* across three surfaces.** One surface exists. Agreement
 needs at least two. No producer fixtures exist, so the D2 consumption clause has nothing to consume.
 
-**Closing it requires**: a TUI Goal surface (`wcore-cli/src/tui/`), a typed host-protocol Goal
-command and event set (`wcore-protocol` ⇒ **fenced seam + Desktop co-pin**), and the canonical
-serialized fixtures. The canonical projection they must consume already exists and is emitted by
-`goal status`.
+> **CORRECTED 2026-07-29 by the orchestrator — three of the four measurements above are STALE.**
+> Work landed after `873cc389`. Original text kept intact; the current measurement follows.
 
-**Cost: 3–4 lane-sessions + one fenced protocol seam.** **Not release-blocking** — Goal is a new
-capability whose only shipped entry point is the CLI, and the CLI path works.
+**Re-measured at HEAD:**
+
+| Claim in the row above | Status at HEAD | Evidence |
+|---|---|---|
+| Zero `Goal` symbols in `wcore-protocol/src/` | **FALSE** | `contract/spec.rs:35-41` imports `GoalProjection`, `GoalLifecycleWire`, `GoalTransitionKind`, `GoalTaskWire`, …; `:755` is commented *"F22-C1 — durable Goals become observable to a host for the first time"* |
+| Zero goal references under `wcore-cli/src/tui/` | **FALSE** | four files — `app.rs`, `protocol_bridge.rs`, `statusline/mod.rs`, `widgets/statusbar.rs` |
+| No producer fixtures exist | **FALSE** | `contracts/desktop/v1/events/goal_snapshot.json` and `goal_transition.json`, plus `goal_id_and_cursor` in the manifest |
+| *identical* across three surfaces | **STILL UNMET**, but for a different reason than stated | see below |
+
+**The real gap is narrower and sharper than "one surface of three": all three surfaces now
+OBSERVE a Goal; only the CLI can CONTROL one.**
+
+- **CLI** — observes *and* controls (`goal Open/Task/Run/Status/Effects`).
+- **TUI** — observes only, and deliberately so: `app.rs:277` states the `goals` map is *"written
+  ONLY by the protocol bridge … so the TUI never derives Goal state of its own"*. Read-only by design.
+- **Host protocol** — observes only. `crates/wcore-protocol/src/commands.rs` contains **zero** `Goal`
+  variants, so a host can watch a Goal advance and cannot open, task, run, or cancel one.
+
+**Closing it requires** a typed Goal **command** set in `wcore-protocol/src/commands.rs` (⇒ **fenced
+seam + Desktop co-pin + one contract regeneration**), the TUI wired to issue those commands rather
+than only render, and fixtures extended to cover the command direction. The projection and both event
+fixtures already exist, so this is command-direction work only.
+
+**Cost: revised down to 1–2 lane-sessions + one fenced protocol seam** (was 3–4). **Not
+release-blocking** — Goal's only shipped entry point is the CLI, and the CLI path works.
 
 #### 22-C3 — FAILED (measured, not built)
 
 > **"Direct, ForgeFlows, Fleet, Council, and Anvil terminate through one canonical Goal transition
 > with no nested verification/retry owner."** (`ROADMAP.md:92`)
+
+> **CORRECTED 2026-07-29 by lane/record-truth — this row said FAILED and said no lane had
+> attempted it. Both are stale. See "Correction" below; the original text is kept intact
+> above it, and its falsifier is itself defective.**
 
 **Grade measured: FAILED, unchanged.** Confirmed at `873cc389`: `GoalTerminalState` has consumers
 only in `goal/{ledger,kernel}.rs` and `session_journal/model.rs`. **Grep for `GoalTerminalState`
@@ -131,6 +156,45 @@ Single crate, no protocol change, no credential, no second machine.
 
 **Cost: 2–3 lane-sessions.** **Not release-blocking** — architecture consistency; no customer
 symptom.
+
+#### 22-C3 — CORRECTION (2026-07-29, lane/record-truth): **PARTIAL, not FAILED — and the row's own falsifier is broken**
+
+**Three separate things are wrong with the row above, and they need separating.**
+
+**(a) The adapter surface WAS built.** `26be00cd` — *"feat(22-c3): the adapter surface — one
+canonical Goal terminal transition over all five loop owners"* — adds
+`crates/wcore-agent/src/goal/strategy.rs` (**+667 lines**) plus changes to
+`goal/kernel.rs`, `session_journal/model.rs` and `session_journal/reducer.rs`. Merged at
+`f68f3ddd` — *"merge(22-c3): one loop owner, enforced over the Goal lifecycle and graded
+PARTIAL"*. Measured at `f68f3ddd`: `strategy.rs` carries **45** `GoalTerminalState` references
+and adapts all five owners —
+`ClimbOutcome | CouncilRunResult | WorkflowRunError | &[ShardSummary] | DirectOutcome`.
+So *"no lane has attempted it"* is false, and **PARTIAL is the correct grade** — which is
+what the implementing lane graded itself in `aa60fc4b`.
+
+**(b) It is NOT in the integration branch, and that must not be glossed.**
+`git branch --contains f68f3ddd` lists `inv/*` and `lane/*` refs only.
+`gh/plan/f20-unified-audit-repair` is at `ef1d97be`, where the adapter is genuinely absent.
+**Both facts are true at once**: the work exists and is graded PARTIAL by its own lane; the
+integration branch does not yet have it. A reader taking either half alone gets the wrong
+picture.
+
+**(c) The row's falsifier is a BROKEN INSTRUMENT and would never have noticed.**
+The row's evidence is *"Grep for `GoalTerminalState` under
+`crates/wcore-agent/src/orchestration/` returns zero hits."* The adapter was built under
+`crates/wcore-agent/src/goal/`. **Measured: that grep returns zero even at `f68f3ddd`, where
+the adapter exists and is merged.** The instrument therefore reports FAILED forever, including
+after the criterion closes — a self-*failing* gate, the mirror of the self-passing class in
+LANE-BRIEF §3.2. Per §6b-ii it is repaired here rather than merely noted:
+
+> **Corrected falsifier for 22-C3.** Grep for `GoalTerminalState` across
+> `crates/wcore-agent/src/` — **not** `orchestration/` alone — and require a consumer that
+> adapts each of the five owner result types. RED when `goal/strategy.rs` is absent or stops
+> naming all five. Verify against `f68f3ddd`, where the corrected form finds 45 references and
+> the original finds none.
+
+**Grade: PARTIAL** (built, merged to lane refs, self-graded PARTIAL, not yet integrated).
+**Not release-blocking**, unchanged.
 
 #### 22-C4 — PARTIAL
 
@@ -209,6 +273,27 @@ hidden**. It appears in `--help` on the shipped binary, with a docstring describ
 will do. It always fails. A customer can draft a skill and can never activate it. That is a shipped,
 advertised, permanently dead flag.
 
+> **CORRECTED 2026-07-29 by lane/record-truth — the paragraph above is stale. The flag is
+> hidden.** At HEAD (`ef1d97be`), `crates/wcore-cli/src/main.rs:473` reads
+> `#[arg(long, value_name = "PROCEDURE_ID", hide = true)]`, above a nine-line comment that
+> cites this ledger row by name: *"HIDDEN (ledger row `23A-C1`) … the flag stops being
+> advertised while still parsing and still failing loudly for anyone who already scripted it.
+> This does NOT close `23A-C1`."* Both halves are guarded by
+> `crates/wcore-cli/tests/skills_promote_not_advertised.rs`.
+>
+> **What this changes:** the *advertisement* complaint is closed, so the
+> "RELEASE-BLOCKING at the advertisement level" verdict below no longer holds, and the
+> 0.25-lane-session interim has already been spent.
+>
+> **What this does NOT change: `23A-C1` stays NOT MET.** Governed promotion, *revoked* and
+> *rolled back* are still unimplemented; `run_skills_promote` is still a `bail!`. The product
+> merely stopped promising something it cannot do. The 3–4 lane-sessions to close the criterion
+> stand.
+>
+> Also stale in the paragraph below: **`F23A-01-H2` is FIXED** (`32a5fc90`, 2026-07-27, five
+> wired regression tests) — see `.planning/phases/23A-governed-skills/23A-STATUS-CORRECTION.md`.
+> The *observe* clause is no longer degraded by it.
+
 **Closing it requires**: governed promotion (state machine + policy review + provenance),
 revocation, rollback, and append-only history — `wcore-cli` + `wcore-memory` + `wcore-skills`.
 Also open and unfixed: **F23A-01-H2**, any errored tool call kills the session, which makes even the
@@ -225,7 +310,7 @@ Also open and unfixed: **F23A-01-H2**, any errored tool call kills the session, 
 Phase 24 has moved more than any other since its own report. Grades below are measured against the
 tree, not `24-PHASE-REPORT.md`.
 
-#### 24-C1 — PARTIAL (was NOT MET on any platform)
+#### 24-C1 — NOT MET (re-graded 2026-07-29; was PARTIAL, was NOT MET on any platform)
 
 > **"Native service lifecycle, profile isolation, active-turn visibility, drain, restart, upgrade,
 > and rollback work without lost or duplicate delivery."** (`ROADMAP.md:117`)
@@ -242,14 +327,90 @@ outcome was UNKNOWN across a `kill -9` produced exactly one message where it pre
 **The specific unmet clauses**: *upgrade* and *rollback* were never performed on any platform;
 the whole measurement is **Linux only**; the 12-of-12 clean tally is short (F24-C-M1); and nine
 channel adapters inherit `supports_outbound_idempotency() == false`, for which an outcome-unknown
-delivery is now correctly **abandoned** rather than duplicated — safe and honest, and not the same
-thing as delivered.
+delivery is **abandoned** rather than duplicated — safe and honest, and not the same thing as
+delivered.
 
-**Closing it requires**: the same live journey on macOS (launchd) and Windows (Task Scheduler), an
+---
+
+**RE-GRADED 2026-07-29 by `lane/24-idempotency` — this row's PARTIAL does not survive measurement.
+Criterion 1 is NOT MET.** Full evidence: `24-C1-IDEMPOTENCY-SUMMARY.md`.
+
+Criterion 1 is a **conjunction** — the gateway's own header reads *"no delivery is lost and none is
+duplicated"*. Graded on each half separately:
+
+- **No-duplicate half: HOLDS** on all ten adapters, and is now *measured* on four rather than
+  reasoned about on one.
+- **No-loss half: FAILS on nine of ten**, by construction, in the crash-during-send window.
+
+**The 12-of-12 tally was graded on the one adapter of ten that implements the property under test.**
+`scripts/f24-journey.mjs:380` is `platform = "slack"` and is the only `platform = "…"` line in the
+driver; Slack (`wcore-channel-slack/src/lib.rs:234`) is the sole override of a trait method that
+defaults to `false` at `wcore-channels/src/lib.rs:139`.
+
+**The design's choice is nonetheless correct, and that is now a fact rather than an inference.** One
+delivery key was replayed twice through real adapters over real HTTP, built by the production
+factory. Telegram, Twilio SMS and WhatsApp each put **two messages** at the destination with no
+dedupe token on the wire; Slack carried the key on both attempts. That known-positive is what makes
+the other three interpretable. So abandoning prevents a **genuine** duplicate, not a hypothetical one.
+
+The honest restatement to carry forward: *no duplicate delivery on 10/10 adapters (measured on 4);
+exactly-once delivery on 1/10 (Slack, Linux only). On the other nine an outcome-unknown delivery is
+abandoned, and that abandonment is currently unrecoverable and unsurfaced.*
+
+**A new HIGH falls out of it, and it is ours alone.** The abandon path claims in-source that such a
+delivery is *"recorded, terminal, and nameable by an operator"*. The code does not implement that:
+`ledger.rs:214 pending()` and `:223 pending_count()` both exclude `Abandoned`; `:253 compact()`
+classes it as terminal history, so the record is **eligible to be deleted**; and `DeliveryState::Abandoned`
+has no consumer anywhere outside `ledger.rs`. The only signal is one `tracing::warn!`. This is what
+converts a deliberate recorded non-delivery into an unrecoverable one. In flight as
+`lane/24-c1-abandoned`.
+
+> **CLOSED 2026-07-29 by `lane/24-c1-abandoned`. Two of the four claims above were already stale
+> when written** — `lane/24-abandon-surface` had landed `c74dd4bd`, giving `compact()` separate
+> budgets and two consumers outside `ledger.rs` (`wcore-cli/src/gateway.rs:642`,
+> `gateway/support.rs:214`). `pending()`/`pending_count()` still exclude `Abandoned`, which is now
+> deliberate and documented rather than a defect, because it is no longer the only read path.
+>
+> What was genuinely open was the **other two thirds of the prescription**: no acknowledge concept
+> and no re-send. A concept search returned 4 hits, all prose in doc comments, **zero
+> implementation** — against a known-positive of 14 for `bandoned` in the same file. Both are now
+> built and **driven on a real systemd gateway** with a real `kill -9`, a real drain and an
+> independent sink: arrivals went 0 → 1 with the gateway stopped first, and the sink's own journal
+> carries the original delivery key.
+>
+> Driving it exposed a defect no unit test could see: `resend` registered adapters but never called
+> `start_all()`, so **every re-send failed with `channel not started`**. This is why the bar is
+> "drive it", not "implement it".
+>
+> **The Matrix silent-drop hypothesis is REAL**, measured independently on a fresh Synapse rather
+> than taken from the restatement: `MSG_C_LOST = True` — HTTP 200, MSG-A's event id returned for
+> MSG-C's body, MSG-C never in the room. Fix re-proven in the same run. The finding lane was right
+> to flag it and right not to grade it unmeasured.
+>
+> **Discord's dedup window remains UNMEASURED** and needs a credential that does not exist on any
+> build host — `BL-24C1-DISCORD-WINDOW`, Sean-reserved. It bounds residual magnitude, not correctness.
+
+**"Outbound idempotency for the nine adapters" was the wrong closing requirement.** The cost is not
+uniform and mostly cannot be paid in code: **7 of 10 platforms provide no idempotency primitive at
+all** (Telegram, Twilio, Meta Graph, SMTP, signal-cli, AppleScript iMessage, MS Teams) — for those,
+`false` is permanent and truthful, and closing them is a **product decision** (an explicit per-channel
+at-most-once vs at-least-once policy, exposed as configuration), not an implementation. Only two are
+cheap: **Matrix** already PUTs to its native idempotency slot but derives `txn_id` from a
+process-local counter that resets to 1 on restart (`rest.rs:13`), and **Discord** already sends a
+dedup `nonce` that is deliberately distinct across restarts. Both ≈0.5 session.
+
+**Severities as graded** (4-way cross-audit: codex 5.6 Sol HIGH, gemini 3.1 Pro MEDIUM, kimi K3
+MEDIUM, internal adversarial HIGH): the **abandonment policy itself is MEDIUM** — it is the correct
+and only available trade, and a HIGH would demand a fix that cannot exist. The **missing operator
+surface and recovery path is HIGH** — fixable entirely in our code. Matrix/Discord are **MEDIUM**.
+
+**Closing it requires**: the same live journey on macOS (launchd) and Windows (Task Scheduler); an
 upgrade/rollback drive (`binary_path`/`binary_version` already exist in the projection precisely so
-these are distinguishable), and outbound idempotency for the nine adapters.
+these are distinguishable); the §3 operator-surface HIGH; the two cheap adapters; and a **product
+decision** on the remaining seven.
 
-**Cost: 2–3 lane-sessions.** **RELEASE-BLOCKING for macOS and Windows** (see §3).
+**Cost: 2–3 lane-sessions**, plus the product decision, which is Sean's.
+**RELEASE-BLOCKING for macOS and Windows** (see §3).
 
 #### 24-C2 — PARTIAL
 
@@ -554,6 +715,25 @@ that remains true.
 the shipped artifact. **If the `voice` feature is ever enabled in a release build, this criterion
 becomes blocking immediately**, because a shipped voice surface with zero interruption evidence is
 exactly the silent-failure class that blocks 24-C2.
+
+**Correction to the ordered-events sub-clause, 2026-07-29 (orchestrator).** `HANDOFF-2026-07-29-M1-WAVE2.md`
+§3 stated that this clause *"cannot pass for voice because it cannot pass for anything — the protocol
+has no sequence on ANY event"*. **That was wrong, and it was my claim.** Measured against the corpus:
+**6 of 51 event fixtures already carry an ordering field** — `anvil_receipt`,
+`anvil_receipt_invalidated`, `sub_agent_event`, `workflow_started`, `workflow_node_event`,
+`workflow_finished` — using `event_id` plus a monotonic `sequence` (`child_sequence` on the sub-agent
+event). Liveness control: the same glob matched `"type"` in all 51, so the 6/51 is a real
+discrimination and not a dead grep.
+
+What `contract/generate.rs:41-45` actually defers is narrower than I reported: **legacy ordinary-turn
+and tool events** have no producer event id or monotonic sequence, and Recovery v1 deliberately
+supplies a sanitized, content-free **journal cursor and replay stream** for those instead of
+retrofitting per-event sequence numbers.
+
+So the clause is **satisfiable, and by an existing in-repo mechanism** — voice events would simply
+adopt the `event_id` + `sequence` shape those six already use. It is not a design impossibility and
+does not require restating the criterion. It remains unexercised only because the voice feature is
+not built.
 
 #### 27-C5 — NOT MET
 

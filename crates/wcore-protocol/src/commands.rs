@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use wcore_types::goal::GoalStrategy;
 
 use crate::diagnostics::GetRuntimeDiagnosticsCommand;
 use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
@@ -128,6 +130,131 @@ pub struct RemoveMcpServerCommand {
     pub name: String,
 }
 
+// ---------------------------------------------------------------------------
+// F22-C1 — host CONTROL of a durable Goal.
+//
+// `crate::goal` gave a host the ability to OBSERVE a Goal (`goal_snapshot`,
+// `goal_transition`). It deliberately shipped no command, and said so: a
+// command variant with no dispatcher is a capability nothing answers. These
+// five close the other direction, and each one is answered in the CLI command
+// loop in the same change that introduces it.
+//
+// ## Why these five, and why not `run`
+//
+// They mirror `wayland-core goal` (`goal_cmd.rs:223-379`) verb for verb, EXCEPT
+// `run`. `goal run` drives the real `FleetDispatcher` — waves, worker
+// subprocesses, leases, shard timeouts — which is a long-running drive, not a
+// command-loop reply, and inlining it would block the session it was issued on.
+//
+// [`ProtocolCommand::GoalAdvance`] is NOT a substitute for it. It is the verb
+// the taxonomy already implied and nothing could issue: `LoopPolicy::Manual`
+// has no numeric ceiling precisely because "each advance is itself an explicit
+// operator action" (`goal.rs:196-199`), and before this command there was no
+// operator surface anywhere that could take one. A Manual-policy Goal was
+// therefore unadvanceable by a host by construction.
+//
+// ## What a host is NOT permitted to say
+//
+// [`GoalOpenCommand`] carries `max_tokens` — a REQUEST — and deliberately does
+// NOT carry the CLI's `--parent-max-tokens` / `--parent-envelope`. The
+// effective envelope is the intersection with the parent, and the parent is the
+// session's own authority, never a number the wire supplied. This is the same
+// boundary `GoalAuthorityWire` holds on the event side: a host may recognise an
+// envelope, never assert one. A `parent_max_tokens` field on the wire would be
+// exactly the authority-minting route that type was shaped to avoid.
+//
+// ## Why cancel and advance carry a cursor
+//
+// Same reason [`ResolveInterruptedApprovalCommand`] does: the cursor binds the
+// decision to the state the operator actually inspected, so a stale host card
+// cannot cancel a Goal that has since terminated, nor advance one that has
+// already consumed the iteration the operator was looking at.
+
+/// Closed payload authorizing a durable Goal from a host control plane.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalOpenCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    pub objective: String,
+    /// Loop bound, at least 1. Mirrors `goal open --iterations`: `1` records
+    /// `LoopPolicy::Once`, higher records `Fixed`. There is deliberately no
+    /// spelling for "unbounded" — the canonical taxonomy has no such variant,
+    /// and a wire field that invented one would be a second loop vocabulary.
+    pub iterations: u32,
+    /// Which of the five canonical loop owners this Goal authorizes.
+    pub strategy: GoalStrategy,
+    /// Token ceiling the host REQUESTS. Core intersects it with the session's
+    /// own envelope; the recorded authority is the intersection, never this.
+    pub max_tokens: u64,
+}
+
+/// Closed payload declaring one task in a Goal's durable ledger.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalDeclareTaskCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    pub task_id: String,
+    /// Task ids that must carry a DURABLE completion before this one is
+    /// claimable. A set, not a list: declaring the same dependency twice is
+    /// the same graph, and the ledger's exactly-once-unblock count must not
+    /// be able to differ based on how many times a host repeated an edge.
+    #[serde(default)]
+    pub depends_on: BTreeSet<String>,
+    /// The key the task's effect is deduplicated by, stable across attempts.
+    /// Absent means Core derives the same default the CLI does.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// Closed payload consuming one iteration of a Goal's authorized loop bound.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalAdvanceCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    /// The state the operator inspected before advancing.
+    pub cursor: RecoveryCursor,
+}
+
+/// Closed payload terminating a Goal through the ONE canonical transition.
+///
+/// The terminal is always [`wcore_types::goal::GoalTerminalState::Cancelled`],
+/// which the taxonomy defines as "the operator or host cancelled" — a state
+/// that named a host actor before any host could reach it. A host cannot
+/// nominate an arbitrary terminal: letting the wire pick `Verified` would let
+/// an untrusted peer mint the one stamp that is reserved for a real executable
+/// gate.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalCancelCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    /// The state the operator inspected before cancelling.
+    pub cursor: RecoveryCursor,
+}
+
+/// Closed payload pulling the current projection of one Goal, or of all Goals
+/// in the session when `goal_id` is absent.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalResyncCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+}
+
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -196,6 +323,21 @@ pub enum ProtocolCommand {
     ResolveUnknownToolEffect(OperatorToolEffectResolution),
     /// Request the process's versioned, redacted effective runtime view.
     GetRuntimeDiagnostics(GetRuntimeDiagnosticsCommand),
+    /// F22-C1: authorize a durable Goal. The recorded envelope is the
+    /// intersection with the session's own authority, never the request.
+    GoalOpen(GoalOpenCommand),
+    /// F22-C1: declare one task in a Goal's durable ledger.
+    GoalDeclareTask(GoalDeclareTaskCommand),
+    /// F22-C1: consume one iteration of a Goal's authorized loop bound. The
+    /// cursor binds the advance to the state the operator inspected.
+    GoalAdvance(GoalAdvanceCommand),
+    /// F22-C1: terminate a Goal through the ONE canonical transition, as
+    /// `Cancelled`. The cursor prevents a stale host card from cancelling a
+    /// Goal that has already finished.
+    GoalCancel(GoalCancelCommand),
+    /// F22-C1: pull the current `goal_snapshot` for one Goal, or for every
+    /// Goal in the session when `goal_id` is absent.
+    GoalResync(GoalResyncCommand),
     AddMcpServer {
         name: String,
         transport: String,

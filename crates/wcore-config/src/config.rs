@@ -2310,7 +2310,29 @@ impl Config {
         // sentinel (catalog-resolved pricing), and `api_path` lands the request
         // on the right endpoint. Native `--provider openai` (no catalog entry)
         // keeps `openai_defaults()` unchanged.
-        let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        //
+        // C4-F3 — the SAME defect, on the one route that is selected by the
+        // model string rather than by `provider`. `make_plugin_provider_router`
+        // (wcore-cli) claims every `ollama:`-prefixed model and serves it from
+        // `wayland-ollama`, but `ProviderType` has no Ollama variant, so
+        // `compat_defaults_for` handed that local turn the configured REMOTE
+        // provider's profile. `compat.provider_type()` is the sole key for every
+        // cost surface — the cache/cost ledger, `TurnTrace.provider`, the budget
+        // reservation, and the journalled provider-attempt identity — so a free
+        // local turn was labelled and CHARGED as the cloud provider (measured:
+        // `ollama:smollm2:135m` billed $0.0756 at Anthropic's family rate).
+        // `ollama_defaults()` already carries the right id and the $0 /
+        // `cost_is_known_free` rows; until now it had NO production construction
+        // site at all, so the preset was only ever exercised by its own tests.
+        //
+        // Ordered ahead of `catalog_entry` deliberately: the router claims any
+        // `ollama:` model unconditionally, and `AgentBootstrap` refuses to fall
+        // through to a remote provider for a local model, so the local route is
+        // the one that actually runs. User `[provider.compat]` overrides still
+        // merge on top, exactly as for every other preset.
+        let compat_defaults = if wcore_types::model_aliases::is_local_model(&model) {
+            ProviderCompat::ollama_defaults()
+        } else if let Some(entry) = catalog_entry.as_ref() {
             ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
         } else {
             compat_defaults_for(provider)

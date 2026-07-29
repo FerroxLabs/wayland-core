@@ -92,6 +92,20 @@ pub enum BackupError {
 
     #[error("journal error: {0}")]
     Journal(String),
+
+    /// A live SQLite database could not be captured consistently (F26-SC3-O1).
+    ///
+    /// This REFUSES rather than falling back to a raw byte copy. A fallback
+    /// would reinstate exactly the defect this path exists to close, and would
+    /// do it silently — which is worse than the original, because the archive
+    /// would then carry a claim of consistency it had not earned.
+    #[error(
+        "refusing to archive: {0}\n\
+         The archive would otherwise carry an inconsistent copy of this database, \
+         and a backup that restores a corrupt database is worse than no backup. \
+         Close whatever holds the database, or move it aside, and retry."
+    )]
+    SqliteCapture(String),
 }
 
 impl BackupError {
@@ -188,6 +202,19 @@ pub fn run(cmd: BackupCmd) -> Result<(), BackupError> {
             );
             if !manifest.absent_secrets.is_empty() {
                 println!("absent_secrets: {}", manifest.absent_secrets.join(","));
+            }
+            // F26-SC3-O1. Always printed, including as `0`, so an operator can
+            // tell "this home had no databases" from "this build does not
+            // capture them" — the second is what the defect looked like.
+            println!("sqlite_captures: {}", manifest.sqlite_captures.len());
+            for db in &manifest.sqlite_captures {
+                println!("sqlite_capture: {db}");
+            }
+            if !manifest.omitted_sqlite_sidecars.is_empty() {
+                println!(
+                    "omitted_sqlite_sidecars: {}",
+                    manifest.omitted_sqlite_sidecars.join(",")
+                );
             }
             // F26-03-D, the create half: name the payloads that a Windows
             // restore will refuse. This WARNS rather than refuses, because the

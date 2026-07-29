@@ -1,0 +1,33 @@
+[fix-trunc] donor archive: donor.tar.gz
+[fix-trunc] prefilling memory.db to ~300 MiB ...
+[fix-trunc] prefill done in 0.6s, memory.db = 307.7 MiB
+[fix-trunc] waiting for writers: 0/3 started (iter 0, 1785345961)
+[fix-trunc] waiting for writers: 3/3 started (iter 1, 1785345962)
+[fix-trunc] journal modes reported by writers: {'w0': 'truncate', 'w1': 'truncate', 'w2': 'truncate'}
+[fix-trunc] pre-restore committed high-water marks: {'w0': 838, 'w1': 409, 'w2': 499}
+[fix-trunc] restore --replace launched pid=808783
+[fix-trunc] waiting for preserved=true (iter 20, 1.0s, records=0)
+[fix-trunc] preserved=True after 1.91s op_id=1785345961573-808783
+[fix-trunc] post-capture committed high-water marks: {'w0': 1102, 'w1': 709, 'w2': 1062}
+[fix-trunc] commits during capture window: w0=+264, w1=+300, w2=+563
+[fix-trunc] restore killed, reaped rc=-9
+[fix-trunc] open journal records after kill: 1
+[fix-trunc] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785345961573-808783
+[fix-trunc] home entries after rollback: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: concurrent
+JOURNAL-MODE: truncate
+WRITERS: 3
+CAPTURE-SECONDS: 1.91
+PRE-RESTORE-COMMITTED: 1746
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: PASS

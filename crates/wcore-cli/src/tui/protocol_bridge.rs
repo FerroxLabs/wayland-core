@@ -1032,6 +1032,23 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 lifecycle,
             });
         }
+        // The TUI now ISSUES Goal control commands as well as rendering them
+        // (`TuiEngine::issue_goal_control`). A refusal arrives back through
+        // this same ingest path rather than being returned to the caller, so
+        // the rule that Goal view state is written only from the event stream
+        // holds for control exactly as it does for observation.
+        ProtocolEvent::GoalControlRefused {
+            request_id,
+            goal_id,
+            reason,
+            ..
+        } => {
+            app.goal_last_refusal = Some(crate::tui::app::GoalRefusalView {
+                request_id,
+                goal_id,
+                reason,
+            });
+        }
     }
 }
 
@@ -1045,7 +1062,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
 /// know how many are still going before they need to know which.
 #[must_use]
 pub fn goal_status_summary(app: &App) -> Option<String> {
-    if app.goals.is_empty() && app.goal_last_transition.is_none() {
+    // A refusal alone must keep the segment alive. The common refusal on a
+    // fresh session is `goal_not_found`, which by definition arrives with zero
+    // Goals and zero transitions — so gating on those two only would make the
+    // single most likely refusal invisible.
+    if app.goals.is_empty() && app.goal_last_transition.is_none() && app.goal_last_refusal.is_none()
+    {
         return None;
     }
     let total = app.goals.len();
@@ -1057,9 +1079,15 @@ pub fn goal_status_summary(app: &App) -> Option<String> {
     let live = total.saturating_sub(terminal);
 
     let mut summary = if total == 0 {
-        // A transition arrived before any snapshot did. Say so rather than
-        // rendering "0 goals", which reads as "none exist".
-        "goal: awaiting snapshot".to_owned()
+        if app.goal_last_transition.is_some() {
+            // A transition arrived before any snapshot did. Say so rather than
+            // rendering "0 goals", which reads as "none exist".
+            "goal: awaiting snapshot".to_owned()
+        } else {
+            // Only a refusal. There is genuinely nothing to await — claiming
+            // otherwise would promise a snapshot that is never coming.
+            "goal: none".to_owned()
+        }
     } else {
         format!("goals {live} live / {total}")
     };
@@ -1070,6 +1098,17 @@ pub fn goal_status_summary(app: &App) -> Option<String> {
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "transition".to_owned());
         summary.push_str(&format!(" · {} {kind}", last.goal_id));
+    }
+    // A refusal is shown LAST and unconditionally, so an operator who issued a
+    // control command that Core rejected cannot read the unchanged Goal counts
+    // as "it worked". Silence here would make a refused command and a
+    // successful no-op render identically.
+    if let Some(refusal) = &app.goal_last_refusal {
+        let reason = serde_json::to_value(refusal.reason)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "refused".to_owned());
+        summary.push_str(&format!(" · refused {reason}"));
     }
     Some(summary)
 }
@@ -4804,6 +4843,57 @@ mod tests {
         assert!(
             summary.contains("1 live / 1"),
             "unexpected summary: {summary}"
+        );
+    }
+
+    /// F22-C1 control: a REFUSED command must be visible in the TUI.
+    ///
+    /// The TUI can now issue Goal commands (`TuiEngine::issue_goal_control`),
+    /// so it must be able to show that one was rejected. The refusal that
+    /// matters most is the one that arrives with NO Goals and NO transitions —
+    /// `goal_not_found` on a fresh session — because the segment's original
+    /// early-return keyed on exactly those two being empty and would have
+    /// rendered nothing at all.
+    #[test]
+    fn a_refused_goal_command_is_visible_even_with_no_goals_at_all() {
+        let mut app = App::new();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "precondition: an untouched session renders no Goal segment"
+        );
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalControlRefused {
+                goal_version: 1,
+                request_id: "req-1".to_owned(),
+                session_id: "s".to_owned(),
+                goal_id: "ghost".to_owned(),
+                reason: wcore_protocol::events::GoalControlRefusalReason::GoalNotFound,
+            },
+        );
+
+        let refusal = app
+            .goal_last_refusal
+            .as_ref()
+            .expect("a refusal must land in view state");
+        assert_eq!(refusal.request_id, "req-1");
+        assert_eq!(refusal.goal_id, "ghost");
+
+        // THE assertion: with zero goals and zero transitions the segment must
+        // still render, and must say "refused". The pre-repair early-return
+        // returned None here, so a refused command looked exactly like a
+        // session that had never issued one.
+        let summary =
+            goal_status_summary(&app).expect("a refusal alone must keep the segment alive");
+        assert!(
+            summary.contains("refused") && summary.contains("goal_not_found"),
+            "a refusal must name itself in the status line: {summary}"
+        );
+        // It must NOT claim a snapshot is coming — nothing is.
+        assert!(
+            !summary.contains("awaiting snapshot"),
+            "a refusal must not promise a snapshot that will never arrive: {summary}"
         );
     }
 

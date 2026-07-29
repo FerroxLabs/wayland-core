@@ -206,3 +206,14 @@ So: **not determined.** Stated as unresolved rather than guessed, because "the s
 | macOS | **NOT RUN.** 23A-04's disposition; not claimed. |
 | `WAYLAND_EXPECT_SHA` mismatch → exit 3 | **NOT BUILT.** The `.sh`/`.ps1` wrappers were not written, because their only job is to wrap a drive target that does not yet pass. Recorded as an unmet clause. |
 | `WAYLAND_F23A_SELFTEST=refusal` | **BUILT, NOT EXERCISED.** The switch and its `F23A-SELFTEST-TRIPPED: refusal` marker are implemented in the drive target, but cannot be meaningfully exercised while the base run is red on H2. Recorded as an unmet clause — an unexercised self-test is exactly the decorative control this plan bans, and it is reported as such rather than counted. |
+
+---
+
+> **STATUS CORRECTION (2026-07-29, lane/record-truth).** This document records
+> `F23A-01-H2` as open. **It was fixed at `32a5fc90` on 2026-07-27**, with five
+> wired regression tests in
+> `crates/wcore-agent/src/orchestration/d1_refusal_terminal_tests.rs`. The body
+> above is left as written on purpose. See `23A-STATUS-CORRECTION.md` in this
+> directory for the evidence — and for the gap underneath it: the 16-route
+> quarantine census is **still unmeasured at HEAD**, and `WAYLAND_F23A_SELFTEST`
+> was never shown to fire. H2 being fixed does not close the census.

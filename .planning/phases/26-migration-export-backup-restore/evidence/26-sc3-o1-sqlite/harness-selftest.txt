@@ -1,0 +1,7 @@
+A3 old-broken-publisher empty reads observed: 29433
+A1 repaired-publisher empty reads observed: 0
+A2 driver correctly refused an empty marker: progress marker EMPTY for w0 (non-atomic publish?)
+A2 driver correctly read a valid marker: {'w0': 41}
+---- SELFTEST ----
+ASSERTIONS: 3
+SELFTEST-VERDICT: PASS

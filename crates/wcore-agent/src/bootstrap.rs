@@ -2021,7 +2021,26 @@ impl AgentBootstrap {
         // before. The `honcho` path round-trips through a live Honcho
         // deployment. Failures degrade silently — telemetry is best-effort,
         // never blocks bootstrap.
-        let user_id = "default";
+        // The identity every user-model bucket on this session is keyed by —
+        // READ here and WRITTEN by the engine's per-turn `observe`.
+        //
+        // This used to be a hardcoded `"default"` while every write path used
+        // `resolve_user_model_user_id()` (which reads `WAYLAND_USER_ID`). On
+        // any host that sets that variable — which is the entire reason it
+        // exists — the model was written under the real id and read back from
+        // `"default"`, so nothing the layer learned ever reached the prompt.
+        // An advertised surface that is dead in exactly the deployment it was
+        // built for.
+        //
+        // It was also a CROSS-USER READ, which is the worse half: with the
+        // render pinned to `"default"`, a process running with `WAYLAND_USER_ID`
+        // UNSET wrote its inferred brief into the one bucket that every OTHER
+        // user's prompt rendered from. Two processes sharing a memory base with
+        // different values for the variable therefore leaked one user's
+        // inferred traits into another user's system prompt — and onward to the
+        // provider. Resolving both ends from the same function closes it by
+        // construction rather than by two call sites agreeing.
+        let user_id = crate::engine::resolve_user_model_user_id();
         // v0.8.0 Task M — hoist the `UserModelBackend` out of the
         // `user_ctx_block` scope so it can ALSO be installed on the
         // engine for per-turn write-back. v0.7.0 read-only at
@@ -2105,12 +2124,57 @@ impl AgentBootstrap {
             } else {
                 None
             };
+        // 23B-C3 (user-model half) — the user-authored correction layer.
+        //
+        // Opened independently of `want_memory` and of the backend choice: a
+        // correction is the user's own statement about themselves, so it must
+        // survive both "memory is off" and a swap from the local backend to
+        // Honcho. It lives in its own file for the reason given in
+        // `wcore_user_model::correction` — `user-model.json` is rewritten
+        // wholesale by the inference fold.
+        //
+        // A failure to OPEN the store is logged and degrades to no
+        // corrections. A failure to WRITE one propagates to the user at the
+        // slash-command surface — telling someone their correction was saved
+        // when it was not is the defect this layer exists to prevent.
+        let correction_store: Option<wcore_user_model::CorrectionStore> = {
+            let path = wcore_memory::paths::auto_memory_dir(cwd_path)
+                .map(|d| d.join("user-corrections.json"))
+                .unwrap_or_else(|| cwd_path.join(".wayland").join("user-corrections.json"));
+            match wcore_user_model::CorrectionStore::with_persistence(&path) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "wcore_agent::bootstrap",
+                        error = %e,
+                        "user-model correction store unavailable; \
+                         corrections will NOT reach the prompt this session"
+                    );
+                    None
+                }
+            }
+        };
+        let corrections = match correction_store.as_ref() {
+            Some(s) => s.corrections(&user_id).await,
+            None => wcore_user_model::Corrections::default(),
+        };
+        // Corrections render even when no user-model backend is installed:
+        // an explicit statement about oneself should not be conditional on
+        // the inference machinery being switched on.
         let user_ctx_block = if let Some(b) = user_model_backend.as_ref() {
-            let brief = b.brief(user_id).await.unwrap_or_default();
-            let prefs = b.preferences(user_id).await.unwrap_or_default();
-            crate::user_context::render_user_context_block(&brief, &prefs)
+            let brief = b.brief(&user_id).await.unwrap_or_default();
+            let prefs = b.preferences(&user_id).await.unwrap_or_default();
+            crate::user_context::render_user_context_block_with_corrections(
+                &brief,
+                &prefs,
+                &corrections,
+            )
         } else {
-            None
+            crate::user_context::render_user_context_block_with_corrections(
+                &wcore_user_model::UserBrief::default(),
+                &wcore_user_model::Preferences::default(),
+                &corrections,
+            )
         };
         let mut system_prompt = system_prompt;
         if let Some(block) = user_ctx_block {
@@ -2941,6 +3005,14 @@ impl AgentBootstrap {
         // observations land in the store the next bootstrap reads from.
         if let Some(backend) = user_model_backend {
             engine.set_user_model_backend(backend);
+        }
+        // 23B-C3 — install the correction store so `/usermodel correct` can
+        // reach the same store this bootstrap just rendered from. The block
+        // above is built once per session, so a correction made mid-session
+        // reaches the provider on the NEXT session's prompt; the slash
+        // command says exactly that rather than implying it took effect now.
+        if let Some(store) = correction_store {
+            engine.set_user_correction_store(store, user_id);
         }
         // M3.2: hand the decay-scheduler handle (if any) to the engine so
         // its `Drop` impl aborts the task on shutdown. No-op when memory

@@ -1,0 +1,6 @@
+* I'll read both files as requested, then re-read them to confirm their current contents.I'll re-read both files to confirm their current contents.The files are unchanged. Based on my reads:
+
+- **one.txt** contains: `ALPHA`
+- **two.txt** contains: `OMEGA`
+
+**Result:** ALPHA-OMEGA

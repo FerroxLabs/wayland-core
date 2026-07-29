@@ -66,7 +66,11 @@ wcore-agents-pack.workspace = true
 # engine loader uses. Already in the graph transitively via wcore-agent.
 wcore-channels-registry = { path = "../wcore-channels-registry" }
 wcore-compact.workspace  = true
-wcore-config.workspace   = true
+# `sqlite` feature: `backup create` captures live SQLite databases through
+# `wcore_config::sqlite_snapshot` rather than reading their file trio
+# independently (F26-SC3-O1). Additive — wcore-memory already enables it, so
+# this adds no build.
+wcore-config = { workspace = true, features = ["sqlite"] }
 wcore-memory.workspace   = true
 # Wave OL: needed for the `PluginProvider` trait surface that the
 # CLI-side `make_plugin_provider_router` consumes (downcasts via
@@ -255,6 +259,10 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 libc.workspace = true
+# F26-SC3-O1: `backup_sqlite_capture` builds a LIVE WAL database and asserts the
+# archive captures it as one consistent file. Needs a real SQLite client to make
+# the WAL non-empty — a fixture written with `fs::write` would not be a database.
+rusqlite.workspace = true
 # v0.9.4 S0.4: criterion bench harness for agent_nav_perf bench.
 criterion.workspace = true
 # v0.8.1 U9: mockito mocks the GitHub Releases API in the

@@ -1,0 +1,3 @@
+base-truncate-arm rc=1
+BASE-FLAKE-RESULT: passed=5 failed=5 of 10 at 2c8b6d1d
+CTLDONE

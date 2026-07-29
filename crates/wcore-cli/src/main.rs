@@ -82,7 +82,18 @@ fn build_slash_dispatcher(engine: &wcore_agent::engine::AgentEngine) -> SlashDis
     let memory_api = engine.memory_api().clone();
     let plugin_handles = engine.plugin_runtime_handles_arc();
     let skill_catalog = engine.skill_catalog().cloned();
-    SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog)
+    let mut dispatcher = SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog);
+    // 23B-C3: register `/usermodel` only when bootstrap actually opened a
+    // correction store, so the command is absent rather than present-and-inert.
+    if let Some((store, user_id)) = engine.user_correction_store() {
+        let mut handler =
+            wcore_agent::slash::usermodel::UserModelHandler::new(store.clone(), user_id);
+        if let Some(backend) = engine.user_model_backend() {
+            handler = handler.with_backend(backend.clone());
+        }
+        dispatcher.register(std::sync::Arc::new(handler));
+    }
+    dispatcher
 }
 
 /// Pre-process one input line through the slash dispatcher, falling through
@@ -5506,6 +5517,34 @@ async fn run_json_stream_mode(
                     // the next Message streams. Pre-fix this was `break`, which
                     // ended the whole session.
                     continue;
+                }
+            }
+            // F22-C1 — host CONTROL of a durable Goal. One arm for all five
+            // commands; the decision logic lives in
+            // `wcore_agent::goal::control` so this fenced file gains a single
+            // contiguous block rather than five handlers.
+            //
+            // `handle_goal_control` NEVER returns an empty vec for a Goal
+            // command: an accepted one answers with `goal_snapshot`, a refused
+            // one with `goal_control_refused`. That is what keeps this arm from
+            // being a surface that accepts and silently does nothing — the
+            // failure mode the catch-all arm below would otherwise produce.
+            goal_command @ (ProtocolCommand::GoalOpen(_)
+            | ProtocolCommand::GoalDeclareTask(_)
+            | ProtocolCommand::GoalAdvance(_)
+            | ProtocolCommand::GoalCancel(_)
+            | ProtocolCommand::GoalResync(_)) => {
+                let live_session_id = engine.current_session_id();
+                let goal_events = wcore_agent::goal::handle_goal_control(
+                    engine.session_journal(),
+                    live_session_id.as_deref(),
+                    &wcore_agent::goal::GoalParentEnvelope::local_session_default(),
+                    audit_unix_time_millis()?,
+                    &goal_command,
+                )
+                .unwrap_or_default();
+                for event in &goal_events {
+                    let _ = writer.emit(event);
                 }
             }
             ProtocolCommand::SessionResync(command) => {
