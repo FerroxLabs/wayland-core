@@ -365,6 +365,31 @@ has no consumer anywhere outside `ledger.rs`. The only signal is one `tracing::w
 converts a deliberate recorded non-delivery into an unrecoverable one. In flight as
 `lane/24-c1-abandoned`.
 
+> **CLOSED 2026-07-29 by `lane/24-c1-abandoned`. Two of the four claims above were already stale
+> when written** — `lane/24-abandon-surface` had landed `c74dd4bd`, giving `compact()` separate
+> budgets and two consumers outside `ledger.rs` (`wcore-cli/src/gateway.rs:642`,
+> `gateway/support.rs:214`). `pending()`/`pending_count()` still exclude `Abandoned`, which is now
+> deliberate and documented rather than a defect, because it is no longer the only read path.
+>
+> What was genuinely open was the **other two thirds of the prescription**: no acknowledge concept
+> and no re-send. A concept search returned 4 hits, all prose in doc comments, **zero
+> implementation** — against a known-positive of 14 for `bandoned` in the same file. Both are now
+> built and **driven on a real systemd gateway** with a real `kill -9`, a real drain and an
+> independent sink: arrivals went 0 → 1 with the gateway stopped first, and the sink's own journal
+> carries the original delivery key.
+>
+> Driving it exposed a defect no unit test could see: `resend` registered adapters but never called
+> `start_all()`, so **every re-send failed with `channel not started`**. This is why the bar is
+> "drive it", not "implement it".
+>
+> **The Matrix silent-drop hypothesis is REAL**, measured independently on a fresh Synapse rather
+> than taken from the restatement: `MSG_C_LOST = True` — HTTP 200, MSG-A's event id returned for
+> MSG-C's body, MSG-C never in the room. Fix re-proven in the same run. The finding lane was right
+> to flag it and right not to grade it unmeasured.
+>
+> **Discord's dedup window remains UNMEASURED** and needs a credential that does not exist on any
+> build host — `BL-24C1-DISCORD-WINDOW`, Sean-reserved. It bounds residual magnitude, not correctness.
+
 **"Outbound idempotency for the nine adapters" was the wrong closing requirement.** The cost is not
 uniform and mostly cannot be paid in code: **7 of 10 platforms provide no idempotency primitive at
 all** (Telegram, Twilio, Meta Graph, SMTP, signal-cli, AppleScript iMessage, MS Teams) — for those,
