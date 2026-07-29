@@ -1,0 +1,32 @@
+• ## Q1 — Right mechanism?
+
+  Yes, the opt-in gate on `lane/**` is the right mechanism. It attacks the actual variable — demand — at the point where 96.3% of it originates, and it preserves the one stated reason the lane trigger exists (artifacts on demand). The alternatives don't:
+
+  - **(a) Collapse to fewer macOS jobs:** cuts demand to ~1/3, i.e. ~7.5 jobs/hr vs 11.25/hr capacity — the queue would drain, so arithmetically it works. But it deletes the artifact-producing Build jobs, which is the *entire reason* the lane trigger exists (fact 6). You'd be fixing the queue by re-breaking the feature. Rejected as the primary fix.
+  - **(b) Own concurrency group for integration:** useless. The bottleneck is not concurrency-group eviction (fact 5 confirms lanes don't evict) — it's the account-wide pool of 5 runners. A separate group changes ordering, not supply. The integration run still waits behind the same 22.4/hr demand.
+  - **(c) Self-hosted macOS runner:** legitimate supply-side complement — it raises the ceiling instead of cutting demand — but it's ops burden and cost, and it does nothing about the fact that ~96% of current macOS spend is compiling agent WIP nobody asked to verify. Do it later if the opt-in leaves residual queueing; don't do it first.
+
+  One implementation note: the `budget` job + `fromJSON` matrix works, but a job-level `if:` on the three macOS jobs (`github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/lane/') || contains(github.event.head_commit.message, '[ci-darwin]') || contains(...,'[ci-macos]')`) is simpler and skips (rather than collapses) the jobs, which reads better in the UI. Either is fine; don't let the matrix plumbing grow beyond that. Also, independently, add `workflow_dispatch` to ci.yml on `main` so fact 8 stops being a constraint for every future escape hatch.
+
+  ## Q2 — What stops being covered, and is it acceptable?
+
+  On a token-less `lane/**` push you lose, specifically: fmt + clippy + full nextest **on macOS**, `cargo audit` on macOS, the release smoke build on macOS, the eval gate on macOS, and both downloadable macOS binaries. You keep: the full Linux CI (which still runs fmt/clippy/nextest/audit — so toolchain-independent breakage is still caught per-push), full Windows coverage, and the full macOS matrix on every integration-branch push and every PR.
+
+  Acceptable, with one named caveat. Rust lane changes are overwhelmingly platform-agnostic; the residual macOS-only failure classes are real but narrow — arm64-specific behavior, case-insensitive APFS path bugs, BSD-vs-GNU userland assumptions in scripts, macOS-only deps/features (keychain, fsevents). Those will now be caught at integration instead of at the lane — i.e., detection moves later by one serial hop, but never past the merge gate to `main`, because integration runs the unmodified matrix on every push and lanes merge serially through it. Given integration currently produces zero verdicts in 9h, this trade is not just acceptable, it's strictly better: you're converting a theoretical per-lane macOS check that never completes into an actual per-integration check that does.
+
+  ## Q3 — Biggest blind spot of the commit-message token
+
+  The blind spot is **silent absence**: without the token, macOS jobs simply don't exist, and a green lane CI looks identical to a fully-tested green lane CI. Agents (and humans) will forget the token, and nothing in the UI tells them they forgot. Two compounding mechanics: `head_commit.message` is only the HEAD commit — a push whose tip is a merge or a fixup commit loses a token present in an earlier commit; and there's no "last chance" full run before a lane merges.
+
+  Close it with three things:
+
+  1. **Make the skip loud.** The gate job (or budget job) always runs and, on skip, writes a `$GITHUB_STEP_SUMMARY` notice and a workflow annotation: "macOS jobs skipped — push with `[ci-darwin]` to enable." Skipped ≠ invisible.
+  2. **Scan the whole push, not just the tip.** Check `github.event.commits[*].message` (bounded at 20 commits; for the rare >20 push, fall back to tip-only) so a token in any pushed commit triggers macOS.
+  3. **Backstop before merge.** The merge-to-integration step (whatever tooling does it) must either require a `[ci-darwin]` run on the lane's final SHA or rely on the integration run as the gate — and that requirement should live in the merge tooling/lane agent template, not in anyone's memory. A scheduled nightly full-matrix run on lane heads is a cheap additional floor if lanes are long-lived.
+
+  ## Q4 — Drop the arm64 Build job on integration?
+
+  **No.** The redundancy argument is technically right and operationally irrelevant. Yes, `macos-latest` is arm64 and the CI job already does the release build — but the Build job is the only one that *uploads* the artifact, and the artifact exists so a machine that cannot compile arm64 macOS can live-test. The integration branch is precisely where that artifact has the most value: it's the candidate-about-to-be-merged binary, the thing you most want live-tested. Meanwhile the savings are a third of 3.7% of macOS demand ≈ 1.2% of pool load — noise against a queue that's 2x oversubscribed. Dropping it buys nothing measurable and breaks the live-test loop on the branch where the loop matters. The dedup instinct is correct on lanes — where the opt-in already achieves it — and wrong on integration.
+
+  PANEL_POSITION=ENDORSE
+
