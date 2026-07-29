@@ -305,12 +305,23 @@ inverts the diagnosis. Repaired to the correct order: *tail HIGH → pass*; *tai
 LOW + whole LOW → acoustic failure, INDETERMINATE*; *tail LOW + whole HIGH →
 real degradation.*
 
-That is **three instrument defects in one lane, all in the harness built to avoid
-this exact failure class, and all found by assertions I had written to catch
-myself.** I record that as the main methodological result: the self-tests were not
-ceremony — without the known-positive in #1 this lane would have published a
-fabricated negative, and without re-running #2 it would have published a
-fabricated HIGH.
+**Defect #2b — the wake pre-roll was not enough.** The Bluetooth output slept
+again during the 65 s quiet window, so the gate reported INDETERMINATE in 2 of 3
+runs. It was *correctly* declining to claim a product defect, but a gate that
+cannot deliver its own precondition is not a gate. Fixed with a continuous
+**220 Hz off-band keep-alive** across the quiet window — 220 Hz and its harmonics
+(440/660/880/1100/1320…) sit thousands of Goertzel bins away from the 1 kHz target
+and from all four off-band probes at a 0.25 Hz bin width, so it holds the speaker
+awake without touching the measurement. The gate then passed cleanly
+(`tail_ratio=169.54`).
+
+That is **four instrument defects in one lane, all inside the harness built to
+avoid this exact failure class, and every one found by an assertion I had written
+to catch myself.** I record it as the main methodological result: the self-tests
+were not ceremony. Without the known-positive in #1 this lane publishes a
+fabricated negative; without re-running #2 it publishes a fabricated HIGH; without
+#3's ordering fix it publishes "the tone never reached the mic" in the same run
+that proved it had.
 
 Also fixed: my stat-before-search helper used `/usr/bin/test`, **which does not
 exist on macOS** (rc=127), so it refused a live 1800-line file. Caught by its own
@@ -422,13 +433,22 @@ premise both legs had asserted rather than measured.
 - **That the `Vec::remove(0)` ring-buffer defect is real.** `RingBuffer::push`
   does an O(n) memmove over 960,000 `i16` per sample past the 60 s cap, inside
   the cpal callback — ~30 GB/s by arithmetic, which *looks* fatal. It is not, on
-  this hardware. Across three 70 s runs the ring retained **exactly 960000
-  samples** (the documented 60 s cap) every time, `stop()` took 45–57 ms, and the
-  tone injected *deep inside the overflow regime* came back intact in the
-  retained tail at ratio **137.03**. **The arithmetic was a good hypothesis and
-  the measurement refutes it here.** I record it as a concern for weaker hardware,
-  explicitly NOT as a defect — my one apparent failure was my own harness
-  (defects #2 and #3), not the product.
+  this hardware. Across **four** 70 s runs the ring retained **exactly 960000
+  samples** (the documented cap) every time and `stop()` took 29–57 ms. In the two
+  runs where the acoustic precondition held, the tone injected *deep inside the
+  overflow regime* came back intact in the retained tail at ratio **137.03** and
+  **169.54**, against a threshold of 20:
+
+  ```
+  OVERFLOW: total=70s retained=960000 samples (60.0s) cap=960000 stop_took=31.9ms
+  OVERFLOW TAIL: 64000 samples, rms=586.6, tail_ratio=169.54, whole=15.75
+  ```
+
+  **The arithmetic was a good hypothesis and the measurement refutes it here.**
+  Recorded as a concern for weaker hardware, explicitly NOT as a defect. Every
+  apparent failure of this gate turned out to be **my own harness** — defects #2,
+  #2b and #3 — never the product. That is worth stating plainly: had I published
+  the first run, I would have reported a HIGH that does not exist.
 - **That the capture path is dead when a tone is not detected.** The repaired gate
   now reports INDETERMINATE and names the acoustic path, because a silent room and
   a broken mic are the same measurement without a control.
