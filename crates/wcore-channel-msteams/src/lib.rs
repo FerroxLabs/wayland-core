@@ -75,7 +75,12 @@ impl MsTeamsChannel {
         config: MsTeamsConfig,
         creds: Arc<dyn CredentialsStore>,
     ) -> Self {
-        Self::with_token_url(name, config, creds, token::BF_TOKEN_URL.to_string())
+        // The token endpoint comes from config, which defaults to the live
+        // Microsoft host — so production is unchanged and a fixture can be
+        // pointed at without a `#[doc(hidden)]` constructor the registry
+        // cannot reach.
+        let token_url = config.token_url.clone();
+        Self::with_token_url(name, config, creds, token_url)
     }
 
     #[doc(hidden)]
@@ -132,7 +137,9 @@ impl MsTeamsChannel {
     /// `ingest_webhook` (e.g. tests) must guarantee the body's authenticity
     /// some other way.
     pub async fn ingest_activity(&self, raw_body: &str) -> Result<(), MsTeamsError> {
-        if let Some(msg) = inbound::activity_to_incoming(raw_body, &self.config.service_url)? {
+        if let Some(msg) =
+            inbound::activity_to_incoming(raw_body, &self.config.service_url, self.media_bounds())?
+        {
             // F9 — bounded, drop-oldest inbox against a flood.
             let mut guard = self.inbox.lock().await;
             wcore_channels::push_bounded(&mut guard, ChannelEvent::MessageReceived { msg });
@@ -187,7 +194,15 @@ impl Channel for MsTeamsChannel {
 
         // Bind the inbound JWT validator now that the audience (app_id) is
         // known. Until this is set, `ingest_webhook` refuses inbound traffic.
-        self.auth = Some(BotFrameworkAuth::new(self.http.clone(), app_id.clone()));
+        // The metadata URL comes from config (defaulting to the live Bot
+        // Framework endpoint); the issuer is NOT configurable, because a
+        // configurable issuer is a way to accept tokens minted by someone else.
+        self.auth = Some(BotFrameworkAuth::with_endpoints(
+            self.http.clone(),
+            app_id.clone(),
+            self.config.openid_metadata_url.clone(),
+            auth::BF_ISSUER.to_string(),
+        ));
 
         self.app_id = Some(app_id);
         self.app_password = Some(app_password);
@@ -348,9 +363,21 @@ impl Channel for MsTeamsChannel {
     ///
     /// (`react` is intentionally left at the trait default: the Bot Framework
     /// Connector REST API exposes no reaction-send endpoint — Teams reactions
-    /// are a client/Graph concern, not a connector capability. `fetch_media`
-    /// likewise stays default until inbound attachment parsing lands, since the
-    /// connector surfaces no attachments to fetch yet.)
+    /// are a client/Graph concern, not a connector capability.
+    ///
+    /// `fetch_media` also stays at the default, but the reason has changed:
+    /// inbound attachment PARSING now lands (see [`inbound`]), so the agent is
+    /// told what arrived — kind, type and reference. Downloading the bytes is a
+    /// separate auth-gated request against Graph/the Connector API and is not
+    /// implemented. Parsing without fetching is the useful half: the agent can
+    /// see and act on a file reference, where before the attachment vanished.
+    ///
+    /// `media_bounds` is likewise left at the trait default deliberately. The
+    /// default is finite and safe; overriding it would require a Teams-specific
+    /// per-file byte cap, and no such figure was verified for this adapter, so
+    /// none is asserted. Note the byte bound cannot bind on this platform in any
+    /// case — a Bot Framework activity reports no attachment size — so only the
+    /// attachment-count bound is reachable here.)
     async fn send_typing(&self, conversation_id: &str) -> Result<(), ChannelError> {
         let (app_id, app_password) = match (&self.app_id, &self.app_password) {
             (Some(id), Some(pw)) => (id.clone(), pw.clone()),
@@ -500,6 +527,8 @@ mod tests {
             credential_handle_app_id: "msteams.test.app_id".to_string(),
             credential_handle_app_password: "msteams.test.app_password".to_string(),
             service_url: "https://smba.trafficmanager.net/amer/".to_string(),
+            token_url: token::BF_TOKEN_URL.to_string(),
+            openid_metadata_url: auth::BF_OPENID_METADATA_URL.to_string(),
         }
     }
 

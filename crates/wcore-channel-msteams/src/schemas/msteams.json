@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "MS Teams Channel Config",
-  "description": "Configuration for the Microsoft Teams channel adapter. Uses the Bot Framework Connector REST API with OAuth2 client-credentials grant. NOTE: This is a send-only MVP; inbound webhook receive is deferred to v0.8.3.",
+  "description": "Configuration for the Microsoft Teams channel adapter. Uses the Bot Framework Connector REST API with OAuth2 client-credentials grant. Send and inbound webhook receive are both implemented; inbound activities are JWT-validated against the Bot Framework JWKS, and their attachments are parsed. Downloading attachment bytes (fetch_media) is not implemented.",
   "type": "object",
   "required": ["credential_handle_app_id", "credential_handle_app_password"],
   "properties": {
@@ -17,6 +17,16 @@
       "type": "string",
       "description": "Bot Framework service URL for the tenant (e.g. https://smba.trafficmanager.net/amer/). Required for send; obtained from the first inbound activity.",
       "default": "https://smba.trafficmanager.net/amer/"
+    },
+    "token_url": {
+      "type": "string",
+      "description": "OAuth2 token endpoint. Defaults to the live Microsoft endpoint; override only to point the adapter at a local fixture.",
+      "default": "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+    },
+    "openid_metadata_url": {
+      "type": "string",
+      "description": "OpenID Connect metadata document supplying the inbound JWT signing keys. Defaults to the live Bot Framework endpoint; override only to point the adapter at a local fixture.",
+      "default": "https://login.botframework.com/v1/.well-known/openidconfiguration"
     }
   },
   "additionalProperties": false
