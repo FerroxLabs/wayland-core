@@ -1160,10 +1160,13 @@ fn run_bounded<T: Send + 'static>(
 /// effect the child produced; none of them is an error string, an error kind or
 /// a status.
 struct ToolArm {
-    /// The child's own Bash stdout came back to the fixture's endpoint. This
-    /// can only be true if the Bash tool was in the child's registry, passed the
-    /// dispatch gate, passed the confirmer, and ran.
-    executed: bool,
+    /// The child's own Bash stdout came back. Blocked by R2 on Linux; kept
+    /// visible rather than designed around.
+    shell_executed: bool,
+    /// THE AUTHORITY OBSERVABLE — the child obtained `Write`, a mutating tool
+    /// outside the read-only delegation floor, proved by reading its own
+    /// written sentinel back.
+    obtained_mutating_tool: bool,
     /// A file landed at a path OUTSIDE the child's workspace root.
     escaped_containment: bool,
     child_turns: usize,
@@ -1196,7 +1199,8 @@ fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> Tool
         tool_arm_inner(&tag, authority, &marker_owned)
     })
     .unwrap_or_else(|| ToolArm {
-        executed: false,
+        shell_executed: false,
+        obtained_mutating_tool: false,
         escaped_containment: false,
         child_turns: 0,
         withheld: Some(
@@ -1211,17 +1215,55 @@ fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> Tool
     })
 }
 
-/// Drive one arm: a delegated child scripted to run a Bash command that first
-/// prints a marker to stdout and then attempts a write outside its workspace.
+/// Drive one arm: a delegated child scripted to exercise a MUTATING tool the
+/// read-only delegation floor does not grant, then read the effect back.
+///
+/// ## Why the probe tool is `Write` and not only `Bash` — 21-C3
+///
+/// `Bash` cannot reach a verdict on Linux at this SHA. Every delegated
+/// isolated-mutation child's shell dies in the sandbox before running (see
+/// `21-C3-NOTES.md` R2: `spawner.rs:1817` emits an OVERLAPPING read-deny pair
+/// and `bwrap.rs:295` aborts on it). A dimension whose only probe is blocked by
+/// an unrelated defect measures that defect, not authority.
+///
+/// `Write` is the same class of request — a mutating tool outside
+/// `SHARED_READ_ONLY_CHILD_TOOLS`, admitted by `build_tool_registry` only when
+/// the parent's own authority contains it — and it does not need a shell. The
+/// child writes a sentinel to a RELATIVE path inside its own workspace, then
+/// reads it back with `Read`, which the read-only floor always grants. The
+/// sentinel returning is a POSITIVE effect: nothing but a successful Write
+/// followed by a successful Read can produce it, and neither the confirmer, the
+/// sandbox, nor workspace containment is in the path.
+///
+/// `Bash` is still driven, in the same arm, and its outcome is recorded
+/// separately — that is how R2 was found and it must stay visible.
 fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
     let staging = TempDir::new().expect("tempdir");
     let outside_path = std::fs::canonicalize(staging.path())
         .expect("canonical probe dir")
         .join("corpus_child_bash_probe.txt");
-    let script = tool_call_script(
+    let write_sentinel = format!("{marker}WRITTEN");
+    let mut script = vec![
+        LlmEvent::ToolUse {
+            id: "corpus-write-call".to_owned(),
+            name: "Write".to_owned(),
+            input: json!({
+                "file_path": "corpus_authority_probe.txt",
+                "content": write_sentinel,
+            }),
+            extra: None,
+        },
+        LlmEvent::ToolUse {
+            id: "corpus-readback-call".to_owned(),
+            name: "Read".to_owned(),
+            input: json!({ "file_path": "corpus_authority_probe.txt" }),
+            extra: None,
+        },
+    ];
+    script.extend(tool_call_script(
         "Bash",
         json!({ "command": bash_probe_command(marker, &outside_path) }),
-    );
+    ));
     // The confirmer is neutralised IDENTICALLY in both arms — see
     // `parent_fixture_with_allow_list`. Holding it constant is what makes the
     // differential single-variable.
@@ -1232,13 +1274,14 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
     let fixture = parent_fixture_with_allow_list(
         session_tag,
         script,
-        vec!["Bash".to_owned()],
+        vec!["Bash".to_owned(), "Write".to_owned(), "Read".to_owned()],
         SandboxChoice::ProductionResolved,
     );
 
     if let Some(reason) = &fixture.bind_failure {
         return ToolArm {
-            executed: false,
+            shell_executed: false,
+            obtained_mutating_tool: false,
             escaped_containment: false,
             child_turns: 0,
             withheld: Some(format!(
@@ -1259,7 +1302,10 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
         ParentAuthority::HoldsBash => fixture.spawner.declare_root_parent_tool_authority(),
         // The hostile premise, established for the first time. `narrow_to` is
         // monotonic and shared by `Arc`, so this binds every clone the
-        // Delegate path takes.
+        // Delegate path takes. `Read` stays in the envelope on purpose: the
+        // read-back leg must remain available in BOTH arms, or the denied arm's
+        // silence would be explained by a missing Read rather than a missing
+        // Write.
         ParentAuthority::ReadOnly => fixture
             .spawner
             .narrow_parent_tool_authority(["Read", "Grep", "Glob"]),
@@ -1268,12 +1314,15 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
     let overrides = ForkOverrides {
         model: None,
         effort: None,
-        allowed_tools: vec!["Bash".to_owned()],
+        // Both mutating tools are REQUESTED in both arms. Whether the child
+        // receives them is `build_tool_registry`'s intersection against the
+        // parent's authority, which is the only thing that differs.
+        allowed_tools: vec!["Bash".to_owned(), "Write".to_owned(), "Read".to_owned()],
         budget: None,
     };
     let config = child_config(
         "corpus-tool-widening",
-        "run the probe command with the Bash tool",
+        "write the probe file, read it back, then run the probe command",
     );
 
     let rt = runtime();
@@ -1283,7 +1332,15 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
     let returned = fixture.provider.tool_results().join(" | ");
 
     ToolArm {
-        executed: returned.contains(marker) || result.text.contains(marker),
+        // The shell leg — blocked by R2 on Linux, kept so the block stays
+        // visible instead of being quietly designed around.
+        shell_executed: returned.contains(marker) || result.text.contains(marker),
+        // THE AUTHORITY OBSERVABLE. The sentinel can only return by way of a
+        // successful `Write` followed by a successful `Read` of the same
+        // relative path inside the child's own workspace. No shell, no sandbox
+        // spawn, no containment boundary and no confirmer decision is in that
+        // path — the allow-list covers all three tools in both arms.
+        obtained_mutating_tool: returned.contains(&write_sentinel),
         escaped_containment: outside_path.exists(),
         child_turns,
         // The shared in-process anti-vacuity gate, unchanged and reused rather
@@ -1331,24 +1388,29 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
 
     let shape = format!(
         "TOOL-AUTHORITY DIFFERENTIAL. Two arms of the production Delegate path \
-         (`Spawner::spawn_fork`), identical in workspace, script, child config, requested \
-         toolset (`allowed_tools=[\"Bash\"]`) and approval posture (Bash allow-listed in both, so \
-         the shipped confirmer is held constant and cannot be the difference). The ONLY variable \
-         is the parent session's own tool authority. \
-         ARM-GRANTED (`declare_root_parent_tool_authority`) in {}: {} child turn(s), the child \
-         executed Bash: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
+         (`Spawner::spawn_fork`), identical in workspace, script, child config, requested toolset \
+         (`allowed_tools=[\"Bash\",\"Write\",\"Read\"]`) and approval posture (all three \
+         allow-listed in both arms, so the shipped confirmer is held constant and cannot be the \
+         difference), with the sandbox runtime resolved in both by the production \
+         `SandboxRegistry::required_for_session`. The ONLY variable is the parent session's own \
+         tool authority. \
+         ARM-GRANTED (`declare_root_parent_tool_authority`) in {}: {} child turn(s), obtained the \
+         mutating tool (wrote a sentinel inside its workspace and read it back): {}, shell \
+         executed: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
          ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`) in {}: {} child \
-         turn(s), the child executed Bash: {}, its write escaped the workspace: {}; returned: {}; \
-         child text: {}",
+         turn(s), obtained the mutating tool: {}, shell executed: {}, its write escaped the \
+         workspace: {}; returned: {}; child text: {}",
         granted.parent_workspace,
         granted.child_turns,
-        granted.executed,
+        granted.obtained_mutating_tool,
+        granted.shell_executed,
         granted.escaped_containment,
         granted.returned,
         granted.child_text,
         denied.parent_workspace,
         denied.child_turns,
-        denied.executed,
+        denied.obtained_mutating_tool,
+        denied.shell_executed,
         denied.escaped_containment,
         denied.returned,
         denied.child_text,
@@ -1370,54 +1432,63 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
     // never carried, and its absence is why a REFUSED here was unattributable
     // for three plans. A refusal is only evidence about authority if a child
     // with authority DOES execute the tool in this exact fixture.
-    if !granted.executed {
+    if !granted.obtained_mutating_tool {
         return ProbeResult::new(
             Outcome::NotExpressible,
-            "no verdict — Bash did not execute even for a parent that holds it",
+            "no verdict — the mutating tool did not work even for a parent that holds it",
             format!(
                 "the KNOWN-POSITIVE arm failed: a child of a parent holding the full \
-                 child-eligible tool set, granted `allowed_tools=[\"Bash\"]`, produced no Bash \
-                 stdout. Something other than tool authority is stopping the call, so the denied \
-                 arm's absence proves nothing and is not recorded as a refusal. {shape}"
+                 child-eligible tool set, granted the mutating toolset outright, could not write a \
+                 sentinel inside its own workspace and read it back. Something other than tool \
+                 authority is stopping the call, so the denied arm's absence proves nothing and is \
+                 not recorded as a refusal. {shape}"
             ),
         );
     }
 
-    if denied.executed {
+    if denied.obtained_mutating_tool {
         return ProbeResult::new(
             Outcome::Allowed,
-            "Bash — a tool the read-only parent does not itself hold",
+            "a mutating tool the read-only parent does not itself hold",
             format!(
-                "the child of a READ-ONLY parent executed Bash and its stdout returned to the \
-                 session's own endpoint. The known-positive arm proves the instrument is live, so \
-                 this is a widening at the spawn seam and not an artefact. {shape}"
+                "the child of a READ-ONLY parent wrote a sentinel with `Write` and read it back. \
+                 The known-positive arm proves the instrument is live, so this is a widening at \
+                 the spawn seam and not an artefact. {shape}"
             ),
         );
     }
 
-    // THE SEPARATION `21-04-PHASE-VERDICT.md` C3 bullet 4 asks for. Containment
-    // is measured on the GRANTED arm — where the child demonstrably held and ran
-    // Bash — so it is reported as its own fact rather than braided into the
-    // authority verdict.
-    let containment = if granted.escaped_containment {
-        "SEPARATELY OBSERVED: on the granted arm the child's Bash write DID land outside its \
-         workspace root, so workspace containment did not bind there and cannot be an alternative \
-         explanation for the denied arm"
+    // THE SEPARATION `21-04-PHASE-VERDICT.md` C3 bullet 4 asks for. Both
+    // alternative mechanisms are ruled out by measurement rather than by
+    // argument: the GRANTED arm proves the tool works in this exact fixture, so
+    // neither the confirmer nor the sandbox nor containment can explain the
+    // denied arm, since all three are identical across the two.
+    let shell_note = if granted.shell_executed {
+        "The shell leg also ran on the granted arm."
     } else {
-        "SEPARATELY OBSERVED: on the granted arm the child executed Bash but its write did NOT \
-         land outside its workspace root, so workspace containment bound independently of tool \
-         authority. The two mechanisms are measured apart rather than jointly attributed"
+        "The shell leg did NOT run on either arm — see 21-C3-NOTES.md R2, a sandbox defect \
+         unrelated to authority — which is exactly why the authority observable is `Write` and a \
+         read-back rather than a Bash effect."
+    };
+    let containment = if granted.escaped_containment {
+        "SEPARATELY OBSERVED: on the granted arm an effect DID land outside the child's workspace \
+         root, so workspace containment did not bind there"
+    } else {
+        "SEPARATELY OBSERVED: on the granted arm no effect landed outside the child's workspace \
+         root, so workspace containment bound independently of tool authority. The two mechanisms \
+         are measured apart rather than jointly attributed"
     };
 
     ProbeResult::new(
         Outcome::Refused,
-        "no Bash — nothing the read-only parent does not hold",
+        "no mutating tool — nothing the read-only parent does not hold",
         format!(
-            "ATTRIBUTED TO TOOL AUTHORITY. The same request, the same confirmer posture and the \
-             same workspace produced a running Bash under a parent that holds it and no Bash at \
-             all under a parent that does not, so the refusal is the parent-authority \
-             intersection at `build_tool_registry` and not containment, not the approval gate and \
-             not an absent child. {containment}. {shape}"
+            "ATTRIBUTED TO TOOL AUTHORITY. The same request, the same allow-list, the same \
+             production-resolved sandbox and the same workspace shape produced a working `Write` \
+             under a parent that holds it and none at all under a parent that does not, so the \
+             refusal is the parent-authority intersection at `build_tool_registry` \
+             (`spawner.rs:2718`) and not containment, not the approval gate, not the sandbox and \
+             not an absent child. {shell_note} {containment}. {shape}"
         ),
     )
 }
