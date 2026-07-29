@@ -630,6 +630,12 @@ enum TopCmd {
     /// `F23_INDEX=` lines to STDOUT; `verify` exits 6 when the store
     /// disagrees with the working tree.
     Index(wcore_cli::index_cmd::IndexArgs),
+    /// F23-04 (Phase 23B): the cache + compaction ledger — `report`, `list`,
+    /// `show` and `verify` over what the prompt cache and the compactor
+    /// actually did. Every verb prints greppable `F23_CACHE=` lines; `verify`
+    /// exits 7 when the session's cost is not fully priced (the USD figure is
+    /// then a floor, not spend) and 8 when there is no ledger to check.
+    Cache(wcore_cli::cache_cmd::CacheArgs),
     /// ForgeFlows: validate / list / run saved `.ron` workflows from
     /// `.wayland/workflows/`.
     #[command(visible_alias = "forgeflows")]
@@ -1261,6 +1267,11 @@ async fn run() -> anyhow::Result<ExitCode> {
             // for the same reason — indexing and searching a checkout needs no
             // provider credential.
             TopCmd::Index(args) => wcore_cli::index_cmd::run(args),
+            // F23-04: dispatched beside `index` and before `Config::resolve` —
+            // reading a ledger a past session already wrote needs no provider
+            // credential, and refusing to report on a session because the
+            // current environment has no key would be absurd.
+            TopCmd::Cache(args) => wcore_cli::cache_cmd::run(args),
             TopCmd::Workflow { cmd } => match wcore_cli::workflow::run(cmd).await {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {

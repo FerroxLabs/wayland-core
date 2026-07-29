@@ -159,6 +159,12 @@ pub mod session_cmd;
 // perf and retrieval-quality gates are measured through.
 pub mod index_cmd;
 
+// F23-04 (Phase 23B) — `wayland-core cache`: report / list / show / verify over
+// the engine's cache + compaction ledger. Lives in the lib for the same reason
+// `index_cmd` does — it is the instrument Success Criterion 4 is measured
+// through, so its output format is asserted on by the integration suite.
+pub mod cache_cmd;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.
