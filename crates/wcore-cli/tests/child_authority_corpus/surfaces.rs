@@ -1111,6 +1111,10 @@ struct ToolArm {
     withheld: Option<String>,
     child_text: String,
     returned: String,
+    /// The parent workspace this arm ran against, carried so a reader can see
+    /// that the two arms were separate hermetic worlds and that the "outside"
+    /// target really is outside this root.
+    parent_workspace: String,
 }
 
 /// The parent authority an arm runs under. This is the ONLY thing that differs
@@ -1143,6 +1147,7 @@ fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> Tool
         ),
         child_text: String::new(),
         returned: String::new(),
+        parent_workspace: "not reached — the arm did not return".to_owned(),
     })
 }
 
@@ -1172,6 +1177,7 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
             )),
             child_text: String::new(),
             returned: String::new(),
+            parent_workspace: fixture.root.display().to_string(),
         };
     }
 
@@ -1223,6 +1229,11 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
         .map(|probe| probe.detail),
         child_text: truncate(&result.text),
         returned: truncate(&returned),
+        parent_workspace: format!(
+            "{} (outside target: {})",
+            fixture.root.display(),
+            outside_path.display()
+        ),
     }
 }
 
@@ -1249,16 +1260,18 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
          toolset (`allowed_tools=[\"Bash\"]`) and approval posture (Bash allow-listed in both, so \
          the shipped confirmer is held constant and cannot be the difference). The ONLY variable \
          is the parent session's own tool authority. \
-         ARM-GRANTED (`declare_root_parent_tool_authority`): {} child turn(s), the child executed \
-         Bash: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
-         ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`): {} child \
+         ARM-GRANTED (`declare_root_parent_tool_authority`) in {}: {} child turn(s), the child \
+         executed Bash: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
+         ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`) in {}: {} child \
          turn(s), the child executed Bash: {}, its write escaped the workspace: {}; returned: {}; \
          child text: {}",
+        granted.parent_workspace,
         granted.child_turns,
         granted.executed,
         granted.escaped_containment,
         granted.returned,
         granted.child_text,
+        denied.parent_workspace,
         denied.child_turns,
         denied.executed,
         denied.escaped_containment,
