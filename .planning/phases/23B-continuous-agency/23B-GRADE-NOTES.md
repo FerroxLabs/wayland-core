@@ -185,3 +185,83 @@ schtasks f23win23B04day3 -> Status Ready, Next Run Time 7/31/2026 7:05:00 AM
 So as of now: **Windows 2 of 3 and on track; Linux 1 of 3 and broken; macOS 0 of 3.**
 The brief's "day one only" was correct when written and is now correct only for Linux and macOS.
 This is exactly why the standing rule is to re-derive rather than inherit.
+
+### M6 — **C2: the acceptance run 23B-01 cites is NOT in the tree.** Its retained log FAILED.
+
+`23B-01-LIVE-EVIDENCE.md:18-22` tabulates fifteen PASS rows for run nonce `446156892e72cf2a`
+(plus prior confirming runs `c7ac3ec01c882827`, `e7ee1a9bb0aaf5d8`) and says
+"Full captured log: `evidence/23B-01-linux-drive.log`".
+
+`evidence/23B-01-linux-drive.log` carries nonce **`f12f77104c3ca039`** and ends:
+
+```
+F23_01_DRIVE=FAIL platform=linux nonce=f12f77104c3ca039 failures=4
+```
+
+with `show`, `retry`, `export` and `reconcile` all dying on
+`journal checksum mismatch at sequence 16` — i.e. 23B-H1.
+
+Searched, with known-positives in the same invocation:
+
+| nonce | files in `evidence/` | files in whole phase dir |
+|---|---|---|
+| `446156892e72cf2a` (cited) | **0** | 1 (the citing prose itself) |
+| `c7ac3ec01c882827` (cited) | **0** | 1 |
+| `e7ee1a9bb0aaf5d8` (cited) | **0** | 1 |
+| `f12f77104c3ca039` *(control)* | **1** | — |
+| `c3ebab28a4160e31` *(control)* | **1** | — |
+
+**But criterion 2 is not thereby unevidenced** — the later re-drive IS retained and IS clean:
+`evidence/23B-02-linux-operator-drive.log`, nonce `c3ebab28a4160e31`, sha `cd021a01`, all 15
+verbs PASS, `F23_01_DRIVE=PASS`. And its provenance is *better* than 23B-01's own:
+
+- `git ls-tree cd021a01 --` → `session_lifecycle.rs`, `session_cmd.rs`, `provenance.rs` all present.
+- `git ls-tree 15971d1b --` (23B-01's binary sha) → **none of the three**, confirming 23B-01's
+  own stated rsync caveat that its `--build-info` attests only to the base tree.
+  Known-positive: `session.rs` IS at `15971d1b`, so the instrument discriminates.
+
+**So C2's usable Linux evidence is the 23B-02 re-drive, and the verdict must cite that, not the
+row-table 23B-01 published.** Grading conclusion unchanged in direction; provenance corrected.
+
+### M7 — C3: the missing acceptance mechanism confirmed independently.
+
+- `/memory why|correct|forget|privacy|retention` ARE wired: `slash/memory.rs:54-58` dispatch and
+  `:97,160,188,204,253` implement.
+- `received_requests` (the outbound-provider-body probe the plan is built around) in
+  `crates/wcore-memory` + `crates/wcore-agent/src/slash` → **0 files**. Known-positive, same
+  query in `crates/wcore-providers` → **7 files**. Instrument alive; the proof genuinely absent.
+- `NudgeBudget` appears only in `wcore-memory/src/lib.rs` and `provenance.rs` — **no CLI, slash or
+  TUI surface**, so the nudge bound is not a control a user can reach. Matches the SUMMARY.
+
+### M8 — BL-23B-H1's re-grade arithmetic RE-DERIVED from the raw logs, and it holds.
+
+Counted by me over `evidence/23B-H1-measure/*.log`, not read from the write-up:
+
+```
+F23_H1_RUN=            92          F23_H1_REACH=              92
+sum(tool_events)      153          runs with tool_events=0     0
+status=OK              92          status=CHECKSUM_MISMATCH    0
+file_written=no         0          distinct binaries           3 (by sha256_16)
+```
+
+**The harness is genuinely reach-proven, and unusually well built.** Each `F23_H1_REACH` line
+carries a real `tool_events=` count from `count_tool_events "$JOURNAL"` plus `file_written=yes`,
+so a non-reaching run cannot be folded into a pass — the exact defect that made the *earlier*
+evidence worthless. `scripts/f23-h1-repro-live.sh:112-117` carries a self-test with a
+known-positive, a known-negative (`tool_events=0 file_written=no`), **and `_sum_old`, which proves
+the old broken matcher would have missed it** — the three-assertion form §6b-ii demands, which
+almost nothing else in this program supplies. Lines 279-285 record an instrument defect
+(`grep -o`'s `.` not matching the `n` in `tool_events`) found AND repaired in the same lane.
+
+**I endorse the MEDIUM re-grade.** It remains a non-reproduction, not a disproof — root cause
+unidentified — and the residual the backlog names is real and I saw it happen: in
+`23B-01-linux-drive.log`, ONE checksum mismatch took down **4 of 15** operator verbs at once,
+because all twelve `session` verbs read the journal and no repair path exists.
+
+### M9 — C1 is 23A's, and 23A itself grades it PARTIAL.
+
+`.planning/phases/23A-governed-skills/23A-C1-SUMMARY.md:4` — "the criterion moves from NOT MET to
+PARTIAL". Clause table (:20-23): observed MET, revoked MET, rolled back MET, cannot-execute-before-
+promotion met and explicitly NOT vacuously — **`promoted` STILL NOT MET (`bail!`, untouched)**.
+No VERDICT or DISPOSITION file exists in `23A-governed-skills/`. A sibling lane owns this; I
+record it and defer.
