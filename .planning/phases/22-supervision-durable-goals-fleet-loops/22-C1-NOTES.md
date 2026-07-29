@@ -154,3 +154,31 @@ silently rots, which is the whole risk of choosing a mirror over the reduced sta
 - (t0) worktree created, baseline measured, notes committed.
 - (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
 - (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
+
+## Measurement 3 (t+~2h) — protocol surface lands, first real counts
+
+Built on `hetzner-dsm` at `/root/wayland-22-c1`, branch `hz/22-c1`, HEAD `e0b22b9e`.
+
+```
+cargo test -p wcore-protocol --lib
+  -> test result: ok. 125 passed; 0 failed; 0 ignored
+  -> grep "goal::tests" = 5 lines, all ok   <-- the new module's tests DID execute
+```
+
+The grep is not decoration. `--lib` on a crate whose new module failed to compile into the
+test binary would still print `test result: ok` for the modules that did; asserting the
+executed NAMES is the only thing that proves my five ran. Same class as the `0 of 12` and
+`5 passed for zero work` traps in LANE-BRIEF §3.2.
+
+Shipped so far:
+- `crates/wcore-protocol/src/goal.rs` — wire projection (new file, in SOURCE_INPUTS)
+- `ProtocolEvent::{GoalSnapshot, GoalTransition}` — additive, nothing existing reshaped
+- `crates/wcore-agent/src/goal/wire.rs` — conversion + the field-coverage guard + `goal_stream`
+- `wayland-core goal stream --journal … --goal … [--expect N]` — the live producer path
+
+## Log
+- (t0) worktree created, baseline measured, notes committed.
+- (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
+- (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
+- (t+2h) protocol surface committed + pushed; wcore-protocol --lib 125/125 with all 5 new
+  goal tests named in the output.
