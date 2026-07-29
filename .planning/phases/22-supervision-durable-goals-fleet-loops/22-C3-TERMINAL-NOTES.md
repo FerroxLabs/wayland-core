@@ -58,3 +58,39 @@ So my lane is not "build the adapter surface" (built), nor "wire the five owners
 
 - [t0] Worktree created, SHA asserted, brief + ledger + prior summary read.
 - [t0] Three brief measurements re-run: 1 FALSE, 1 TRUE-but-defective-instrument, 1 TRUE-with-stale-line-numbers.
+- [t1] Cross-audit panel (codex 5.6-sol / gemini 3.1-pro / kimi K3 + internal adversarial) on the
+  design. **Unanimous on two points:** (a) making `resolve()` total is NOT structural closure by
+  itself — a future caller can simply not call it; (b) `engine.run` is the wrong enforcement
+  boundary for Direct (it is a per-TURN loop; a Goal spans many turns and many engines).
+  Split on the rest: codex/gemini wanted capability receivers + private raw drivers across all
+  five (measured cost: ForgeFlows ~34 call sites, Direct thousands — not achievable in one lane);
+  kimi argued the conversion boundary is already sealed and the real fix is to delete the
+  non-canonical *termination* paths, at zero call-site churn. **Internal adversarial pass sided
+  with kimi**, and measurement then settled it.
+- [t2] **THE FINDING.** The bypass is not (only) in the CLI's `if let Some(...) = resolve()`.
+  It is in the reducer. `GoalKernel::terminate` is public and `SessionEvent::GoalTerminated`
+  was refused ONLY while a loop owner was live:
+
+      if let Some(owner) = &goal.loop_owner { refuse }
+
+  with the stated justification that *"A Goal that never claimed an owner is still terminable
+  this way — but by definition no engine ran it, so there was no loop owner to be canonical
+  about."* **That premise is false precisely when attachment is opt-in.** An engine can run a
+  Goal to completion, never claim, and then record `SelfChecked` — a full engine verdict — down
+  the plain path. A sixth engine added tomorrow is in that state BY DEFAULT, since claiming is
+  the thing it would have to opt into. This is the brief's "sixth engine cannot bypass it"
+  scenario, and it was representable.
+- [t3] Built the closure: exhaustive `GoalTerminalState::requires_loop_owner()` split
+  (engine-produced vs control-plane, no wildcard arm) + unconditional reducer refusal of an
+  engine verdict on the plain path. Workspace check green.
+- [t4] The closure made **5 existing tests fail** — all of them terminating a Goal with an
+  engine verdict on the raw path. Adapted each to the sanctioned route; no assertion relaxed,
+  nothing `#[ignore]`d. Kernel round-trip keeps its serialization property in full (engine half
+  moved to a crate-internal test over the canonical transition; integration test gained the
+  refusal assertion over every engine shape — coverage is a superset of the original).
+- [t5] wcore-agent: **3205 run, 3205 passed, 0 failed** (3 flaky, retried green).
+- [t6] Per-owner three-assertion gate written (`goal_no_bypass_test.rs`), all five refusals
+  captured verbatim. **Falsified:** neutralizing the new refusal (restoring the old shape) turns
+  5/5 per-engine cases + the sweep RED — and the failure output shows the old shape returned a
+  successful `RecoveryCursor { journal_sequence: Some(1) }`, i.e. the bypass write COMMITTED.
+  Reducer restored via `git checkout -- <one path>` (permitted; moves no ref), verified clean.
