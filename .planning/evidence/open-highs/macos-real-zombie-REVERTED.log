@@ -1,0 +1,13 @@
+   Compiling wcore-types v0.12.25 (/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-open-highs/crates/wcore-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/real_zombie.rs (target/debug/deps/real_zombie-c3ada7f68a6ad021)
+
+running 5 tests
+test a_fully_reaped_process_reads_as_dead ... ok
+test a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead ... ok
+test a_live_process_reads_as_live ... ok
+test a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... ok
+test the_running_test_process_reads_as_live ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
