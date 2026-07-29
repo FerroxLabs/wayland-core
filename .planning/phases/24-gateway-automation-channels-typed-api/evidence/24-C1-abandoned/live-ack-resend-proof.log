@@ -1,0 +1,162 @@
+=== binary under test ===
+848595e9453a0c3cdfade179e3e4394e4e669516
+
+=== 1. independent sink first (stalls after 3) ===
+SINK_READY url=http://127.0.0.1:18477 journal=/tmp/24c1ab-run/arrivals.jsonl
+
+=== 2. seed 6 deliveries ===
+seeded=24
+
+=== 3. install + start the REAL service ===
+  binary:  /root/wayland-24-c1-abandoned/target/release/wayland-core
+gateway start requested (systemd)
+
+=== 4. COUNT POSITIVE DELIVERY at the independent sink ===
+  t=2s arrivals_at_sink=0
+  t=4s arrivals_at_sink=0
+  t=6s arrivals_at_sink=0
+  t=8s arrivals_at_sink=0
+  t=10s arrivals_at_sink=0
+  t=12s arrivals_at_sink=0
+  t=14s arrivals_at_sink=0
+  t=16s arrivals_at_sink=0
+  t=18s arrivals_at_sink=0
+  t=20s arrivals_at_sink=0
+  t=22s arrivals_at_sink=0
+  t=24s arrivals_at_sink=0
+  t=26s arrivals_at_sink=0
+  t=28s arrivals_at_sink=0
+  t=30s arrivals_at_sink=0
+  t=32s arrivals_at_sink=0
+  t=34s arrivals_at_sink=0
+  t=36s arrivals_at_sink=0
+  t=38s arrivals_at_sink=0
+  t=40s arrivals_at_sink=0
+  t=42s arrivals_at_sink=0
+  t=44s arrivals_at_sink=0
+  t=46s arrivals_at_sink=0
+  t=48s arrivals_at_sink=0
+  t=50s arrivals_at_sink=0
+  t=52s arrivals_at_sink=0
+  t=54s arrivals_at_sink=0
+  t=56s arrivals_at_sink=0
+  t=58s arrivals_at_sink=0
+  t=60s arrivals_at_sink=4
+ARRIVALS_AT_INDEPENDENT_SINK=4
+
+=== 5. surface BEFORE (must be EMPTY) ===
+No abandoned deliveries recorded in /tmp/24c1ab-run/home.
+
+=== 6. kill -9 while a delivery is stalled at the sink ===
+gateway_pid=4145527 at 16:45:47
+killed gateway and sink
+STATE_COUNTS_AFTER_KILL = {'settled': 3, 'attempted': 1}
+  CARRIED: cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205 state= attempted dest= 24c1absink
+
+=== 7+8. restart, then drain inside the carried-work window ===
+drain fired on spin 34 at 16:45:53.459
+drain requested (budget 1ms); gateway pid 4166021
+drain complete: Drained (deliveries pending 0)
+Jul 29 16:38:11 Ubuntu-2404-noble-amd64-base wayland-core[4001180]: [gateway] ABANDONED delivery cron:a3799933-6146-4b7f-a2dc-ab9f7688cec8:1785343083598
+Jul 29 16:44:45 Ubuntu-2404-noble-amd64-base wayland-core[4145527]: [gateway] started pid=4145527 role=Owner profile=24c1ab carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+Jul 29 16:45:52 Ubuntu-2404-noble-amd64-base wayland-core[4166021]: [gateway] started pid=4166021 role=Owner profile=24c1ab carried=1 (unattempted 0 / unknown-outcome 1) quarantined=0
+Jul 29 16:45:53 Ubuntu-2404-noble-amd64-base wayland-core[4166021]: [gateway] drain requested (budget Some(1)ms)
+Jul 29 16:45:53 Ubuntu-2404-noble-amd64-base wayland-core[4166021]: [gateway] drain Forced: observations=2 abandoned=1 flushed=true
+Jul 29 16:45:53 Ubuntu-2404-noble-amd64-base wayland-core[4166021]: [gateway] ABANDONED delivery cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+
+=== 9. THE SURFACE: what did you give up on? ===
+1 abandoned delivery in /tmp/24c1ab-run/home:
+
+  cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+    to:     24c1absink
+    when:   2026-07-29T16:45:53.383723441+00:00
+    why:    shutdown drain ran out of budget before this delivery finished
+    resend: CHECK THE DESTINATION FIRST — an attempt was in flight and may have landed
+    acked:  no — retained until `gateway ack cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205`
+
+1 abandonment(s) are UNACKNOWLEDGED and are exempt from compaction until they are. Review each, then `gateway ack <id>`.
+--- json ---
+{
+  "abandoned": [
+    {
+      "acknowledged": null,
+      "at": "2026-07-29T16:45:53.383723441+00:00",
+      "destination": "24c1absink",
+      "id": "cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205",
+      "reason": "drain_budget_expired",
+      "resent": null,
+      "was_attempted": true
+    }
+  ],
+  "dropped_past_retention": 0,
+  "home": "/tmp/24c1ab-run/home",
+  "quarantined": 0,
+  "unacknowledged": 1
+}
+TARGET_DELIVERY_ID=cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+
+=== 10. KNOWN-NEGATIVE: resend must REFUSE without --confirm-not-delivered ===
+REFUSE_RC=1  (non-zero REQUIRED — a guard that never fires is decorative)
+wayland-core gateway: cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205 was already in flight when it was abandoned, so it may have reached 24c1absink. Re-sending could put a second copy there.
+
+  shutdown drain ran out of budget before this delivery finished
+
+Check the destination. If the message is NOT there, re-run with --confirm-not-delivered.
+
+=== 11. bring an independent sink back, with its OWN journal ===
+gateway_active=inactive (must NOT be active)
+SINK_READY url=http://127.0.0.1:18477 journal=/tmp/24c1ab-run/arrivals2.jsonl
+ARRIVALS2_BEFORE_RESEND=0  (must be 0: a re-send arrival cannot be an old delivery recounted)
+
+=== 12. THE RE-SEND, confirmed ===
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/24c1ab-run/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-29T16:46:02.763527Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0m24c1absink [3mplatform[0m[2m=[0mslack
+Re-sent cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205 to 24c1absink.
+  receipt:      1.000000
+  replay-safe:  yes — the destination honours the delivery key, so a landed first copy suppressed this one
+  abandonment:  still listed and UNACKNOWLEDGED — `gateway ack` it once you have confirmed the outcome
+RESEND_RC=0
+ARRIVALS2_AFTER_RESEND=1  (must be 1)
+--- the re-sent message, as the INDEPENDENT sink recorded it ---
+{"seq":1,"ts":"1.000000","endpoint":"chat.postMessage","conversation_id":"24c1absink","text":"24c1ab-delivery-4","auth_fingerprint":"sha256:731fb6b626d1","answered":true,"idempotency_key":"cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205","suppressed":false,"at":"1785343562.764248793Z"}
+
+=== 13. the abandonment is STILL listed, now marked resent, still unacked ===
+1 abandoned delivery in /tmp/24c1ab-run/home:
+
+  cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+    to:     24c1absink
+    when:   2026-07-29T16:45:53.383723441+00:00
+    why:    shutdown drain ran out of budget before this delivery finished
+    resend: CHECK THE DESTINATION FIRST — an attempt was in flight and may have landed
+    resent: 2026-07-29T16:46:02.766232205+00:00
+    acked:  no — retained until `gateway ack cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205`
+
+1 abandonment(s) are UNACKNOWLEDGED and are exempt from compaction until they are. Review each, then `gateway ack <id>`.
+
+=== 14. acknowledge it ===
+Acknowledged cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205. It is now eligible for compaction once the journal passes its retention cap.
+--- re-running ack must be idempotent, not a second signature ---
+cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205 was already acknowledged at 2026-07-29T16:46:04.878228962+00:00; left unchanged.
+--- surface after ack ---
+1 abandoned delivery in /tmp/24c1ab-run/home:
+
+  cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+    to:     24c1absink
+    when:   2026-07-29T16:45:53.383723441+00:00
+    why:    shutdown drain ran out of budget before this delivery finished
+    resend: CHECK THE DESTINATION FIRST — an attempt was in flight and may have landed
+    resent: 2026-07-29T16:46:02.766232205+00:00
+    acked:  2026-07-29T16:46:04.878228962+00:00
+
+=== 15. KNOWN-NEGATIVE: both verbs refuse an id that is not abandoned ===
+ACK_BOGUS_RC=1     (non-zero REQUIRED)
+RESEND_BOGUS_RC=1  (non-zero REQUIRED)
+wayland-core gateway: cannot acknowledge cron:not-a-real-delivery:1 in /tmp/24c1ab-run/home; `gateway abandoned` lists what can be: unknown delivery id: cron:not-a-real-delivery:1
+wayland-core gateway: no abandoned delivery cron:not-a-real-delivery:1 in /tmp/24c1ab-run/home; `gateway abandoned` lists what there is
+OLD_PIPED_SHAPE_RC=0  (0 — this is the defect being repaired: same failing command, wrong status)
+
+=== 16. cross-check the surface against the RAW ledger ===
+raw_abandoned_records = 1
+  id= cron:b88ad8c8-be4a-4694-94be-b38985f07df4:1785343545205
+     was_attempted= True resent= True acknowledged= True
+F24C1_ACK_RESEND_LIVE_DONE
