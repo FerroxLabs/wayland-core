@@ -171,3 +171,82 @@ non-empty out dir.
 functional, and I live-prove it on hetzner before pushing. Nine advertised-but-dead instances
 on this programme; I will not make it ten.
 
+---
+
+## T+75 — built, and live-driven on hetzner. Redaction PROVEN with four arms.
+
+Built at `4e4090b9` on `hetzner-dsm:/root/wayland-support-bundle` (worktree `hz/support-bundle`).
+`cargo build -p wcore-cli --bin wayland-core` → **rc=0**. fmt clean on the Mac (rc=0, 0 diff
+lines — re-run **unpiped** after the first attempt read `tail`'s status instead of cargo's,
+which is §3.2's pipe-steals-exit-status trap, caught in-lane).
+
+### The coordinator's warning applied: `0` is my success value
+
+A hit count of `0` means "redacted" — and a missing bundle, an unwritable path, an errored
+grep, a mangled variable and a bundle that collected nothing ALL produce `0`. So the sweep
+alone proves nothing. Four arms, each with its own exit code, in
+`evidence/24-support-bundle/sb-proof.sh`:
+
+| arm | guards against | measured |
+|---|---|---|
+| **3** — secret really IS in the input (exit 71) | redaction of something never present is free | config plant in **2** input files, env plant in **1** |
+| **1** — bundle exists, non-empty (exit 72) | absent-because-nothing-generated | **5** files; **1861** bytes by THREE independent methods (`cat\|wc -c`, `du -sb`, `stat -c%s` summed) — all three agree, so the `wc -c`-says-0-for-72-bytes defect is excluded |
+| **4** — bundle actually COLLECTED (exit 74) | a bundle that collects nothing passes every redaction test | non-secret marker `COLLECTION-MARKER-8fa31c` present **1×** in `recent-log.txt`; `api_key` NAME present **1×** in `config-keys.txt` |
+| **2** — sweep can FIND this needle (exit 73) | dead instrument | known-positive over a control dir **rc=1 (found)** for BOTH plants, in the same run as the real sweep |
+
+**Result: real sweep hits = 0 for both plants, rc=0 CLEAN, with the known-positive returning 1
+in the same invocation.** `scripts/f24-secret-sweep.sh --selftest` → **5/5 PASS** first.
+
+**And the redaction is positively evidenced, not just an absence:** `manifest.redactions = 2`
+— a NON-ZERO count. The scrubber demonstrably replaced two values rather than finding nothing
+to do. The scrubbed log reads:
+
+```
+INFO  gateway starting COLLECTION-MARKER-8fa31c      <- marker survived
+ERROR auth rejected for key [REDACTED] (401)         <- config-file secret
+ERROR upstream refused bearer [REDACTED]             <- environment secret
+```
+
+The config-file secret is the one the pre-fix redactor could not have learned.
+
+### Degraded cases — OBSERVED (`sb-degraded.sh`, `sb-d3.sh`)
+
+- **D1 stale status file + dead gateway** — the trap the fix exists for. Planted a
+  `gateway-status.json` claiming `running / uptime 98765 / turns_in_flight 7` with a dead pid
+  999999. Bundle reports `running=false`, `state=uninstalled`; **the stale `98765` and
+  `turns_in_flight: 7` do NOT appear in the bundle**, with a liveness control proving the same
+  grep DOES find both in the planted file. 4/4 PASS.
+- **D2 empty home, no config, no log** — bundle still produced (rc=0); **3** absent sources
+  NAMED in the manifest; no empty log member invented. 3/3 PASS.
+- **D4 non-empty out dir** — refused rc=1 with the reason named; pre-existing file untouched;
+  no members written. 3/3 PASS.
+- **D3 unwritable out path** — see the instrument defect below. Now 4/4 (D3a) + 6/6 (D3b).
+
+### TWO instrument defects in MY OWN harness, both repaired in-lane (§6b-ii)
+
+**(i) D3 measured root's `CAP_DAC_OVERRIDE`, not the product.** `chmod 500` + running as root
+means the write SUCCEEDS, so my first D3 reported three product failures that do not exist. I
+did not note-and-move-on; I repaired it, and added a **control that proves the bypass**: a
+plain `touch` also succeeds in the same 500 dir as root. Replaced with two causes root cannot
+bypass — **D3a** parent-is-a-regular-file (ENOTDIR): `rc=1`, *"Not a directory (os error 20)"*,
+no success banner, blocking file untouched. **D3b** genuinely unprivileged user (uid 65534).
+
+**(ii) D3b's first run SELF-PASSED, and this is the sharper one.** It returned `rc=126`,
+`env: '/root/.../wayland-core': Permission denied` — `nobody` could not **execute** the binary
+under `/root`, so **the product never ran at all**. All three assertions passed anyway:
+`rc != 0` ✓, "names permission denied" ✓ (that was `env`'s own message, not the product's),
+"no partial bundle" ✓ (nothing ran). A textbook pass-for-the-wrong-reason. Repaired with two
+controls: **CONTROL A** proves `nobody` can now execute the binary (`--version` rc=0), and a
+**SANITY** arm proves the same unprivileged user + same verb **succeeds on a writable path**
+(rc=0) — without which `rc != 0` could just mean the verb never works for that user. Re-run:
+`rc=1`, *"Permission denied (os error 13)"* **from the product**. 6/6 PASS.
+
+Both defects are of the class this programme keeps hitting, found in the instrument built to
+hunt it. Repaired, not documented-and-left.
+
+### Still to do
+
+- Binary-level differential proving the PRE-FIX build leaks the config secret (the third
+  assertion, at the binary rather than the unit level).
+- `cargo test -p wcore-gateway`, `-p wcore-cli` with explicit counts read back; clippy.
+
