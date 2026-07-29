@@ -102,3 +102,101 @@ Two consequences:
       be reused as the comparison baseline)
 - [ ] fork-PR approval policy
 - [ ] implement, dispatch, prove `runner_name`, prove arm64, counterfactual, Windows unaffected
+
+---
+
+## 3. Measurements that decided the design
+
+### 3.1 Executed macOS job durations (n=14 executed; cancelled EXCLUDED)
+
+From `gh api .../runs/<id>/jobs` over a 100-run `ci.yml` window, filtered to
+`conclusion in (success,failure)` — the prior lane's measured instrument defect was counting
+cancelled jobs whose enqueue→cancel span reaches 368 min, which reported 61 concurrent where the
+truth was 5. I filtered the same way.
+
+| job | n | median run | max run | median QUEUE wait |
+|---|---|---|---|---|
+| `CI (macos-latest)` | 7 | **26.2 min** | 32.7 | 56.2 min |
+| `Build (aarch64-apple-darwin)` | 4 | **16.5 min** | 23.5 | 17.3 min |
+| `Build (x86_64-apple-darwin)` | 3 | **16.5 min** | 23.4 | 89.5 min |
+
+### 3.2 THE SERIALISATION ARITHMETIC (the question I was asked to answer, not assume)
+
+A self-hosted runner executes **one job at a time**.
+
+- move all three  -> 26.2 + 16.5 + 16.5 = **59.2 min serial** -> **~3.0 macOS jobs/hr**
+- hosted pool measured (prior lane, independently)            -> **11.25 macOS jobs/hr**
+
+**Moving everything is a 3.7x throughput DOWNGRADE.** Self-hosted is NOT strictly better. Its
+advantage is *latency while idle*, not capacity.
+
+Live census 2026-07-29T06:41:37Z on the hosted pool: **39 macOS jobs queued / 3 in_progress**.
+So the runner's real value is that it has no queue at all.
+
+Demand check for moving ONE job: lane traffic measured at 234 macOS jobs / 3-per-push / 10.84 h
+= **~7.2 lane pushes/hr** at peak fan-out. 7.2 x 16.5 min = **119 min of work per 60 min of
+capacity — 2x oversubscribed even for one job.** That is why the job carries a per-ref
+`concurrency` group with `cancel-in-progress: true`: a superseded commit's binary is worthless,
+and coalescing collapses a burst to one build. Without it I would have rebuilt the hosted pool's
+pathology on Sean's laptop.
+
+### 3.3 Decision
+
+| job | destination | why |
+|---|---|---|
+| `Build (aarch64-apple-darwin)` | **SELF-HOSTED** on token-less `lane/**` pushes | cheap, native, the only arm64 artifact producer, uploads regardless of test outcome |
+| `CI (macos-latest)` | **stays HOSTED**, opt-in on lanes | 26.2 min of a personal laptop; and it is the job whose 12.8k tests (keychain, fsevents, sandbox, reaping) are most corrupted by a non-hermetic desktop |
+| `Build (x86_64-apple-darwin)` | **stays HOSTED**, opt-in on lanes | compile-check only, Intel, lowest urgency; adding it would serialise a second 16.5 min behind the first |
+
+### 3.4 Correction to an inherited assumption — clippy red is NOT macOS-specific
+
+`CI (macos-latest)` is 7/7 `failure` in the window, failing at **Clippy**. I nearly recorded that
+as evidence of macOS-only value. It is not: on the same run `30421332107`, `CI (linux-containerized)`
+ALSO fails at Clippy (step 8) and `CI (Array)` (Windows) fails too. It is a repo-wide clippy red.
+Stated because the tempting version of this claim would have overstated my lane's case.
+On that same run `Build (aarch64-apple-darwin)` was **green** — the build leg is reliable while
+the verdict leg is red, which is exactly why the build leg is the one worth moving.
+
+### 3.5 No contention for the runner
+
+No workflow targets `[self-hosted, macOS, ARM64]` today. Absence proven with a live instrument:
+the same grep finds **15** self-hosted Windows `runs-on` matches (nightly-windows-soak.yml x3,
+ci.yml matrix), and per-file known-positives of 13 and 10. The three macOS+self-hosted "hits" are
+comment prose and the Windows matrix line. So I am the runner's first consumer.
+
+## 4. Instrument defects found in MY OWN work, and repaired here (LANE-BRIEF 6b-ii)
+
+Not written up and left — repaired in this lane, each with the third assertion.
+
+1. **`gate.py --self-test` reported `rc=0` on a CRASHED run.** I invoked it as
+   `python3 gate.py ... | tee file; echo $?` — **the pipe stole the exit status**, the exact
+   defect LANE-BRIEF 3.2 names, committed by me while implementing a gate against that class.
+   Repaired: status is now read with no pipe (`cmd > file; RC=$?`).
+2. **An evaluator exception aborted the remaining self-test arms.** Arm 2 raised on a `!=`
+   clause; arms 3, 4 and 5 never ran while the suite still printed plausible output. Repaired:
+   `!=` is modelled, an unmodelled clause is a typed `Unparsed` that becomes a gate FAILURE
+   (never coerced to False, which would report the safe answer for an expression the gate never
+   understood), and each arm is exception-isolated.
+3. **Two arms were undetected — genuine gate weakness, not mutation noise.**
+   - *fork safety*: my only `pull_request` case used `ref='main'`, so `startsWith(ref,'lane/')`
+     excluded it incidentally and deleting the `event_name == 'push'` guard changed nothing the
+     gate could see. Added a `pull_request` case with a lane-shaped ref, so the push-only guard is
+     now the only thing producing the safe answer.
+   - *Rosetta assertion*: I tested `"exit 1" in step_body`, but the step has a SECOND `exit 1`
+     for `RUNNER_ARCH`, so gutting the uname branch still satisfied it. Replaced with
+     `fatal_on_arch_mismatch()`, which scopes the search to the uname branch itself.
+4. **My own success message lied on failure.** The "naive matcher would have missed it" line
+   printed next to `GATE_FAILURES=0` arms. Now only printed when the gate actually caught it.
+
+Third assertion, present on every arm: the **naive matcher** (`self-hosted` + `ARM64` + job name
+all appear in the file) **PASSES all five mutations** while the real gate fails them. Without that
+comparison the self-test would pass on a broken gate too.
+
+Result: `SELF_TEST=PASS`, rc=0, 5/5 arms detected.
+
+## 5. Still open
+
+- [ ] live dispatch: prove a job executed on `sean-mac-arm64` via job-level `runner_name`
+- [ ] prove the artifact is genuinely arm64 (`file`/`lipo`, and execute it)
+- [ ] counterfactual: same work under pre-change config queues behind the hosted pool
+- [ ] Windows runners unaffected
