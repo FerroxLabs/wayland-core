@@ -146,3 +146,43 @@ something is broken. My argument was a preference, not a defect.
 Plan: keep the landed module as the base, graft my post-condition + `--home` honouring
 + `channel-health.json`, port the mutation-proved tests that still apply, then re-prove
 EVERYTHING on the reconciled code.
+
+## M6 — RECONCILED, and the graft found a real credential leak
+
+Merge commit `2231744a`. `gateway.rs` now differs from integration by DOC ONLY
+(9 insertions, 4 deletions, all `//!`). All behaviour lives in the landed
+`gateway/support.rs` plus three grafts.
+
+**`F24-C4-M1` is not the MEDIUM I provisionally called it — it is a live credential
+leak, and I proved it end to end (M8).** With `config_sources` reverted to the landed
+ambient path and the verb driven as `support-bundle --home $H` with `WAYLAND_HOME`
+UNSET:
+
+```
+  known secrets:    1        (fixed code: 3)
+  redactions made:  0        (fixed code: 1)
+  verb exit:        0        <- it did NOT refuse
+  /root/wl-r2-m8/recent-log.txt:1   <- THE CANARY SURVIVED INTO THE BUNDLE
+  live_bundle_canary M8_GATE_RC=101 <- the independent gate caught it
+```
+
+**The post-condition did NOT fire on M8, and that is the honest limit of it.** It
+re-scans for secrets the redactor KNOWS. When the bug is that the redactor was armed
+from the wrong file, there is no known secret to scan for. The post-condition backstops
+a *scrub* defect in the library; it cannot backstop an *arming* defect in the caller.
+Only the external canary gate catches that. Both are needed and neither subsumes the
+other — worth stating because it is exactly the kind of overlap one assumes.
+
+Grading it **HIGH**: the artifact is built to be attached to a support ticket, and the
+trigger is `--home` without a matching env var — which is the documented way to address
+a specific home (`ScopeArgs::home` doc) and the shape the Windows registration itself
+uses, since Task Scheduler cannot set env vars.
+
+Mutations on reconciled code: M1 M2 M3 M4 M5 M7 all RED (unit), M6 RED (live,
+production, `M6_RC=1`), M8 RED (live, independent gate, `M8_GATE_RC=101`). 8/8.
+
+macOS: `sean-mac-arm64` probed and it is a CI runner label, NOT an ssh host
+(`Could not resolve hostname`, tried 3 spellings; only `hetzner-dsm` is in ssh config).
+Nothing here is Darwin-only behaviour, so the §0 Darwin exception does not apply and a
+macOS leg would need a full workspace build I cannot cheaply obtain. Left, per the
+coordinator's own "if it is not cheap, leave it and say so".
