@@ -146,3 +146,67 @@ LOCAL + WAL      A writes_ok=103597 errs=0 / B 100473 errs=1(locked) integrity_c
 
 Local-disk WAL control passed in the same session (204k writes, `ok`), so the harness
 discriminates and WAL-on-local is genuinely worth keeping.
+
+## M8 — the fix, and its live proof through the real binary
+
+Centralised in `wcore-config::sqlite_journal` (statfs on Linux, MNT_LOCAL+fstype on macOS,
+GetDriveTypeW on Windows). Four production sites converted; the fifth briefed site is
+`#[cfg(test)]`.
+
+Live, via the real `wayland-core index build`, on hetzner:
+
+```
+LOCAL  (ext4) F23_INDEX=build ... records=5   persisted journal_mode = wal      rows=5 integrity ok
+NFS           F23_INDEX=build ... records=4   persisted journal_mode = delete   rows=4 integrity ok
+```
+
+**Artifact ruled out.** NFS does not simply refuse WAL: the same binary on the same mount with
+`WAYLAND_SQLITE_JOURNAL_MODE=wal` produced `journal_mode = wal`, 4 rows. The difference is the
+selector and nothing else.
+
+§3b-ii compliance: the forced arm was confirmed from the product's OWN log line
+(`sqlite journal mode forced by WAYLAND_SQLITE_JOURNAL_MODE ... mode="WAL" source="env"`),
+not from the env I exported.
+
+## M9 — HONEST NEGATIVE: the product-level corruption test did not reproduce
+
+Six rounds of two concurrent `wayland-core index build` processes through the two incoherent
+NFS clients, WAL forced:
+
+```
+PREFIX  (WAL forced)  journal_mode=wal     integrity=ok  rows=5
+POSTFIX (detection)   journal_mode=delete  integrity=ok  rows=4  (1 benign UNIQUE-constraint race)
+```
+
+**No corruption in either arm.** `index build` is short-lived and the two processes barely
+overlap, so the window the SQLite-level hammer exploited (15s of sustained concurrent writes)
+never opens. So I can claim the mechanism and the mode selection, but I did NOT observe the
+product itself corrupting a database. Stated as a limit on the evidence, not glossed.
+
+The exposure is still real for the long-lived connections: `wcore-memory` holds a connection
+for a whole session and `wcore-swarm`'s audit trail is appended across a run.
+
+## M10 — pre-fix evidence, stated precisely
+
+Against merge-base `fab33493`, the pre-fix selection at all sites was a string literal with no
+filesystem input of any kind:
+
+```
+store.rs:211  .query_row("PRAGMA journal_mode = WAL", ...)
+audit.rs:196  conn.pragma_update(None, "journal_mode", "WAL")
+schema:45     conn.pragma_update(None, "journal_mode", "WAL")?;
+```
+
+There is no branch, so "the pre-fix code would have chosen WAL on both filesystems" is not an
+inference — the value is a constant. Encoded executably as
+`SqliteJournalMode::legacy_unconditional()` and asserted in the self-test.
+
+## M11 — fence + cross-audit
+
+Fence exposure vs `fab33493`: `crates/wcore-cli/src/{lib,main}.rs` — **zero lines**, empty diff.
+Control on the same base shows 14 files / 865 insertions, so the diff instrument is live.
+
+Cross-audit (codex gpt-5.6-sol, last block) on the one real judgement call — unknown filesystem
+→ WAL or TRUNCATE: **"choose TRUNCATE for any unrecognized filesystem"**, agreeing with the
+implementation and against the reference implementation's fail-open default. One auditor, not
+a full panel; the decision is anyway backed by the measured asymmetry.
