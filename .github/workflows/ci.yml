@@ -53,156 +53,64 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # ── macOS runner admission control ────────────────────────────────────
-  # 2026-07-29, lane/ci-macos-budget. Measured, not inferred (raw evidence in
-  # .planning/CI-MACOS-BUDGET.md):
+  # ── macOS runner admission control (2026-07-29, lane/ci-macos-budget) ──
+  # Measured, not inferred. Raw evidence: .planning/CI-MACOS-BUDGET.md.
   #
-  #   * GitHub-hosted macOS concurrency ceiling on this account is FIVE. Peak
-  #     concurrent *executed* macOS jobs observed over a 10.84 h / 303-run
-  #     window = 5; throughput 11.25 macOS jobs/hour; median macOS job 19.6 min.
-  #   * Demand over that same window was 22.4 macOS jobs/hour — ~2x capacity,
+  #   * The GitHub-hosted macOS pool has a concurrency ceiling of FIVE on this
+  #     account (peak concurrent EXECUTED macOS jobs over a 10.84 h / 303-run
+  #     window = 5; a live census later showed exactly 5 in_progress against 36
+  #     queued). Throughput 11.25 macOS jobs/hour, median job 19.6 min.
+  #   * Demand over the same window was 22.4 macOS jobs/hour — ~2x capacity,
   #     permanently. The queue grew ~11 jobs/hour and could never drain.
-  #     Observed macOS waits of 4h06m, 5h03m and 5h31m.
-  #   * 96.3% of all macOS jobs created came from `lane/**` (234 of 243). The
-  #     integration branch got NINE, of which seven executed, in 10.8 hours —
-  #     and produced ZERO CI verdicts in 9 hours.
-  #   * macOS is the ONLY constrained pool. Within a single run, dispatched at
-  #     one instant, ubuntu-latest jobs started in 1-8s and windows-latest in
-  #     2-5s while the macOS jobs were still queued 80+ minutes later. So this
-  #     is not account-wide throttling.
+  #     Observed macOS waits: 4h06m, 5h03m, 5h31m.
+  #   * 96.3% of macOS demand (234 of 243 jobs) came from `lane/**`. The
+  #     integration branch got NINE macOS jobs in 10.8 h and produced ZERO CI
+  #     verdicts in 9 h.
+  #   * macOS is the constrained pool specifically: within one run, dispatched
+  #     at a single instant, ubuntu-latest started in 1-8s and windows-latest in
+  #     2-5s while the macOS jobs were still queued 80+ minutes later.
   #
-  # The `lane/**` push trigger (line 41) is NOT deleted — it exists so a lane
-  # that cannot compile for Darwin or Windows locally can obtain a CI-built
-  # binary for its own unmerged changes, and deleting it would re-break that.
-  # Windows is unconstrained (2-5s waits, plus a self-hosted runner), so the
-  # Windows half of that capability is untouched and stays unconditional. Only
-  # the macOS half is rationed: on a `lane/**` push the three macOS jobs are
-  # scheduled ON OPT-IN ONLY, via `[ci-darwin]` (alias `[ci-macos]`) in a
-  # pushed commit message. `main`, the integration branch and every
-  # pull_request keep the full, unmodified matrix.
+  # The `lane/**` push trigger (line 41) is deliberately NOT removed — it exists
+  # so a lane that cannot compile for Darwin or Windows locally can obtain a
+  # CI-built binary for its own unmerged changes. Windows is unconstrained, so
+  # the Windows half of that capability is untouched and stays unconditional.
+  # Only the three macOS jobs are rationed on lane pushes, behind an opt-in
+  # token `[ci-darwin]` (alias `[ci-macos]`) in a pushed commit message.
+  # `main`, the integration branch and every pull_request keep the full matrix.
   #
-  # Why a computed matrix rather than a job-level `if:`: `jobs.<id>.if` cannot
-  # read the `matrix` context (only github/needs/vars/inputs), so an `if` can
-  # only skip an ENTIRE job — which would also drop the self-hosted Windows CI
-  # leg and all four non-Darwin build targets. Emitting the matrix keeps every
-  # job NAME byte-identical (`CI (macos-latest)`, `Build (aarch64-apple-darwin)`
-  # …), so nothing downstream that keys on a check name breaks.
+  # WHY AN INLINE EXPRESSION AND NOT A `needs:` SETUP JOB. The first cut of this
+  # change computed the matrices in a small `budget` job that `ci` and `build`
+  # depended on. That was measured and REVERTED: it puts a new serialisation
+  # point in front of all compute, and ubuntu-latest is itself congested (live
+  # census: 32 queued / 13 running). The budget job sat queued 14+ minutes on
+  # run 30426418225 before `ci` and `build` were even created — a self-inflicted
+  # regression on the critical path of every run, on the exact metric this
+  # change exists to improve. Evaluating the condition inline costs zero jobs
+  # and zero hops.
   #
-  # Fails closed: if this job errors, its dependents are skipped AND the run
-  # conclusion is `failure`, so a broken budget job goes red rather than
-  # silently deleting CI coverage.
-  budget:
-    name: Runner budget (macOS admission control)
-    runs-on: ubuntu-latest
-    outputs:
-      darwin: ${{ steps.decide.outputs.darwin }}
-      ci_os: ${{ steps.decide.outputs.ci_os }}
-      build_matrix: ${{ steps.decide.outputs.build_matrix }}
-    steps:
-      - id: decide
-        # Commit messages are attacker-controllable. They are passed through
-        # `env:` and never interpolated into the `run:` script text — the
-        # documented GHA script-injection mitigation, and the same discipline
-        # AGENTS.md already mandates for LLM-supplied data reaching a shell.
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          HEAD_MSG: ${{ github.event.head_commit.message }}
-          PUSH_MSGS: ${{ toJSON(github.event.commits.*.message) }}
-        run: |
-          set -euo pipefail
-
-          darwin=false
-          reason="lane push with no macOS opt-in token"
-
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            darwin=true
-            reason="pull_request — full matrix always"
-          fi
-
-          case "$REF_NAME" in
-            main|plan/f20-unified-audit-repair)
-              darwin=true
-              reason="protected/integration branch '$REF_NAME' — full matrix always"
-              ;;
-          esac
-
-          if [ "$darwin" = "false" ]; then
-            # Scan the tip commit AND every commit in the push. GitHub caps the
-            # `commits` array at 20; `head_commit` always covers the tip, so a
-            # token on the tip works regardless of push size.
-            if printf '%s\n%s\n' "${HEAD_MSG:-}" "${PUSH_MSGS:-}" \
-                 | grep -qiE '\[ci-(darwin|macos)\]'; then
-              darwin=true
-              reason="opt-in token [ci-darwin]/[ci-macos] found in a pushed commit message"
-            fi
-          fi
-
-          # The self-hosted Windows CI leg and the four non-Darwin build targets
-          # are ALWAYS present, so neither matrix vector can ever be empty —
-          # an empty vector is a hard workflow error ("Matrix vector 'os' does
-          # not contain any values"). Asserted below rather than assumed.
-          win_ci='["self-hosted","Windows","X64","msvc"]'
-          non_darwin_builds='{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}'
-          darwin_builds='{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}'
-
-          if [ "$darwin" = "true" ]; then
-            ci_os="[\"macos-latest\",${win_ci}]"
-            build_matrix="{\"include\":[${non_darwin_builds},${darwin_builds}]}"
-          else
-            ci_os="[${win_ci}]"
-            build_matrix="{\"include\":[${non_darwin_builds}]}"
-          fi
-
-          # Gate: both payloads must be valid JSON and non-empty. Without this a
-          # typo above would surface as an opaque matrix error on the dependent
-          # jobs instead of failing here with the offending value printed.
-          echo "$ci_os" | jq -e 'type == "array" and length >= 1' > /dev/null
-          echo "$build_matrix" | jq -e '.include | type == "array" and length >= 4' > /dev/null
-
-          {
-            echo "darwin=$darwin"
-            echo "ci_os=$ci_os"
-            echo "build_matrix=$build_matrix"
-          } >> "$GITHUB_OUTPUT"
-
-          # Make the decision LOUD. The residual risk of an opt-in gate is
-          # silent absence: a lane push goes green having never touched macOS
-          # and looks identical to a fully covered one. An absent job is at
-          # least visible in the checks list; this makes it explicit, and
-          # annotates the run so a reader cannot miss it.
-          {
-            echo "### macOS runner budget"
-            echo
-            echo "| field | value |"
-            echo "| --- | --- |"
-            echo "| event | \`$EVENT_NAME\` |"
-            echo "| ref | \`$REF_NAME\` |"
-            echo "| **macOS jobs scheduled** | **\`$darwin\`** |"
-            echo "| reason | $reason |"
-            echo
-            if [ "$darwin" = "true" ]; then
-              echo "DARWIN_REQUESTED — \`CI (macos-latest)\`, \`Build (aarch64-apple-darwin)\` and \`Build (x86_64-apple-darwin)\` are scheduled."
-            else
-              echo "DARWIN_SKIPPED — this run has **no macOS coverage and no macOS binary artifacts**."
-              echo "Linux and Windows coverage are unchanged."
-              echo
-              echo "To get them, push again with \`[ci-darwin]\` in the commit message, e.g.:"
-              echo '```'
-              echo 'git commit --allow-empty -m "[ci-darwin] need a macOS binary for live testing"'
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "$darwin" = "true" ]; then
-            echo "::notice title=macOS budget::DARWIN_REQUESTED — $reason"
-          else
-            echo "::warning title=macOS budget::DARWIN_SKIPPED — $reason. No macOS coverage or artifacts in this run; push with [ci-darwin] to enable."
-          fi
+  # A job-level `if:` cannot do this either: `jobs.<id>.if` cannot read the
+  # `matrix` context, so it can only skip an ENTIRE job — which would also drop
+  # the self-hosted Windows CI leg and all four non-Darwin build targets.
+  # Splitting the macOS legs into their own jobs would duplicate ~140 lines of
+  # steps, and this file already documents a real defect caused by exactly that
+  # drift (the `--no-fail-fast` divergence at the `ci-linux` test step, which
+  # made every historical CI failure count a lower bound rather than a total).
+  #
+  # INJECTION SAFETY. `head_commit.message` and `commits.*.message` are
+  # attacker-controllable, but here they are only ever operands of `contains()`
+  # inside the expression evaluator — they never reach a shell, and the
+  # expression can only select between two JSON literals written above. Attacker
+  # input can toggle WHICH literal is chosen; it cannot alter either literal.
+  #
+  # The condition below appears THREE times (both matrices + the reporting step
+  # in `ci-linux`) because GitHub Actions supports neither YAML anchors nor the
+  # `env` context inside `strategy`. Those three copies MUST stay byte-identical;
+  # .planning/evidence/ci-macos-budget/gate.py asserts byte-identity, evaluates the
+  # condition against a 9-case truth table, and proves it can fail via four
+  # mutation arms (`gate.py --self-test`).
 
   ci:
     name: CI (${{ matrix.os }})
-    needs: budget
     runs-on: ${{ matrix.os }}
     # Shrink debug info + disable incremental compile across the matrix.
     # The Windows runner has ~14GB free disk and the default Rust dev
@@ -218,14 +126,15 @@ jobs:
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
-      # Emitted by the `budget` job above. Full value is
+      # Selects between two literals (see the admission-control note at the top
+      # of `jobs:`). Full value is
       #   ["macos-latest",["self-hosted","Windows","X64","msvc"]]
       # — byte-identical to the literal list this replaced, so the job names
       # `CI (macos-latest)` and `CI (Array)` are unchanged. On a `lane/**` push
       # without a `[ci-darwin]` opt-in the `macos-latest` entry is omitted; the
       # self-hosted Windows entry is ALWAYS present, so the vector is never empty.
       matrix:
-        os: ${{ fromJSON(needs.budget.outputs.ci_os) }}
+        os: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || '[["self-hosted","Windows","X64","msvc"]]') }}
         # Windows runs on a self-hosted runner (Sean's box, labels:
         # self-hosted,Windows,X64,msvc). Switched off windows-latest
         # during v0.8.6 round 18 — GHA's hosted Windows runner has
@@ -515,6 +424,49 @@ jobs:
       # WCORE_SMOKE_REQUIRE_PREBUILT idiom (#190).
       DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
+      # ── macOS runner budget report ────────────────────────────────────
+      # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
+      # green having never touched macOS and looks identical to a fully covered
+      # one. An absent job is at least visible in the checks list; this makes it
+      # explicit in the run summary and as a run-level annotation. All three
+      # cross-audit models raised this independently and it is the one part of
+      # the design that is mitigated rather than eliminated.
+      #
+      # This lives inside `ci-linux` (which always runs, on ubuntu, with no
+      # `needs:`) precisely so that reporting costs ZERO extra jobs and adds
+      # ZERO hops to the critical path — see the reverted `budget` job note at
+      # the top of `jobs:`. DARWIN below MUST stay byte-identical to the
+      # condition in the two `strategy.matrix` expressions.
+      - name: Report macOS runner budget (DARWIN_REQUESTED / DARWIN_SKIPPED)
+        env:
+          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### macOS runner budget"
+            echo
+            echo "- event: \`${GITHUB_EVENT_NAME}\`"
+            echo "- ref: \`${GITHUB_REF_NAME}\`"
+            echo "- macOS jobs scheduled: **\`${DARWIN}\`**"
+            echo
+            if [ "$DARWIN" = "true" ]; then
+              echo "DARWIN_REQUESTED — \`CI (macos-latest)\`, \`Build (aarch64-apple-darwin)\` and \`Build (x86_64-apple-darwin)\` are scheduled."
+            else
+              echo "DARWIN_SKIPPED — this run has **no macOS coverage and no macOS binary artifacts**."
+              echo "Linux and Windows coverage are unchanged."
+              echo
+              echo "To get them, push again with \`[ci-darwin]\` in the commit message:"
+              echo '```'
+              echo 'git commit --allow-empty -m "[ci-darwin] need a macOS binary for live testing"'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DARWIN" = "true" ]; then
+            echo "::notice title=macOS budget::DARWIN_REQUESTED for ${GITHUB_REF_NAME}"
+          else
+            echo "::warning title=macOS budget::DARWIN_SKIPPED for ${GITHUB_REF_NAME} — no macOS coverage or artifacts in this run; push with [ci-darwin] to enable."
+          fi
+
       - uses: actions/checkout@v6
 
       - name: Free disk space (drop unused preinstalled toolchains)
@@ -678,11 +630,11 @@ jobs:
   # before they reach the release workflow.
   build:
     name: Build (${{ matrix.target }})
-    needs: budget
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Emitted by the `budget` job above. The full value reproduces the
+      # Selects between two literals (see the admission-control note at the top
+      # of `jobs:`). The full value reproduces the
       # six-entry `include:` list this replaced exactly — same `os`/`target`
       # keys, same `use_cross: true` on aarch64-linux — so every job name
       # (`Build (x86_64-apple-darwin)` …) and both artifact names are unchanged:
@@ -700,7 +652,7 @@ jobs:
       # only job that UPLOADS the arm64 binary (ci.yml:600 below) and it does so
       # independently of whether the test suite passed, which is exactly when a
       # lane needs a binary most. The saving would have been ~1.2% of pool load.
-      matrix: ${{ fromJSON(needs.budget.outputs.build_matrix) }}
+      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
       - uses: actions/checkout@v6
