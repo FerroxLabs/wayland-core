@@ -2,18 +2,24 @@
 lane: 24-c4-support
 branch: lane/24-c4-support
 base: 5140d640fb5df75f196d0875cb5bcd4a48ddf097
+reconciled-onto: 4a872413 (verified clean against the moving tip d5b462d5)
 worked: 2026-07-29
 closes: F24-C4-H1
-opens: F24-C2-M1
+opens: [F24-C2-M1, F24-C4-M1]
 verdict: "24-C4 half two goes NOT MET -> MET on Linux. The criterion goes PARTIAL -> MET-WITH-STATED-EXCEPTIONS. The phase's single release blocker is closed."
-fence-exposure: "ZERO. git diff --stat 5140d640 HEAD -- crates/wcore-cli/src/{lib,main}.rs is empty, with a live control in the same invocation (gateway.rs 384/1, cron.rs 25/0, in_flight_bound.rs 200/0)."
+fence-exposure: "ZERO. Neither crates/wcore-cli/src/lib.rs nor main.rs appears in git diff --name-only 5140d640 HEAD, with a live control in the same invocation."
 instrument-defects-mine: 2
 instrument-defects-repaired: 2
 ---
 
 # 24-C4-SUPPORT — the support bundle gets an operator verb
 
-Lane `24-c4-support`, based on `lane/grade-24` at `5140d640` (the verdict commit).
+Lane `24-c4-support`, based on `lane/grade-24` at `5140d640` (the verdict commit),
+**reconciled onto integration `4a872413`** after a concurrent lane shipped the same verb.
+
+> **Read §8 first if you are short of time.** The reconciliation is not bookkeeping: it
+> produced a **live credential leak** in the landed implementation (`F24-C4-M1`, HIGH),
+> found by proving my own graft was load-bearing rather than assuming it.
 
 ---
 
@@ -309,3 +315,167 @@ Two instrument defects of my own, both repaired in-lane rather than only noted (
 
 _Lane `24-c4-support`, 2026-07-29. Evidence: `24-C4-SUPPORT-evidence/`. Working trail:
 `24-C4-SUPPORT-NOTES.md`._
+
+---
+
+## 8. RECONCILIATION (appended 2026-07-29, after the coordinator's message)
+
+Everything in §§1-7 above was measured **before** the rebase and is superseded on the
+support-bundle verb wherever the two disagree. `cron.rs` and
+`wcore-cron/tests/in_flight_bound.rs` are untouched by the reconciliation and §3 stands.
+
+### 8.1 What happened, and what I did instead of a rebase
+
+`lane/support-bundle` built the same verb from a base I could not see. Merging produced
+two `SupportBundle` variants and two match arms.
+
+**I merged integration into my lane rather than rebasing.** LANE-BRIEF §0 forbids
+`git rebase` outright ("other lanes share the repository object store"); the coordinator
+asked for a rebase. A merge reaches the same stated end — a branch that merges cleanly —
+moves only my own ref, and does not use the forbidden verb. Flagged rather than silently
+routed around. Merge commit `2231744a`.
+
+**Verified clean, and against a moving target.** `git merge-tree --write-tree` (read-only)
+against integration reports **rc=0, 0 conflicts**. Integration had already advanced from
+`4a872413` to `d5b462d5` while I worked; none of those eight commits touches any file of
+mine, and the trial merge is clean against the current tip, not just the one I was given.
+
+### 8.2 The landed implementation is better than mine in four places
+
+I kept it, and discarded my own work where it lost. Stated plainly because a reconciler
+who keeps their own code by default is not reconciling.
+
+| | kept | why |
+|---|---|---|
+| child module `gateway/support.rs` | **theirs** | `gateway.rs` is past AGENTS.md's 1000-line bound |
+| `Redactor::learn_secret_values_from_file(config, credentials)` | **theirs** | **A real gap in mine.** My redactor learned from the ENVIRONMENT only, so a credential living in `config.toml` was never learned and a log line quoting it would have shipped verbatim. Structural elision covers the config member; it does not cover the log. |
+| ledger **summary**, not the raw journal | **theirs** | mine pushed `deliveries.jsonl` in as a projection; projections are copied whole and the journal is unbounded |
+| opens the ledger only if the journal exists | **theirs** | `DeliveryLedger::open` creates `home` — a diagnostic verb must not create the state it reports on |
+| `Uninstalled` vs merely stopped in the status member | **theirs** | |
+| `--out` **optional**, timestamped default | **theirs — overruling my own steer** | I argued required-with-no-default. I was wrong to insist: the default lands inside the operator's own `$WAYLAND_HOME`, the path is printed, and the read-before-send warning is louder than mine. A preference, not a defect. |
+
+**Their liveness handling is an equivalent of mine and slightly better** (it distinguishes
+`Uninstalled`), so per the coordinator's instruction I kept the simpler landed one and
+dropped my staged liveness member. It preserves the property that mattered: the status
+member is derived through `read_live_projection`, never copied from the on-disk file.
+
+### 8.3 Three grafts survived, and one of them was load-bearing
+
+1. **The post-condition.** The landed module had no equivalent — nothing re-read the
+   finished bundle. Grafted as `members_still_carrying_a_known_secret` + a `bail!`.
+2. **`config_sources`** — `--home` honoured for the config/credentials paths. See §8.4.
+3. **`channel-health.json` as a projection.** The landed module omitted it; Criterion 4
+   names "redacted **health**/log/support evidence" and this is the gateway's health
+   publication. Pushed unconditionally so an absence is NAMED rather than silently skipped.
+
+### 8.4 `F24-C4-M1` — NEW, HIGH. A live credential leak in the landed code.
+
+The landed module called `wcore_config::config::global_config_path()` unconditionally.
+That resolves from the **process env** `WAYLAND_HOME`; `ScopeArgs::home` is a flag that
+is **never exported**. So `gateway support-bundle --home /X` read the AMBIENT config.
+
+That is not cosmetic, because those two paths feed
+`Redactor::learn_secret_values_from_file`. The scrubber learns secrets that are not in
+play and **fails to learn the ones that are**.
+
+**Proved live (M8), not argued.** `config_sources` reverted to the landed behaviour,
+binary rebuilt, driven as `support-bundle --home $H` with `WAYLAND_HOME` unset:
+
+```
+  known secrets:    1          (fixed code: 3)
+  redactions made:  0          (fixed code: 1)
+  verb exit status: 0          <- it did NOT refuse
+  grep -rc -F <canary> /root/wl-r2-m8
+      recent-log.txt:1         <- THE CANARY SHIPPED IN THE BUNDLE
+  live_bundle_canary        -> M8_GATE_RC=101   <- the independent gate caught it
+```
+
+**The post-condition did NOT fire here, and that is its honest limit.** It re-scans for
+secrets the redactor *knows*; when the bug is that the redactor was armed from the wrong
+file there is no known secret to scan for. It backstops a **scrub** defect in the
+library; it cannot backstop an **arming** defect in the caller. Only the external canary
+gate catches that. Both are needed and neither subsumes the other — recorded because the
+overlap is exactly the kind one assumes without checking.
+
+**Graded HIGH** (not the MEDIUM I first provisionally logged): the artifact exists to be
+attached to a support ticket, and the trigger is `--home` without a matching env var —
+which is the documented way to address a specific home (`ScopeArgs::home`'s own doc) and
+the shape the **Windows** registration uses, since Task Scheduler cannot set env vars.
+
+### 8.5 Re-proved on the reconciled code — nothing below is a pre-rebase result
+
+| gate | result |
+|---|---|
+| `cargo test -p wcore-cli --lib gateway::` | **16 passed, 0 failed, 0 ignored, 1843 filtered out** (7 in `gateway::support`) |
+| `cargo test -p wcore-cli --lib cron::` | **6 passed, 0 failed, 0 ignored, 1853 filtered out** |
+| `cargo test -p wcore-gateway --test support_bundle_redaction` | **4 passed, 0 failed, 1 ignored** |
+| `cargo test -p wcore-cron` (all targets) | **73 + 11 + 3 + 5 + 8 + 13 + 0 passed, 0 failed, 0 ignored** |
+| `cargo clippy -p wcore-cli -p wcore-cron -p wcore-gateway --all-targets` | clean (only the pre-existing `imap-proto` note) |
+
+**Live drive, reconciled binary, real gateway** (pid `4128897`, `status` → `Running`),
+canary seeded into `config.toml` / `credentials.toml` / `gateway.log` with a positive
+control (`1, 1, 1`), and **driven with `--home` only, `WAYLAND_HOME` unset** — the
+`F24-C4-M1` arm:
+
+```
+  members:          8            <- incl. channel-health.json AND ledger-summary.json
+  gateway running:  yes
+  known secrets:    3
+  redactions made:  1
+config-keys.txt contains base_url  <- it read $H's config, not the ambient one
+canary sweep across all 8 members: 0, 0, 0, 0, 0, 0, 0, 0
+  instrument-alive control (same tool/flags): recent-log.txt:1 for "REDACTED"
+recent-log.txt: [gateway] provider auth rejected using token [REDACTED] (retrying)
+```
+
+**`live_bundle_canary` on the reconciled bundle: 1 passed, 0 failed, 0 ignored, 4
+filtered out.** Both failure arms re-proved: leaky bundle → `A_RC=101`; unseeded input
+directory → `B_RC=101`.
+
+**Mutations, 8 of 8 RED on the reconciled code:**
+
+| # | mutation | result |
+|---|---|---|
+| M1 | rename the verb | RED |
+| M2 | verb parses, returns early | RED |
+| M3 | liveness hardcoded `true` | RED |
+| M4 | `--home` ignored for config sources | RED |
+| M5 | leak detector blinded | RED |
+| M7 | `channel-health.json` member dropped | RED |
+| **M6** | **break the log scrub in `collect`, rebuild, drive the live verb** | **RED — `M6_RC=1`**, refused |
+| **M8** | **revert `config_sources`, rebuild, drive live** | **RED — canary leaked, `M8_GATE_RC=101`** |
+
+M3 is now a *different* mutation from the one that survived pre-rebase (§2) — the landed
+liveness code has no serialized token to mis-spell, so the earlier trap does not recur
+here. The §2 instrument repair still stands on its own test.
+
+### 8.6 Fence and files
+
+`crates/wcore-cli/src/gateway.rs` now differs from integration by **documentation only** —
+9 insertions, 4 deletions, every one a `//!` line. All behaviour is in
+`gateway/support.rs`. Neither fenced file (`wcore-cli/src/lib.rs`, `main.rs`) appears in
+my diff at all.
+
+Files of mine vs integration: `crates/wcore-cli/src/gateway.rs` (doc only),
+`crates/wcore-cli/src/gateway/support.rs`, `crates/wcore-cli/src/cron.rs`,
+`crates/wcore-cron/tests/in_flight_bound.rs`.
+
+### 8.7 macOS — probed, not assumed, and left
+
+The coordinator was right that "no permitted macOS build host" was too blunt, so I
+checked instead of repeating it. **`sean-mac-arm64` is a CI runner label, not an ssh
+host**: `ssh sean-mac-arm64` → `Could not resolve hostname` (also tried `sean-mac`,
+`seanmac`); the only host in `~/.ssh/config` is `hetzner-dsm`. The §0 Darwin exception
+does not apply either — nothing in this work is Darwin-only behaviour, and hetzner proved
+all of it — so a macOS leg would need a full workspace build on the Mac, which the same
+rule forbids and which is not cheap. **Left, and said so**, per the coordinator's own
+instruction. Not a blocker on anything here.
+
+### 8.8 Findings after reconciliation
+
+| id | sev | state |
+|---|---|---|
+| `F24-C4-H1` | HIGH | **CLOSED.** Verb reachable, driven live on the reconciled code, live canary gate executed with both failure arms. |
+| `F24-C4-M1` | **HIGH** | **NEW, FIXED in this branch.** Landed code armed the redactor from the wrong config under `--home`; canary shipped in the bundle. Fixed by `config_sources`, regression-tested (M4) and live-proved (M8). |
+| `F24-C2-M1` | MEDIUM | Unchanged, open, → BACKLOG. `max_in_flight` unreachable above 2 and unread by the runner. |
+
