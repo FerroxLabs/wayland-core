@@ -1,0 +1,26 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-durable-posture/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.93s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/f14_sigkill_recovery.rs (target/debug/deps/f14_sigkill_recovery-0c2c7646b8296b33)
+
+running 14 tests
+test f14_seed_recoverable_turn_helper ... ignored
+test packaged_local_surfaces_pin_distinct_policy_provenance ... ok
+test without_secure_store_an_operator_who_requires_durability_gets_a_refusal ... ok
+test without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable ... ok
+test a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable ... ok
+test sigkill_mid_dispatch_charges_the_surviving_reservation_instead_of_refunding_it ... ok
+test sigkill_during_model_stream_resumes_as_provider_reconciliation_without_redispatch ... ok
+test sigkill_while_awaiting_approval_restores_gate_without_provider_or_tool_replay ... ok
+test sigkill_during_tool_execution_requires_reconciliation_without_reexecution ... ok
+test stop_during_active_host_continue_preserves_unknown_provider_authority ... ok
+test packaged_fresh_process_reopens_sealed_request_and_dispatches_once ... ok
+test recovered_approval_approve_executes_effect_once_and_continues_once ... ok
+test packaged_tui_restart_projection_matches_json_host ... ok
+test packaged_host_continue_and_non_genesis_reconnect_are_exactly_once ... ok
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.39s
+
+WLRC=0
+WLDONE
