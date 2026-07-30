@@ -3203,11 +3203,13 @@ mod tests {
                 "`{msg}` must survive intact"
             );
         }
-        // The digit and `a` accelerators only exist when env keys were
-        // detected, so they MUST be exercised on a surface that has them —
-        // on a bare `fresh()` they are not accelerators at all and the
-        // assertion would pass without testing anything.
-        for msg in ["1 hello", "a hello"] {
+        // The digit accelerator only exists when env keys were detected, so it
+        // MUST be exercised on a surface that has them — on a bare `fresh()`
+        // `1` is not an accelerator at all and the assertion would pass
+        // without testing anything. (`a` is deliberately NOT in this list; it
+        // lands on a step with a focused text field, which is pinned
+        // separately by `a_connect_all_diverts_prose_into_the_name_field`.)
+        for msg in ["1 hello"] {
             let mut surface = OnboardingSurface::with_env_keys(vec![
                 env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
                 env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
@@ -3225,6 +3227,51 @@ mod tests {
         assert_eq!(
             surface.take_typeahead().as_deref(),
             Some("summarize this repo")
+        );
+    }
+
+    /// A SEPARATE hole that unbinding SPACE does not close, found while
+    /// writing the test above and pinned to the measured behaviour rather than
+    /// to what was predicted.
+    ///
+    /// `a` (offered when 2+ env keys were detected) connects every detected
+    /// key and lands on `Step::Name`, which HAS a focused text field. The
+    /// type-ahead deliberately stays out of the way of focused fields, so the
+    /// rest of the sentence is typed into the "what should I call you" input
+    /// instead of being buffered. Nothing reaches the composer.
+    ///
+    /// Worse than the character loss: `connect_all_env_keys` calls
+    /// `persist_env_provider_selection`, so this path WRITES config.toml. A
+    /// first message beginning `a ` therefore both selects a provider the user
+    /// never chose and diverts their prose into a name field.
+    ///
+    /// Recorded as a finding, not fixed here: closing it means either an
+    /// env-key cursor (so `a`/digits can be reached by arrows and committed
+    /// with Enter) or making the write conditional, both of which are larger
+    /// UX changes than this lane's brief sanctions and want their own
+    /// cross-audit. See the lane SUMMARY.
+    #[test]
+    fn a_connect_all_diverts_prose_into_the_name_field() {
+        let mut app = App::new();
+        let mut surface = OnboardingSurface::with_env_keys(vec![
+            env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
+            env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
+        ]);
+        type_str(&mut surface, &mut app, "a hello");
+        assert_eq!(
+            surface.step,
+            Step::Name,
+            "`a` connects every detected key and advances to the Name step"
+        );
+        assert_eq!(
+            surface.take_typeahead(),
+            None,
+            "the Name step has a focused field, so nothing is buffered"
+        );
+        assert!(
+            !surface.name.value().is_empty(),
+            "the prose went into the name field: {:?}",
+            surface.name.value()
         );
     }
 
