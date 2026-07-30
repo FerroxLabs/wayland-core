@@ -1041,6 +1041,27 @@ async fn run_one_session(
                                 "RESUMED received; replayed events will flow as dispatches"
                             );
                         }
+                        // F24-C3: observability for the inbound half.
+                        //
+                        // Until this existed there was NO way to tell, from
+                        // outside the process, whether a MESSAGE_CREATE had
+                        // reached us at all — so "inbound does not work" and
+                        // "inbound works and the mapper dropped it" produced
+                        // identical output (nothing), and six lanes could not
+                        // distinguish them. `content_len` rather than
+                        // `content`: whether the privileged MESSAGE_CONTENT
+                        // intent is actually delivering bodies is a length
+                        // question, and logging the body would put message
+                        // text in an operator's log file.
+                        if let Some(mc) = parse_message_create(&payload) {
+                            tracing::debug!(
+                                target: "wcore_channel_discord::gateway",
+                                channel_id = %mc.channel_id,
+                                author_is_bot = mc.author.as_ref().is_some_and(|a| a.bot),
+                                content_len = mc.content.len(),
+                                "MESSAGE_CREATE received from the Discord gateway"
+                            );
+                        }
                         if let Some(mc) = parse_message_create(&payload)
                             && let Some(im) =
                                 map_message_create(mc, allowed_channel_ids, bot_id)
