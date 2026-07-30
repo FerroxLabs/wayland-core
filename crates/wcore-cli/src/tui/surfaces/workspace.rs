@@ -2862,7 +2862,7 @@ fn push_turn(
 ) {
     match turn.role {
         TurnRole::User => {
-            // v0.9.1.2 F16: OpenClaw-style user-message highlight. Every
+            // v0.9.1.2 F16: user-message highlight. Every
             // wrapped line of the user message gets a column-0 `▌`
             // (U+258C LEFT HALF BLOCK) in the brand accent plus a
             // slightly raised background tint (`surface_hover`, #262626)
@@ -6463,7 +6463,7 @@ mod tests {
     //   F15 "the path map is useless for 1-N files" — the panel is gone.
     //   F16 "I can't tell my prompt apart from the agent's reply" — user
     //   messages render with a column-0 `▌` accent bar plus a slight
-    //   surface-alt background tint, OpenClaw style.
+    //   surface-alt background tint.
     //   F17 "what's that orphan `:` floating below the streaming text" —
     //   the transcript-gutter spinner was removed; the bottom status bar
     //   already shows "Considering… (Ns)" with the rotating verb.

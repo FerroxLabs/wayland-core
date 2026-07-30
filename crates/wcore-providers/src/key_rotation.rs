@@ -1,4 +1,4 @@
-//! API key rotation pool — ported from openclaw MIT (c) Peter Steinberger 2025.
+//! API key rotation pool.
 //!
 //! Holds N keys per provider. On each call, returns the `last_good` key first
 //! (stickiness), then rotates round-robin on failure. On success, updates
@@ -18,8 +18,8 @@ struct KeyState {
 /// Use [`KeyPool::next_key`] to get the current best key. Call
 /// [`KeyPool::mark_failure`] on any provider error to demote that key for the
 /// cooldown window, and [`KeyPool::mark_success`] to set it as `last_good`.
-/// Duplicate keys are filtered at construction (matches openclaw's
-/// `dedupeApiKeys` invariant).
+/// Duplicate keys are filtered at construction, so a key repeated in config
+/// cannot take more than its share of the rotation or be cooled down twice.
 ///
 /// # Concurrency
 ///

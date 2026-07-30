@@ -15019,8 +15019,8 @@ impl AgentEngine {
     ///    about to call it.
     /// 3. Catalog mode (default): the remaining deferred defs are removed
     ///    from the array entirely and folded into ONE sorted name-only
-    ///    inventory line on ToolSearch's description (openclaw parity —
-    ///    per-tool stubs measured MORE expensive than the hot schemas).
+    ///    inventory line on ToolSearch's description (per-tool stubs measured
+    ///    MORE expensive than the hot schemas).
     ///    A hydrated tool leaves the catalog line and ships full, in the
     ///    same one-turn tools[] change as its admission. Catalog off:
     ///    deferred defs stay as per-tool stub entries.

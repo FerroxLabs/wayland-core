@@ -294,8 +294,9 @@ so search never hard-fails — except when explicitly disabled.
 | default | *(no keys)* | **Parallel free → DDG** |
 
 `WAYLAND_WEB_BACKEND` is an explicit override that wins over key presence;
-`auto` (or unset / unrecognized) runs the ladder. The order matches the Hermes
-agent's preference (firecrawl → parallel → tavily → exa → searxng → brave → ddg).
+`auto` (or unset / unrecognized) runs the ladder in the table order
+(firecrawl → parallel → tavily → exa → searxng → brave → ddg), so a configured
+key always wins over the keyless default and DuckDuckGo is the final fallback.
 
 **Default (no config):** the engine uses Parallel.ai's free, anonymous Search
 MCP (`https://search.parallel.ai/mcp`) — ranked URLs with query-relevant

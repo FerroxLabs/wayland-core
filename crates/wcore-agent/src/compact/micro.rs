@@ -271,9 +271,10 @@ fn prune_superseded_reads(messages: &mut [Message], config: &CompactConfig) -> (
 /// weight — the outcome is in the tool result and, for file writes, on disk)
 /// AND the epoch boundary below has ticked past it.
 ///
-/// Modeled on hermes-agent's `_truncate_tool_call_args_json`
-/// (context_compressor.py:1130-1150), but run CONTINUOUSLY on every
-/// compaction pipeline pass rather than at a compression threshold.
+/// Note this runs CONTINUOUSLY on every compaction pipeline pass rather than
+/// only once a compression threshold is crossed: the payloads it strips are
+/// dead weight from the moment they age out, and deferring the pass to a
+/// threshold would let them ride in every request until then.
 ///
 /// CACHE-SAFETY invariants (prompt-cache prefix stability):
 /// - **Deterministic**: the stub is a pure function of the original

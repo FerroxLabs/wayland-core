@@ -1,4 +1,4 @@
-//! 3-tier failover classifier — ported from openclaw MIT (c) Peter Steinberger 2025.
+//! 3-tier failover classifier.
 //!
 //! Classifies a provider error into a FailoverReason using three signal sources
 //! in precedence order:
@@ -42,7 +42,7 @@ pub fn classify_failover(
 }
 
 fn classify_by_status(status: u16) -> Option<FailoverReason> {
-    // openclaw semantic split: 503/529 are explicit "overloaded" signals; other
+    // Semantic split: 503/529 are explicit "overloaded" signals; other
     // 5xx codes (500/502/504) are treated as transient timeouts so failover
     // does a fast retry / try the next provider rather than a long backoff.
     match status {
@@ -55,7 +55,7 @@ fn classify_by_status(status: u16) -> Option<FailoverReason> {
         413 => Some(FailoverReason::ContextOverflow),
         // Anthropic + OpenAI use 529 for "overloaded"; 503 is the standard "service unavailable".
         529 | 503 => Some(FailoverReason::Overloaded),
-        // Other 5xx — server error; treat as Timeout per openclaw recovery semantics.
+        // Other 5xx — server error; treat as Timeout so recovery is a fast retry.
         s if (500..=599).contains(&s) => Some(FailoverReason::Timeout),
         // 400 with no body classification — format error
         400 => Some(FailoverReason::Format),
@@ -114,9 +114,9 @@ fn classify_by_body(body: &str) -> Option<FailoverReason> {
     {
         return Some(FailoverReason::ModelNotFound);
     }
-    // Context overflow MUST be checked before generic Format patterns —
-    // openclaw treats this as a distinct recovery class (compact / route to
-    // larger-context model rather than swap provider).
+    // Context overflow MUST be checked before generic Format patterns — it is a
+    // distinct recovery class (compact / route to a larger-context model rather
+    // than swap provider).
     if b.contains("context length exceeded")
         || b.contains("context_length_exceeded")
         || b.contains("prompt is too long")
@@ -149,7 +149,7 @@ fn classify_by_sdk_code(code: &str) -> Option<FailoverReason> {
         "insufficient_quota" => Some(FailoverReason::Billing),
         "invalid_api_key" | "invalid_authorization" => Some(FailoverReason::Auth),
         "rate_limit_exceeded" => Some(FailoverReason::RateLimit),
-        // openclaw treats context_length_exceeded as its own recovery class
+        // context_length_exceeded is its own recovery class
         // (compact / pick larger-context model), NOT a Format error.
         "context_length_exceeded" => Some(FailoverReason::ContextOverflow),
         "model_not_found" => Some(FailoverReason::ModelNotFound),
@@ -170,7 +170,7 @@ fn classify_by_sdk_code(code: &str) -> Option<FailoverReason> {
         "deadline_exceeded" => Some(FailoverReason::Timeout),
         "failed_precondition" => Some(FailoverReason::Format),
         "unavailable" => Some(FailoverReason::Overloaded),
-        // OS-level errno family (openclaw classifies authoritatively as timeout)
+        // OS-level errno family — transport failures, classified as timeout
         "etimedout" | "econnreset" | "econnaborted" | "ehostunreach" | "eai_again" => {
             Some(FailoverReason::Timeout)
         }
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn status_500_timeout() {
-        // openclaw recovery semantics: 500/502/504 -> Timeout (fast retry / try next provider).
+        // Recovery semantics: 500/502/504 -> Timeout (fast retry / try next provider).
         // Only 503 and 529 are explicit Overloaded signals.
         assert_eq!(
             classify_failover(&dummy_err(), Some(500), None, None),
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn sdk_code_openai_context_length_exceeded() {
-        // openclaw recovery class: context_overflow recovers via compaction or
+        // Recovery class: context_overflow recovers via compaction or
         // larger-context-model routing, not by swapping providers.
         assert_eq!(
             classify_failover(&dummy_err(), None, None, Some("context_length_exceeded")),

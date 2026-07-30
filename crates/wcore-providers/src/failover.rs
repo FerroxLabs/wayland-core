@@ -1,4 +1,4 @@
-//! FailoverReason taxonomy ported from openclaw MIT © Peter Steinberger 2025.
+//! Failover reason taxonomy.
 //!
 //! 11-variant enum describes WHY a provider call failed in a way the failover
 //! state machine can act on. Wraps the existing ProviderError as a `source`
@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 /// Why a provider call failed, taxonomized for failover decisions.
 ///
-/// String representations match openclaw's TS string-union for cross-language
-/// log/telemetry compatibility.
+/// The `snake_case` string representations are a stable wire contract: logs,
+/// telemetry and non-Rust hosts match on them, so variants must not be renamed
+/// without a coordinated consumer change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailoverReason {

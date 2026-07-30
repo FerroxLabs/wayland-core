@@ -1,4 +1,4 @@
-//! Self-healing pricing layer — ported from openclaw MIT (c) Peter Steinberger 2025.
+//! Self-healing pricing layer.
 //!
 //! Fetches the OpenRouter /api/v1/models catalog with a 24h TTL and diffs the
 //! live pricing against the bundled catalog. Diffs emit CatalogChange events

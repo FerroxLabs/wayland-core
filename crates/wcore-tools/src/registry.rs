@@ -391,7 +391,7 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
     }
 }
 
-/// Layer D3 (token-opt, openclaw parity): fold every deferred def OUT of the
+/// Layer D3 (token-opt): fold every deferred def OUT of the
 /// tools[] array entirely, replacing the per-tool name-only stubs with ONE
 /// compact catalog line appended to ToolSearch's description. Measured on
 /// the reference workload the 43 stub entries cost ~2.5k tokens/request —
@@ -405,8 +405,8 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// already changes (a hydration admission).
 ///
 /// `catalog_max_chars` bounds the names portion of the line; overflow is
-/// replaced by a `+N more — search to discover` suffix (openclaw's bounded
-/// directory), keeping an MCP swarm from ballooning the prompt while every
+/// replaced by a `+N more — search to discover` suffix, keeping the line a
+/// bounded directory so an MCP swarm cannot balloon the prompt while every
 /// omitted tool stays discoverable through ToolSearch queries.
 ///
 /// Fallback: when no non-deferred `ToolSearch` def is present there is no

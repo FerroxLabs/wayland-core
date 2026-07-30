@@ -304,7 +304,7 @@ pub const ANTHROPIC_CACHE_CONTROL_LIMIT: usize = 4;
 const BYTES_PER_TOKEN_ESTIMATE: usize = 2;
 
 /// Inject `cache_control` markers at the 4 Anthropic prompt-cache zones
-/// (moving-breakpoint layout, ported from openclaw/hermes-agent):
+/// (moving-breakpoint layout):
 ///
 ///   1. the last `system` block — stable prefix,
 ///   2. the last `tools` entry — stable prefix,

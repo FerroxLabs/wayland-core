@@ -12,23 +12,19 @@
 //! predicate with a `ProviderCompat` override); `OpenAIProvider::stream`
 //! consults it to pick the endpoint + the parser in this module.
 //!
-//! ## Reference
+//! ## How Responses differs from Chat Completions
 //!
-//! The request body shape and the streaming event taxonomy below were mirrored
-//! from OpenClaw's mature TypeScript implementation:
+//! Three differences drive everything in this module:
 //!
-//! * `openclaw/src/llm/providers/openai-responses.ts` — top-level request
-//!   params (`model`, `input`, `stream: true`, `max_output_tokens`,
-//!   `reasoning`, `tools`).
-//! * `openclaw/src/llm/providers/openai-responses-shared.ts` —
-//!   `convertResponsesMessages` (the `input` item shapes:
-//!   `message`/`function_call`/`function_call_output`, with `input_text` /
-//!   `output_text` content parts and a `developer`/`system` instruction
-//!   message) and `processResponsesStream` (the event handlers below).
-//! * `openclaw/src/llm/providers/openai-responses-tools.ts` —
-//!   `convertResponsesTools` (the flat `{type:"function", name, description,
-//!   parameters}` Responses tool format, distinct from Chat Completions'
-//!   nested `{type:"function", function:{...}}`).
+//! * **Request params** are `model` / `input` / `stream` / `max_output_tokens`
+//!   / `reasoning` / `tools` — note `max_output_tokens`, not `max_tokens`.
+//! * **`input` carries typed items, not chat messages** — `message`,
+//!   `function_call` and `function_call_output`, whose content parts are
+//!   `input_text` / `output_text`. The system prompt rides the dedicated
+//!   `instructions` field rather than an item.
+//! * **Tools use a flat shape** — `{type:"function", name, description,
+//!   parameters}` — distinct from Chat Completions' nested
+//!   `{type:"function", function:{...}}`.
 //!
 //! ## Request body (`/v1/responses`)
 //!
@@ -82,15 +78,14 @@ use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason
 use wcore_types::tool::{ToolDef, truncate_deferred_description};
 
 /// Build the `/v1/responses` request body from a provider-neutral
-/// [`LlmRequest`]. Mirrors `buildParams` + `convertResponsesMessages` +
-/// `convertResponsesTools` from the OpenClaw references in the module docs.
+/// [`LlmRequest`], per the request shape documented on the module.
 pub(crate) fn build_responses_body(request: &LlmRequest, compat: &ProviderCompat) -> Value {
     let mut body = json!({
         "model": request.model,
         "input": build_input(&request.messages),
         "stream": true,
         // `store: false` keeps OpenAI from persisting the response server-side;
-        // wayland-core manages its own history. Mirrors OpenClaw's default.
+        // wayland-core manages its own history.
         "store": false,
     });
 
@@ -104,8 +99,8 @@ pub(crate) fn build_responses_body(request: &LlmRequest, compat: &ProviderCompat
     }
 
     // System prompt rides the dedicated `instructions` field, NOT an input
-    // item (OpenClaw pushes a developer/system message; the `instructions`
-    // field is the documented equivalent and avoids ordering ambiguity).
+    // item. A `developer`/`system` input item would work too, but the
+    // dedicated field is the documented form and avoids ordering ambiguity.
     if !request.system.is_empty() {
         body["instructions"] = json!(request.system);
     }
@@ -662,8 +657,8 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
 
         // --- terminal: success ---------------------------------------------
         // `response.done` is the ChatGPT **Codex** backend's terminal-success
-        // frame (OpenClaw normalizes both `response.completed` and
-        // `response.done` to the same end-of-turn). It carries the same
+        // frame; it is the same end-of-turn as `response.completed`.
+        // It carries the same
         // `response` object (status + usage), so it routes through the identical
         // path. Additive: the plain-OpenAI Responses path never emits
         // `response.done`, so the existing `response.completed` behavior is
@@ -823,7 +818,7 @@ fn finalize_tool_call(
 
 /// Pull token usage out of a `response.completed` payload. OpenAI's Responses
 /// usage reports `input_tokens` INCLUSIVE of cached tokens, so subtract the
-/// cached portion to get the non-cached input (mirrors OpenClaw).
+/// cached portion to get the non-cached input.
 fn update_usage(state: &mut ResponsesStreamState, response: Option<&Value>) {
     let Some(usage) = response.and_then(|r| r.get("usage")) else {
         return;
