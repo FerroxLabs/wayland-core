@@ -1,0 +1,27 @@
+=== C4 SSH REAP DIRECTION + INSTRUMENT SELF-TEST @ 0d48b5515b816e8930456fcda7c91c0ec9a46ebd ===
+continuing the SAME orphan produced earlier (nonce rc3bccbba999b81443) rather than starting a new one
+
+--- A1 KNOWN-POSITIVE: repaired instrument sees the orphan BEFORE the reap
+ORPH_BEFORE_EXIT=0
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+INDEP_BEFORE=0
+
+--- A3 OLD BROKEN MATCHER on the SAME state (must be shown incapable)
+OLD_MATCHER_EXIT_BEFORE_REAP=2  first line: error: unexpected argument '--kill' found
+
+--- the reap itself, with the verb that exists
+CANCEL_EXIT=0
+backend:  ssh
+task:     rclong3bccbba999b81443
+method:   second ssh connection kills the remote session carrying the nonce (remote-kill-issued), then the remote process table is re-read
+residual: none — the cleanup was verified by re-enumeration
+
+--- A2 KNOWN-NEGATIVE: same instrument, same nonce, AFTER the reap -> must go to zero
+ORPH_AFTER_EXIT=0
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+INDEP_AFTER=0
+
+--- A3b OLD BROKEN MATCHER on the reaped state (identical output = it measures nothing)
+OLD_MATCHER_EXIT_AFTER_REAP=2  first line: error: unexpected argument '--kill' found
+A3 VERDICT: the old --kill invocation produced BYTE-IDENTICAL output before and after the reap -- it could not distinguish the two states. Instrument was dead.
+C4REAPDONE
