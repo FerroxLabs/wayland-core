@@ -292,6 +292,11 @@ else
   LANDED=$(awk '
     /\xe2\x80\xba/ { sub(/^.*\xe2\x80\xba ?/, ""); sub(/ +$/, ""); print; exit }
   ' "$OUT/${LABEL}.after.txt")
+  # An EMPTY composer renders its placeholder on the same row, so scraping it
+  # returns hint text as though the user had typed it. That turned the
+  # deliberate-shortcut control -- whose whole assertion is "the composer is
+  # empty" -- into an ungradeable MISMATCH. Recognise the placeholder as empty.
+  [ "$LANDED" = "type / for commands" ] && LANDED=""
 fi
 say "COMPOSER_TEXT=[${LANDED}]"
 say "COMPOSER_LEN=${#LANDED}"

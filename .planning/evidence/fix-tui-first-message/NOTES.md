@@ -136,3 +136,81 @@ is exactly the population the brief says fix (a) alone would abandon.
    claimed while the modal is up.
 2. `COMPOSER_PRESENT` was keyed off "surface is not onboarding", which the finding above proves
    wrong. Repaired to key off the `›` prompt actually being on screen.
+
+## T+3h — AFTER: all quadrants measured on the fixed binary
+
+Binary `--build-info` source **`42da520d`**, sha256
+`9c82e7a0d663bd2909d8164b042c85fdbf6bbc9c1b258c4ff8b0349359d04f74`, built by this lane on
+hetzner. Same harness, same pty, same 0.14 s/char. Raw results in `after/*.result`; pane
+captures in `after/*.{before,typed,after}.txt`.
+
+| # | quadrant | modal shown? | sent | kept | LOST | verdict |
+|---|---|---|---|---|---|---|
+| 1 | credentials configured (`FLUX_API_KEY` + `-p`/`-m`) | **NO** | 44 | 44 in composer | **0** | INTACT_DELIVERED |
+| 1b | same, discriminating 20-char case | **NO** | 42 | 42 in composer | **0** | INTACT_DELIVERED |
+| 2 | credentials absent | **YES** | — | — | — | modal reachable |
+| 3a | credentials absent, typing during modal | YES, and **stays up** | 37 | 37 visible in readout | **0** | INTACT_HELD |
+| 3b | modal forced up over a resolving config, onboarding then completed | YES → dismissed | 41 | 41 in composer | **0** | INTACT_DELIVERED |
+| 5 | control: deliberate `s`+⏎, no typing | YES → dismissed | 0 | composer empty | **0** | INTACT_DELIVERED |
+
+Against the baseline: quadrant 1 was 4 lost, 1b was 20 lost, 3a was 37 lost. All now 0.
+
+Quadrant 2 is the "prove you did not just delete it" control and it holds: with no credentials
+the card still appears. It is reached by a different route from the one fix (a) touches — the
+`MissingApiKey` recovery branch at `main.rs:1858`, which is unchanged.
+
+Quadrant 5 is the other control: the documented `s` shortcut still skips, and leaves the
+composer byte-empty rather than littering it with the keystroke that did the skipping.
+
+### A third defect, found while trying to prove quadrant 3b, and fixed
+
+Completing onboarding rebinds the **engine** and leaves the **view** stale. The workspace gates
+its composer on `app.config.model.is_empty()`, so the user finished onboarding, had a live
+provider bound, and landed on a workspace with **no input line at all**, still naming the
+pre-onboarding provider:
+
+```
+  No model configured.
+  anthropic has no default model.
+```
+
+Measured over a seeded config resolving `flux-router`/`flux-auto`. `RebindApplied` already
+carries a fresh `ConfigView` for exactly this purpose and the `Switch` arm was discarding it.
+Without this, fix (b) is unobservable live for the population it was written for — the buffer
+is delivered correctly into a composer that is not on screen.
+
+### Gates (hetzner, at `42da520d`, status read back from a file, not from an exit code)
+
+```
+WLFMT=0   cargo fmt --all -- --check
+WLCLIPPY=0  cargo clippy -p wcore-cli --all-targets -- -D warnings
+WLCHECK=0   cargo check --workspace --all-targets
+WLMETA=0    cargo metadata --locked
+```
+
+`cargo test -p wcore-cli --lib tui::` → **1441 passed; 0 failed; 1 ignored; 473 filtered out**.
+The executed count is read back deliberately: a suite that runs zero tests exits 0 too.
+
+The first run of this pair reported `WLTEST=101` while the ssh call itself exited 0 — the
+status-file pattern caught exactly the trap the brief names.
+
+### Secret handling
+
+The FluxRouter key was injected on **stdin only**, never in argv, never written to disk, never
+echoed; only its length (51) is recorded. Final sweep: **0** hits across the lane evidence,
+`crates/`, and every tracked file, with the sweep proven alive on a known-positive (**1** hit in
+a file that really contained the value). The vault passphrase is the same throwaway literal the
+prior UAT disclosed.
+
+### Third instrument defect, repaired in-lane
+
+Grading only on the composer made the harness **permanently red** for the credentials-absent
+quadrant: the card holds every character and displays them, and there is no composer to deliver
+into until onboarding finishes. A gate with no reachable pass state proves as little as one with
+no reachable fail state (LANE-BRIEF §3b-iii). The grader now scores DELIVERED and HELD
+separately and reports which source it graded on. Self-test grew to 10 assertions and still
+fails (rc=91) on a matcher mutated to always report INTACT.
+
+A fourth: an empty composer renders its placeholder on the composer row, so the deliberate-
+shortcut control — whose whole assertion is "the composer is empty" — scraped `type / for
+commands` and graded MISMATCH. Placeholder now recognised as empty.

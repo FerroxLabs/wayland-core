@@ -1,0 +1,28 @@
+LABEL=Q2Q3a-no-keys
+BIN=/root/wayland-fix-tui-first-message/target/release/wayland-core
+BIN_SHA256=9c82e7a0d663bd2909d8164b042c85fdbf6bbc9c1b258c4ff8b0349359d04f74
+ASSERT_BIN=OK
+CPS=0.14
+CREDENTIALS=ABSENT
+BIN_ARGS=[]
+SETTLE=30
+PANE_NONEMPTY_LINES=30
+PANE_DEAD=0
+ASSERT_PTY=OK
+SURFACE_BEFORE=ONBOARDING
+SENT_TEXT=[Use the bash tool to run echo Q3TOKEN]
+SENT_LEN=37
+SURFACE_AFTER_TYPING=ONBOARDING
+TYPEAHEAD_LINE=[Use the bash tool to run echo Q3TOKEN   (kept for your first message · ⌫ edit · ⎋ discard)]
+TYPEAHEAD_HELD=[Use the bash tool to run echo Q3TOKEN]
+TYPEAHEAD_HELD_LEN=37
+SURFACE_FINAL=ONBOARDING
+COMPOSER_PRESENT=NO reason=onboarding-modal-still-up
+COMPOSER_TEXT=[]
+COMPOSER_LEN=0
+GRADED_ON=typeahead-readout
+LOST_CHARS=0
+LOST_PREFIX=[]
+VERDICT=INTACT_HELD
+WLRC=0
+WLDONE
