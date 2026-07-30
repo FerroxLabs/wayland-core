@@ -1,0 +1,30 @@
+=== trigger.rs max(60) ===
+74:    pub min_interval_secs: u64,
+84:    pub fn new(min_interval_secs: u64, max_in_flight: u32) -> Self {
+86:            min_interval_secs,
+106:            min_interval_secs: self
+107:                .min_interval_secs
+108:                .max(default.min_interval_secs)
+235:            Self::Once { .. } => TriggerBound::new(1, 1),
+238:            Self::Interval { every_secs } => TriggerBound::new((*every_secs).max(60), 1),
+239:            Self::Cron { .. } => TriggerBound::new(60, 1),
+242:            Self::Event { .. } => TriggerBound::new(1, 2),
+246:            Self::Webhook { .. } => TriggerBound::new(5, 1),
+249:            Self::Poll { every_secs, .. } => TriggerBound::new((*every_secs).max(300), 1),
+255:            } => TriggerBound::new((*heartbeat_secs).max(1), 1).with_deadline(*deadline),
+366:            let earliest = after + Duration::seconds(bound.min_interval_secs.max(1) as i64);
+514:        let hostile = TriggerBound::new(1, 100);
+516:        assert_eq!(clamped.min_interval_secs, default.min_interval_secs);
+523:        let cautious = TriggerBound::new(3600, 1);
+525:        assert_eq!(clamped.min_interval_secs, 3600);
+531:        let default = TriggerBound::new(1, 1).with_deadline(t0() + Duration::hours(10));
+532:        let asked = TriggerBound::new(1, 1).with_deadline(t0() + Duration::hours(1));
+537:        let later = TriggerBound::new(1, 1).with_deadline(t0() + Duration::hours(100));
+=== runner.rs delivery id ===
+327:                "cron:{}:{}",
+332:                "cron:{}:{}:{}",
+1146:        assert_eq!(a, format!("cron:job-1:{}", first.timestamp_millis()));
+=== KNOWN-POSITIVE control: a string certainly present ===
+26
+=== KNOWN-NEGATIVE control: a string certainly absent ===
+0

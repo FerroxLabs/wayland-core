@@ -1,0 +1,9 @@
+failures:
+failures:
+    a_forged_classification_that_does_not_partition_the_repeats_is_refused
+    quadrant_1_a_windows_run_of_proven_recurrences_verifies
+    quadrant_2_a_planted_replay_is_refused
+    quadrant_3_indeterminate_repeats_are_refused
+    the_verifier_and_the_driver_return_the_same_verdict_on_the_same_receipt
+test result: FAILED. 34 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+WLRC=101

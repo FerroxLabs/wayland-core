@@ -1,0 +1,22 @@
+q1-recurrence-passes expected=RECURRENCE driver=RECURRENCE clean=true duplicates=12 replays=0 recurrences=12 indeterminate=0 unidentified=0 OK
+q2-replay-fails expected=EXACTLY-ONCE-VIOLATED driver=EXACTLY-ONCE-VIOLATED clean=false duplicates=12 replays=1 recurrences=11 indeterminate=0 unidentified=0 OK
+q3-indeterminate-fails expected=NOT-PROVEN driver=NOT-PROVEN clean=false duplicates=12 replays=0 recurrences=4 indeterminate=8 unidentified=16 OK
+q4-clean-passes expected=NO-REPEATS driver=NO-REPEATS clean=true duplicates=0 replays=0 recurrences=0 indeterminate=0 unidentified=0 OK
+QUADRANTS 4 drift=0
+--- sidecars ---
+verdict=RECURRENCE 12 repeat(s), every one under a DISTINCT delivery identity. The trigger fired again — `every:15` is rate-floored to 60s by trigger.rs:238, applied at :366 — and the product delivered each occurrence exactly once. 24 arrival(s) under as many distinct identities is a STRONGER exactly-once measurement than a run short enough to miss the boundary, not a spoiled one
+  submitted=12 arrived=24 unique=12 duplicates=12 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=12 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=0 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=0 at endpoint(s) (none)
+step-13 reconcile had read arrived=24 duplicates=12; 0 arrival(s) landed after it.
+---q3---
+verdict=NOT-PROVEN 8 repeat(s) carry no delivery identity to judge by (16 unidentified arrival(s) at endpoint(s) twilio.messages,whatsapp.messages), so exactly-once can be neither established nor refuted for them. An unmeasurable property is not a clean one; this is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate
+  submitted=12 arrived=24 unique=12 duplicates=12 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=4 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=8 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=16 at endpoint(s) twilio.messages,whatsapp.messages
+step-13 reconcile had read arrived=24 duplicates=12; 0 arrival(s) landed after it.
+The receipt was written and records the true final counts.

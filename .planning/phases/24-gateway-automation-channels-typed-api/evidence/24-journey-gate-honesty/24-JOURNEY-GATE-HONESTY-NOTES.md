@@ -56,11 +56,67 @@ recurrence. That is a second self-inflicted source of the state being graded.
    unclassified repeat is not a clean one.
 4. Prove all four quadrants, on both sides, on the SAME receipt bytes.
 
+## Minute 25 — remaining premise claims verified at HEAD
+
+Both controls alive in the same capture (`/usr/bin/grep -c "fn " trigger.rs` = 26,
+`/usr/bin/grep -c zzzz_not_present_zzzz` = 0), so these are measurements and not
+a dead instrument returning zeros:
+
+- `trigger.rs:238` — `Self::Interval { every_secs } => TriggerBound::new((*every_secs).max(60), 1)` **CONFIRMED**
+- `trigger.rs:366` — `let earliest = after + Duration::seconds(bound.min_interval_secs.max(1) as i64)` **CONFIRMED**
+- `runner.rs:327` / `:332` — `"cron:{}:{}"` and `"cron:{}:{}:{}"` **CONFIRMED**
+
+**6 of 6 brief claims held.** The one thing the brief did not have — that the
+Rust side never sees `delivery_identity` — is the reason the fix had to add a
+verified field rather than relax a comparison.
+
+## Minute 120 — both gates changed, four quadrants proven, both directions
+
+Post-fix, at `2d231653` then `5014f070` on hetzner (`hz/journey-gate-honesty`,
+SHA asserted after each checkout):
+
+| suite | result |
+|---|---|
+| `--test journey_receipt_contract` | **39 passed, 0 failed, 0 ignored, 0 filtered out** |
+| `--lib journey::` | **32 passed, 0 failed, 0 ignored, 247 filtered out** |
+| `-p wcore-channels-registry --test delivery_semantics_declaration` | **8 passed, 0 failed** |
+| `clippy --all-targets -- -D warnings` (both crates) | rc=0 |
+| `node --test scripts/f24-journey.test.mjs` (Mac) | **36 passed, 0 failed, 0 skipped** |
+
+**PRE-FIX CONTROL** — blanket `duplicates != 0` refusal restored in
+`verify_counts` on hetzner, nothing else touched:
+
+```
+test result: FAILED. 34 passed; 5 failed
+  quadrant_1_a_windows_run_of_proven_recurrences_verifies
+  quadrant_2_a_planted_replay_is_refused
+  quadrant_3_indeterminate_repeats_are_refused
+  a_forged_classification_that_does_not_partition_the_repeats_is_refused
+  the_verifier_and_the_driver_return_the_same_verdict_on_the_same_receipt
+```
+
+and the agreement test's own message is the finding stated in one line:
+
+```
+q1-recurrence-passes: the driver recorded verdict=RECURRENCE and the verifier
+returned verdict=UNCLASSIFIED-REPEATS.
+```
+
+**q4 stayed GREEN under the control** — so the control is targeted at the change,
+not a blanket breakage. Source restored (`git diff --stat` = 0 bytes) and 39/0
+re-proven at the same commit.
+
+**Drift-test control, both directions.** Mutation A (delete the correction
+sentence) and mutation B (re-assert the refuted sentence a second time) each
+turn `the_recurrence_section_keeps_its_measurement_and_its_correction` red —
+`7 passed; 1 failed` both times, the other seven unaffected — and the document
+restores to 0 bytes of diff.
+
 ## Still to establish
 
-- [ ] `trigger.rs` and `runner.rs` line citations at HEAD.
-- [ ] Rust: `delivery_identity` parsed, verified, printed.
-- [ ] JS: same predicate, same verdict.
-- [ ] Four quadrants x two gates = eight results, from unproxied tools.
-- [ ] `docs/delivery-semantics.md` §5 reworded.
+- [x] `trigger.rs` and `runner.rs` line citations at HEAD.
+- [x] Rust: `delivery_identity` parsed, verified, printed.
+- [x] JS: same predicate, same verdict.
+- [x] Four quadrants x two gates, both directions.
+- [x] `docs/delivery-semantics.md` §5 reworded.
 - [ ] Windows: real journey, or a faithful synthetic — SAY WHICH.
