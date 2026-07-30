@@ -61,8 +61,70 @@ record the registry state alongside the result rather than reporting a bare pass
 - **The credential never lands on disk.** stdin-only transfer, never in argv, never echoed, swept
   for afterwards with an expected hit count of 0.
 
+## Getting a REAL console for the TUI — the central problem, and how it was solved
+
+ssh gives no console. A TUI with no console may exit 0 and read as a pass, which is precisely the
+trap the brief names. Two facts shaped the approach:
+
+- A prior lane (`.planning/evidence/windows-legs-sweep/NOTES.md:113`) measured that
+  **`portable_pty`'s ConPTY backend does not surface the child's stdout**, which is why this repo's
+  own `pty_capture.rs` is `#![cfg(unix)]`. So the repo's own harness cannot drive a Windows TUI.
+- Its consequence, also measured there: with no terminal, `confirm.rs` denies confirmable tool
+  calls on piped stdin, so **16 of 22 pairs did not run** on Windows.
+
+I therefore drove the product through **pywinpty 3.0.5** (Python 3.12.10), which binds the same
+Win32 ConPTY API Windows Terminal itself uses, and rendered the byte stream through **pyte** so the
+capture is literally the screen a user would see. Driver: `D:\lane-uat-tui-win\drive_tui.py`.
+
+### The driver was DEAD THREE TIMES and every failure looked like a clean run
+
+This is the §3b-i shape, hit repeatedly against my own instrument. Recorded because each version
+would have produced a confident, false product finding:
+
+| Ver | Defect | What it would have reported |
+|---|---|---|
+| v1 | passed a **list** argv; pywinpty wants a command string | "TUI renders nothing on Windows" — 23 bytes, blank screen, no error |
+| v2 | read in a **background thread**; pywinpty is not thread-safe here, the reader died after the first chunk and the driver **swallowed the exception** | same false blank screen, 23 bytes |
+| v3 | read loop deadline was 2.0 s, but **ConPTY stalls ~3.0 s** before delivering any child output | 28 bytes, blank screen — a *timing* artifact indistinguishable from a broken product |
+
+The v3 stall is worth stating precisely, measured by timestamped reads: bytes arrive at
+`0.00s → 4`, `0.01s → 23`, `0.01s → 28`, then **nothing until `3.03s`**, then `33 → 57 → 59 → 102 →
+104`, EOF at `3.04s`. **Any Windows ConPTY harness with a settle under ~3.5 s silently reports an
+empty screen.** All three defects were caught by the known-positive control, none by inspection.
+Per §6b-ii the instrument was repaired in-lane rather than noted, and the repair kept its history.
+
+### Instrument liveness, both directions (run before ANY product measurement is believed)
+
+- **Known-positive:** `cmd.exe /c echo KNOWN_POSITIVE_MARKER & ver` → `WLRC=0`, `WLBYTES=104`,
+  rendered screen contains `KNOWN_POSITIVE_MARKER` and `Microsoft Windows [Version 10.0.26200.8875]`.
+  The instrument can pass.
+- **Known-negative:** same driver aimed at `D:\lane-uat-tui-win\this-binary-does-not-exist.exe` →
+  `FileNotFoundError: The command was not found or was not executable`, **no `.status` file written**,
+  so the three-state grade is *incomplete*, not *pass*. The instrument can fail.
+
+## Instrument defects hit this session, continued
+
+3. **cmd/PowerShell quote-mangling is real and I hit it.** An inline
+   `python -c "import winpty; print(\"x\")"` sent over ssh arrived at Python as
+   `print(" pywinpty\,` → `SyntaxError: unterminated string literal`. **Every** script and spec is
+   now written locally and `scp`'d as a file; the only things crossing the boundary inline are
+   unquoted paths. JSON spec files exist for this reason.
+4. **zsh ate an unquoted `--include=*.rs` glob** — and my known-positive control returned **0**,
+   which would have "confirmed" that `FLUX_API_KEY` does not appear in the codebase. Re-run quoted:
+   `FLUX_API_KEY` appears in real code (`wcore-providers/src/fingerprint.rs:125` maps it to
+   `flux-router`), and the control returns **53** files for `ANTHROPIC_API_KEY`. Exactly the
+   §3b-i failure the brief predicts, reproduced on the first attempt.
+
 ## Status log
 
 - [t0] Environment established (table above). Windows clone of `plan/f20-unified-audit-repair`
-  started into `D:\lane-uat-tui-win\repo`; SHA will be asserted against `e9bed1af9...` before any
-  build output is trusted.
+  into `D:\lane-uat-tui-win\repo`; **CLONE_HEAD asserted = `e9bed1af931f02aea094469d44eed291af0c4c96`**,
+  identical to my Mac worktree HEAD and to `git ls-remote` from both hosts independently.
+- [t1] Release build of `-p wcore-cli` launched detached on the Windows host, communicating only
+  through `D:\lane-uat-tui-win\status\build.status` (`WLRC=` then `WLDONE`).
+- [t2] ConPTY driver built, killed three times by its own defects, repaired, and proven alive in
+  both directions. Product measurement can now begin.
+- [t3] Live-turn recipe located from a prior lane (`.planning/evidence/e2e-product-smoke/journey2.sh`):
+  provider `flux-router`, model `flux-standard`, `base_url = https://api.fluxrouter.ai/v1`,
+  config at `$WAYLAND_HOME/config.toml`, plus `WAYLAND_VAULT_PASSPHRASE`. Key comes from
+  `FLUX_API_KEY` (`wcore-config/src/config.rs:2965`).
