@@ -72,3 +72,18 @@ already carries the "name exactly what is missing" contract.
 1. Distribution: vendor / fetch / operator-path. (M2 pushes hard toward operator-path.)
 2. Where the backend seam lives without colliding with `lane/twilio-whatsapp-identity`.
 3. What can be live-proven vs. what must be reported unrun.
+
+---
+
+## Closing measurements (see WHATSAPP-BRIDGE-SUMMARY.md for the full account)
+
+- **M4 — distribution:** cross-audit 3/3 for (D) operator-provided path. All three raised
+  version skew; that produced the `health` handshake.
+- **M5 — my own comment was false.** `bridge.js` does NOT fall back to baileys on an
+  unrecognised `--backend`; it echoes the value verbatim and fails at load with `-32000`. The
+  fallback applies to an ABSENT or valueless flag. Corrected everywhere.
+- **M6 — my probe over-claimed.** The real bridge answers `health` with no `node_modules`;
+  only `connect` fails. Added `bridge_dependencies` and `whatsapp_pairing` gates.
+- **M7 — final verification at `0d844959`:** unit 69 passed / 0 ignored / 0 filtered;
+  live 6 passed / 0 ignored / 0 filtered against the real hash-verified bridge.js under real
+  Node; clippy `-D warnings` rc=0; `cargo check --workspace --all-targets` rc=0.
