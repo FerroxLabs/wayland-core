@@ -17,14 +17,23 @@
 # Format: "<binary> <test>" exactly as nextest prints it after the timing and
 # progress fields are stripped.
 
-# 1. The keyring behaviour change vs a 2026-07-16 assertion.
-#    c73ac417 made a host with no secure store degrade and run the turn; this
-#    test (crates/wcore-cli/tests/f14_sigkill_recovery.rs:1106) asserts the
-#    opposite, including that the provider is never reached. Independently
-#    proven pre-existing by three lanes. The underlying conflict is a product
-#    decision escalated to Sean; it is deliberately NOT being made to pass.
-#    This gate exists BECAUSE of this incident — see the script header.
-wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+# 1. REMOVED 2026-07-31 — the test no longer exists, and that is NOT the same as
+#    it having been fixed.
+#    It used to read:
+#      wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+#    Commit 368d4f5f ("test(f14): split the secure-store posture into
+#    degrade-FORBIDDEN and degrade-ALLOWED") replaced that single assertion with
+#    the two that encode the decision actually taken:
+#      wcore-cli::f14_sigkill_recovery without_secure_store_an_operator_who_requires_durability_gets_a_refusal
+#      wcore-cli::f14_sigkill_recovery without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable
+#    Both PASS at e64ec3da (measured, not assumed), so there is no debt left to
+#    record and no successor line is needed here.
+#
+#    Keep the history: the gate originally reported this entry as "now PASSES",
+#    which was wrong — the old name is absent at every commit on this branch. That
+#    false report is what exposed the deletion escape hatch now closed by the
+#    collected-test check in merge-test-gate.sh. Read that comment before ever
+#    deleting a line from this file.
 
 # 2. Desktop wire-contract fixture drift. Regenerating it means
 #    `wcore-contract generate`, which LANE-BRIEF.md §0 reserves as a
@@ -36,3 +45,55 @@ wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_
 #    lane/fix-clippy-gate did not touch. NOT diagnosed by this lane — recorded so
 #    the gate has a reachable pass state, and flagged as needing an owner.
 wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
+
+# ---------------------------------------------------------------------------
+# ADDED 2026-07-31 at e64ec3da, by the orchestrator, on the gate's first real
+# cadence run. All three are PRE-EXISTING and none belong to the lane that was
+# being merged (lane/fix-keyringless-inbound).
+#
+# HOW "pre-existing" WAS ESTABLISHED — measured, not inferred from the diff:
+# the same three IDs were run at the merge commit e64ec3da AND at the integration
+# base 674b72c8 without the lane. Identical failures at both, on TRY 1 and TRY 2,
+# in ~0.2s each — deterministic, not contention flake, on a box at load 7-10.
+# Anti-vacuity: nextest reported "3 tests run" at both commits, so the filter
+# matched and the result is a measurement rather than an empty selection.
+#
+# They entered integration BETWEEN 43c84493 (where this baseline was established)
+# and 674b72c8, through merges whose gates compiled everything and ran nothing.
+# That is precisely the gap this gate closes, confirmed on its first use.
+#
+# These are recorded as debt so the gate keeps a reachable pass state. They are
+# NOT thereby accepted: 4 and 5 are blinded regression detectors, and 6 is a real
+# data-loss defect. Each has an owner named below.
+
+# 4/5. TWO REGRESSION DETECTORS BLINDED BY LOG SILENCING.
+#    Both assert on stderr content:
+#      R-011 expects one of ["start_all() complete", "channel_manager",
+#            "inbound polling active"]  (harness_regression.rs:1053, guards F-014
+#            channel bootstrap)
+#      R-012 expects one of ["local backend", "HONCHO_API_KEY", "user-model:
+#            using local", "honcho"]    (harness_regression.rs:1129, guards F-093
+#            user-model fallback)
+#    Observed stderr now contains only the config-permission warning. The
+#    stderr-noise reduction (41 lines -> 2, issue #147) removed the lines these
+#    two tests read. The product behaviour they guard was NOT shown to be broken —
+#    what broke is the tests' ability to SEE it, which is the more dangerous of
+#    the two because it is silent. Do not "fix" these by loosening the assertion
+#    to something that always matches; point them at wherever the bootstrap and
+#    fallback events actually go now, or restore the events at a level the test
+#    can observe. Owner: issue #147 (same change that caused it).
+wcore-cli::harness_regression r011_channels_auto_register_logs
+wcore-cli::harness_regression r012_honcho_fallback_on_no_key
+
+# 6. REFUSED RESTORE MUTATES THE TARGET — data loss, not a test artifact.
+#    portability_hostile_corpus.rs:1242. The test digests an occupied target
+#    before and after a restore that is REFUSED, and the digests differ:
+#      before 3044f265e70cc6624fd44cc39eab10299a43c6190630af49296e847530ba5018
+#      after  d50b29ed835e66b420b75fe0fbc98713087f7ee52a8c127a8890276303d32047
+#    So the refusal path has already written to the user's file by the time it
+#    declines. Measured by digest, deliberately not read off the refusal message —
+#    the message says the right thing while the bytes do not, which is why an
+#    honest instrument was needed to see it. Same family as #114 (restore
+#    --replace torn-SQLite on the rollback side). Needs its own issue and a fix;
+#    it is in this file only so the gate stays usable in the meantime.
+wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical

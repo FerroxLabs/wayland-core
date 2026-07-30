@@ -102,11 +102,45 @@ extract_failures() {
 
 # ---------------------------------------------------------------------------
 # The comparison. Pure text in, verdict out, so it is testable without cargo.
-#   $1 baseline file, $2 file of observed failing test IDs
+#   $1 baseline file, $2 file of observed failing test IDs,
+#   $3 OPTIONAL file of every test ID that the suite will collect and run.
 # Echoes a report and returns 0 (pass) / 1 (fail).
+#
+# WHY $3 EXISTS — a soundness hole found on this gate's FIRST real cadence run
+# -----------------------------------------------------------------------------
+# Without it, a baseline entry leaves the observed-failure set for two completely
+# different reasons that this function could not tell apart:
+#
+#   1. the test ran and PASSED            -> genuinely fixed, baseline is stale
+#   2. the test NO LONGER EXISTS          -> deleted, renamed, or no longer collected
+#
+# Both looked like case 1, so both printed "STALE BASELINE ... PASSED". That is
+# not merely a wrong message: it means DELETING A FAILING TEST SATISFIES THE GATE.
+# The escape hatch this file's header explicitly refuses to leave open ("add it to
+# the baseline is not a way to make a new failure go away quietly") was reachable
+# by deletion instead of by suppression.
+#
+# Found for real, not hypothetically: on 2026-07-31 the gate reported
+# `wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent`
+# as "now PASSES". It does not pass — commit `368d4f5f` SPLIT it into
+# `without_secure_store_an_operator_who_requires_durability_gets_a_refusal` and
+# `without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`.
+# The old name does not exist at any commit on the branch. The gate could not see
+# the difference, and the difference is the whole point of the baseline.
+#
+# WHAT $3 DOES AND DOES NOT CATCH — stated exactly, because a half-true guarantee
+# is how the rest of this repo's gates went quiet:
+#   * CATCHES deleted, renamed, and feature/platform-gated-out entries: they are
+#     absent from `cargo nextest list` for the profile that ran.
+#   * CATCHES a test newly excluded by a profile default-filter.
+#   * DOES NOT catch a test that still exists but was newly `#[ignore]`d, because
+#     `nextest list` prints ignored tests by default. Verified on hetzner-dsm
+#     rather than assumed. That residual is recorded, not papered over.
+# When $3 is absent the old two-way behaviour is kept, so the pure-text self-test
+# arms that predate this change still mean what they meant.
 # ---------------------------------------------------------------------------
 compare_failures() {
-  local baseline="$1" observed="$2" rc=0
+  local baseline="$1" observed="$2" existing="${3:-}" rc=0
   local b_clean o_clean
   b_clean="$(mktemp)"; o_clean="$(mktemp)"
   # Strip comments and blanks, sort, dedupe.
@@ -117,6 +151,19 @@ compare_failures() {
   local new fixed
   new="$(comm -13 "$b_clean" "$o_clean")"
   fixed="$(comm -23 "$b_clean" "$o_clean")"
+
+  # Split "left the failure set" into "passed" and "no longer exists". Only
+  # possible when the caller supplied the collected-test set.
+  local vanished=""
+  if [ -n "$existing" ] && [ -f "$existing" ]; then
+    local e_clean f_tmp
+    e_clean="$(mktemp)"; f_tmp="$(mktemp)"
+    sed 's/[[:space:]]*$//' "$existing" | grep -v '^[[:space:]]*$' | sort -u > "$e_clean"
+    printf '%s\n' "$fixed" | grep -v '^$' | sort -u > "$f_tmp"
+    vanished="$(comm -23 "$f_tmp" "$e_clean")"
+    fixed="$(comm -12 "$f_tmp" "$e_clean")"
+    rm -f "$e_clean" "$f_tmp"
+  fi
 
   echo "baseline entries : $(grep -c . "$b_clean" || true)"
   echo "observed failures: $(grep -c . "$o_clean" || true)"
@@ -139,6 +186,15 @@ compare_failures() {
     echo "Remove them from the baseline. A baseline that only ever grows is a suppression list."
     rc=1
   fi
+  if [ -n "$vanished" ]; then
+    echo ""
+    echo "GATE FAILED — BASELINE ENTRY NO LONGER EXISTS. Listed as known-failing, but the"
+    echo "suite never collected it — deleted, renamed, or gated out. It did NOT pass:"
+    printf '%s\n' "$vanished" | sed 's/^/  /'
+    echo "Deleting a failing test is not fixing it. Either restore the test, or replace the"
+    echo "baseline line with the successor test name and say in the comment what replaced it."
+    rc=1
+  fi
   [ "$rc" -eq 0 ] && echo "" && echo "GATE PASSED — no new failures, baseline exactly matched."
   rm -f "$b_clean" "$o_clean"
   return "$rc"
@@ -150,16 +206,20 @@ compare_failures() {
 # third is what proves the comparison is doing more than "is the list empty".
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0
+  # `total` is counted, not hardcoded. The literal "12/12" that used to be here
+  # became a lie the moment arms were added, and a self-test that misreports its
+  # own size is the wrong thing to be trusting.
+  local tmp fails=0 total=0
   tmp="$(mktemp -d)"
   printf 'crate::suite a\ncrate::suite b\n' > "$tmp/base2"
   : > "$tmp/base0"
 
-  arm() { # name expected_rc baseline observed
+  arm() { # name expected_rc baseline observed [existing]
     local name="$1" want="$2"
+    total=$((total + 1))
     shift 2
     local out got
-    out="$(compare_failures "$1" "$2" 2>&1)"; got=$?
+    out="$(compare_failures "$1" "$2" "${3:-}" 2>&1)"; got=$?
     if [ "$got" -eq "$want" ]; then
       echo "  PASS  $name (rc=$got, expected $want)"
     else
@@ -187,9 +247,53 @@ self_test() {
   #    passes this; this one must not.
   printf 'crate::suite a\ncrate::suite z\n' > "$tmp/obs"; arm "same count, different test -> fail" 1 "$tmp/base2" "$tmp/obs"
 
+  # --- vanished-entry arms. rc is 1 for BOTH "passed" and "no longer exists", so
+  #     an rc-only arm cannot tell them apart and would pass on a gate that had
+  #     merged the two cases back together. These assert the MESSAGE.
+  marm() { # name want_substring reject_substring baseline observed existing
+    local name="$1" want="$2" reject="$3" out
+    total=$((total + 1))
+    out="$(compare_failures "$4" "$5" "${6:-}" 2>&1)"
+    if printf '%s' "$out" | grep -qF "$want" && ! printf '%s' "$out" | grep -qF "$reject"; then
+      echo "  PASS  $name"
+    else
+      echo "  FAIL  $name"
+      printf '%s\n' "$out" | sed 's/^/        /'
+      fails=$((fails + 1))
+    fi
+  }
+  # Collected-test set containing only 'a': so baseline entry 'b' does not exist.
+  printf 'crate::suite a\n' > "$tmp/exists_a"
+  printf 'crate::suite a\ncrate::suite b\n' > "$tmp/exists_ab"
+
+  # 7. Baseline entry that the suite never collected -> the NEW error, and
+  #    explicitly NOT the "PASSED" wording. This is the deletion escape hatch.
+  printf 'crate::suite a\n' > "$tmp/obs"
+  marm "baseline entry deleted -> 'NO LONGER EXISTS', not 'PASSED'" \
+       "BASELINE ENTRY NO LONGER EXISTS" "but PASSED" \
+       "$tmp/base2" "$tmp/obs" "$tmp/exists_a"
+  # 8. Baseline entry that DOES exist and passed -> still the stale-baseline error,
+  #    and NOT the vanished one. Proves the split discriminates rather than
+  #    relabelling every case as "vanished".
+  marm "baseline entry exists and passes -> 'PASSED', not 'NO LONGER EXISTS'" \
+       "but PASSED" "BASELINE ENTRY NO LONGER EXISTS" \
+       "$tmp/base2" "$tmp/obs" "$tmp/exists_ab"
+  # 9. Back-compat: with NO collected-test set supplied, behaviour is the old
+  #    two-way one, so every arm above that predates this change still means what
+  #    it meant when it was written.
+  marm "no existing-set supplied -> old two-way behaviour" \
+       "but PASSED" "BASELINE ENTRY NO LONGER EXISTS" \
+       "$tmp/base2" "$tmp/obs"
+  # 10. A clean tree must still be able to PASS with the existing-set wired in.
+  #     Without this the new rule could redden every run and nobody would notice
+  #     until the gate was ignored wholesale.
+  printf 'crate::suite a\ncrate::suite b\n' > "$tmp/obs"
+  arm "observed == baseline, existing-set supplied -> pass" 0 "$tmp/base2" "$tmp/obs" "$tmp/exists_ab"
+
   # --- extraction arms. Verbatim lines from a real 13,562-test nextest log. ---
   earm() { # name expected_output_line  <<< input
     local name="$1" want="$2" input="$3" got
+    total=$((total + 1))
     got="$(printf '%s\n' "$input" | extract_failures)"
     if [ "$got" = "$want" ]; then
       echo "  PASS  $name"
@@ -232,6 +336,7 @@ self_test() {
   #    line, because a report that mangles the identifier is a report nobody can
   #    grep or paste back into `nextest -E`.
   local rep spaced_id
+  total=$((total + 1))
   spaced_id='wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent'
   printf '%s\n' "$spaced_id" > "$tmp/obs"
   rep="$(compare_failures "$tmp/base0" "$tmp/obs" 2>&1 | grep -c "^  $spaced_id\$")"
@@ -244,10 +349,10 @@ self_test() {
 
   rm -rf "$tmp"
   if [ "$fails" -eq 0 ]; then
-    echo "self-test: 12/12 arms correct"
+    echo "self-test: $total/$total arms correct"
     return 0
   fi
-  echo "self-test: $fails arm(s) WRONG"
+  echo "self-test: $fails of $total arm(s) WRONG"
   return 1
 }
 
@@ -283,9 +388,40 @@ main() {
 
   extract_failures < "$log" > "$obs"
 
-  compare_failures "$baseline" "$obs"
+  # The collected-test set, so a baseline entry that VANISHED is distinguishable
+  # from one that was FIXED. See the long comment on compare_failures.
+  #
+  # It has to come from `nextest list`, NOT from the run log: `[profile.ci]` sets
+  # `status-level = "fail"`, so the log contains no PASS lines at all and an
+  # "executed set" derived from it would be empty — every baseline entry would
+  # then read as vanished. Checked in .config/nextest.toml before writing this
+  # rather than after it misfired.
+  #
+  # `list` emits the same "<crate>::<binary> <test>" ID shape the failure matcher
+  # produces, so the two sets are directly comparable with no normalisation.
+  local existing
+  existing="$(mktemp)"
+  cargo nextest list --workspace --profile ci > "$existing" 2>/dev/null
+
+  # Anti-vacuity, and the reason this is a guard and not an assumption: if `list`
+  # fails or prints nothing, the set is empty, EVERY baseline entry looks vanished,
+  # and the gate reddens for a reason that has nothing to do with the merge. Worse,
+  # a future edit that inverted the comparison would make an empty set pass
+  # everything. Refuse to grade on a set that cannot be right — and require it to
+  # be at least as large as the number of tests we just watched execute.
+  local listed
+  listed="$(grep -c . "$existing" 2>/dev/null || echo 0)"
+  if [ "${listed:-0}" -lt "$ran" ]; then
+    echo "harness error: 'cargo nextest list' returned $listed test IDs but the run executed $ran;" >&2
+    echo "the collected-test set is unusable, so vanished-vs-fixed cannot be graded." >&2
+    rm -f "$log" "$obs" "$existing"
+    return 2
+  fi
+  echo "tests collected: $listed"
+
+  compare_failures "$baseline" "$obs" "$existing"
   local rc=$?
-  rm -f "$log" "$obs"
+  rm -f "$log" "$obs" "$existing"
   return $rc
 }
 
