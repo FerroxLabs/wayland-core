@@ -2458,6 +2458,32 @@ impl Config {
             crucible: merged.crucible,
         };
 
+        // A durable session cannot be opened on a host with no confidential-
+        // capable credential store, which is the normal state of a headless
+        // Linux server: no OS keyring exists and no vault passphrase has been
+        // supplied. Before this, `session.enabled` stayed true there and the
+        // product accepted the work anyway — `gateway run` started, `channel
+        // health` reported `Healthy`, and then EVERY turn died at dispatch with
+        // "Session persistence authority unavailable". Two live UAT lanes hit it
+        // from opposite ends and found two DIFFERENT workarounds
+        // (`[session] enabled = false` and `WAYLAND_VAULT_PASSPHRASE`), which is
+        // the signature of one decision taken too late and in two places.
+        //
+        // So take it once, here, at the single point that governs every engine,
+        // every entrance and every surface: give the capability up and say so,
+        // rather than promising something this host cannot deliver.
+        //
+        // Deliberately narrow — see `durable_sessions_must_be_disabled` for the
+        // two cases this must NOT swallow.
+        if durable_sessions_must_be_disabled(
+            resolved.session.enabled,
+            &resolved.storage.credentials.backend,
+            || resolved.confidential_recovery_storage_available(),
+        ) {
+            resolved.session.enabled = false;
+            record_durable_sessions_disabled_by_host();
+        }
+
         for (fallback_provider, fallback_model) in fallback_specs {
             if fallback_provider
                 .as_deref()
@@ -2508,6 +2534,102 @@ impl Config {
             &credentials_storage_path(),
         )
     }
+
+    /// Read-only: can this host hold the confidential material that durable
+    /// session recovery requires?
+    ///
+    /// Answers the same question as [`Self::open_confidential_credentials_store`]
+    /// without any of its side effects, so it can be asked at startup.
+    #[must_use]
+    pub fn confidential_recovery_storage_available(&self) -> bool {
+        crate::credentials::confidential_backend_available(
+            &self.storage.credentials,
+            &credentials_storage_path(),
+        )
+    }
+}
+
+/// Must durable session persistence be turned off because this host cannot
+/// protect it?
+///
+/// Pure and short-circuiting. `measure_availability` is the expensive,
+/// environment-reading probe; it is deliberately a closure so this predicate
+/// can be exercised exhaustively without one, and so the probe is NOT run in
+/// the two cases whose answer is already decided:
+///
+/// * sessions already off — nothing to disable;
+/// * `backend = "plaintext"` — the operator configured a backend that can never
+///   hold confidential material. That is their own choice and it must keep
+///   failing loudly at session open (`reject_backend_without_confidential_storage`),
+///   not be silently downgraded into a different mode of operation.
+#[must_use]
+fn durable_sessions_must_be_disabled(
+    session_enabled: bool,
+    backend: &crate::credentials::CredentialsBackend,
+    measure_availability: impl FnOnce() -> bool,
+) -> bool {
+    session_enabled && backend.supports_confidential_material() && !measure_availability()
+}
+
+/// Set when [`durable_sessions_must_be_disabled`] fired during resolution.
+static DURABLE_SESSIONS_DISABLED_BY_HOST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Were durable sessions turned off because this HOST cannot protect them, as
+/// opposed to the operator asking for them to be off?
+///
+/// `session.enabled == false` alone cannot answer that: the two causes are
+/// indistinguishable in the resolved value, and a status surface that reports
+/// "sessions off" for an operator who never asked is exactly as unhelpful as
+/// one that reports "Healthy" for a product that cannot answer.
+///
+/// Process-global on purpose. The answer is a property of the host — no OS
+/// keyring, no unlocked vault — not of one config value, so every `Config`
+/// resolved in this process reaches the same verdict. The surfaces that need
+/// to report it (channel health, `--doctor`, a protocol status frame) sit far
+/// from the resolution site and do not hold the `Config` that made the call;
+/// threading a field to all of them would mean changing `SessionConfig`'s
+/// shape, which every test that builds one by hand constructs literally.
+///
+/// Known limitation, stated rather than hidden: a library embedder that
+/// resolves two configs with different credential backends in one process gets
+/// one flag for both. That is acceptable while the flag reports a host fact.
+#[must_use]
+pub fn durable_sessions_disabled_by_host() -> bool {
+    DURABLE_SESSIONS_DISABLED_BY_HOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Both effects of the host-forced degrade, in one place so they cannot drift
+/// apart: record it for status surfaces, and tell the operator.
+fn record_durable_sessions_disabled_by_host() {
+    DURABLE_SESSIONS_DISABLED_BY_HOST.store(true, std::sync::atomic::Ordering::Relaxed);
+    warn_durable_sessions_disabled_once();
+}
+
+/// Tell the operator, exactly once per process, that durable sessions are off
+/// and why.
+///
+/// `Once`-guarded for the same reason [`crate::credentials`]'s isolated-profile
+/// warning is: config resolution runs more than once per launch (fallback
+/// providers each resolve), and a channel gateway resolves per process, not per
+/// turn. The whole point of moving this decision to startup is that the
+/// operator hears it ONCE, at a moment that is about configuration — not
+/// repeatedly, attached to a message they were trying to answer.
+fn warn_durable_sessions_disabled_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "notice: durable session persistence is OFF for this run. This host has no \
+             usable OS keyring and no unlocked credentials vault, and a durable session \
+             seals every provider request into its recovery journal, which cannot be done \
+             without one. Everything else works normally — prompts, channels, tools and \
+             replies — but conversation history is not saved to disk and an interrupted \
+             turn cannot be recovered. To turn durable sessions back on, unlock the \
+             encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file \
+             descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and \
+             silence the notice, set [session] enabled = false in config.toml."
+        );
+    });
 }
 
 /// Wave SD — path used by the plaintext credentials backend. Lives next
@@ -5012,6 +5134,109 @@ max_sessions = 20                # auto-cleanup oldest
 mod tests {
     use super::*;
     use wcore_types::model_aliases::OPENAI_GPT4O;
+
+    // -------------------------------------------------------------------------
+    // Headless keyring — the startup degrade rule
+    // -------------------------------------------------------------------------
+
+    /// Every combination, both directions, with the counts asserted.
+    ///
+    /// The rule has exactly two rows that disable and six that do not. Asserting
+    /// the counts as well as each row means a change that collapses the rule to
+    /// "always disable" or "never disable" — the two ways this could go wrong —
+    /// reds the gate even if someone also edits the row it broke.
+    #[test]
+    fn durable_sessions_are_disabled_only_when_this_host_cannot_protect_them() {
+        use crate::credentials::CredentialsBackend;
+
+        let cases = [
+            // (sessions on, backend, secure storage reachable, must disable)
+            //
+            // The defect: a headless server, default config, no keyring, no vault.
+            (true, CredentialsBackend::Auto, false, true),
+            (true, CredentialsBackend::Auto, true, false),
+            // An explicit keyring the host cannot reach is the same predicament.
+            (true, CredentialsBackend::Keyring, false, true),
+            (true, CredentialsBackend::Keyring, true, false),
+            // Plaintext is the operator's own choice and keeps its existing hard
+            // refusal at session open. Degrading it would hide a real
+            // misconfiguration behind a different mode of operation.
+            (true, CredentialsBackend::Plaintext, false, false),
+            (true, CredentialsBackend::Plaintext, true, false),
+            // Already off — nothing to disable, and nothing to announce.
+            (false, CredentialsBackend::Auto, false, false),
+            (false, CredentialsBackend::Auto, true, false),
+        ];
+
+        let mut disabled = 0usize;
+        let mut kept = 0usize;
+        for (enabled, backend, available, expected) in &cases {
+            let actual = durable_sessions_must_be_disabled(*enabled, backend, || *available);
+            assert_eq!(
+                actual, *expected,
+                "enabled={enabled} backend={backend:?} storage_available={available}"
+            );
+            if actual { disabled += 1 } else { kept += 1 }
+        }
+        assert_eq!(disabled, 2, "exactly two rows may disable durable sessions");
+        assert_eq!(kept, 6, "the other six must be left alone");
+        assert_eq!(disabled + kept, cases.len(), "every row must be graded");
+    }
+
+    /// The availability probe talks to the OS keyring, so it must not run in the
+    /// two cases whose answer is already decided. A closure that panics is the
+    /// only way to prove a short-circuit actually short-circuits — an
+    /// `assert_eq!` on the result passes whether or not the probe ran.
+    #[test]
+    fn the_availability_probe_is_not_measured_when_the_answer_is_already_known() {
+        use crate::credentials::CredentialsBackend;
+
+        fn never_measured() -> bool {
+            panic!("secure-storage availability must not be probed in this case");
+        }
+
+        assert!(!durable_sessions_must_be_disabled(
+            false,
+            &CredentialsBackend::Auto,
+            never_measured
+        ));
+        assert!(!durable_sessions_must_be_disabled(
+            true,
+            &CredentialsBackend::Plaintext,
+            never_measured
+        ));
+
+        // Control: the probe IS measured in the case that needs it. Without
+        // this, the two assertions above would also pass on a predicate that
+        // never measures anything at all.
+        let measured = std::cell::Cell::new(false);
+        let disable = durable_sessions_must_be_disabled(true, &CredentialsBackend::Auto, || {
+            measured.set(true);
+            false
+        });
+        assert!(disable, "the headless case must disable durable sessions");
+        assert!(measured.get(), "the probe must run in the undecided case");
+    }
+
+    /// `session.enabled == false` cannot tell a status surface WHY sessions are
+    /// off, and the two causes need opposite reporting: an operator who asked
+    /// for it wants silence, an operator whose host forced it wants to know.
+    /// This is the seam `channel health` / `--doctor` read.
+    ///
+    /// The assertion is on the TRANSITION, not on an absolute initial value:
+    /// any earlier `Config::resolve` in the same test binary could legitimately
+    /// have set the flag already on a keyring-less machine, and a test that
+    /// depended on that would be order-dependent and flaky rather than wrong.
+    #[test]
+    fn a_host_forced_degrade_is_reportable_afterwards() {
+        record_durable_sessions_disabled_by_host();
+        assert!(
+            durable_sessions_disabled_by_host(),
+            "recording a host-forced degrade must make it readable by a status \
+             surface; otherwise the only trace of it is a stderr line that has \
+             already scrolled away"
+        );
+    }
 
     // -------------------------------------------------------------------------
     // #111 — per-assistant MCP scoping

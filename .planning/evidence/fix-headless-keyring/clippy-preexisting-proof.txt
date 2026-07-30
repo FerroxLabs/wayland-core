@@ -1,0 +1,22 @@
+PRE-EXISTENCE PROOF for every file the -D warnings clippy gate reds on.
+Method: sha256 of the file blob at the integration base vs at my HEAD.
+
+crates/wcore-cron/tests/single_owner.rs
+  base=b16aa611018f6fc020490d1524eca23303fdb2e858819c9e4185afc652a1652d
+  head=b16aa611018f6fc020490d1524eca23303fdb2e858819c9e4185afc652a1652d
+  => IDENTICAL - not touched by this lane
+crates/wcore-agent/tests/cache_ledger_engine_test.rs
+  base=5635034052ce3ca8456d43fcc3cb3a61fa8848418d42073ecc407d240d178168
+  head=5635034052ce3ca8456d43fcc3cb3a61fa8848418d42073ecc407d240d178168
+  => IDENTICAL - not touched by this lane
+crates/wcore-agent/tests/user_model_identity_wire.rs
+  base=03ba694d77e2b7ab6835094b9f377648f5ef3b13ddccae990f677ac36573919a
+  head=03ba694d77e2b7ab6835094b9f377648f5ef3b13ddccae990f677ac36573919a
+  => IDENTICAL - not touched by this lane
+
+CONTROL - the same comparison on the four files this lane DID change.
+If these came back IDENTICAL the comparison above would be meaningless.
+crates/wcore-config/src/config.rs => DIFFERS (control OK)
+crates/wcore-config/src/credentials.rs => DIFFERS (control OK)
+crates/wcore-agent/src/engine.rs => DIFFERS (control OK)
+crates/wcore-agent/tests/headless_durable_session_test.rs => NEW IN THIS LANE (absent at base: ABSENT)
