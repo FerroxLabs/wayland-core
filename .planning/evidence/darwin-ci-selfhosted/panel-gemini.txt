@@ -1,0 +1,12 @@
+[ijfw] Memory loaded (0 things remembered)
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+PANEL_POSITION=D
+
+**Strongest Reason:**
+It is the only option that strictly satisfies the constraints (zero-Node default, no mandatory dependency, opt-in) while completely isolating the Rust project from severe repository bloat (122 MB of JS dependencies) and the legal/maintenance overhead of redistributing third-party MIT/Apache-2.0 JS licenses within a standalone Rust CLI release.
+
+**Strongest Argument Against:**
+It degrades the user experience for those who *do* want the alternative backends, shifting the entire burden of environment provisioning (installing Node, downloading the bridge, managing JS dependencies, and configuring paths) onto the operator rather than providing a seamless "just works" integration.
+Hook system message: [ijfw] Session 14 complete (0 memory entries).

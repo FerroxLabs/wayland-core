@@ -150,6 +150,45 @@ to `clean: true` (`ci.yml:1043-1052`), which the previous lane kept deliberately
 follow-up #4: *"Revisit `clean: false` if build latency ever matters more than inter-branch
 isolation."* **Latency now demonstrably matters.**
 
+## T6 — cross-audit panel (LANE-BRIEF §4)
+
+Question put to all four: at 84.8% duty, is the right call (A) move the Intel job on as briefed,
+(B) move nothing and report saturation, or (C) leave the job set alone but cut per-job cost with a
+persistent `CARGO_TARGET_DIR` outside the cleaned workspace?
+
+| auditor | vote | core argument |
+|---|---|---|
+| codex gpt-5.6-sol | **B** | adding a redundant 16-min job at 84.8% is indefensible; a shared target dir "weakens clean-build confidence" for *release artifacts* — use caching only with explicit keys, isolation, validation, eviction |
+| gemini 3.1-pro | **B** | at 85% utilisation queue waits grow exponentially; persistent unpruned target dir → cache thrash, disk exhaustion on a laptop, incremental-compile correctness risk |
+| kimi K3 | **C** | "B is a shrug — saturation is the symptom, cold builds are the cause"; cargo fingerprinting is robust, hazards are disk growth + stale artifacts, mitigable |
+| internal adversarial (vs. consensus) | argues **C** | doing nothing leaves lanes waiting 85-151 min for the one job that matters; C is the only lever that touches the actual cost driver |
+
+Vote 2-1 for B (A got zero votes). Extraction notes: codex repeats its final block — took the LAST
+match; gemini needed `--skip-trust`; kimi bullet-prefixes and indents, so the vote was extracted
+UNANCHORED (an anchored `^[ABC]$` would have dropped it — the vote sits at `  • C`).
+
+**I take the majority, and here is why the minority does NOT carry stronger evidence — which is
+the test LANE-BRIEF §4 sets.** Kimi's case for C rests on "cargo's fingerprinting is robust;
+persistent target dir is standard practice". That is true as general practice and **this
+repository has measured counterexamples to it**:
+
+- LANE-BRIEF documents `wcore-protocol` baking `CARGO_MANIFEST_DIR` into its output via
+  `source_digest()`, where a shared target dir produced ENOENT surfacing "as unrelated test
+  failures in files you never touched" — a lane nearly reported a false regression from it.
+- `ci.yml:182` carries a step literally named "Clear stale install-action state (Windows flake
+  mitigation)" — a recurring red caused by *this project's other* self-hosted runner leaving
+  state behind between jobs.
+
+So the generic safety premise C depends on is one this repo has already been bitten by twice.
+And the decisive point: **C changes the provenance of the artifact every other lane live-tests
+with.** I cannot prove C safe inside this lane — doing so needs repeated warm builds across
+several lane branches on a runner that is already at 84.8%, and shipping it unproven would be
+exactly the "report a YAML edit as a working change" the brief forbids.
+
+**DECISION: B.** No job is moved onto `sean-mac-arm64`. C is recorded as the costed,
+evidence-backed follow-up with the panel's named mitigations (per-triple dir, pruning, artifact
+provenance check), not taken here.
+
 ## Open questions this lane must still answer
 
 1. Real duty cycle of runner 34 over the window since the job landed — not the 7.2 pushes/hr
