@@ -254,6 +254,133 @@ pub async fn send_reaction(
     }
 }
 
+/// The body of an `m.replace` edit event.
+///
+/// Matrix has no "update this event" verb. An edit is a **new event** that
+/// declares itself a replacement of an older one, and clients render the
+/// replacement in place. That shape has two consequences this adapter must
+/// honour and neither is optional:
+///
+/// - The **fallback** `body` is conventionally prefixed `* ` so a client too old
+///   to understand `m.replace` shows something intelligible rather than a
+///   duplicate. Omitting it makes an edit look like a second message on old
+///   clients — a silent duplicate, which is the failure mode this phase spends
+///   most of its effort on.
+/// - The authoritative new text lives in `m.new_content`. A client that
+///   understands the relation reads that and ignores the fallback.
+#[derive(Serialize)]
+struct EditMessageBody<'a> {
+    msgtype: &'a str,
+    /// Fallback rendering for clients that do not understand `m.replace`.
+    body: String,
+    #[serde(rename = "m.new_content")]
+    new_content: TextMessageBody<'a>,
+    #[serde(rename = "m.relates_to")]
+    relates_to: ReplaceRelation<'a>,
+}
+
+#[derive(Serialize)]
+struct ReplaceRelation<'a> {
+    rel_type: &'a str,
+    event_id: &'a str,
+}
+
+/// Edit `event_id` in `room_id` by sending an `m.replace` relation.
+///
+/// Returns the **new** event's id — the id of the replacement event, not of the
+/// original. Matrix genuinely has two ids here and collapsing them would be a
+/// lie: the original still exists and is still addressable, and a caller that
+/// wants to edit again must relate to the ORIGINAL, not to the replacement.
+/// The caller therefore keeps the original id; this receipt records what was
+/// created.
+pub async fn edit_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    access_token: &str,
+    room_id: &str,
+    event_id: &str,
+    new_text: &str,
+) -> Result<String, MatrixError> {
+    let txn_id = next_unkeyed_txn_id();
+    let encoded_room = urlencoding::encode(room_id);
+    let url =
+        format!("{api_base}/_matrix/client/v3/rooms/{encoded_room}/send/m.room.message/{txn_id}");
+
+    let payload = EditMessageBody {
+        msgtype: "m.text",
+        body: format!("* {new_text}"),
+        new_content: TextMessageBody {
+            msgtype: "m.text",
+            body: new_text,
+        },
+        relates_to: ReplaceRelation {
+            rel_type: "m.replace",
+            event_id,
+        },
+    };
+
+    let resp = http
+        .put(&url)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| MatrixError::Network(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(MatrixError::Http { status, body: text });
+    }
+    let result: SendEventResponse = resp
+        .json()
+        .await
+        .map_err(|e| MatrixError::Parse(e.to_string()))?;
+    Ok(result.event_id)
+}
+
+/// Redact `event_id` in `room_id`:
+/// `PUT /_matrix/client/v3/rooms/{room}/redact/{eventId}/{txnId}`.
+///
+/// Redaction is Matrix's delete. It strips the event's content server-side and
+/// federates the removal; the event stub remains in the timeline by design.
+/// This adapter does not pretend otherwise — the operation reports success when
+/// the homeserver accepted the redaction, which is the strongest guarantee the
+/// protocol offers.
+pub async fn redact_event(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    access_token: &str,
+    room_id: &str,
+    event_id: &str,
+) -> Result<String, MatrixError> {
+    let txn_id = next_unkeyed_txn_id();
+    let encoded_room = urlencoding::encode(room_id);
+    let encoded_event = urlencoding::encode(event_id);
+    let url = format!(
+        "{api_base}/_matrix/client/v3/rooms/{encoded_room}/redact/{encoded_event}/{txn_id}"
+    );
+
+    let resp = http
+        .put(&url)
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| MatrixError::Network(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(MatrixError::Http { status, body: text });
+    }
+    let result: SendEventResponse = resp
+        .json()
+        .await
+        .map_err(|e| MatrixError::Parse(e.to_string()))?;
+    Ok(result.event_id)
+}
+
 /// Split an `mxc://server/mediaId` URI into `(server, mediaId)`.
 fn parse_mxc(mxc: &str) -> Result<(&str, &str), MatrixError> {
     let rest = mxc
