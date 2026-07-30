@@ -1,0 +1,6 @@
+cache_tier.rs vs agent/prompt_caching.py: |A|=20 |B|=6 shared=2 jaccard=0.0833 containment=0.1
+    'cache_control'
+    'ephemeral'
+
+cache_tier.rs vs agent/conversation_loop.py: |A|=20 |B|=761 shared=0 jaccard=0.0 containment=0.0
+

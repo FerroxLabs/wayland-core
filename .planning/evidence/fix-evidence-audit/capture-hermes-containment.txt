@@ -1,0 +1,18 @@
+=== CONTAINMENT extension: |A n B| / |A|  (Jaccard under-reads when |B| >> |A|) ===
+site                       |A|   |B|  shared  jaccard  containment
+-- ATTRIBUTED --
+todo.rs                     57    53      25   0.2941       0.4386
+yuanbao_tools.rs           171   158      65   0.2462       0.3801
+discord_tool.rs            158   249      87   0.2719       0.5506
+send_message.rs             81   302      33   0.0943       0.4074
+session_search.rs           46   222      15   0.0593       0.3261
+homeassistant_tool.rs      128   143      49   0.2207       0.3828
+transcription_tools.rs     112   334       5   0.0113       0.0446
+vision_tools.rs            173   286      22   0.0503       0.1272
+-- NEGATIVE CONTROLS (no attribution, same language pair) --
+cooldown.rs                  7    53       0   0.0000       0.0000
+chunk.rs                    11   302       0   0.0000       0.0000
+glob.rs                     63   222       5   0.0179       0.0794
+markdown_tool.rs            56   286       7   0.0209       0.1250
+read.rs                    129   249       7   0.0189       0.0543
+grep.rs                     54   143       5   0.0260       0.0926
