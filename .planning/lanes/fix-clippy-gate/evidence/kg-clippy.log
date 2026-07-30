@@ -1,0 +1,219 @@
+   Compiling aws-lc-rs v1.17.0
+    Checking aws-lc-sys v0.41.0
+   Compiling rustls v0.23.40
+    Checking cranelift-frontend v0.123.12
+    Checking cranelift-native v0.123.12
+    Checking wasmtime-internal-unwinder v36.0.12
+    Checking utoipa v5.5.0
+    Checking tui-input v0.15.3
+    Checking wit-parser v0.225.0
+    Checking wcore-cron v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cron)
+    Checking wcore-protocol v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-protocol)
+    Checking wcore-plugin-api v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-plugin-api)
+    Checking wasmtime-internal-cranelift v36.0.12
+error: spawned process is not `wait()`ed on in all code paths
+   --> crates/wcore-cron/tests/single_owner.rs:505:17
+    |
+505 |       let child = std::process::Command::new(std::env::current_exe().unwrap())
+    |  _________________^
+506 | |         .args(["--exact", "cross_process_lease_worker", "--nocapture"])
+507 | |         .env(CHILD_DIR_ENV, dir)
+508 | |         .env(CHILD_OUT_ENV, out)
+...   |
+511 | |         .spawn()
+512 | |         .expect("re-executing the test binary as a child must succeed");
+    | |_______________________________________________________________________^
+    |
+note: this if expression has a `wait()` call, but it is missing an else block
+   --> crates/wcore-cron/tests/single_owner.rs:515:13
+    |
+515 | /             if text.starts_with("STARTED") {
+516 | |                 return child;
+517 | |             }
+    | |_____________^
+note: `wait()` called here
+   --> crates/wcore-cron/tests/single_owner.rs:516:24
+    |
+516 |                 return child;
+    |                        ^^^^^
+    = help: consider calling `.wait()` in all code paths
+    = note: not doing so might leave behind zombie processes
+    = note: see https://doc.rust-lang.org/stable/std/process/struct.Child.html#warning
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#zombie_processes
+    = note: `-D clippy::zombie-processes` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::zombie_processes)]`
+
+error: this `if` statement can be collapsed
+   --> crates/wcore-cron/tests/single_owner.rs:514:9
+    |
+514 | /         if let Ok(text) = std::fs::read_to_string(out) {
+515 | |             if text.starts_with("STARTED") {
+516 | |                 return child;
+517 | |             }
+518 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+514 ~         if let Ok(text) = std::fs::read_to_string(out)
+515 ~             && text.starts_with("STARTED") {
+516 |                 return child;
+517 ~             }
+    |
+
+error: could not compile `wcore-cron` (test "single_owner") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+    Checking wcore-dispatch v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-dispatch)
+    Checking wcore-pluginsrc v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-pluginsrc)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-agents-pack)
+    Checking wayland-ijfw v0.12.25 (/root/wayland-fix-clippy-gate/crates/wayland-ijfw)
+    Checking wayland-browser v0.12.25 (/root/wayland-fix-clippy-gate/crates/wayland-browser)
+    Checking wayland-cua v0.12.25 (/root/wayland-fix-clippy-gate/crates/wayland-cua)
+    Checking wcore-permissions v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-permissions)
+    Checking wcore-repomap v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-repomap)
+    Checking rustls-webpki v0.103.13
+    Checking jsonwebtoken v10.3.0
+    Checking wcore-sandbox v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-sandbox)
+    Checking wasmtime v36.0.12
+    Checking wcore-safety v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-safety)
+    Checking wcore-budget v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-budget)
+    Checking wcore-compact v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-compact)
+    Checking wcore-fixture-harness v0.1.0 (/root/wayland-fix-clippy-gate/crates/wcore-fixture-harness)
+    Checking wcore-user-model v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-user-model)
+    Checking wcore-channel-imessage v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-imessage)
+    Checking wcore-types v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-types)
+    Checking workspace-hack v0.1.0 (/root/wayland-fix-clippy-gate/workspace-hack)
+    Checking tokio-rustls v0.26.4
+    Checking tungstenite v0.24.0
+    Checking hyper-rustls v0.27.9
+    Checking lettre v0.11.22
+    Checking tokio-postgres-rustls v0.13.0
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking tokio-tungstenite v0.24.0
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-egress)
+    Checking wayland-honcho v0.12.25 (/root/wayland-fix-clippy-gate/crates/wayland-honcho)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-honcho-adapter)
+    Checking wasmtime-wasi-io v36.0.12
+    Checking aws-runtime v1.7.3
+    Checking wasmtime-wasi v36.0.12
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-sso v1.98.0
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-pricing)
+    Checking wcore-eval-scenarios v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-eval-scenarios)
+    Checking wcore-exec-backend v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-exec-backend)
+    Checking wcore-acp v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-acp)
+    Checking wcore-gateway v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-gateway)
+    Checking wcore-replay v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-replay)
+    Checking wcore-memory v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-providers)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-email)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-sms)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-whatsapp)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-discord)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-slack)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-telegram)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-matrix)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-msteams)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channel-signal)
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-plugin-wasm)
+    Checking wcore-tools v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-swarm)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-channels-registry)
+error: function `record_overwrites_so_the_surface_describes_the_LATEST_turn` should have a snake case name
+   --> crates/wcore-memory/src/activation.rs:198:8
+    |
+198 |     fn record_overwrites_so_the_surface_describes_the_LATEST_turn() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `record_overwrites_so_the_surface_describes_the_latest_turn`
+    |
+    = note: `-D non-snake-case` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(non_snake_case)]`
+
+error: could not compile `wcore-memory` (lib test) due to 1 previous error
+    Checking wayland-ollama v0.12.25 (/root/wayland-fix-clippy-gate/crates/wayland-ollama)
+    Checking wcore-mcp v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-mcp)
+    Checking wcore-cua v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cua)
+    Checking wcore-browser v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-browser)
+    Checking wcore-skills v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-plugin-subprocess)
+error: this `if` statement can be collapsed
+   --> crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:99:13
+    |
+ 99 | /             if let Some(pp) = ppid_of(p) {
+100 | |                 if tree.contains(&pp) && alive(p) {
+101 | |                     tree.push(p);
+102 | |                 }
+103 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+ 99 ~             if let Some(pp) = ppid_of(p)
+100 ~                 && tree.contains(&pp) && alive(p) {
+101 |                     tree.push(p);
+102 ~                 }
+    |
+
+error: could not compile `wcore-browser` (test "process_count_reaper_baseline_test") due to 1 previous error
+    Checking wcore-eval v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-agent)
+    Checking wcore-cli v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cli)
+error: struct update has no effect, all the fields in the struct have already been specified
+  --> crates/wcore-agent/tests/cache_ledger_engine_test.rs:82:11
+   |
+82 |         ..Default::default()
+   |           ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_update
+   = note: `-D clippy::needless-update` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: could not compile `wcore-agent` (test "cache_ledger_engine_test") due to 1 previous error
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:229:40
+    |
+229 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+    = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:337:40
+    |
+337 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:396:40
+    |
+396 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:472:40
+    |
+472 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: could not compile `wcore-agent` (test "user_model_identity_wire") due to 4 previous errors
