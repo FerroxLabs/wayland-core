@@ -97,11 +97,39 @@ not a build-container choice, so it is out of scope for this lane and recorded a
 - Add a CI gate that reads each Linux artifact's max `GLIBC_*` and fails if it exceeds a declared
   per-target floor, proven in BOTH directions.
 
+## MEASUREMENT 3 — floors, built on hetzner, same instrument each time
+
+Every build is `cargo build --release --target <triple> -p wcore-cli`, rust 1.95.0, differing
+ONLY by container image. Measurements written to a file on the host and read with the Read tool,
+never through a shell pipeline (§3b).
+
+| Build | Image | Target | MAX GLIBC | `NEEDED` openssl |
+|---|---|---|---|---|
+| baseline | `ubuntu:24.04` | x86_64 | **2.39** | `libssl.so.3` |
+| baseline | `ubuntu:24.04` multiarch | aarch64 | **2.39** | `libssl.so.3` |
+| candidate | `almalinux:9` | x86_64 | **2.34** | `libssl.so.3` |
+
+Build cost: 6m14s (baseline x86_64) vs 6m06s (almalinux:9 x86_64) — the container change is
+**cost-neutral**, and it removes `cargo install cross --git` (a from-source install) from the
+aarch64 leg.
+
+### The lexicographic bug, caught in real data rather than only in the self-test
+
+The `almalinux:9` binary's true max is `GLIBC_2.34`. A plain `sort -u | tail -1` over the same
+symbol list returns **`GLIBC_2.9`**, because "9" sorts above "3" as text. So the natural one-line
+floor check would have reported this binary as needing 2.9 and would have passed *any* floor. The
+gate compares integer tuples and its self-test asserts this exact divergence.
+
+Note the baseline aarch64 binary's lexicographic max happens to be correct (2.39), because its
+symbol set contains no `2.9`. That is why the bug survives casual testing: it is data-dependent.
+
 ## Status
 
 - [x] Read LANE-BRIEF, MILESTONE-SHIP, release.yml, Cross.toml
 - [x] P1 verified from source
 - [x] P2/P3 measured; P3 refuted my own counter-hypothesis
 - [x] OpenSSL 3 ABI constraint discovered — inverts the brief's option ranking
-- [ ] New floor measured for both targets
-- [ ] CI gate added, proven in both directions
+- [x] x86_64 floor lowered 2.39 → 2.34 and measured
+- [x] Gate written, self-test 4/4, integrated into release.yml
+- [ ] aarch64 candidate built via the CHECKED-IN script and measured
+- [ ] Live executability matrix (both directions) on real distros

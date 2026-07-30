@@ -1,0 +1,16 @@
+=== container distro ===
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+=== host(amd64) glibc ===
+ldd (Ubuntu GLIBC 2.39-0ubuntu8.7) 2.39
+=== aarch64 cross gcc ===
+aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+=== locate aarch64 libc.so.6 ===
+/usr/aarch64-linux-gnu/lib/libc.so.6
+=== sysroot libc version strings ===
+--- /usr/aarch64-linux-gnu/lib/libc.so.6
+GLIBC_2.36
+GLIBC_2.38
+GLIBC_2.39
+GNU C Library (Ubuntu GLIBC 2.39-0ubuntu8) stable release version 2.39.
