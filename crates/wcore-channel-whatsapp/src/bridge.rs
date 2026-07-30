@@ -406,12 +406,16 @@ struct InboundMessageParams {
 }
 
 /// `connection.status` notification params.
+///
+/// The bridge also puts a `backend` field here, deliberately not decoded: the
+/// authoritative backend read-back is the `health` handshake in
+/// [`BridgeSession::over`], which happens once and REFUSES the session on a
+/// mismatch. A second, advisory copy of the same fact arriving on every status
+/// change would be a check nobody acts on.
 #[derive(Debug, Clone, Deserialize)]
 struct ConnectionStatusParams {
     #[serde(default)]
     state: Option<String>,
-    #[serde(default)]
-    backend: Option<String>,
 }
 
 /// The `health` reply. The `backend` field is the whole point — it is what the
@@ -806,10 +810,7 @@ async fn dispatch_line(line: &str, inbox: &Inbox, pending: &Pending) {
         },
         "connection.status" => {
             let p: ConnectionStatusParams =
-                serde_json::from_value(params).unwrap_or(ConnectionStatusParams {
-                    state: None,
-                    backend: None,
-                });
+                serde_json::from_value(params).unwrap_or(ConnectionStatusParams { state: None });
             let state = p.state.unwrap_or_default();
             let mut guard = inbox.lock().await;
             match state.as_str() {
@@ -1636,7 +1637,9 @@ bridge_path = "/nonexistent/bridge.js"
         // fall-back-to-baileys from silently applying to a typo'd config.
         let (wire, _peer) = scripted_peer("baileys").await;
         let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
-        let err = BridgeSession::over(
+        // `BridgeSession` owns a child process handle and is deliberately not
+        // `Debug`, so unwrap the Result by hand rather than via `expect_err`.
+        let err = match BridgeSession::over(
             wire,
             inbox,
             WhatsappBackend::WhatsappWeb,
@@ -1644,7 +1647,13 @@ bridge_path = "/nonexistent/bridge.js"
             Duration::from_secs(5),
         )
         .await
-        .expect_err("a mismatched backend must be refused");
+        {
+            Ok(session) => {
+                session.close().await;
+                panic!("a mismatched backend must be refused, but a session was opened");
+            }
+            Err(e) => e,
+        };
 
         match err {
             BridgeError::BackendMismatch { want, got } => {
