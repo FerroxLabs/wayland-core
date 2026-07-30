@@ -24,7 +24,7 @@ off instruments that could never pass.
 | `22-C4` | **PARTIAL** | One measurement moved; the gap did not. |
 | `22-C5` | **PARTIAL** | The row is accurate as written. |
 | `23A-C1` | **MET** (shipped surface) ↑↑ | **Moved further than any other row — both its earlier texts are now false. No longer release-blocking.** |
-| `24-C1` | **PARTIAL** ↑ | The platform half is closed; the conjunction *"no delivery lost **and** none duplicated"* is not — no-loss still fails on 9 of 10 adapters. |
+| `24-C1` | **PARTIAL** ↑ | The platform half is closed; the conjunction *"no delivery lost **and** none duplicated"* is not — no-loss fails on **7** of 10 adapters (this row said 9; corrected 2026-07-30 by `lane/24c1-declaration`, re-verified by `lane/24c3-channels`). Exactly-once is 3 of 10 — Slack, Matrix, Discord — and is now **declared** in `docs/delivery-semantics.md` with a per-cell citation and a drift test that fails the build if the doc and the code disagree. **Exactly-once is scoped to a delivery id, not a message**, so `F24-GWP-H1` (a second scheduler firing mints a fresh id) defeats it on **all three**, not a subset. |
 | `24-C2` | **PARTIAL** | Grade unchanged, **but the sentence that made this the ledger's number-one release blocker is no longer true** — §3 item 1 must be re-ranked. |
 | `24-C3` | **NOT MET** | Work landed, **the implementing lane declines to claim the criterion**, and a new HIGH is open and unfixed. |
 | `24-C4` | **MET-WITH-STATED-EXCEPTIONS** ↑ | Was "MET on Linux / HTTP+SSE only"; the exceptions are now stated rather than embedded in the grade. |
