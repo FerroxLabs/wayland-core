@@ -23,7 +23,12 @@
 # is not dirty after the flip. A control that cannot be shown to have been
 # applied is not a control.
 
-$ErrorActionPreference = 'Stop'
+# 'Continue', NOT 'Stop'. Run 2 of this script used 'Stop' and died on cargo's
+# `warning: unused import: Component` on stderr, because PowerShell surfaces a
+# native command's stderr as an error record. The correct shape is Continue plus
+# EXPLICIT guards - `throw` and `exit 1` terminate regardless of this preference,
+# so the hard aborts below still hold.
+$ErrorActionPreference = 'Continue'
 $repo = "D:\wls\repo"
 $out  = "D:\wls\out"
 $env:CARGO_TARGET_DIR = "D:\wls\target"

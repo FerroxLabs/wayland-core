@@ -1,0 +1,16 @@
+LEG=phase22-M-legs-negative-controls
+HOST=SEANDESKTOP
+UTC=2026-07-30T02:15:08.6603273Z
+SHA=dedfedc1f56f60c2aa4063e43a23e7835f77b8a4
+M5_STUB_MARKER_HITS=1
+M5_STUBBED=verdict=FAILED passed=0 failed=1 ignored=0 filtered_out=43
+M5_SAME_BUILD_NOENV=verdict=ok passed=1 failed=0 ignored=0 filtered_out=43
+M5_MARKER_AFTER_RESTORE=0
+M1_CORPUS_BYTES=84327
+M1_FLIPPED_INDEX=0
+M1_CORPUS_DIRTY_AFTER_FLIP=0
+M1_CORRUPTED=verdict=ok passed=2 failed=0 ignored=0 filtered_out=0
+M1_CORPUS_DIRTY_AFTER_RESTORE=0
+M1_RESTORED=verdict=ok passed=2 failed=0 ignored=0 filtered_out=0
+TREE_DIRTY_AT_END=0
+WLDONE
