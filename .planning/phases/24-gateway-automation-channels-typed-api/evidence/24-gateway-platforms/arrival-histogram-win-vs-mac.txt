@@ -1,0 +1,8 @@
+=== windows total_arrival_lines= 27
+   distinct keys= 13
+   arrivals-per-key histogram= {3: 1, 2: 12}
+   sample keys= [('f24j-heartbeat', 3), ('f24j-delivery-01', 2), ('f24j-delivery-02', 2), ('f24j-delivery-03', 2)]
+=== macos total_arrival_lines= 13
+   distinct keys= 13
+   arrivals-per-key histogram= {1: 13}
+   sample keys= [('f24j-heartbeat', 1), ('f24j-delivery-01', 1), ('f24j-delivery-02', 1), ('f24j-delivery-03', 1)]

@@ -1,0 +1,12 @@
+=== VERIFY linux (expected PASS) ===
+JOURNEY VERIFIED platform=linux commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+verify_rc=0
+=== FAIL-DIRECTION 1: wrong platform (expected rc!=0) ===
+wrongplat_rc=1
+=== FAIL-DIRECTION 2: wrong commit (expected rc!=0) ===
+wrongcommit_rc=1
+=== FAIL-DIRECTION 3: tampered binary, one byte appended (expected rc!=0) ===
+wayland-journey: receipt records platform "linux", expected "macos"
+wayland-journey: receipt records candidate commit "7c61079842346988f6d19d399b7d92b672dec680", expected "978f49d778ce74cd5777d153866d734b16bbf705"
+tampered_rc=1
+wayland-journey: binary digest mismatch: receipt records b3190b19ff6012cf6c68dca298753b021d02b4bc2dd6670135a93fc482a62385, verifier computed 875f472b3ccbdaf7e4c9e293f399b2f750768eb8ae99a05c6131b7c5ff0fb30b

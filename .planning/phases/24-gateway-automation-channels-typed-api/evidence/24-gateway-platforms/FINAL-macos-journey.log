@@ -1,0 +1,19 @@
+[1/17] preflight-clean OK
+[2/17] binary-identity OK
+[3/17] profile-setup OK
+[4/17] sink-start OK
+[5/17] gateway-install OK
+[6/17] gateway-start OK
+[7/17] status-running OK
+[8/17] automation-add OK
+[9/17] deliveries-submit OK
+[10/17] arrival-before-kill OK
+[11/17] hard-kill OK
+[12/17] platform-recover OK
+[13/17] delivery-reconcile OK
+[14/17] upgrade-in-place OK
+[15/17] rollback OK
+[16/17] redaction-canary OK
+[17/17] drain-uninstall-clean OK
+JOURNEY COMPLETE platform=macos receipt=/tmp/lane-gateway-platforms-run/macos2/macos-receipt.json
+MACRC=0

@@ -1,0 +1,6 @@
+f4fd1b52 ancestor_of_HEAD=NO has_978f49d7=YES :: 2026-07-30 docs(ledger): use the re-derived byte count for media_cost.rs
+96eb0500 ancestor_of_HEAD=NO has_978f49d7=YES :: 2026-07-30 notes(27-C2c): premise check — hetzner HAS Xvfb+XTest; the blocker is a browser binary, not a display
+726cd400 ancestor_of_HEAD=NO has_978f49d7=YES :: 2026-07-30 docs(release-rank): open investigation notes for the RC blocker re-rank
+78cce3ec ancestor_of_HEAD=YES has_978f49d7=YES :: 2026-07-30 docs(22-c3-terminal): lane summary — the bypass that was still representable
+7c610798 ancestor_of_HEAD=YES has_978f49d7=YES :: 2026-07-30 notes(cli-danger-tiers): measured base semantics of all five danger spellings
+da8e46b5 ancestor_of_HEAD=YES has_978f49d7=YES :: 2026-07-30 test(egress): measure whether an untrusted project config can disable the egress gate

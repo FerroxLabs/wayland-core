@@ -1,0 +1,149 @@
+{
+  "schema": "wayland.journey.receipt/1",
+  "platform": "macos",
+  "service_family": "launchd",
+  "candidate_commit": "7c61079842346988f6d19d399b7d92b672dec680",
+  "binary_version": "wayland-core 0.12.25",
+  "binary_sha256": "11e14834540ab11998d04d52a6c31bb3d0ba7f7f1345a2755d832eda22a33a44",
+  "driver_commit": "3dcda272cf31f8844f4b757954037d9abb95bcaa",
+  "started_at": "2026-07-30T01:54:20.965Z",
+  "finished_at": "2026-07-30T01:55:32.725Z",
+  "arrival_source": "independent-sink",
+  "counts": {
+    "submitted": 12,
+    "arrived": 12,
+    "unique": 12,
+    "duplicates": 0,
+    "losses": 0
+  },
+  "adapter_coverage": {
+    "registered_total": 10,
+    "exercised": [
+      {
+        "adapter": "slack",
+        "endpoint": "chat.postMessage",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      },
+      {
+        "adapter": "whatsapp",
+        "endpoint": "whatsapp.messages",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      },
+      {
+        "adapter": "sms",
+        "endpoint": "twilio.messages",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "preflight-clean",
+      "command": "launchctl list wayland-core-gateway-f24j",
+      "output": "residual_query_status=113\nCould not find service \"wayland-core-gateway-f24j\" in domain for port\n\ngateway_state=\"uninstalled\"",
+      "ok": true
+    },
+    {
+      "name": "binary-identity",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core --build-info",
+      "output": "wayland-core 0.12.25 (source 7c61079842346988f6d19d399b7d92b672dec680)\nsha256=11e14834540ab11998d04d52a6c31bb3d0ba7f7f1345a2755d832eda22a33a44\npath=/tmp/lane-gateway-platforms-art/mac/wayland-core",
+      "ok": true
+    },
+    {
+      "name": "profile-setup",
+      "command": "write /tmp/lane-gateway-platforms-run/macos/macos-home/credentials.toml + channels/f24jsink.toml (synthetic credentials)",
+      "output": "home=/tmp/lane-gateway-platforms-run/macos/macos-home\nprofile=f24j\ncredentials_mode=0600\ncanary_bytes=49\nseeded_bot_token=xoxb-f24j-WLJ-CANARY-macos-176628d081a27686c48d564c1a66db42",
+      "ok": true
+    },
+    {
+      "name": "sink-start",
+      "command": "/Users/seandonahoe/.nvm/versions/node/v22.23.1/bin/node scripts/f24-sink.mjs --journal /tmp/lane-gateway-platforms-run/macos/macos-arrivals.jsonl",
+      "output": "SINK_READY url=http://127.0.0.1:60372 journal=/tmp/lane-gateway-platforms-run/macos/macos-arrivals.jsonl\nsink_pid=50831\nhealth={\"ok\":true,\"arrivals\":0}",
+      "ok": true
+    },
+    {
+      "name": "gateway-install",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway install --profile f24j",
+      "output": "wrote unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway installed (launchd): wayland-core-gateway-f24j\n  home:    /private/tmp/lane-gateway-platforms-run/macos/macos-home\n  binary:  /tmp/lane-gateway-platforms-art/mac/wayland-core\n$ launchctl list wayland-core-gateway-f24j\nregistration_status=0\n{\n\t\"StandardOutPath\" = \"/private/tmp/lane-gateway-platforms-run/macos/macos-home/gateway.log\";\n\t\"LimitLoadToSessionType\" = \"Aqua\";\n\t\"StandardErrorPath\" = \"/private/tmp/lane-gateway-platforms-run/macos/macos-home/gateway.log\";\n\t\"Label\" = \"wayland-core-gateway-f24j\";\n\t\"OnDemand\" = false;\n\t\"LastExitStatus\" = 0;\n\t\"PID\" = 50849;\n\t\"Program\" = \"/tmp/lane-gateway-platforms-art/mac/wayland-core\";\n\t\"ProgramArguments\" = (\n\t\t\"/tmp/lane-gateway-platforms-art/mac/wayland-core\";\n\t\t\"gateway\";\n\t\t\"run\";\n\t\t\"--profile\";\n\t\t\"f24j\";\n\t);\n};",
+      "ok": true
+    },
+    {
+      "name": "gateway-start",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway start --profile f24j",
+      "output": "gateway start requested (launchd)",
+      "ok": true
+    },
+    {
+      "name": "status-running",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway status --profile f24j --json",
+      "output": "{\n  \"state\": \"running\",\n  \"pid\": 50849,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/lane-gateway-platforms-art/mac/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}\nliveness_probe=kill -0 50849 -> alive",
+      "ok": true
+    },
+    {
+      "name": "automation-add",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core cron add --trigger every:15 --channel f24jsink --text f24j-heartbeat ; /tmp/lane-gateway-platforms-art/mac/wayland-core cron add --trigger \"cron:0 9 * * *\" --channel f24jsink --text f24j-daily",
+      "output": "next[0]: 2026-07-30T01:55:22.429255+00:00\nnext[1]: 2026-07-30T01:56:22.429255+00:00\nnext[2]: 2026-07-30T01:57:22.429255+00:00\nadded 1c599c57-b402-477b-b56a-99df8e8e9e0e\nnext[0]: 2026-07-30T09:00:00+00:00\nnext[1]: 2026-07-31T09:00:00+00:00\nnext[2]: 2026-08-01T09:00:00+00:00\nadded 25bb1c9f-563d-440b-9e3d-194bae988d57\n$ /tmp/lane-gateway-platforms-art/mac/wayland-core cron list\non  1c599c57-b402-477b-b56a-99df8e8e9e0e  [interval  ] @every 15s                    channel  f24jsink :: f24j-heartbeat  last_fired=never\non  25bb1c9f-563d-440b-9e3d-194bae988d57  [cron      ] 0 9 * * *                     channel  f24jsink :: f24j-daily  last_fired=never",
+      "ok": true
+    },
+    {
+      "name": "deliveries-submit",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core cron add --trigger every:15 --channel <per-adapter> --text f24j-delivery-NN x12 across 3 adapters",
+      "output": "submitted=12\nsubmitted_by_adapter=slack=4 whatsapp=4 sms=4\nf24j-delivery-01 -> slack: added 340076e7-a112-4d10-88ce-649b8621fb88\nf24j-delivery-02 -> whatsapp: added 60901099-7f39-4c89-8f03-25b0a21a3fe5\nf24j-delivery-03 -> sms: added 8028c056-5539-4da0-a24b-263bb2e2f247\nf24j-delivery-04 -> slack: added cc3d7f0c-e204-4df7-94ee-35051ae8e40e\nf24j-delivery-05 -> whatsapp: added 5ef0bff5-eda3-42b6-8270-aec4c7d448e4\nf24j-delivery-06 -> sms: added 91f6edbe-e17c-4bea-a4ca-34000d18c3ff\nf24j-delivery-07 -> slack: added b70a8592-9d8a-419a-919b-274741b58bc1\nf24j-delivery-08 -> whatsapp: added 313a3664-13e2-4083-a576-4765723857dc\nf24j-delivery-09 -> sms: added 7e056b46-9607-4e78-9045-7737c0beda3e\nf24j-delivery-10 -> slack: added 43dfdb51-2d6c-4a84-97c7-7040764e068d\nf24j-delivery-11 -> whatsapp: added 5d359599-02eb-4f63-977f-a3e094533384\nf24j-delivery-12 -> sms: added bcecd5df-62c5-45b4-98bd-0ee74e0847b6",
+      "ok": true
+    },
+    {
+      "name": "arrival-before-kill",
+      "command": "read arrivals journal /tmp/lane-gateway-platforms-run/macos/macos-arrivals.jsonl (owned by the independent sink)",
+      "output": "arrivals_total=13\nunique_expected_bodies=12\nfirst_arrival={\"seq\":1,\"ts\":\"1.000000\",\"endpoint\":\"chat.postMessage\",\"conversation_id\":\"f24jsink\",\"text\":\"f24j-heartbeat\",\"auth_fingerprint\":\"sha256:8dae03abb765\",\"answered\":true,\"idempotency_key\":\"cron:1c599c57-b402-477b-b56a-99df8e8e9e0e:1785376522429\",\"suppressed\":false,\"at\":\"2026-07-30T01:55:23.430Z\"}",
+      "ok": true
+    },
+    {
+      "name": "hard-kill",
+      "command": "kill -9 50849",
+      "output": "killed_pid=50849\nkill_status=0\n\nliveness_after_kill=kill -0 50849 -> gone",
+      "ok": true
+    },
+    {
+      "name": "platform-recover",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway status --profile f24j --json (polled; NO manual start)",
+      "output": "killed_pid=50849\nrecovered_pid=59271\n{\n  \"state\": \"running\",\n  \"pid\": 59271,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/lane-gateway-platforms-art/mac/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}\n$ launchctl list wayland-core-gateway-f24j\nstatus=0\n{\n\t\"StandardOutPath\" = \"/private/tmp/lane-gateway-platforms-run/macos/macos-home/gateway.log\";\n\t\"LimitLoadToSessionType\" = \"Aqua\";\n\t\"StandardErrorPath\" = \"/private/tmp/lane-gateway-platforms-run/macos/macos-home/gateway.log\";\n\t\"Label\" = \"wayland-core-gateway-f24j\";\n\t\"OnDemand\" = false;\n\t\"LastExitStatus\" = 9;\n\t\"PID\" = 59271;\n\t\"Program\" = \"/tmp/lane-gateway-platforms-art/mac/wayland-core\";\n\t\"ProgramArguments\" = (\n\t\t\"/tmp/lane-gateway-platforms-art/mac/wayland-core\";\n\t\t\"gateway\";\n\t\t\"run\";\n\t\t\"--profile\";\n\t\t\"f24j\";\n\t);\n};",
+      "ok": true
+    },
+    {
+      "name": "delivery-reconcile",
+      "command": "tally the independent sink's journal /tmp/lane-gateway-platforms-run/macos/macos-arrivals.jsonl, per observed endpoint",
+      "output": "arrival_source=independent-sink\nsubmitted=12\narrived=12\nunique=12\nduplicates=0\nlosses=0\njournal_lines_total=13\nadapters_exercised=3/10\n  slack endpoint=chat.postMessage submitted=4 arrived=4 unique=4\n  whatsapp endpoint=whatsapp.messages submitted=4 arrived=4 unique=4\n  sms endpoint=twilio.messages submitted=4 arrived=4 unique=4",
+      "ok": true
+    },
+    {
+      "name": "upgrade-in-place",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway uninstall --profile f24j ; /tmp/lane-gateway-platforms-run/macos/macos-upgraded-core gateway install --profile f24j ; /tmp/lane-gateway-platforms-art/mac/wayland-core gateway start --profile f24j",
+      "output": "upgrade_target=/tmp/lane-gateway-platforms-run/macos/macos-upgraded-core\nstop_status=0\ngateway stop requested (launchd)\nremoved unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway uninstalled (launchd): wayland-core-gateway-f24j\nwrote unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway installed (launchd): wayland-core-gateway-f24j\n  home:    /private/tmp/lane-gateway-platforms-run/macos/macos-home\n  binary:  /tmp/lane-gateway-platforms-run/macos/macos-upgraded-core\ngateway start requested (launchd)\nobserved_binary_path=/tmp/lane-gateway-platforms-run/macos/macos-upgraded-core\nobserved_pid=59451\n{\n  \"state\": \"running\",\n  \"pid\": 59451,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/lane-gateway-platforms-run/macos/macos-upgraded-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "rollback",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway uninstall --profile f24j ; /tmp/lane-gateway-platforms-art/mac/wayland-core gateway install --profile f24j ; /tmp/lane-gateway-platforms-art/mac/wayland-core gateway start --profile f24j",
+      "output": "rollback_target=/tmp/lane-gateway-platforms-art/mac/wayland-core\nstop_status=0\ngateway stop requested (launchd)\nremoved unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway uninstalled (launchd): wayland-core-gateway-f24j\nwrote unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway installed (launchd): wayland-core-gateway-f24j\n  home:    /private/tmp/lane-gateway-platforms-run/macos/macos-home\n  binary:  /tmp/lane-gateway-platforms-art/mac/wayland-core\ngateway start requested (launchd)\nobserved_binary_path=/tmp/lane-gateway-platforms-art/mac/wayland-core\nobserved_pid=59638\n{\n  \"state\": \"running\",\n  \"pid\": 59638,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/lane-gateway-platforms-art/mac/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "redaction-canary",
+      "command": "redact /tmp/lane-gateway-platforms-run/macos/macos-raw.txt -> /tmp/lane-gateway-platforms-run/macos/macos-redacted.md over 3 seeded secrets",
+      "output": "control=present published=absent secrets=3\nraw_bytes=8952\nredacted_bytes=8903\nredaction_markers=1",
+      "ok": true
+    },
+    {
+      "name": "drain-uninstall-clean",
+      "command": "/tmp/lane-gateway-platforms-art/mac/wayland-core gateway drain --profile f24j --budget-ms 15000 ; /tmp/lane-gateway-platforms-art/mac/wayland-core gateway uninstall --profile f24j",
+      "output": "drain requested (budget 15000ms); gateway pid 59638\ndrain complete: Drained (deliveries pending 0)\nremoved unit: /Users/seandonahoe/Library/LaunchAgents/wayland-core-gateway-f24j.plist\ngateway uninstalled (launchd): wayland-core-gateway-f24j\n$ launchctl list wayland-core-gateway-f24j\nresidual_status=113\nCould not find service \"wayland-core-gateway-f24j\" in domain for port\n\nresidual_pids_alive=0\nfinal_status={\n  \"state\": \"uninstalled\",\n  \"pid\": null,\n  \"uptime_secs\": null,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": null,\n  \"binary_version\": null\n}",
+      "ok": true
+    }
+  ]
+}

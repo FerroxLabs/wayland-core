@@ -1,0 +1,18 @@
+=== node processes ===
+
+=== powershell processes ===
+
+   Id StartTime           
+   -- ---------           
+11104 7/29/2026 7:10:59 PM
+44420 7/30/2026 9:10:39 AM
+
+
+
+=== journey.log line count and tail ===
+9
+[7/17] status-running OK
+[8/17] automation-add OK
+[9/17] deliveries-submit OK
+=== status file? ===
+NOSTATUS

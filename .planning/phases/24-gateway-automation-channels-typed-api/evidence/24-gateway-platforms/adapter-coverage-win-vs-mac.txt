@@ -1,0 +1,10 @@
+===== windows counts= {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+  KEY /adapter_coverage = {"registered_total": 10, "exercised": [{"adapter": "slack", "endpoint": "chat.postMessage", "submitted": 4, "arrived": 8, "unique": 4}, {"adapter": "whatsapp", "endpoint": "whatsapp.messages", "submitted": 4, "arrived": 8, "unique": 4}, {"adapter": "sms", "endpoint": "twilio.messages", "submitted": 4, "arrived": 8, "unique": 4}]}
+  KEY /adapter_coverage/exercised[0]/adapter = "slack"
+  KEY /adapter_coverage/exercised[1]/adapter = "whatsapp"
+  KEY /adapter_coverage/exercised[2]/adapter = "sms"
+===== macos counts= {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+  KEY /adapter_coverage = {"registered_total": 10, "exercised": [{"adapter": "slack", "endpoint": "chat.postMessage", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "whatsapp", "endpoint": "whatsapp.messages", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "sms", "endpoint": "twilio.messages", "submitted": 4, "arrived": 4, "unique": 4}]}
+  KEY /adapter_coverage/exercised[0]/adapter = "slack"
+  KEY /adapter_coverage/exercised[1]/adapter = "whatsapp"
+  KEY /adapter_coverage/exercised[2]/adapter = "sms"
