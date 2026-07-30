@@ -69,10 +69,34 @@ pub fn template_dir(t: Template) -> Result<PathBuf> {
         tried.push(p);
     }
     // `CARGO_MANIFEST_DIR` is `<workspace>/crates/wcore-cli` at compile time.
+    //
+    // DEBUG ONLY, AND THAT IS A REPRODUCIBILITY REQUIREMENT (SUPPLY-29-34).
+    // `env!` expands to a string LITERAL, so the builder's absolute source path
+    // is baked into the binary. `--remap-path-prefix` cannot rewrite it —
+    // Cargo's own documentation states the path-sanitizing settings "do not
+    // affect hard-coded paths within source code strings" — so this one literal
+    // is enough to make the shipped artifact non-reproducible on its own.
+    //
+    // Measured on hetzner at 2329be9b, two clean release builds of `-p
+    // wcore-cli` from identical source at different absolute paths:
+    //   without any remap : 8 build-path strings embedded, digests DIFFER
+    //   with remap        : 7 of 8 gone (all cranelift OUT_DIR paths, plus all
+    //                       1619 registry paths), digests STILL DIFFER
+    // The single survivor was this literal. F29-REPRO-VARIANCE identified only
+    // the cranelift `OUT_DIR` class and filed `--remap-path-prefix` as the
+    // remedy; that remedy is necessary but NOT sufficient, and this is why.
+    //
+    // Release builds lose nothing real. The doc comment above already says an
+    // installed binary has no workspace beside it, so this branch cannot fire
+    // for the shipped artifact; a release build run from a workspace root is
+    // still covered by the current-directory fallback below.
+    #[cfg(debug_assertions)]
     let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .map(|r| r.join("templates").join(t.dir_name()));
+    #[cfg(not(debug_assertions))]
+    let compiled: Option<PathBuf> = None;
     if let Some(p) = compiled {
         if p.is_dir() {
             return Ok(p);
