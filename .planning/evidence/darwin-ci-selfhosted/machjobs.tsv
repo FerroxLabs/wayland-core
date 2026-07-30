@@ -1,0 +1,14 @@
+30517009690	Build (aarch64-apple-darwin) [self-hosted]	completed	skipped	null	null	2026-07-30T05:55:26Z	2026-07-30T05:55:26Z	2026-07-30T05:55:25Z
+30513944686	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T04:35:43Z	2026-07-30T06:46:23Z	2026-07-30T06:53:35Z
+30513699696	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T04:22:20Z	2026-07-30T06:53:39Z	2026-07-30T07:00:59Z
+30512772418	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T04:02:24Z	2026-07-30T04:19:42Z	2026-07-30T04:27:37Z
+30512325518	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:52:20Z	2026-07-30T05:04:02Z	2026-07-30T05:11:39Z
+30511944633	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T05:37:16Z	2026-07-30T05:41:06Z	2026-07-30T05:48:28Z
+30511767028	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:39:34Z	2026-07-30T05:19:00Z	2026-07-30T05:26:17Z
+30511632389	Build (aarch64-apple-darwin) [self-hosted]	in_progress	null	sean-mac-arm64	34	2026-07-30T07:18:18Z	2026-07-30T07:23:49Z	null
+30511261870	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:28:10Z	2026-07-30T03:30:06Z	2026-07-30T03:38:28Z
+30510813792	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:18:09Z	2026-07-30T05:26:21Z	2026-07-30T05:33:35Z
+30510410939	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:09:20Z	2026-07-30T04:11:07Z	2026-07-30T04:19:38Z
+30510401651	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:09:08Z	2026-07-30T04:46:37Z	2026-07-30T04:56:01Z
+30510339584	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T03:07:47Z	2026-07-30T04:02:45Z	2026-07-30T04:11:03Z
+30509613390	Build (aarch64-apple-darwin) [self-hosted]	completed	success	sean-mac-arm64	34	2026-07-30T04:42:04Z	2026-07-30T06:31:39Z	2026-07-30T06:38:56Z

@@ -1,0 +1,4 @@
+COPY-VERIFY ok   panel-kimi.txt src=    1907 dst=    1907
+COPY-VERIFY ok   panel-codex.txt src=    5198 dst=    5198
+--- known-negative: the assertion must FAIL on a deliberately emptied file ---
+COPY-VERIFY FAIL .probe.tmp src=    1907 dst=       0  <- correct, assertion reddens

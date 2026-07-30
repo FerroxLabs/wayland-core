@@ -1,0 +1,42 @@
+=== commit messages to be pushed ===
+9f3e15439364f5e3be55b51bc77ec8a7bcabeccf
+decide(darwin-ci): panel 2-1 for moving NO further macOS job onto the Mac
+
+codex=B gemini=B kimi=C. Majority taken. Minority (persistent CARGO_TARGET_DIR
+to cut per-job cost) rests on 'cargo fingerprinting is robust / persistent
+target dirs are standard practice', which this repo has two measured
+counterexamples to: wcore-protocol baking CARGO_MANIFEST_DIR via
+source_digest(), and the existing 'Clear stale install-action state' step at
+ci.yml:182 mitigating the other self-hosted runner's surviving state.
+
+It also changes provenance of the artifact other lanes live-test with, and
+cannot be proven safe inside this lane on a runner already at 84.8% duty.
+Recorded as a costed follow-up instead.
+---
+a257f791b54fb43268616b8eeba2bd664e1f2eae
+measure(darwin-ci): runner 34 duty cycle is 84.8%, not 44.5%
+
+Two-page (200-run) scan of every job with runner_id=34: 37 executed, busy
+295.3 of 348.2 min over 5.80 h, one >10min gap. A one-page scan gave 44.5%
+because jobs from runs past the page boundary were invisible; the tell was a
+43min gap a 2.5h-old job did not dispatch into.
+
+Also measured: self-hosted Windows waits median 71.8 / max 182.6 min, so
+'self-hosted' is a different queue not an absent one; and zero cfg(target_arch)
+attributes exist under crates/ (control: 64 files with cfg(target_os)), so the
+Intel Darwin job cannot catch anything the arm64 build misses.
+---
+7b910cec41b87f39509f396d24511eb7f6730696
+docs(darwin-ci): NOTES — brief premise measured stale, self-hosted mac job already live
+
+The dispatch brief states no job points at sean-mac-arm64. Measured false at
+base 4caaa31c: lane/ci-selfhosted-mac already landed build-darwin-selfhosted
+(ci.yml:959) and runner 34 reports busy=true in production.
+
+Records the two brief claims refuted so far and the remaining increment
+(post-coalescing duty-cycle measurement, deferred by the previous lane).
+---
+=== TOKEN SCAN (must be zero) ===
+0
+=== KNOWN-POSITIVE CONTROL: same scan for a string that IS present ===
+3

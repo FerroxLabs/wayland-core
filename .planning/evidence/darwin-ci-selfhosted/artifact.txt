@@ -1,0 +1,8 @@
+download_rc=0
+--- independent verification on this Mac ---
+Mach-O 64-bit executable arm64
+arm64
+wayland-core 0.12.25
+version_rc=0
+--- DISCRIMINATING CONTROL: lipo must report other arches for other binaries ---
+x86_64 arm64e
