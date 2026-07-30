@@ -102,6 +102,75 @@ shared control flow, no shared constants.** `resolveFailoverStatus`'s reason→H
 map (402/500/429/503/401/403/408/400/404/410) has **no counterpart in our file at
 all**.
 
+## MEASUREMENT 2 — premise check: are there exactly nine sites?
+
+Instrument alive: `grep -r -l --include='*.rs' 'pub fn' crates/` → **925 files**
+(known-positive); gibberish needle → **0** (known-negative).
+
+`grep -r -n -i 'Steinberger' crates/` → **6 hits**, exactly the five module headers
+plus `retry.rs:738`. Adding `anthropic.rs:307` and the two channel crates gives
+**nine**. **The brief's premise holds.**
+
+One item the brief does NOT list, found by the same sweep and relevant to the
+channel chain: `crates/wcore-channels-registry/src/lib.rs:55` — *"F-045 (W7-M): new
+channel adapters ported from desktop OpenClaw fork."* It names no copyright holder,
+but it is the same asserted chain as sites 8/9 and should travel with them.
+
+## MEASUREMENT 3 — the literal-overlap metric, WITH ITS CONTROLS
+
+Method (`litcmp.py`, identical for every pairing): extract every quoted literal of
+length >= 5, lowercase, drop punctuation-only, report |A n B| and Jaccard.
+
+**Both directions were run, per LANE-BRIEF §3b-iii.**
+
+| pairing | shared | Jaccard | reading |
+|---------|--------|---------|---------|
+| **POSITIVE CONTROL** `cerebras.rs` vs `moonshot.rs` (both ours, template copy) | 11 | **0.3438** | method CAN find similarity |
+| **POSITIVE CONTROL** `deepseek.rs` vs `moonshot.rs` (both ours) | 13 | **0.2364** | method CAN find similarity |
+| **NEG CONTROL** `cooldown.rs` vs `errors.ts` | 0 | 0.0000 | method CAN find none |
+| **NEG CONTROL** `cooldown.rs` vs `failover-error.ts` | 0 | 0.0000 | |
+| **NEG CONTROL** `paste_detect.rs` vs `errors.ts` | 1 | 0.0037 | |
+| **NEG CONTROL** `fingerprint.rs` vs `errors.ts` | 2 | 0.0058 | |
+| **NEG CONTROL** `failover_policy.rs` vs `failover-policy.ts` (same name, no header) | 1 | 0.0435 | |
+| S1 `failover.rs` vs `failover-error.ts` | 10 | **0.1493** | elevated |
+| S3 `classify.rs` vs `errors.ts` | 29 | **0.0948** | elevated |
+| S2 `key_rotation.rs` vs `api-key-rotation.ts` | 0 | 0.0000 | at floor |
+| S4 `cache_observation.rs` vs `prompt-cache-retention.ts` | 0 | 0.0000 | at floor |
+| S4b `cache_observation.rs` vs `prompt-cache-observability.ts` | 0 | 0.0000 | at floor |
+| S5 `refresh.rs` vs `model-pricing-cache.ts` | 2 | 0.0194 | at floor |
+| S6 `retry.rs` vs `backoff.ts` | 0 | 0.0000 | at floor |
+| S6b `retry.rs` vs `infra/retry.ts` | 0 | 0.0000 | at floor |
+| S7 `anthropic.rs` vs `anthropic-family-cache-semantics.ts` | 1 | 0.0055 | at floor |
+| S7b `anthropic.rs` vs `system-prompt-cache-boundary.ts` | 0 | 0.0000 | at floor |
+
+**The control calibrates the scale.** Genuine copy-paste inside our own repo scores
+0.24–0.34. Independently-written Rust against a peer module scores 0.000–0.006.
+Seven of the nine site pairings sit **inside the negative-control band**. Only S1 and
+S3 rise above it, and both stay well below the known-copy band.
+
+### What the elevated overlap actually consists of
+
+**S1's ten shared literals are exactly the taxonomy and nothing else:**
+`auth_permanent, billing, context_overflow, format, model_not_found, overloaded,
+rate_limit, session_expired, timeout` + `failovererror` (the type name). No shared
+comment, no shared helper name, no shared constant. The literal channel at site 1 IS
+the taxonomy — which is the same finding as Measurement 1, arrived at independently.
+
+**S3's 29 decompose into two buckets, neither of which is peer expression:**
+- *vendor-dictated* (any independent implementation classifying these providers must
+  contain them): `etimedout, econnreset, econnaborted, ehostunreach, eai_again`
+  (POSIX errno); `resource_exhausted, invalid_argument` (Google gRPC canonical
+  codes); `invalid_request_error, overloaded_error, request_too_large` (Anthropic
+  error types); `rate_limit_exceeded, insufficient quota, invalid api key` (OpenAI);
+  `throttlingexception` (AWS Bedrock); `plans & billing` (Anthropic's own remediation
+  sentence); `context length exceeded, context window, prompt is too long, prompt too
+  long` (provider message text).
+- *the same taxonomy names again*: `auth_permanent, billing, model_not_found,
+  overloaded, rate_limit, session_expired`.
+
+**There is not one distinctive, non-dictated shared literal at any of the nine
+sites** — no copied comment, no invented identifier, no shared magic number.
+
 ## Status log
 
 - [x] worktree created, toplevel asserted
