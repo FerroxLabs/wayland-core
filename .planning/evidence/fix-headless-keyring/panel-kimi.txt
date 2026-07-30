@@ -1,0 +1,26 @@
+• This is a design-judgment question, not a code task. Answer concisely.
+
+  Q1: Degrade-with-notice vs refuse to start. Arguments: The server accepts work and reports healthy while answering nothing — a fail-silent behavior. But the proposed fix removes that failure mode entirely by disabling the feature that breaks. Refuse-to-start punishes operators who never configured durable sessions (default on) on hosts where keyring can never exist. Degradation is principled if: the notice is loud, persistent (not just startup scroll), and the operator's expectations are recorded. The operator "did not opt in to losing crash recovery" — but on a headless host, crash recovery was never achievable; there's no actual loss of a property that could have been delivered. Refuse-to-start would be right if durability were a security/integrity requirement (like a bank ledger); crash recovery is availability, not correctness — losing it degrades UX, not data integrity. So degrade, but strengthen: health should report degraded state (feature status), and ideally require explicit config ack if operator explicitly set durable=on? If operator explicitly enabled it in config, arguably refuse/warn harder — a config that's unachievable. But prompt says concise. Note the nuance: if explicitly configured ON, hard fail is defensible; if default ON, degrade.
+
+  Q2: Security property. Journal encryption protects provider requests at rest. With no journal, nothing sensitive is written — you can't leak what you never persist. Conversation history saved to disk though — is that encrypted too? The prompt says history saved to disk plus recovery journal encrypted. If the same confidential key encrypts history, disabling durable sessions means no history on disk either — strictly less confidential data at rest. So no security property weakened; auto-disable removes the at-rest sensitive surface. Caveat: lose tamper-evidence/audit trail, and crash recovery loss is availability. Also stderr notice must not leak secrets (it won't). One subtle point: running without journal means an interrupted turn's provider request is lost rather than exposed — confidentiality preserved.
+
+  PANEL_POSITION=DEGRADE.
+
+• **1. Degrade vs. refuse**
+
+  Degrade is right — refuse-to-start solves the wrong problem. On a headless Linux host with no keyring, crash recovery was never deliverable; the operator isn't losing a property they could have had, they're being told a default they never configured can't run there. Refusing to start would make the default configuration (durable sessions ON) a guaranteed outage on an entire, common host class — the cure becomes worse than the bug you're fixing (a server that accepts work, reports Healthy, and answers nothing is the actual fail-silent disaster here).
+
+  Two hardening conditions, though:
+
+  - The health endpoint/command must report the degraded state ("durable sessions: DISABLED — no keyring"), not just Healthy. A stderr line scrolls away; health is what operators and load balancers actually watch. The current bug *was* a health lie — don't ship a fix that keeps a smaller version of it.
+  - Distinguish default-on from explicitly-configured-on. If the operator wrote `durable_sessions = true` in config and it silently turns off, that *is* overriding an explicit choice. Explicit opt-in that's unachievable deserves a louder refusal (fail startup, or require an `allow_no_keyring = true` ack); the silent degrade should apply only to the default path.
+
+  **2. Security property**
+
+  None weakened — it improves slightly. The journal encryption protects one thing: provider requests at rest. With no journal, no provider request ever touches disk, so there is nothing at rest to protect. Same for history: if it was encrypted under the same key, disabling durable sessions removes that at-rest confidential surface entirely. You cannot leak what you never persist. Confidentiality is monotonically better in the degraded mode.
+
+  What you actually lose is **availability** (crash recovery of an in-flight turn) and an audit/forensics trail — neither is a confidentiality property the encryption was guarding. One caveat: with history off, an interrupted turn's context is gone rather than recoverable, so retries must be idempotent or client-driven — that's a correctness concern for callers, not a security one.
+
+  PANEL_POSITION=DEGRADE
+
+To resume this session: kimi -r session_1080a91b-07f6-4079-a7f0-839590e659ad

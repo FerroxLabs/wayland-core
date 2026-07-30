@@ -1,0 +1,12 @@
+A Rust CLI AI-agent product has a release blocker. On any host with no OS keyring (every headless Linux server), durable session persistence cannot get its confidential encryption key, so EVERY agent turn dies with "Session persistence authority unavailable" -- while the gateway starts fine and its health command reports Healthy. It accepts work, reports healthy, answers nothing.
+
+Durable session persistence provides: conversation history saved to disk, plus crash recovery of an interrupted turn (the exact provider request is encrypted into a recovery journal so that journal never holds provider requests in cleartext).
+
+Proposed fix: at startup config resolution, if durable sessions are ON and no confidential-capable credential store is reachable, turn durable sessions OFF and print one stderr notice naming cause, consequence and remedy.
+Rejected alternative: refuse to start at all.
+
+Two questions, concise:
+1. Is degrade-with-one-startup-notice right, or should a server refuse to start? The operator did not opt in to losing crash recovery.
+2. Is any security property weakened by auto-disabling durable sessions? Does running with NO recovery journal write anything that the journal encryption was protecting?
+
+End with one line: PANEL_POSITION=DEGRADE or PANEL_POSITION=REFUSE

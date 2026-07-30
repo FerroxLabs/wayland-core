@@ -1,0 +1,6 @@
+1. Refuse to start. Failing fast is the correct path when a critical system guarantee (crash recovery/history) cannot be met. A stderr notice in a headless environment is easily missed in logs, leading to silent data loss when the operator attempts to resume a session. Require an explicit opt-out (e.g., `--ephemeral-mode`) to run without a keyring.
+
+2. No security property is weakened. Disabling persistence means the agent operates entirely in memory. Because no recovery journal is written, there is no disk I/O of provider requests, meaning no plaintext is leaked to disk that the encryption was designed to protect. 
+
+PANEL_POSITION=REFUSE
+Hook system message: [ijfw] Session 14 complete (0 memory entries).
