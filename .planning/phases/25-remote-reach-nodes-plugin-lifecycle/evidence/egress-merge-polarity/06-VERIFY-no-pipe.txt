@@ -1,0 +1,36 @@
+HEAD=dee6c36fd85f17d5d590131c9ad76548c96c031e
+--- A. the shipped merge line (KNOWN-POSITIVE: must show exactly one hit) ---
+4456:        enabled: global.security.enabled,
+--- B. the OLD shape (KNOWN-NEGATIVE: must show nothing) ---
+4425:    // This merge was `global.security.enabled && project.security.enabled`, and
+--- C. every restricted.* assignment in the untrusted fn (control: anvil MUST appear, security must NOT) ---
+4555:    restricted.default.max_tokens = project.default.max_tokens;
+4556:    restricted.default.max_turns = project.default.max_turns;
+4557:    restricted.default.approval_mode = project.default.approval_mode;
+4558:    restricted.default.system_prompt = project.default.system_prompt;
+4559:    restricted.default.user = project.default.user;
+4560:    restricted.default.read_only = project.default.read_only;
+4564:    restricted.tools.allow_list = project.tools.allow_list;
+4565:    restricted.tools.skills.deny = project.tools.skills.deny;
+4566:    restricted.tools.verify_edits = project.tools.verify_edits;
+4586:    restricted.anvil.enabled = project.anvil.enabled;
+--- D. the corrected test assertion ---
+6008:            "an untrusted project's `[security] enabled = false` must not \
+--- E. numstat is banned; raw diff line counts for my two code files vs base ---
+config.rs added lines:
+67
+config.rs removed lines:
+16
+--- F. shared-file fence: must be EMPTY ---
+--- G. all files changed vs base ---
+.planning/HANDOFF-2026-07-30-WAVE3.md
+.planning/LANE-BRIEF.md
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-EGRESS-MERGE-POLARITY-SUMMARY.md
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/01-RED-base-da8e46b5.log
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/02-RED-naive-or-variant.log
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/03-GREEN-c81fc657.log
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/04-FINAL-2897db01.log
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/05-PREEXISTING-FLAKE-CONTROL.log
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/egress-merge-polarity/EGRESS-MERGE-POLARITY-NOTES.md
+crates/wcore-agent/tests/egress_merge_polarity_test.rs
+crates/wcore-config/src/config.rs
