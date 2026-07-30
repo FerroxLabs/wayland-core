@@ -1,0 +1,19 @@
+LIVE frames total      : 38
+LIVE distinct types    : 10
+
+live types NOT handled by Desktop: ['budget_grant_result', 'capability_activation', 'execution_policy', 'workspace_policy']
+live types NOT in corpus         : ['capability_activation', 'workspace_policy']
+live types NOT in Core enum      : []  (control: must be empty)
+
+FRAMES Desktop would drop: 27 of 38 = 71%
+    budget_grant_result        x1
+    capability_activation      x24
+    execution_policy           x1
+    workspace_policy           x1
+FRAMES Desktop handles   : 11
+    approval_resume            x1
+    config_changed             x1
+    error                      x1
+    info                       x5
+    pong                       x2
+    ready                      x1

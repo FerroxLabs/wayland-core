@@ -1,0 +1,5 @@
+selftest-neg.ts(4,32): error TS2322: Type '"zzz_not_a_real_event"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_request" | "tool_running" | "tool_result" | "tool_cancelled" | "stream_end" | "config_changed" | ... 19 more ... | "host_send_message_request"'.
+selftest-neg.ts(7,14): error TS2322: Type '{ type: "text_delta"; text: string; }' is not assignable to type 'WCoreEvent'.
+  Property 'msg_id' is missing in type '{ type: "text_delta"; text: string; }' but required in type '{ type: "text_delta"; text: string; msg_id: string; }'.
+selftest-neg.ts(10,54): error TS2322: Type 'number' is not assignable to type 'string'.
+selftest-neg.ts(13,79): error TS2353: Object literal may only specify known properties, and '"zzz_excess_prop"' does not exist in type '{ type: "info"; msg_id: string; message: string; }'.
