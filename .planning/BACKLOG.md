@@ -2123,3 +2123,31 @@ What it *did* measure is the **journal mode a network filesystem forces**: TRUNC
 **Still uncovered: locking semantics and `rename` atomicity over the wire.** Do not read the
 TRUNCATE result as network-filesystem coverage; it is the mode, not the filesystem.
 
+
+---
+
+### `BL-UNTRUSTED-RESOURCE-LIMITS` — an untrusted project config can RAISE max_tokens and max_turns (MEDIUM)
+
+Found by `lane/egress-merge-polarity` while sweeping for other mis-polarised fields, **measured not
+fixed** per the severity policy.
+
+`config.rs` carries the comment *"Resource limits … can only reduce power"*. **That is false.**
+`max_tokens` (`:4088`) and `max_turns` (`:4093`) **never compare values against global**, so an
+untrusted project config — one that travels with a cloned repo, per GHSA-8r7g — raises both past the
+operator's setting. Proven in test: **100 → 999999** and **5 → 100000**.
+
+Same family as the egress polarity defect that lane just closed: a comment asserting a safety
+property the code does not implement. `[budget]` and `[session_cap]` are **not** forwarded, so the
+spend ceiling itself is unaffected — this is the per-turn/per-run limit only.
+
+Fix shape is the neighbouring GHSA-8r7g clamps: honour a project value only when it is **no more
+permissive** than global.
+
+### `BL-EVAL-SCENARIOS-LOCKFILE-DRIFT` — `Cargo.lock` omits a declared dependency, so every build rewrites it
+
+Pre-existing, proven at base by `lane/egress-merge-polarity`, **needs an owner before any release**.
+
+`crates/wcore-eval-scenarios/Cargo.toml:123` declares `serial_test`; `Cargo.lock` omits it. Cargo
+therefore rewrites the lockfile on **every** build. **This will break any `--locked` build** — which
+is exactly what a release or a reproducibility gate uses. Not committed by that lane, deliberately.
+
