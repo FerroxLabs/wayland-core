@@ -243,12 +243,19 @@ async fn baseline_process_count_before_during_after() {
 // ── BASELINE 3b — one reaper interval, both directions ───────────────────
 
 /// Spawn a real, long-lived child NOT owned by the supervisor's stash, so the
-/// reaper's PID path is what terminates it. Returns the child PID.
+/// reaper's raw-PID SIGTERM path is exactly what terminates it. Returns the PID.
+///
+/// Deliberately `/bin/sleep` directly and NOT `sh -c "sleep 300"`: the shell form
+/// forks, giving a two-process tree (measured: `tree_size` came back 2), and the
+/// reaper's documented behaviour is to SIGTERM the ONE registered PID. Testing it
+/// against a tree it never claimed to own would be measuring the wrong contract.
+/// Whole-tree cleanup IS measured — against the real sidecar, in 3c, where the
+/// supervisor owns the tree via `ProcessTreeGuard`.
 fn spawn_real_child() -> (std::process::Child, u32) {
-    let child = std::process::Command::new("/bin/sh")
-        .args(["-c", "sleep 300"])
+    let child = std::process::Command::new("/bin/sleep")
+        .arg("300")
         .spawn()
-        .expect("spawn /bin/sh sleep");
+        .expect("spawn /bin/sleep");
     let pid = child.id();
     (child, pid)
 }
