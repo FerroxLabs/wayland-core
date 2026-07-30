@@ -45,29 +45,66 @@ relying on it, because that scope is narrower than "one message".
 | **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
 | **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`.** See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
-| **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **Yes** — a replayed key produced **two** messages, no dedupe token on the wire |
-| **Twilio SMS** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **Yes** — a replayed key produced **two** messages |
-| **WhatsApp** (Meta Graph) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Meta | **Yes** — a replayed key produced **two** messages |
+| **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **NOT MEASURED at a real destination** — see the correction below |
+| **Twilio SMS** | none that Twilio honours — the adapter sends an `Idempotency-Key` header and the `Messages` resource documents no dedup slot to read it | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **NOT MEASURED at a real destination** — see the correction below |
+| **WhatsApp** (Meta Graph) | none that Meta honours — the adapter sends the delivery id as `biz_opaque_callback_data`, which the Cloud API documents as *tracking* data, not a dedup slot | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Meta | **NOT MEASURED at a real destination** — see the correction below |
 | **Email** (SMTP) | none that any MTA guarantees | **at-most-once** | **abandoned** | zero or one message — unknowable without checking the mailbox | **NOT MEASURED** |
 | **Signal** (`signal-cli`) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Signal | **NOT MEASURED** |
 | **iMessage** (AppleScript) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Messages.app. **macOS only** — on Linux and Windows the adapter is not compiled in and cannot be constructed at all | **NOT MEASURED** |
 | **MS Teams** (Bot Framework) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Teams | **NOT MEASURED** |
 
-**"NOT MEASURED" means not measured, and it is not a pass.** Four of the ten — Email, Signal,
-iMessage, MS Teams — have never had a replay driven at a real destination. Their rows are
-derived from source: the adapter transmits no key the destination honours, so the capability bit
-and the spine's behaviour follow mechanically. That is real evidence about *our* code and no evidence at all about the
-*platform's* behaviour. It is weaker than the four rows above it and is labelled rather than
-filled in optimistically.
+**"NOT MEASURED" means not measured, and it is not a pass.** Seven of the ten — Email, Signal,
+iMessage, MS Teams, **Twilio SMS, WhatsApp and Telegram** — have never had a replay driven at a
+real destination. Their rows are derived: the adapter transmits nothing the destination is documented
+to honour, so the capability bit and the spine's behaviour follow. That is real evidence about
+*our* code and no evidence at all about the *platform's* behaviour. It is weaker than the rows
+above it and is labelled rather than filled in optimistically.
 
-The four rows measured before 2026-07-30 (Slack, Telegram, Twilio, WhatsApp) come from one run
-in which a single delivery key was replayed twice through real adapters over real HTTP, built by
-the production factory. Two more have since been driven end to end by the shipped binary against
-the real platform: Discord, which turned out to be wrong — [§8](#8-discord-was-wrong-and-how-it-was-found) —
-and Matrix, which held — [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). That original run is
-what makes the other rows interpretable: it is the known-positive proving
-a duplicate is genuinely produced when no key is honoured, rather than a duplicate being merely
-theorised.
+Three rows have been driven at the real platform, all on 2026-07-30: Slack, which turned out to
+be wrong — see the correction below; Discord, also wrong —
+[§8](#8-discord-was-wrong-and-how-it-was-found); and Matrix, which held —
+[§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). Those are what make the derived rows
+interpretable: two of them are the known-positive proving a duplicate is genuinely produced when
+no key is honoured, rather than a duplicate being merely theorised.
+
+### Correction, 2026-07-30 — Twilio and WhatsApp were never measured at a real destination
+
+Until this date both rows read *"Replay measured at a real destination? **Yes** — a replayed key
+produced **two** messages"*, and the paragraph above them said the four pre-existing rows "come
+from one run in which a single delivery key was replayed twice through real adapters over real
+HTTP".
+
+**Every clause of that is true and the answer in the column is still wrong**, because the
+question in the column header is *"at a real destination?"* and the run was
+`crates/wcore-cli/tests/f24_c1_outbound_idempotency.rs` — a **`mockito`** fixture. Real adapters,
+real HTTP, real production factory, and a destination we wrote. Measured with
+`/usr/bin/grep` on 2026-07-30: **zero** files in `crates/` reference a Twilio or Meta live
+credential (`TWILIO_ACCOUNT_SID`, `WHATSAPP_ACCESS_TOKEN`, `WA_ACCESS_TOKEN`, `live_twilio`,
+`live_whatsapp`); the known-positive in the same search, `SLACK_BOT_TOKEN`, returns
+`live_slack_actions.rs`, so the search was alive and the absence is real. **We hold no Twilio or
+Meta credentials.**
+
+This is the identical defect the Slack correction below diagnoses, in the two rows directly
+beneath it: *the evidence column must state the same claim as the guarantee column.* It survived
+that correction because the reviewer was looking at Slack.
+
+**Telegram's row carried the same overstatement and has now been corrected too.**
+`lane/twilio-whatsapp-identity` flagged it but declined to edit a row it had not measured, which
+was the right call for a lane. The orchestrator verified it independently before changing it:
+`TELEGRAM_BOT_TOKEN` and `live_telegram` return **four** hits across `crates/`, all four in
+`wcore-safety/src/pii.rs` as a **redaction pattern** — no live test exists. Two known-positives in
+the same sweep were alive (`SLACK_BOT_TOKEN` → `live_slack_actions.rs`,
+`live_matrix`/`MATRIX_ACCESS_TOKEN` → `matrix_live_room.rs`), so the absence is real and not a
+dead search. Telegram came from the same `mockito` run as the other two.
+
+Neither guarantee changed. `at-most-once` was never in doubt for either: it follows from the
+absence of a documented dedup slot, and that is a fact about the platforms' published APIs, not
+about our fixture. What changed is the strength of the evidence claimed for it.
+
+### Correction, 2026-07-30 — the Slack row was wrong, and how
+
+Until this date the Slack row read **exactly-once**, "On restart, expect: **one message**",
+live-proven. Its evidence column said *"real HTTP; the key was present on both attempts."*
 
 ### Correction, 2026-07-30 — the Slack row was wrong, and how
 
@@ -116,7 +153,36 @@ arrival count.
 | Slack | `wcore-channel-slack/src/lib.rs` `supports_outbound_idempotency` — **`false`**, because `slack.com` ignores the key | the `idempotency-key` request header IS still sent on a keyed send (bound by the mockito test `a_keyed_send_puts_the_key_on_the_wire_though_slack_ignores_it`, and by its twin proving the header is **absent** when unkeyed) — but no Slack-honoured slot exists. The live arrival count is asserted by `wcore-channels-registry/tests/live_slack_actions.rs` |
 | Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539`, and by the live wire capture in [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | Discord | **`false`**, overridden explicitly in `wcore-channel-discord/src/lib.rs` | `rest::nonce_for_key` IS still sent as `nonce` (`lib.rs:170-172`), and Discord ignores it for deduplication — see [§8](#8-discord-was-wrong-and-how-it-was-found) |
-| the other seven | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
+| Twilio SMS | **`false`**, overridden explicitly in `wcore-channel-sms/src/lib.rs` | the delivery id IS sent as an `Idempotency-Key` request header (`api::IDEMPOTENCY_HEADER`), bound in both directions by `a_keyed_send_puts_the_delivery_id_on_the_wire_though_twilio_ignores_it` and `an_unkeyed_send_carries_no_delivery_id_header`. Twilio's `Messages` resource documents no dedup slot, so nothing reads it there |
+| WhatsApp | **`false`**, overridden explicitly in `wcore-channel-whatsapp/src/lib.rs` | the delivery id IS sent as `biz_opaque_callback_data`, the Cloud API's documented ≤512-char *tracking* string, which Meta echoes back in the `statuses` object of the `messages` webhook. Bound by `a_keyed_send_carries_the_delivery_id_as_biz_opaque_callback_data` and its absence twin |
+| the other five | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
+
+#### Transmitting an id is ATTRIBUTION. It is not deduplication. (2026-07-30)
+
+Four adapters now put the gateway's delivery id on the wire while declaring
+`supports_outbound_idempotency() == false`: Slack, Discord, Twilio SMS and WhatsApp. That
+combination is not a contradiction and it is not an oversight, so it is worth stating once.
+
+- **Transmitting** the id is a fact about *our request*. It makes an arrival **attributable**: a
+  destination that records what we sent can say which `cron:{job_id}:{scheduled_for_millis}`
+  caused it, so a repeated body is judgeable as a replay (same identity twice — a real violation)
+  or a recurrence (the trigger fired again — expected).
+- **Deduplicating** is a fact about *their arrival count*, and only a run at the real platform
+  can establish it.
+
+Before 2026-07-30 Twilio and WhatsApp transmitted nothing, and the cost was not theoretical: in
+the Windows journey run, **8 of 12 repeats were graded `indeterminate` — unjudgeable in
+principle** — purely because `twilio.messages` and `whatsapp.messages` arrivals carried no
+identity, and the receipt correctly refuses to call an unmeasurable property clean. The same
+journey restricted to Slack returned 24 classified recurrences and `rc=0`.
+
+**What this cost, stated rather than absorbed.** The old `false` for these two rested on a
+*mechanical* argument — we send nothing, therefore nothing can dedupe. That argument is gone.
+The bit stays `false` as a **conservative default pending
+`wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`**, which is written, gated on
+credentials we do not hold, and panics rather than skipping. The asymmetry that makes the trade
+sound: a wrong `false` abandons a delivery *visibly* (`wayland-core gateway abandoned`), while a
+wrong `true` duplicates one *silently*.
 
 ---
 

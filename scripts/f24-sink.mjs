@@ -90,6 +90,23 @@ function record(endpoint, conversationId, text, auth, answered, key, suppressed)
   return arrival;
 }
 
+// Read the delivery identity an arrival carried, from whichever carrier the
+// platform's API leaves available: the `Idempotency-Key` request header, or a
+// body field the caller extracts and passes as `bodyValue`.
+//
+// Returns `null` — never `''` and never `undefined` — when no identity was
+// carried, because `unidentified` is counted by `typeof key === 'string' &&
+// key.trim()` on the driver side and an empty string there would read as
+// present-but-blank rather than absent. An arrival that carried nothing must
+// stay visibly unidentifiable; silently upgrading it to "identified" is the
+// failure this whole journal column exists to make impossible.
+function readKey(req, bodyValue) {
+  const header = req.headers['idempotency-key'];
+  if (typeof header === 'string' && header.trim()) return header;
+  if (typeof bodyValue === 'string' && bodyValue.trim()) return bodyValue;
+  return null;
+}
+
 function json(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -129,7 +146,7 @@ const server = http.createServer((req, res) => {
       }
       const channel = parsed.channel ?? '';
       const text = parsed.text ?? '';
-      const key = req.headers['idempotency-key'] ?? null;
+      const key = readKey(req, null);
 
       if (key && served.has(key)) {
         // The replay REACHED the destination and was absorbed there. It is
@@ -173,7 +190,18 @@ const server = http.createServer((req, res) => {
       }
       const to = parsed.to ?? '';
       const text = parsed.text?.body ?? '';
-      const arrival = record('whatsapp.messages', to, text, auth, true, null, false);
+      // The Cloud API's documented arbitrary tracking field, which the adapter
+      // fills with the gateway's delivery id on a keyed send. Recorded into the
+      // SAME `idempotency_key` slot the Slack endpoint uses, because the tally
+      // is asking one question — "what identity did this arrival carry?" — and
+      // a per-adapter column would make the answer unaggregatable.
+      //
+      // Hardcoded `null` here until 2026-07-30. That was a SECOND, independent
+      // cause of the journey's NOT-PROVEN verdict: even after the adapter began
+      // transmitting an id, an arrival journalled with no key still reads as
+      // unidentified, and the fix would have looked like it had done nothing.
+      const key = readKey(req, parsed.biz_opaque_callback_data);
+      const arrival = record('whatsapp.messages', to, text, auth, true, key, false);
       json(res, 200, {
         messaging_product: 'whatsapp',
         contacts: [{ input: to, wa_id: to }],
@@ -190,7 +218,13 @@ const server = http.createServer((req, res) => {
       // Twilio authenticates with HTTP Basic, so the token rides in the same
       // Authorization header the fingerprint already digests. It is never
       // journalled in the clear, same as the Slack bearer.
-      const arrival = record('twilio.messages', to, text, auth, true, null, false);
+      //
+      // Twilio's Messages resource has no client-supplied opaque parameter, so
+      // the adapter carries the delivery id in the `Idempotency-Key` header
+      // instead — inert at api.twilio.com, but it is what makes the request
+      // self-identifying at a destination that records what we sent.
+      const key = readKey(req, null);
+      const arrival = record('twilio.messages', to, text, auth, true, key, false);
       json(res, 201, {
         sid: `SMf24c3${String(arrival.seq).padStart(26, '0')}`,
         status: 'queued',

@@ -26,6 +26,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WhatsappError;
 
+/// Meta's documented cap on `biz_opaque_callback_data`.
+///
+/// The Cloud API describes it as a tracking string of at most 512 characters.
+/// A delivery id is `cron:{job_id}:{scheduled_for_millis}` and is far shorter,
+/// so this bound is never reached in practice — it exists so a pathological
+/// job id degrades into a truncated tracking string rather than into a Meta
+/// rejection that fails the send outright. Losing attributability is bad;
+/// losing the message is worse.
+pub const MAX_TRACKING_DATA_CHARS: usize = 512;
+
+/// Fit a delivery id into [`MAX_TRACKING_DATA_CHARS`], truncating on a char
+/// boundary so a multi-byte id cannot produce invalid UTF-8.
+#[must_use]
+pub fn clamp_tracking_data(key: &str) -> String {
+    match key.char_indices().nth(MAX_TRACKING_DATA_CHARS) {
+        None => key.to_string(),
+        Some((byte_idx, _)) => key[..byte_idx].to_string(),
+    }
+}
+
 /// Outbound WhatsApp text-message request body.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendMessageRequest {
@@ -39,6 +59,12 @@ pub struct SendMessageRequest {
     /// outbound is not a reply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<MessageContext>,
+    /// The gateway's delivery id, carried in the Cloud API's documented
+    /// arbitrary tracking field. See
+    /// [`SendMessageRequest::with_tracking_data`]. Omitted entirely on an
+    /// unkeyed send.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biz_opaque_callback_data: Option<String>,
 }
 
 /// Quoted-message reference for reply-in-context outbound messages.
@@ -58,6 +84,7 @@ impl SendMessageRequest {
                 preview_url: false,
             },
             context: None,
+            biz_opaque_callback_data: None,
         }
     }
 
@@ -67,6 +94,49 @@ impl SendMessageRequest {
         self.context = wamid
             .filter(|id| !id.is_empty())
             .map(|message_id| MessageContext { message_id });
+        self
+    }
+
+    /// Carry the gateway's delivery id in `biz_opaque_callback_data`.
+    ///
+    /// # Why this field and not a header
+    ///
+    /// `biz_opaque_callback_data` is the Cloud API's documented arbitrary
+    /// tracking string on the send payload (optional, ≤512 chars), and Meta
+    /// echoes it back inside the `statuses` object of the `messages` webhook.
+    /// So unlike an inert header it is useful at the REAL platform: a delivery
+    /// status arriving hours later can be joined to the exact
+    /// `cron:{job_id}:{scheduled_for_millis}` that caused it.
+    ///
+    /// # What it is NOT
+    ///
+    /// It is not a dedup token, and nothing here claims Meta collapses two
+    /// sends that carry the same value —
+    /// [`crate::WhatsappChannel::supports_outbound_idempotency`] stays `false`
+    /// for that reason. It is a TRACKING string; attribution and deduplication
+    /// are different properties and only the first is being asserted.
+    ///
+    /// A `None` or empty key leaves the field omitted rather than sending an
+    /// empty string, so an unidentified arrival stays visibly unidentified.
+    ///
+    /// # THIS CARRIER IS CLOUD-API-ONLY — a named assumption, not an oversight
+    ///
+    /// `biz_opaque_callback_data` is a field of Meta's **Cloud API** send
+    /// payload. It does not exist in the WhatsApp **Web** protocol, so a
+    /// non-Cloud backend (Baileys, whatsapp-web) reaching this crate through a
+    /// future transport seam **cannot** carry a delivery id here and would
+    /// silently produce arrivals with no identity — exactly the state this
+    /// change exists to remove, reintroduced one layer down and invisible from
+    /// the Cloud path's tests.
+    ///
+    /// Whoever adds that seam owns choosing its carrier; this comment only
+    /// refuses to let the choice be made by default. The bit that must not
+    /// drift is [`crate::WhatsappChannel::supports_outbound_idempotency`],
+    /// which is one value for the whole adapter while the transports beneath it
+    /// may differ — a backend that cannot carry an id must not inherit a
+    /// declaration made about one that can.
+    pub fn with_tracking_data(mut self, key: Option<&str>) -> Self {
+        self.biz_opaque_callback_data = key.filter(|k| !k.is_empty()).map(clamp_tracking_data);
         self
     }
 }
@@ -98,6 +168,20 @@ pub struct SendMediaRequest {
     pub media: MediaEnvelope,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<MessageContext>,
+    /// The gateway's delivery id — see
+    /// [`SendMessageRequest::with_tracking_data`].
+    ///
+    /// A multi-attachment outbound is N Cloud API messages under ONE logical
+    /// delivery, so every part carries the SAME value here. That is deliberate
+    /// and is the opposite of the chunked-text rule in
+    /// `wcore-channels::ChannelManager::send_to_keyed`, which withholds the key
+    /// from chunk 2..N so a *deduplicating* destination cannot suppress them.
+    /// The distinction is exactly the one this whole change turns on: a
+    /// dedup token must be unique per message or it destroys content, whereas a
+    /// tracking string is supposed to be shared by every part of one delivery —
+    /// that sharing is what makes the parts joinable back to their cause.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biz_opaque_callback_data: Option<String>,
 }
 
 /// Wraps the media object so it serializes under the `kind`-named key.
@@ -154,6 +238,7 @@ impl SendMediaRequest {
                 body: MediaBody { link: url, caption },
             },
             context: None,
+            biz_opaque_callback_data: None,
         }
     }
 
@@ -162,6 +247,14 @@ impl SendMediaRequest {
         self.context = wamid
             .filter(|id| !id.is_empty())
             .map(|message_id| MessageContext { message_id });
+        self
+    }
+
+    /// Carry the gateway's delivery id (see
+    /// [`SendMessageRequest::with_tracking_data`], including its Cloud-API-only
+    /// caveat).
+    pub fn with_tracking_data(mut self, key: Option<&str>) -> Self {
+        self.biz_opaque_callback_data = key.filter(|k| !k.is_empty()).map(clamp_tracking_data);
         self
     }
 }
