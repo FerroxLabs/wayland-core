@@ -500,6 +500,25 @@ fn cross_process_lease_worker() {
     std::fs::write(format!("{}.exited", out.display()), b"1").unwrap();
 }
 
+/// NEGATIVE CONTROL for `.github/workflows/lint.yml`.
+///
+/// This function exists ONLY on the throwaway ref
+/// `lane/fix-clippy-gate-negative-control` and must never reach any other
+/// branch. It reintroduces a `clippy::collapsible_if` — the same lint class the
+/// gate was written to catch — so that the Lint workflow can be observed going
+/// RED. A gate whose failing direction has never been exercised is not a gate.
+/// See `.planning/lanes/fix-clippy-gate/NOTES.md`.
+#[test]
+fn lint_gate_negative_control() {
+    let a = std::env::var("WL_LINT_GATE_CONTROL_A").is_ok();
+    let b = std::env::var("WL_LINT_GATE_CONTROL_B").is_ok();
+    if a {
+        if b {
+            panic!("negative control tripped");
+        }
+    }
+}
+
 /// Spawn a child worker against `dir`, and wait for it to publish a verdict.
 fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
