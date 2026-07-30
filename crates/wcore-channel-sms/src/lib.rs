@@ -156,6 +156,57 @@ impl SmsChannel {
         wcore_channels::push_bounded(&mut guard, ChannelEvent::MessageReceived { msg });
         Ok(())
     }
+
+    /// The one outbound path. `key` is the gateway's delivery id when this send
+    /// came through [`Channel::send_message_idempotent`], and `None` otherwise.
+    ///
+    /// Both trait methods route here so a keyed and an unkeyed send cannot
+    /// drift apart in anything but the header — a second copy of this function
+    /// is how "the keyed path also splits long bodies" stops being true without
+    /// anyone noticing.
+    async fn post(
+        &mut self,
+        msg: OutgoingMessage,
+        key: Option<&str>,
+    ) -> Result<MessageReceipt, ChannelError> {
+        if self.state != ConnectionState::Connected {
+            return Err(ChannelError::NotStarted);
+        }
+        let account_sid = self
+            .account_sid
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("account sid not loaded".to_string()))?;
+        let auth_token = self
+            .auth_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("auth token not loaded".to_string()))?;
+
+        if msg.conversation_id.is_empty() {
+            return Err(ChannelError::Rejected(
+                "OutgoingMessage.conversation_id is empty (twilio requires To)".to_string(),
+            ));
+        }
+
+        let resp = api::send_message(
+            &self.http,
+            &self.config.api_base_url,
+            account_sid,
+            auth_token,
+            &self.config.from_number,
+            &msg.conversation_id,
+            &msg.text,
+            self.config.max_retry_attempts,
+            key,
+        )
+        .await
+        .map_err(ChannelError::from)?;
+
+        Ok(MessageReceipt {
+            id: resp.sid,
+            conversation_id: msg.conversation_id,
+            ts_secs: Utc::now().timestamp(),
+        })
+    }
 }
 
 #[async_trait]
@@ -235,42 +286,57 @@ impl Channel for SmsChannel {
     }
 
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
-        if self.state != ConnectionState::Connected {
-            return Err(ChannelError::NotStarted);
-        }
-        let account_sid = self
-            .account_sid
-            .as_deref()
-            .ok_or_else(|| ChannelError::Auth("account sid not loaded".to_string()))?;
-        let auth_token = self
-            .auth_token
-            .as_deref()
-            .ok_or_else(|| ChannelError::Auth("auth token not loaded".to_string()))?;
+        self.post(msg, None).await
+    }
 
-        if msg.conversation_id.is_empty() {
-            return Err(ChannelError::Rejected(
-                "OutgoingMessage.conversation_id is empty (twilio requires To)".to_string(),
-            ));
-        }
+    /// Carries the gateway's delivery id on the wire as
+    /// [`api::IDEMPOTENCY_HEADER`].
+    ///
+    /// Twilio will not deduplicate on it — see
+    /// [`Self::supports_outbound_idempotency`], which stays `false`. What it
+    /// buys is **attributability**: an arrival at a destination that records
+    /// what we sent can now be traced back to the exact
+    /// `cron:{job_id}:{scheduled_for_millis}` that produced it, so a repeated
+    /// body is judgeable as a replay or a recurrence instead of being
+    /// unclassifiable.
+    async fn send_message_idempotent(
+        &mut self,
+        msg: OutgoingMessage,
+        key: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.post(msg, Some(key)).await
+    }
 
-        let resp = api::send_message(
-            &self.http,
-            &self.config.api_base_url,
-            account_sid,
-            auth_token,
-            &self.config.from_number,
-            &msg.conversation_id,
-            &msg.text,
-            self.config.max_retry_attempts,
-        )
-        .await
-        .map_err(ChannelError::from)?;
-
-        Ok(MessageReceipt {
-            id: resp.sid,
-            conversation_id: msg.conversation_id,
-            ts_secs: Utc::now().timestamp(),
-        })
+    /// **`false`, and it must stay `false` until a replay is driven at
+    /// `api.twilio.com` itself.**
+    ///
+    /// This adapter DOES transmit the delivery id (see
+    /// [`api::IDEMPOTENCY_HEADER`]). That is a fact about our request. This
+    /// method is a claim about **Twilio's arrival count**, and the two are
+    /// different claims — conflating them is precisely what cost this
+    /// repository its Slack and Discord exactly-once rows on 2026-07-30, when
+    /// both were driven at their real APIs for the first time and both produced
+    /// **two** messages from a replayed key. Both had held the bit on the
+    /// strength of a `mockito` test asserting the token left the process.
+    ///
+    /// The bit is not decorative: `LedgeredHandler::dispatch_fire`
+    /// (`wcore-gateway/src/automation.rs:216-220`) reads it to decide whether
+    /// an `Attempted`, outcome-unknown delivery may be **re-sent** after a
+    /// crash. Answering `true` here at a destination that cannot recognise the
+    /// replay converts every such restart into a duplicate — and an invisible
+    /// one, because our own ledger records a single delivery.
+    ///
+    /// Twilio's `Messages` create resource exposes no client-supplied
+    /// idempotency parameter at all (the full optional-parameter list is
+    /// enumerated on [`api::IDEMPOTENCY_HEADER`]), so there is no documented
+    /// slot for it to honour. That is a strong prior and it is **not** a
+    /// measurement. We hold no Twilio credentials; the live replay is written
+    /// and gated in
+    /// `crates/wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`
+    /// and skips loudly naming the credential it needs. **A skip is not a
+    /// pass.**
+    fn supports_outbound_idempotency(&self) -> bool {
+        false
     }
 
     fn config_schema(&self) -> &str {
@@ -434,6 +500,89 @@ mod tests {
     fn max_message_len_is_sms_cap() {
         let ch = SmsChannel::new("test", cfg_for("https://unused.example"), store_for_test());
         assert_eq!(ch.max_message_len(), Some(1600));
+    }
+
+    // -----------------------------------------------------------------
+    // 0. Delivery identity on the wire — BOTH DIRECTIONS.
+    //
+    // These two are a matched pair and neither is worth much alone. The
+    // first proves the header CAN be present; the second proves it is
+    // absent when it should be. A single positive test would pass just as
+    // happily against an adapter that attached the header unconditionally,
+    // which would make every unkeyed arrival falsely identified — the
+    // failure mode is *silent*, because a receipt full of identified
+    // arrivals is the shape a healthy run has.
+    //
+    // Both mocks match on the header, so a regression cannot degrade into
+    // a pass: the request stops matching, mockito answers 501, and the
+    // send below fails loudly rather than the assertion quietly weakening.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_keyed_send_puts_the_delivery_id_on_the_wire_though_twilio_ignores_it() {
+        let mut server = mockito::Server::new_async().await;
+        let key = "cron:job-sms:1785121776528";
+        let mock = server
+            .mock(
+                "POST",
+                format!("/2010-04-01/Accounts/{TEST_SID}/Messages.json").as_str(),
+            )
+            .match_header("idempotency-key", key)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sid":"SM-keyed","status":"queued"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SmsChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        // The capability bit is asserted in the SAME test as the wire fact,
+        // deliberately. Reading them apart is how Slack and Discord ended up
+        // declaring `true` on the strength of a header they merely sent: a
+        // mock proves what we transmit and can prove nothing about what the
+        // destination does with it.
+        assert!(
+            !ch.supports_outbound_idempotency(),
+            "Twilio must NOT claim outbound idempotency. Its Messages resource documents no \
+             client-supplied dedup parameter, and no replay has ever been driven at \
+             api.twilio.com. Transmitting the header is not evidence that it is honoured."
+        );
+
+        let receipt = ch
+            .send_message_idempotent(OutgoingMessage::text("+15551112222", "keyed"), key)
+            .await
+            .expect("keyed send must reach the fixture carrying the header");
+        assert_eq!(receipt.id, "SM-keyed");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_unkeyed_send_carries_no_delivery_id_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "POST",
+                format!("/2010-04-01/Accounts/{TEST_SID}/Messages.json").as_str(),
+            )
+            .match_header("idempotency-key", mockito::Matcher::Missing)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sid":"SM-unkeyed","status":"queued"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SmsChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        let receipt = ch
+            .send_message(OutgoingMessage::text("+15551112222", "unkeyed"))
+            .await
+            .expect("unkeyed send must reach the fixture with NO header");
+        assert_eq!(receipt.id, "SM-unkeyed");
+        mock.assert_async().await;
     }
 
     // -----------------------------------------------------------------
