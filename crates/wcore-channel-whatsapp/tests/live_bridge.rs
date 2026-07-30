@@ -14,7 +14,7 @@
 //! A suite that exits 0 having run zero tests is the failure shape this project
 //! keeps finding, so when these are run the executed count must be read back:
 //! `cargo test -p wcore-channel-whatsapp --test live_bridge -- --ignored` must
-//! report `5 passed`, not merely `ok`.
+//! report `6 passed`, not merely `ok`.
 //!
 //! # What these prove, and what they do NOT
 //!
@@ -134,6 +134,57 @@ async fn live_the_backend_selector_selects_against_the_real_bridge() {
         vec!["whatsapp_pairing".to_string()],
         "whatsapp-web must clear every gate up to pairing; got {report:?}"
     );
+}
+
+/// CAN PASS — and this one exists because **a gate that can never go green
+/// proves as little as one that can never go red**.
+///
+/// Every other live verdict here is `Incomplete`, because the host has never
+/// been paired. Without this test the probe would be a permanently-red
+/// instrument and nobody could tell a working bridge from a broken one.
+///
+/// It is a REACHABILITY proof, not an authentication proof. The pairing
+/// material it reads is placed by the harness, so what is demonstrated is that
+/// the last gate opens when the material is where the bridge would write it —
+/// **not** that WhatsApp has accepted anything. That limit is real and is
+/// stated in `docs/whatsapp-bridge.md`: session material that exists but has
+/// been revoked server-side reads as paired until the bridge reports
+/// `logged_out`.
+#[tokio::test]
+#[ignore = "needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge"]
+async fn live_the_ok_verdict_is_reachable_when_pairing_material_is_present() {
+    let session = match std::env::var("WCORE_TEST_SESSION_DIR") {
+        Ok(s) => PathBuf::from(s),
+        Err(_) => panic!(
+            "WCORE_TEST_SESSION_DIR is not set. Point it at a session root containing \
+             baileys/creds.json to prove the Ok verdict is reachable."
+        ),
+    };
+    let marker = session.join("baileys").join("creds.json");
+    assert!(
+        marker.exists(),
+        "known-positive setup: {} must exist for this proof to mean anything",
+        marker.display()
+    );
+
+    let mut c = cfg(WhatsappBackend::Baileys, bridge_path());
+    c.session_dir = Some(session);
+
+    let report = WhatsappBridgeChannel::new("live-paired", c)
+        .probe()
+        .await
+        .expect("probe must not error");
+    eprintln!("LIVE: probe report = {report:?}");
+
+    assert_eq!(
+        report.outcome,
+        ProbeOutcome::Ok,
+        "the Ok verdict must be reachable; got {report:?}"
+    );
+    assert!(report.outcome.is_ready());
+    assert!(report.config_complete);
+    assert_eq!(report.identity.as_deref(), Some("bridge/baileys"));
+    assert!(report.findings.is_empty());
 }
 
 /// CAN FAIL — with a real Node present, so the red is attributable to the
