@@ -46,15 +46,44 @@ max_tokens: present(project) ? min(project, global) : absent
 max_turns : (Some(p), Some(g)) => Some(min(p,g)) ; otherwise project unchanged
 ```
 
-## 4. Open judgement call — trust-gated or unconditional?
+## 4. Judgement call — trust-gated or unconditional? RESOLVED: trust-gated
 
 The neighbouring GHSA-8r7g clamps (`approval_mode`, `auto_approve`,
 `allow_list`) are UNCONDITIONAL — they clamp the trusted path too. But
 `[budget]` (`max_cost_usd`, `max_wall_time_secs`, …) — a strictly more powerful
 resource ceiling, denominated in dollars — is `project.or(global)` with **no
 clamp at all** on the trusted path, and is simply dropped on the untrusted one.
-That is the closer precedent for a *resource* ceiling, so the emerging pick is
-**trust-gated**. To be cross-audited (§4 of LANE-BRIEF) before shipping.
+That is the closer precedent for a *resource* ceiling.
+
+**Panel (LANE-BRIEF §4): 3/3 for trust-gated.** codex `gpt-5.6-sol`, gemini
+`3.1-pro-preview`, kimi K3 all picked trust-gated independently, all three
+naming the same strongest reason (a trusted project can already register
+`[mcp.servers]` = arbitrary tool execution, so a token ceiling buys no security)
+and — unprompted — all three naming the same strongest counter.
+
+**The counter, and why it fails — MEASURED, not argued.** All three dissents
+reduce to: *"trust is sticky while repo content is not; a workspace trusted on
+Monday still applies on Friday after a hostile PR raises `max_turns`, so the
+trusted path is a post-trust escalation channel."* That premise is **false in
+this codebase**:
+
+- `fingerprint_workspace` (`workspace_trust.rs:151-218`) hashes the **content**
+  of `.wayland-core.toml` itself (`:162` puts it in `candidates`, `:206-211`
+  feeds its bytes into the SHA-256).
+- `WorkspaceTrustStore::resolve` (`:99-104`) recomputes that digest on every
+  resolve and grants trust only on `digest == &fingerprint.digest`.
+
+So the moment a hostile commit edits `.wayland-core.toml` to raise `max_turns`,
+the digest changes, the stored grant no longer matches, the workspace reverts to
+UNTRUSTED, and the clamp applies. **The escalation channel the dissent posits
+does not exist**, and it is closed by the very edit that would exploit it. This
+is locked by a test (`raising_the_ceiling_in_a_trusted_repo_revokes_its_own_trust`).
+
+Minority position retained for the record: the internal-consistency argument
+(unclamped knob among clamped neighbours) is real but is a *style* cost, and
+kimi independently noted that fixing it properly needs a `max_tokens:
+Option<u32>` migration to tell "unset" from "64000" — out of scope here, and
+recorded as a finding rather than done badly.
 
 ## 5. Status
 
