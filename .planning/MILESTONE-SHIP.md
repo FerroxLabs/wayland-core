@@ -39,8 +39,15 @@ Re-measured 2026-07-30 by `lane/release-rank`, replacing a stale 7-item list. **
 |---|---|---|
 | ~~1~~ | ~~`BL-LOCKFILE-DRIFT`~~ | **CLOSED `b2ddf113`.** `serial_test` was missing from `Cargo.lock`, breaking every `--locked` build including `release.yml:310`. Integration-only, never on main, which is why CI looked clean |
 | 2 | `27-C5` — two aarch64 targets NOT MEASURED | `lane/27c5-aarch64` |
-| 3 | `27-C2(c)` — three policy baselines | `lane/27c2c-baselines` |
+| ~~3~~ | ~~`27-C2(c)` — three policy baselines~~ | **CLOSED `7953e2c3`.** All three measured on hetzner under `xvfb-run` against the **real Camoufox sidecar**, every known-negative reddening. Graded **MET-WITH-STATED-EXCEPTIONS**, not MET — see below |
 | 4 | `24-C1` — per-channel semantics declaration | **S4, Sean** |
+
+`27-C2`'s three stated exceptions: **no backend implements `BrowserOp::Download`**, so confinement's
+*admit* direction is vacuous in the shipped product; macOS/Windows and Wayland CUA unmeasured; the
+config→`CuaPolicy` trust boundary unexercised because the baseline builds the policy in-process.
+Adjudicated as not RC-blocking — `download` is absent from the tool description, so a guessed op
+fails closed with a typed `Unsupported` after confinement rather than being an advertised dead
+surface. Tracked to either implement `Download` or delete it and its confinement apparatus.
 
 Plus one open HIGH that must not ship: **`F29-02-H1`** — `.cargo/audit.toml` silences advisories on a
 stated "sole path" when the graph has three, two through `wcore-tools`, which parses user-supplied
