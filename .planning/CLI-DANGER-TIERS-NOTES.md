@@ -103,12 +103,107 @@ tier from the parsed CLI.
 - zsh ate an unquoted `--include=*.rs` on the first attempt (LANE-BRIEF §3b-i);
   all subsequent greps quote the glob.
 
-## 5. Status
+## 5. LIVE DRIVE — posture read back out of the binary's own `ready` frame
+
+Per LANE-BRIEF §3b-ii, the posture is read from the product's own output, not
+inferred from the flags passed. hetzner `73b9edfd`, debug binary, isolated
+`HOME`, `env -i`, fake key `sk-ant-lane-fake-000` (no real credential used).
+
+| argv | posture | approvals | sandbox | lease expiry (unix ms) |
+|---|---|---|---|---|
+| `--force` | smart | bypass | **required** | — |
+| `--yolo` | smart | bypass | **required** | — |
+| `--dangerously-skip-permissions` | smart | bypass | **required** | — |
+| `--auto-approve` | smart | bypass | **required** | — |
+| `--dangerously-skip-permissions-and-sandbox` | dangerous | bypass | **bypass** | 1785374431528 |
+| `--dangerous` | dangerous | bypass | **bypass** | 1785374432051 |
+| *(no flag — CONTROL)* | smart | **prompt** | required | — |
+
+**Controls in both directions (§3b-iii), on the live instrument:**
+- It CAN report a non-bypass approval: the no-flag row shows `approvals=prompt`.
+  So `approvals=bypass` above is a measurement, not a constant.
+- It CAN report a non-required sandbox: the tier-2 rows show `sandbox=bypass`.
+  So `sandbox=required` for tier 1 is a measurement, not a permanently-green
+  field.
+
+Lease bound measured live: `now=1785373558s expires=1785374458s delta=900s`,
+i.e. exactly `DEFAULT_DANGEROUS_SESSION_TTL_SECS` = 15 min.
+
+Notice scoping (proves `--force` stderr is unchanged), with a known-positive
+control so the zero is not a dead grep:
+
+```
+--force                            compat_notice=0   known_positive(any_stderr)=2
+--yolo                             compat_notice=0   known_positive(any_stderr)=2
+--dangerously-skip-permissions     compat_notice=1   known_positive(any_stderr)=2
+```
+
+## 6. Instrument self-test — three assertions
+
+1. **Known-positive passes.** `cargo test -p wcore-cli --bin wayland-core danger`
+   → `6 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out`.
+2. **Known-negative genuinely fails.** Sabotage = move `force` out of tier 1's
+   `visible_aliases` into tier 2's, i.e. exactly the hazard. Verbatim:
+
+```
+test tests::danger_spellings_never_change_tier ... FAILED
+thread 'tests::danger_spellings_never_change_tier' panicked at crates/wcore-cli/src/main.rs:7761:13:
+assertion `left == right` failed: --force CHANGED TIER: sandbox_bypassed=true, expected false. A tier-1 spelling that gains a dangerous grant strips the OS sandbox from every existing script that uses it.
+  left: true
+ right: false
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 47 filtered out
+```
+
+3. **The old shape would have missed it.** Under the IDENTICAL sabotage, the
+   pre-rename test stays green:
+
+```
+test tests::foreign_dangerous_alias_is_approval_only ... ok
+```
+
+   because it hardcodes `resolve_local_execution(&cfg, true, false, ..)` rather
+   than deriving the tier from the parsed `Cli`. That test is retained in the
+   suite for exactly this reason.
+
+**Also measured, and worth stating because it is a near-miss:** under the same
+sabotage `the_two_tiers_refuse_to_stack_in_every_spelling` ALSO stays green —
+once `--force` is a tier-2 alias, `--force --dangerous` is the same bool flag
+twice, which clap rejects for an unrelated reason. So the stacking test would
+NOT have caught the escalation either. `danger_spellings_never_change_tier` is
+the only gate in the suite that does.
+
+## 7. Fence exposure — `crates/wcore-cli/src/main.rs`
+
+Measured against the merge-base SHA captured once (`a3e68a31`), never against
+the branch name (LANE-BRIEF §6).
+
+- `crates/wcore-cli/src/lib.rs`: **0 lines — not touched.**
+- `crates/wcore-cli/src/main.rs`: **+253 / -23**. **NOT contiguous.**
+  12 hunks at `-U0`, clustering into 5 regions:
+  1. `331-358` — the two danger args in `struct Cli` (the rename itself)
+  2. `1089-1128` — `danger_tiers()`, the wiring line, the scoped notice
+  3. `1859` — one token: `!cli.dangerous` → `!dangerous_launch`
+  4. `1960` — one token: `cli.dangerous` → `dangerous_launch`
+  5. `7672-7903` — inside `mod tests`, all test code
+- **200 of the 253 added lines are inside `#[cfg(test)] mod tests`.**
+  Production exposure is **53 added / 23 removed**, across regions 1-4, two of
+  which are single-token renames.
+- All 23 removals are in production code (regions 1-2); the test-module hunks
+  are pure additions.
+
+A rename cannot be additive-only, so the fence's "additive, one contiguous
+block" guidance could not be met literally. It was met in spirit: no
+reformatting, no reordering, no drive-by cleanup, no touched registrations.
+
+## 8. Status
 
 - [x] Semantics measured, table above
-- [x] `--auto-approve` verdict reached with evidence
-- [ ] Rename + aliases wired
-- [ ] Regression test authored, proven able to fail AND able to pass
-- [ ] Docs updated
-- [ ] hetzner build/test
-- [ ] live binary drive
+- [x] `--auto-approve` verdict reached with evidence — NOT tier 1, left alone
+- [x] Rename + aliases wired (`visible_aliases`, mutual `conflicts_with`)
+- [x] Regression test authored, proven able to fail AND able to pass
+- [x] Docs updated (`getting-started.md`, `json-stream-protocol.md`)
+- [x] `cargo fmt --all` clean (rc=0, 0-line diff)
+- [x] `cargo check --workspace --all-targets` on hetzner: `WLRC=0`, 0 errors
+- [x] live binary drive
+- [x] Repaired a self-passing gate I authored (`--help` short-circuits clap
+      conflict validation) rather than documenting it — §6b-ii
