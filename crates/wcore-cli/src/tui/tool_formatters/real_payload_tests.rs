@@ -43,7 +43,7 @@
 use std::time::Duration;
 
 use serde_json::Value;
-use wcore_types::tool::Tool;
+use wcore_tools::Tool;
 
 use super::formatter_for;
 
@@ -159,7 +159,7 @@ fn write_then_edit_then_read_render_the_tools_own_words() {
     let path_s = path.to_string_lossy().to_string();
 
     let (summary, _) = render_real(
-        &wcore_tools::write::WriteTool::new(),
+        &wcore_tools::write::WriteTool::new(None),
         serde_json::json!({ "file_path": path_s, "content": "alpha\nbeta\n" }),
     );
     // `WriteTool` returns "Created <path> (2 lines)". Previously the card
