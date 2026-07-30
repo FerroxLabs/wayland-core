@@ -690,8 +690,23 @@ jobs:
   # desktop's prepareWaylandCore.js (node_modules resolution path) — pull the
   # ONE binary matching their platform via npm's os/cpu + optionalDependencies.
   #
-  # Gated on post-tag-smoke: npm only ever serves a binary that already ran
-  # `--version` on its native OS. Requires the org secret NPM_TOKEN (an
+  # Gated on post-tag-smoke — but NOT uniformly, and the difference matters.
+  # This comment previously read "npm only ever serves a binary that already ran
+  # `--version` on its native OS". That is FALSE for the two aarch64 packages,
+  # which are header-verified only (see the arch-check at :624-684) because no
+  # aarch64 runner executes them here. Measured 2026-07-30 by lane
+  # `27c5-aarch64`, which then retired the linux half by actually running it:
+  # aarch64-unknown-linux-gnu is 8 PASS / 1 RED at v0.12.25 and 9 PASS / 0 RED
+  # at candidate b7560018 on real Apple ARM cores.
+  #
+  # `aarch64-pc-windows-msvc` remains UNEXECUTED and cannot be executed on any
+  # host we have: the ARM64 PE (machine 0xAA64) returns NOLAUNCH /
+  # ERROR_BAD_EXE_FORMAT on the x86_64 Windows box, with an x86_64 PE in the
+  # same session returning 0 as the known-positive. So npm can still serve one
+  # binary that has never run anywhere. Do not restore the old sentence without
+  # a Windows-on-ARM runner to make it true.
+  #
+  # Requires the org secret NPM_TOKEN (an
   # automation token for the @ferroxlabs npm org); without it the job no-ops
   # with a notice instead of failing the release.
   publish-npm:
