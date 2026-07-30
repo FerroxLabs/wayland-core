@@ -1465,6 +1465,31 @@ impl Router {
                         if !app.config.force {
                             app.mode = applied.session_mode;
                         }
+                        // Mirror the re-resolved provider + model onto the
+                        // status-bar snapshot, exactly as `/provider` does.
+                        //
+                        // Without this the ENGINE rebinds and the VIEW does
+                        // not, and the view is what the workspace gates its
+                        // composer on: `app.config.model.is_empty()` swaps the
+                        // composer for a `No model configured.` panel. So a
+                        // user could finish onboarding, have a live provider
+                        // bound, and land on a workspace with **no input line
+                        // at all** — still naming the pre-onboarding provider.
+                        // Measured on hetzner: complete onboarding over a
+                        // config resolving flux-router/flux-auto and the
+                        // workspace still read `anthropic has no default
+                        // model.`
+                        //
+                        // Only these two fields are mirrored. `force` is launch
+                        // authority stamped onto the view AFTER the snapshot is
+                        // taken (see `config_view_from`), so copying the whole
+                        // view would silently drop it.
+                        if !applied.config_view.provider.is_empty() {
+                            app.config.provider = applied.config_view.provider.clone();
+                        }
+                        if !applied.config_view.model.is_empty() {
+                            app.config.model = applied.config_view.model.clone();
+                        }
                     }
                 }
                 // Replay the rescued type-ahead into the now-active surface's

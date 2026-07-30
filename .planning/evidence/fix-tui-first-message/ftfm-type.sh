@@ -50,6 +50,7 @@ while [ $# -gt 0 ]; do
     --with-key) WITH_KEY=1; shift ;;
     --send) SENDS+=("$2"); shift 2 ;;
     --arg) ARGS+=("$2"); shift 2 ;;
+    --seed-config) SEED="$2"; shift 2 ;;
     --selftest) SELFTEST=1; shift ;;
     *) echo "unknown flag: $1" >&2; exit 90 ;;
   esac
@@ -112,7 +113,23 @@ if [ "${SELFTEST:-0}" = "1" ]; then
   # inventing a count.
   r=$(compute "abcdef" "xyz")
   [ "$r" = "LOST_CHARS=-1 VERDICT=MISMATCH" ] || { echo "SELFTEST A4 FAIL: $r"; fails=1; }
-  if [ "$fails" = 0 ]; then echo "SELFTEST=PASS assertions=6"; exit 0
+  # A5 the readout stripper. It has to survive the hint being present (the fixed
+  # build) and absent (the base build), because both are graded by this harness.
+  ta="Use the bash tool   (kept for your first message · ⌫ edit · ⎋ discard)"
+  h="${ta%%   (kept for your first message*}"; [ "$h" = "$ta" ] && h=""
+  [ "$h" = "Use the bash tool" ] || { echo "SELFTEST A5 FAIL: [$h]"; fails=1; }
+  ta="no readout on this build"
+  h="${ta%%   (kept for your first message*}"; [ "$h" = "$ta" ] && h=""
+  [ -z "$h" ] || { echo "SELFTEST A5b FAIL: [$h]"; fails=1; }
+  # A6 the CAN-IT-PASS control (LANE-BRIEF §3b-iii). Grading only on the
+  # composer made the credentials-absent quadrant permanently red: the card
+  # holds every character and shows them, and there is no composer to deliver
+  # into until onboarding finishes. Assert the readout is a gradeable source, or
+  # the fixed build reports a total loss forever.
+  r=$(compute "Use the bash tool to run echo Q3TOKEN" "Use the bash tool to run echo Q3TOKEN")
+  [ "${r#*VERDICT=}" = "INTACT" ] \
+    || { echo "SELFTEST A6 FAIL: readout must be gradeable: $r"; fails=1; }
+  if [ "$fails" = 0 ]; then echo "SELFTEST=PASS assertions=10"; exit 0
   else echo "SELFTEST=FAIL"; exit 91; fi
 fi
 
@@ -122,6 +139,23 @@ fi
 [ -d "$BIN" ] && { echo "ASSERT_BIN=FAIL is-a-directory" >&2; exit 93; }
 
 rm -rf "$HOMEDIR"; mkdir -p "$HOMEDIR" "$OUT"
+# Optional pre-seeded global config. Needed for the one quadrant that requires
+# the onboarding card and a WORKING session at the same time: the card only
+# shows when the session cannot run, and the workspace has no composer until it
+# can, so the card has to be forced up (`setup`) over a config that already
+# resolves. Never contains a credential — the key stays in the environment.
+#
+# Path taken from the product itself (`--config-path`), not assumed — a seed
+# written to the wrong directory would silently do nothing and the run would
+# look like a product failure.
+if [ -n "${SEED:-}" ]; then
+  CFG=$(HOME="$HOMEDIR" "$BIN" --config-path 2>/dev/null | head -1)
+  [ -n "$CFG" ] || { echo "SEED_PATH=FAIL"; exit 96; }
+  mkdir -p "$(dirname "$CFG")"
+  cp "$SEED" "$CFG"
+  echo "SEEDED_CONFIG=$CFG"
+  [ -s "$CFG" ] || { echo "SEED_WRITE=FAIL"; exit 96; }
+fi
 RESULT="$OUT/${LABEL}.result"
 : > "$RESULT"
 say() { echo "$*"; echo "$*" >> "$RESULT"; }
@@ -207,9 +241,15 @@ if grep -qF 'Connect a provider' "$OUT/${LABEL}.typed.txt"; then
 else
   say "SURFACE_AFTER_TYPING=CHAT"
 fi
-# The type-ahead readout, if the build under test has one.
+# The type-ahead readout, if the build under test has one. `HELD` is the text
+# alone, with the trailing affordance hint stripped, so it can be compared to
+# what was sent.
 TA=$(awk -F'Type-ahead: ' '/Type-ahead: /{print $2; exit}' "$OUT/${LABEL}.typed.txt" | sed 's/ *$//')
 say "TYPEAHEAD_LINE=[${TA}]"
+HELD="${TA%%   (kept for your first message*}"
+[ "$HELD" = "$TA" ] && HELD=""    # no hint found → no readout on this build
+say "TYPEAHEAD_HELD=[${HELD}]"
+say "TYPEAHEAD_HELD_LEN=${#HELD}"
 
 # ── optional follow-up keys (complete onboarding, etc.) ──────────────────────
 for k in ${SENDS[@]+"${SENDS[@]}"}; do
@@ -256,12 +296,37 @@ fi
 say "COMPOSER_TEXT=[${LANDED}]"
 say "COMPOSER_LEN=${#LANDED}"
 
-eval "$(compute "$TEXT" "$LANDED")"
+# ── grade ────────────────────────────────────────────────────────────────────
+# The question is "did the product keep the user's characters", and there are
+# TWO ways to keep them: DELIVERED into a composer, or HELD visibly on the card
+# for a user who has not finished onboarding yet and therefore has no composer
+# to deliver into.
+#
+# THIRD instrument defect, and the one that mattered most: grading only on the
+# composer made this harness PERMANENTLY RED for the credentials-absent
+# quadrant. The card correctly holds all 37 characters and shows them on screen,
+# and the harness called that TOTAL_LOSS — a gate with no reachable pass state
+# proves as little as one with no reachable fail state (LANE-BRIEF §3b-iii).
+# Both states are now graded, and the run says which one it measured.
+if [ -n "$LANDED" ]; then
+  GRADED_ON=composer; GOT="$LANDED"
+elif [ -n "$HELD" ]; then
+  GRADED_ON=typeahead-readout; GOT="$HELD"
+else
+  GRADED_ON=nothing-on-screen; GOT=""
+fi
+say "GRADED_ON=${GRADED_ON}"
+eval "$(compute "$TEXT" "$GOT")"
 say "LOST_CHARS=${LOST_CHARS}"
 if [ "${LOST_CHARS}" -ge 0 ]; then
   say "LOST_PREFIX=[${TEXT:0:${LOST_CHARS}}]"
 else
-  say "LOST_PREFIX=[<ungradeable — see COMPOSER_TEXT>]"
+  say "LOST_PREFIX=[<ungradeable — see COMPOSER_TEXT / TYPEAHEAD_HELD>]"
+fi
+if [ "$VERDICT" = "INTACT" ] && [ "$GRADED_ON" = "typeahead-readout" ]; then
+  VERDICT=INTACT_HELD
+elif [ "$VERDICT" = "INTACT" ]; then
+  VERDICT=INTACT_DELIVERED
 fi
 say "VERDICT=${VERDICT}"
 
