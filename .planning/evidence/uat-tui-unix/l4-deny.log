@@ -1,0 +1,265 @@
+########## UAT RUN: l4-deny
+host=Ubuntu-2404-noble-amd64-base uname=Linux 6.8.0-101-generic x86_64 date=2026-07-30T10:49:03Z
+ASSERT_BIN=OK path=/root/wayland-uat-tui-unix/target/release/wayland-core size=98435048
+BIN_SHA256=fae1287ac591e16c4d1595e49378ae69ce4515f752c1247cb8b96e8d959d059a
+BIN_BUILDINFO=wayland-core 0.12.25 (source e9bed1af931f02aea094469d44eed291af0c4c96)
+PTY_OUTSIDE_ISATTY=False
+PTY_INSIDE=ISATTY=True
+PTY_CONTROL=OK (discriminates: False outside pty, True inside pty)
+CMD= env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GROQ_API_KEY -u OPENROUTER_API_KEY -u FAL_API_KEY -u HF_API_KEY -u API_KEY -u PROVIDER -u BASE_URL -u MODEL HOME=/root/uat-home-l4 /root/wayland-uat-tui-unix/target/release/wayland-core -p flux-router -m flux-auto; echo "WLRC=$?" > /root/uat-lane-caps/l4-deny.rc; echo WLDONE >> /root/uat-lane-caps/l4-deny.rc; sleep 300
+LAUNCHED settle=30s
+----- CAPTURE 0 (what the user sees on arrival) -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+                    ┌ Connect a provider ──────────────────────────────────────────────────────────┐
+                    │      __      __  _____ _____.___.____       _____    _______  ________       │
+                    │     /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \      │
+                    │     \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \     │
+                    │      \        /    |    \____   |    |___/    |    \/    |    \|    `   \    │
+                    │       \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /    │
+                    │            \/         \/\/              \/       \/         \/        \/     │
+                    │                                                                              │
+                    │                            the autonomous AI agent                           │
+                    │                                                                              │
+                    │                          connect a provider to begin                         │
+                    │                                                                              │
+                    │Paste your provider API key — we'll detect which provider.                    │
+                    │┌────────────────────────────────────────────────────────────────────────────┐│
+                    ││› paste your provider API key here                                          ││
+                    │└────────────────────────────────────────────────────────────────────────────┘│
+                    │                                                                              │
+                    │                                                                              │
+                    │▸ Enter an API key — any major provider   ⏎                                   │
+                    │  Use Ollama — a local model, no API key needed   o                           │
+                    │  Skip for now (set up a provider later from /config)   s                     │
+                    │                                                                              │
+                    │                            ● Connect   ─   ○ Ready                           │
+                    │                                                                              │
+                    │                                                                              │
+                    └──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 19s
+
+----- SEND #1: [__LITERAL:Use the bash tool to run exactly: echo LINUXDENY_TOKEN] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+                           __      __  _____ _____.___.____       _____    _______  ________
+                          /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \
+                          \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \
+                           \        /    |    \____   |    |___/    |    \/    |    \|    `   \
+                            \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /
+                                 \/         \/\/              \/       \/         \/        \/
+
+                                                 the autonomous AI agent
+
+
+
+
+
+
+
+
+                         A terminal AI agent that reads, writes, and runs code in your project.
+
+                                               Try: explain this codebase
+                                     /connect to paste an API key and add a provider
+                                               Try: /model to pick a model
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › the bash tool to run exactly: echo LINUXDENY_TOKEN
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 22s
+
+----- SEND #2: [Enter] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo LINUXDENY_TOKEN                            ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to run the command `echo LINUXDENY_TOKEN` using the Bash    │                                │
+   tool.                                                                           │                                │
+     ⋆ Steeping the bytes… (2s · ↑ 0 tokens · thinking)                            │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Esc interrupt    ⏎ queue a message for the next turn
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 2s
+
+----- SEND #3: [__SLEEP:15] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo LINUXDENY_TOKEN                            ┌ Activity ──────────────────────┐
+                                                                                   │ ⊘ Pending(1)  press y          │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ awaiting Bash · echo LINU…     │
+   the token envelope and cost is unpriced, not $0.                                │ Pricing unavailable for f…     │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+   ─────────────────────────────────────────────────────────────────────────────── │                                │
+    ❯ Run a shell command                                                          │                                │
+     echo LINUXDENY_TOKEN                                                          │                                │
+                                                                                   │                                │
+    [enter/y] approve once   [a] always for echo LINUXDENY_TOKEN   [n] deny        │                                │
+   [esc] cancel                                                                    │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to run the command `echo LINUXDENY_TOKEN` using the Bash    │                                │
+   tool.                                                                           │                                │
+     ⊘ Awaiting your approval: Bash                                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  ⊘ press [y] approve · [a] always · [n] deny · [esc] cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 20s
+
+----- SEND #4: [n] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo LINUXDENY_TOKEN                            ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ Pricing unavailable for f…     │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+     ⊘ Bash({ "command": "echo LINUXDENY_TOKEN" }) · rejected by user              │                                │
+                                                                                   │                                │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to run the command `echo LINUXDENY_TOKEN` using the Bash    │                                │
+   tool.The tool was denied with the message "User declined — explain what to      │                                │
+   change instead." This means the user is asking me to explain what the token     │                                │
+   variable should contain, rather than executing the command.                     │                                │
+                                                                                   │                                │
+     The user asked me to run `echo LINUXDENY_TOKEN`, which was presumably denied  │                                │
+     ⋆ Steeping the bytes… (23s · ↑ 0 tokens · wrapping up)                        │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Esc interrupt    ⏎ queue a message for the next turn
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 23s
+
+----- SEND #5: [__SLEEP:15] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo LINUXDENY_TOKEN                            ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ Pricing unavailable for f…     │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+     ⊘ Bash({ "command": "echo LINUXDENY_TOKEN" }) · rejected by user              │                                │
+                                                                                   │                                │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ $0.00 + unpriced │ 41s
+
+----- PANE ALIVE? -----
+pane_dead=0 pid=223825
+----- EXIT STATUS FILE (written by the child, read separately) -----
+cat: /root/uat-lane-caps/l4-deny.rc: No such file or directory
+NO_RC_FILE (process still running or killed)
+ORPHAN_SWEEP=argv0_exact_match pattern=/root/wayland-uat-tui-unix/target/release/wayland-core
+PROCS_BEFORE_KILL=1
+ORPHANS_AFTER_KILL=0
+ORPHAN_DETECTOR=ALIVE (known-positive = the pre-kill scan; DEAD means ORPHANS_AFTER_KILL proves nothing)

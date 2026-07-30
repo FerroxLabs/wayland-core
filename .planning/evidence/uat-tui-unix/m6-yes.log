@@ -1,0 +1,265 @@
+########## UAT RUN: m6-yes
+host=Seans-MacBook-Pro.local uname=Darwin 25.3.0 arm64 date=2026-07-30T10:29:25Z
+ASSERT_BIN=OK path=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core size=80209792
+BIN_SHA256=e5803944aead3c987b8b158a71576bc2d0b49dde6e71a6463df20590089c662b
+BIN_BUILDINFO=wayland-core 0.12.25 (source a903142bad8dd8014ac61c65675f8e9e28a8fb96)
+PTY_OUTSIDE_ISATTY=False
+PTY_INSIDE=ISATTY=True
+PTY_CONTROL=OK (discriminates: False outside pty, True inside pty)
+CMD=set -a; . /Users/seandonahoe/.wayland-secrets/flux.env; set +a;  env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GROQ_API_KEY -u OPENROUTER_API_KEY -u FAL_API_KEY -u HF_API_KEY -u API_KEY -u PROVIDER -u BASE_URL -u MODEL HOME=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/home-m6 WAYLAND_VAULT_PASSPHRASE=uat-throwaway-not-a-real-secret /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core -p flux-router -m flux-auto; echo "WLRC=$?" > /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m6-yes.rc; echo WLDONE >> /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m6-yes.rc; sleep 300
+LAUNCHED settle=25s
+----- CAPTURE 0 (what the user sees on arrival) -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+                    ┌ Connect a provider ──────────────────────────────────────────────────────────┐
+                    │      __      __  _____ _____.___.____       _____    _______  ________       │
+                    │     /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \      │
+                    │     \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \     │
+                    │      \        /    |    \____   |    |___/    |    \/    |    \|    `   \    │
+                    │       \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /    │
+                    │            \/         \/\/              \/       \/         \/        \/     │
+                    │                                                                              │
+                    │                            the autonomous AI agent                           │
+                    │                                                                              │
+                    │                          connect a provider to begin                         │
+                    │                                                                              │
+                    │Paste your provider API key — we'll detect which provider.                    │
+                    │┌────────────────────────────────────────────────────────────────────────────┐│
+                    ││› paste your provider API key here                                          ││
+                    │└────────────────────────────────────────────────────────────────────────────┘│
+                    │                                                                              │
+                    │                                                                              │
+                    │▸ Enter an API key — any major provider   ⏎                                   │
+                    │  Use Ollama — a local model, no API key needed   o                           │
+                    │  Skip for now (set up a provider later from /config)   s                     │
+                    │                                                                              │
+                    │                            ● Connect   ─   ○ Ready                           │
+                    │                                                                              │
+                    │                                                                              │
+                    └──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 23s
+
+----- SEND #1: [__LITERAL:Use the bash tool to run exactly: echo HELLO_FROM_UAT] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+                           __      __  _____ _____.___.____       _____    _______  ________
+                          /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \
+                          \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \
+                           \        /    |    \____   |    |___/    |    \/    |    \|    `   \
+                            \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /
+                                 \/         \/\/              \/       \/         \/        \/
+
+                                                 the autonomous AI agent
+
+
+
+
+
+
+
+
+                         A terminal AI agent that reads, writes, and runs code in your project.
+
+                                               Try: explain this codebase
+                                     /connect to paste an API key and add a provider
+                                               Try: /model to pick a model
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › the bash tool to run exactly: echo HELLO_FROM_UAT
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 27s
+
+----- SEND #2: [Enter] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo HELLO_FROM_UAT                             ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+     ✻ Steeping the bytes… (2s · ↑ 0 tokens · thinking)                            │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Esc interrupt    ⏎ queue a message for the next turn
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 2s
+
+----- SEND #3: [__SLEEP:12] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo HELLO_FROM_UAT                             ┌ Activity ──────────────────────┐
+                                                                                   │ ⊘ Pending(1)  press y          │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ awaiting Bash · echo HELL…     │
+   the token envelope and cost is unpriced, not $0.                                │ Pricing unavailable for f…     │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+   ─────────────────────────────────────────────────────────────────────────────── │                                │
+    ❯ Run a shell command                                                          │                                │
+     echo HELLO_FROM_UAT                                                           │                                │
+                                                                                   │                                │
+    [enter/y] approve once   [a] always for echo HELLO_FROM_UAT   [n] deny         │                                │
+   [esc] cancel                                                                    │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to run `echo HELLO_FROM_UAT` using the Bash tool. This is   │                                │
+   a straightforward request.                                                      │                                │
+     ⊘ Awaiting your approval: Bash                                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  ⊘ press [y] approve · [a] always · [n] deny · [esc] cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 18s
+
+----- SEND #4: [y] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo HELLO_FROM_UAT                             ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ Pricing unavailable for f…     │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+     ● Bash({ "command": "echo HELLO_FROM_UAT" }) · done                           │                                │
+       Ran `?` · exit 0 · 0 bytes                                                  │                                │
+                                                                                   │                                │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to run `echo HELLO_FROM_UAT` using the Bash tool. This is   │                                │
+   a straightforward request.                                                      │                                │
+     ✦ Steeping the bytes… (21s · ↑ 0 tokens · running Bash)                       │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Esc interrupt    ⏎ queue a message for the next turn
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 21s
+
+----- SEND #5: [__SLEEP:15] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ the bash tool to run exactly: echo HELLO_FROM_UAT                             ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │ Pricing unavailable for f…     │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+     ● Bash({ "command": "echo HELLO_FROM_UAT" }) · done                           │                                │
+       Ran `?` · exit 0 · 0 bytes                                                  │                                │
+                                                                                   │                                │
+   ⚙ Pricing unavailable for flux-router/flux-auto; the call remains bounded by    │                                │
+   the token envelope and cost is unpriced, not $0.                                │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ $0.00 + unpriced │ 38s
+
+----- PANE ALIVE? -----
+pane_dead=0 pid=35896
+----- EXIT STATUS FILE (written by the child, read separately) -----
+cat: /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m6-yes.rc: No such file or directory
+NO_RC_FILE (process still running or killed)
+ORPHAN_SWEEP=argv0_exact_match pattern=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core
+PROCS_BEFORE_KILL=1
+ORPHANS_AFTER_KILL=0
+ORPHAN_DETECTOR=ALIVE (known-positive = the pre-kill scan; DEAD means ORPHANS_AFTER_KILL proves nothing)

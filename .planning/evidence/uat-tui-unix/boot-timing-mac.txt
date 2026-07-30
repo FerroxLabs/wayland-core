@@ -1,0 +1,5 @@
+SPLASH_FIRST_SEEN_AT=1s
+ONBOARDING_FIRST_SEEN_AT=2s
+SPLASH_FIRST_SEEN=1
+ONBOARDING_FIRST_SEEN=2
+INSTRUMENT=ALIVE (at least one needle matched, so a miss is a real miss)

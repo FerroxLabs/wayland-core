@@ -1,0 +1,68 @@
+[2m2026-07-30T10:19:41.855177Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T10:19:41.855247Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T10:19:41.856075Z[0m [32m INFO[0m on-disk plugin loaded [3mplugin[0m[2m=[0mwayland-ijfw [3mmanifest[0m[2m=[0m/Users/seandonahoe/.wayland/plugins/ijfw/plugin.toml
+[2m2026-07-30T10:19:41.857197Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T10:19:41.863608Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T10:19:41.863729Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T10:19:41.863745Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T10:19:41.863752Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T10:19:41.863759Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T10:19:41.863766Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T10:19:41.863772Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T10:19:41.863778Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T10:19:41.863789Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T10:19:41.863811Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-30T10:19:41.863824Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T10:19:41.863865Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:19:41.863895Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T10:19:41.863918Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-30T10:19:41.877264Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:19:41.877302Z[0m [32m INFO[0m video_analyze: ffmpeg + vision backend present — tool enabled
+[2m2026-07-30T10:19:41.877322Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T10:19:41.878422Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T10:19:41.998162Z[0m [31mERROR[0m [mcp] stdio server sent unparseable line [3mserver[0m[2m=[0mecho [3merror[0m[2m=[0mexpected value at line 1 column 1 [3mline[0m[2m=[0mhello-mcp
+[2m2026-07-30T10:19:42.005917Z[0m [31mERROR[0m [mcp] stdio server sent unparseable line [3mserver[0m[2m=[0mecho [3merror[0m[2m=[0mexpected value at line 1 column 1 [3mline[0m[2m=[0mmcp-test
+[2m2026-07-30T10:19:42.021532Z[0m [33m WARN[0m [mcp stderr] Saved lockfile [3mserver[0m[2m=[0mbun
+[2m2026-07-30T10:19:42.508585Z[0m [33m WARN[0m [mcp stderr] (node:3541) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead. [3mserver[0m[2m=[0mnode
+[2m2026-07-30T10:19:42.508595Z[0m [33m WARN[0m [mcp stderr] (Use `node --trace-deprecation ...` to show where the warning was created) [3mserver[0m[2m=[0mnode
+[2m2026-07-30T10:19:42.578929Z[0m [33m WARN[0m [mcp stderr] Installed 90 packages in 225ms [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:45.990006Z[0m [33m WARN[0m [mcp stderr] [INFO] \x1b[32mPort resolver: bound preferred port 8000\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:45.991217Z[0m [33m WARN[0m [mcp stderr] [AUTH] \x1b[32mScope management active for 12 services\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.332292Z[0m [33m WARN[0m [mcp stderr] [UTILS] \x1b[32mCredentials directory verified: /Users/seandonahoe/.google_workspace_mcp/credentials\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.332307Z[0m [33m WARN[0m [mcp stderr] [INFO] \x1b[32mTransport: stdio\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.346813Z[0m [33m WARN[0m [mcp stderr] [07/30/26 17:19:46] INFO     Starting MCP server                transport.py:241 [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.346839Z[0m [33m WARN[0m [mcp stderr]                              'google_workspace' with transport                   [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.346846Z[0m [33m WARN[0m [mcp stderr]                              'stdio'                                             [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.350329Z[0m [33m WARN[0m [mcp stderr] [INFO] \x1b[32mProcessing request of type ListToolsRequest\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:46.365741Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0mhello-echo-mcp [3merror[0m[2m=[0mInitialization failed: Transport error: MCP stdio server exited before responding; transport cleanup failed: Transport error: failed to kill MCP process group: Operation not permitted (os error 1)
+[2m2026-07-30T10:19:46.365756Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0mcom.canva-canva-mcp [3merror[0m[2m=[0mTransport error: HTTP request returned status: 401 Unauthorized
+[2m2026-07-30T10:19:46.365760Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0mcom.notion/notion-mcp [3merror[0m[2m=[0mTransport error: HTTP request returned status: 401 Unauthorized
+[mcp] Connected to 'com.brave/brave-search-mcp': 6 tools, resources=false
+[mcp] Connected to 'com.microsoft-playwright-mcp': 23 tools, resources=false
+[2m2026-07-30T10:19:46.366563Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0mcom.notion-notion-mcp [3merror[0m[2m=[0mTransport error: HTTP request returned status: 401 Unauthorized
+[mcp] Connected to 'wayland-image-generation': 1 tools, resources=false
+[2m2026-07-30T10:19:46.366574Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0mcom.slack-slack-mcp [3merror[0m[2m=[0mTransport error: Parse JSON response failed: expected value at line 1 column 1 — preview: <!DOCTYPE html><html lang="en-US" class="" data-primer data-cdn="https://a.slack-edge.com/"><head><script>
+
+(function () {
+	
+	var data;
+
+	const MAX_CDN_FALLBACK = 2;
+	let isReloading = false;
+
+	function scanPageAssets() {
+		var css = document.getElementsBy… (60804 bytes total, truncated)
+[2m2026-07-30T10:19:46.366578Z[0m [33m WARN[0m failed to connect MCP server [3mserver[0m[2m=[0me2e-echo-server [3merror[0m[2m=[0mInitialization failed: Transport error: MCP stdio server exited before responding; transport cleanup failed: Transport error: failed to kill MCP process group: Operation not permitted (os error 1)
+[mcp] Connected to 'io.github.taylorwilsdon-google-workspace-mcp': 122 tools, resources=true
+[mcp] Connected to 'com.github-github-mcp-server': 44 tools, resources=true
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+[2m2026-07-30T10:19:46.463790Z[0m [32m INFO[0m plugin hook dispatcher wired [3mcount[0m[2m=[0m1 [3mplugins[0m[2m=[0m["wayland-ijfw"]
+[2m2026-07-30T10:19:47.066173Z[0m [33m WARN[0m [mcp stderr] [INFO] \x1b[32mProcessing request of type ListResourcesRequest\x1b[0m [3mserver[0m[2m=[0muvx
+[2m2026-07-30T10:19:47.385524Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T10:19:47.385553Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:19:47.387099Z[0m [32m INFO[0m watching skill directory [3mdir[0m[2m=[0m/Users/seandonahoe/Library/Application Support/wayland-core/skills
+[2m2026-07-30T10:19:47.387218Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T10:19:47.387240Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T10:19:47.402479Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m3516 [3mdir[0m[2m=[0m/Users/seandonahoe/Library/Application Support/wayland-core/channels
+[2m2026-07-30T10:19:47.402514Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+Error: storage.credentials.backend is set to "plaintext", which cannot hold the confidential key that durable session recovery requires. Unlock an encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = "keyring", or turn durable sessions off with [session] enabled = false

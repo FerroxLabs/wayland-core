@@ -1,0 +1,142 @@
+########## UAT RUN: m4-repro
+host=Seans-MacBook-Pro.local uname=Darwin 25.3.0 arm64 date=2026-07-30T10:27:05Z
+ASSERT_BIN=OK path=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core size=80209792
+BIN_SHA256=e5803944aead3c987b8b158a71576bc2d0b49dde6e71a6463df20590089c662b
+BIN_BUILDINFO=wayland-core 0.12.25 (source a903142bad8dd8014ac61c65675f8e9e28a8fb96)
+PTY_OUTSIDE_ISATTY=False
+PTY_INSIDE=ISATTY=True
+PTY_CONTROL=OK (discriminates: False outside pty, True inside pty)
+CMD=set -a; . /Users/seandonahoe/.wayland-secrets/flux.env; set +a;  env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GROQ_API_KEY -u OPENROUTER_API_KEY -u FAL_API_KEY -u HF_API_KEY -u API_KEY -u PROVIDER -u BASE_URL -u MODEL HOME=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/home-m4 WAYLAND_VAULT_PASSPHRASE=uat-throwaway-not-a-real-secret /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core -p flux-router -m flux-auto; echo "WLRC=$?" > /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m4-repro.rc; echo WLDONE >> /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m4-repro.rc; sleep 300
+LAUNCHED settle=12s
+----- CAPTURE 0 (what the user sees on arrival) -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+                    ┌ Connect a provider ──────────────────────────────────────────────────────────┐
+                    │      __      __  _____ _____.___.____       _____    _______  ________       │
+                    │     /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \      │
+                    │     \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \     │
+                    │      \        /    |    \____   |    |___/    |    \/    |    \|    `   \    │
+                    │       \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /    │
+                    │            \/         \/\/              \/       \/         \/        \/     │
+                    │                                                                              │
+                    │                            the autonomous AI agent                           │
+                    │                                                                              │
+                    │                          connect a provider to begin                         │
+                    │                                                                              │
+                    │Paste your provider API key — we'll detect which provider.                    │
+                    │┌────────────────────────────────────────────────────────────────────────────┐│
+                    ││› paste your provider API key here                                          ││
+                    │└────────────────────────────────────────────────────────────────────────────┘│
+                    │                                                                              │
+                    │                                                                              │
+                    │▸ Enter an API key — any major provider   ⏎                                   │
+                    │  Use Ollama — a local model, no API key needed   o                           │
+                    │  Skip for now (set up a provider later from /config)   s                     │
+                    │                                                                              │
+                    │                            ● Connect   ─   ○ Ready                           │
+                    │                                                                              │
+                    │                                                                              │
+                    └──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 10s
+
+----- SEND #1: [__LITERAL:MARKERSTART_what is two plus two_MARKEREND] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+                           __      __  _____ _____.___.____       _____    _______  ________
+                          /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \
+                          \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \
+                           \        /    |    \____   |    |___/    |    \/    |    \|    `   \
+                            \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /
+                                 \/         \/\/              \/       \/         \/        \/
+
+                                                 the autonomous AI agent
+
+
+
+
+
+
+
+
+                         A terminal AI agent that reads, writes, and runs code in your project.
+
+                                               Try: explain this codebase
+                                     /connect to paste an API key and add a provider
+                                               Try: /model to pick a model
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › two plus two_MARKEREND
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 13s
+
+----- SEND #2: [__SLEEP:4] -----
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+                           __      __  _____ _____.___.____       _____    _______  ________
+                          /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \
+                          \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \
+                           \        /    |    \____   |    |___/    |    \/    |    \|    `   \
+                            \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /
+                                 \/         \/\/              \/       \/         \/        \/
+
+                                                 the autonomous AI agent
+
+
+
+
+
+
+
+
+                         A terminal AI agent that reads, writes, and runs code in your project.
+
+                                               Try: explain this codebase
+                                     /connect to paste an API key and add a provider
+                                               Try: /model to pick a model
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › two plus two_MARKEREND
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 20s
+
+----- PANE ALIVE? -----
+pane_dead=0 pid=31737
+----- EXIT STATUS FILE (written by the child, read separately) -----
+cat: /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/caps/m4-repro.rc: No such file or directory
+NO_RC_FILE (process still running or killed)
+ORPHAN_SWEEP=argv0_exact_match pattern=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/darwin/wayland-core
+PROCS_BEFORE_KILL=1
+ORPHANS_AFTER_KILL=0
+ORPHAN_DETECTOR=ALIVE (known-positive = the pre-kill scan; DEAD means ORPHANS_AFTER_KILL proves nothing)
