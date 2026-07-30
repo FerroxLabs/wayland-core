@@ -121,16 +121,21 @@ compare_failures() {
   echo "baseline entries : $(grep -c . "$b_clean" || true)"
   echo "observed failures: $(grep -c . "$o_clean" || true)"
 
+  # Indent with sed, NOT `printf '  %s\n' $list`. A test ID is "<binary> <test>"
+  # and therefore contains a space, so the unquoted-expansion form word-splits it
+  # and prints one ID across two lines — which is how the first real run of this
+  # gate reported the keyring failure. Cosmetic in a terminal, not cosmetic if
+  # anyone ever pipes this output into a matcher.
   if [ -n "$new" ]; then
     echo ""
     echo "GATE FAILED — NEW test failures not present in the baseline:"
-    printf '  %s\n' $new
+    printf '%s\n' "$new" | sed 's/^/  /'
     rc=1
   fi
   if [ -n "$fixed" ]; then
     echo ""
     echo "GATE FAILED — STALE BASELINE. These are listed as known-failing but PASSED:"
-    printf '  %s\n' $fixed
+    printf '%s\n' "$fixed" | sed 's/^/  /'
     echo "Remove them from the baseline. A baseline that only ever grows is a suppression list."
     rc=1
   fi
@@ -222,9 +227,24 @@ self_test() {
     "" \
     "        PASS [   0.010s] crate::suite some_test"
 
+  # R1 REPORT FORMATTING. A test ID contains a space, and the first version of
+  #    the reporter word-split it across two lines. Assert the ID survives on ONE
+  #    line, because a report that mangles the identifier is a report nobody can
+  #    grep or paste back into `nextest -E`.
+  local rep spaced_id
+  spaced_id='wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent'
+  printf '%s\n' "$spaced_id" > "$tmp/obs"
+  rep="$(compare_failures "$tmp/base0" "$tmp/obs" 2>&1 | grep -c "^  $spaced_id\$")"
+  if [ "$rep" -eq 1 ]; then
+    echo "  PASS  report: a spaced test ID stays on one line"
+  else
+    echo "  FAIL  report: a spaced test ID stays on one line (matched $rep, expected 1)"
+    fails=$((fails + 1))
+  fi
+
   rm -rf "$tmp"
   if [ "$fails" -eq 0 ]; then
-    echo "self-test: 11/11 arms correct"
+    echo "self-test: 12/12 arms correct"
     return 0
   fi
   echo "self-test: $fails arm(s) WRONG"
