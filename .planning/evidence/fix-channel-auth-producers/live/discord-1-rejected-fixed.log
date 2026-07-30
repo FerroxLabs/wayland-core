@@ -1,0 +1,67 @@
+=== ARM discord-1-rejected-fixed ===
+binary: /root/wayland-authprod/target/debug/wayland-core
+wayland-core 0.12.25
+sha256: bc82f7f89ba7831d399daff4c415235eb004a3152435187a292c14d80e407ac1
+platform: discord   token mode: bogus
+WAYLAND_HOME: /root/wl-authprod-discord-1-rejected-fixed
+-- PRECONDITIONS, asserted before any measurement --
+handle_in_config=1   (must be 1)
+handle_in_store=1   (bogus/real: 1, absent: 0)
+owners_of_this_home_BEFORE_start=0   (must be 0)
+
+-- start gateway --
+gateway_pid=4073400
+health file after 2s: /root/wl-authprod-discord-1-rejected-fixed/channel-health.json
+-- PARTICIPANT ASSERTION --
+gateway_alive=yes   (must be yes)
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+
+-- gateway log: platform-facing evidence --
+count_4004=1
+count_invalid_auth=0
+count_auth_test_rejected=0
+count_mgr_terminal=1
+count_gateway_stop=1
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/wl-authprod-discord-1-rejected-fixed/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[gateway] channels registered=1
+[2m2026-07-30T14:27:44.059852Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m4073400 [3mdir[0m[2m=[0m/root/wl-authprod-discord-1-rejected-fixed/channels
+[2m2026-07-30T14:27:44.243480Z[0m [33m WARN[0m could not resolve bot user id via /users/@me; mention/self detection degraded [3merror[0m[2m=[0mauth: bot token missing or rejected: GET /users/@me returned HTTP 401
+[gateway] started pid=4073400 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-30T14:27:44.691744Z[0m [31mERROR[0m discord rejected the bot token; stopping the gateway loop [3mreason[0m[2m=[0mdiscord gateway closed with 4004 (authentication failed): the bot token was rejected at IDENTIFY
+[2m2026-07-30T14:27:44.744112Z[0m [31mERROR[0m channel credential was rejected by the platform; health is Unauthenticated and polling has stopped. Rotate the credential and run `channel reload` [3mchannel[0m[2m=[0mdiscord
+
+-- channel health --json (DEFAULT exit status) --
+{
+  "configured": 1,
+  "registered": 1,
+  "channels": [
+    {
+      "channel": "discord",
+      "platform": "discord",
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: discord gateway closed with 4004 (authentication failed): the bot token was rejected at IDENTIFY",
+      "consecutive_errors": 0,
+      "reconnects": 0
+    }
+  ]
+}
+HEALTH_RC=0
+
+-- STICKINESS: same query again after 20s (state must not drift) --
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: discord gateway closed with 4004 (authentication failed): the bot token was rejected at IDENTIFY",
+HEALTH2_RC=0
+
+-- channel health --require-healthy (the gate), FULL output --
+configured: 1   registered: 1
+discord (discord)
+  state:      Unauthenticated
+  reason:     adapter reported auth expired: discord gateway closed with 4004 (authentication failed): the bot token was rejected at IDENTIFY
+  errors:     0
+  reconnects: 0
+wayland-core channel: 1 of 1 channels are not Healthy: discord (Unauthenticated: adapter reported auth expired: discord gateway closed with 4004 (authentication failed): the bot token was rejected at IDENTIFY)
+REQUIRE_RC=1
+
+-- teardown BY PID, verified --
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)
