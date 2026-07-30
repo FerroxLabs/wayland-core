@@ -180,17 +180,51 @@ fn help_states_that_tier_one_retains_the_sandbox() {
 
 /// The two tiers must refuse to stack at the binary level too, not merely in
 /// the in-process clap unit test.
+///
+/// NOTE ON THE HARNESS, because the obvious spelling of this test is broken:
+/// do NOT append `--help`. clap handles `--help` BEFORE it validates
+/// `conflicts_with`, so `--force --dangerously-skip-permissions-and-sandbox
+/// --help` exits 0 and prints help — the test then passes for a conflicting
+/// pair and would keep passing if the conflict were deleted outright. That is
+/// exactly a gate that cannot fail. Measured on this binary, 2026-07-30.
+///
+/// `--list-agents` is used instead: it is validated like any other argument,
+/// so a conflicting pair errors at parse, and on the pass side it exits
+/// promptly rather than opening a session the test would have to time out.
 #[test]
 fn the_binary_refuses_to_stack_the_two_tiers() {
     let output = Command::new(binary())
         .arg("--force")
         .arg("--dangerously-skip-permissions-and-sandbox")
-        .arg("--help")
+        .arg("--list-agents")
         .output()
         .expect("spawn wayland-core --force --dangerously-skip-permissions-and-sandbox");
     assert!(
         !output.status.success(),
-        "stacking tier 1 and tier 2 must be refused; stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
+        "stacking tier 1 and tier 2 must be refused; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "the refusal must be clap's conflict error, not an unrelated failure \
+         (an unrelated crash would also make this test pass):\n{stderr}"
+    );
+
+    // CONTROL IN THE PASS DIRECTION. The same invocation with only ONE of the
+    // two flags must succeed, proving the failure above is caused by the
+    // conflict and not by `--list-agents` being broken.
+    for solo in ["--force", "--dangerously-skip-permissions-and-sandbox"] {
+        let ok = Command::new(binary())
+            .arg(solo)
+            .arg("--list-agents")
+            .output()
+            .expect("spawn wayland-core <solo flag> --list-agents");
+        assert!(
+            ok.status.success(),
+            "{solo} --list-agents must succeed; stderr: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    }
 }
