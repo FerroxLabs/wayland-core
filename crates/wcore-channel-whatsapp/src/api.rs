@@ -136,9 +136,7 @@ impl SendMessageRequest {
     /// may differ — a backend that cannot carry an id must not inherit a
     /// declaration made about one that can.
     pub fn with_tracking_data(mut self, key: Option<&str>) -> Self {
-        self.biz_opaque_callback_data = key
-            .filter(|k| !k.is_empty())
-            .map(|k| clamp_tracking_data(k));
+        self.biz_opaque_callback_data = key.filter(|k| !k.is_empty()).map(clamp_tracking_data);
         self
     }
 }
@@ -256,9 +254,7 @@ impl SendMediaRequest {
     /// [`SendMessageRequest::with_tracking_data`], including its Cloud-API-only
     /// caveat).
     pub fn with_tracking_data(mut self, key: Option<&str>) -> Self {
-        self.biz_opaque_callback_data = key
-            .filter(|k| !k.is_empty())
-            .map(|k| clamp_tracking_data(k));
+        self.biz_opaque_callback_data = key.filter(|k| !k.is_empty()).map(clamp_tracking_data);
         self
     }
 }
