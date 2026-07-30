@@ -52,6 +52,62 @@ jobs:
           version="${RELEASE_TAG#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      # ── The Desktop wire contract, published as a release asset ─────────────
+      # `contracts/desktop/v1` is what a host implements against: 52 event
+      # fixtures, 23 command fixtures, three JSON Schemas, the adversarial
+      # vectors and the manifest that pins the generator and all three digests.
+      # Until now it shipped in NO release — a host had to clone the repo at a
+      # tag and hope it read the same bytes we built. There was no signed
+      # artifact to check that hope against.
+      #
+      # It is emitted HERE, in `prepare-release`, and NOT in `github-release`,
+      # entirely because of ordering. Uploading it as a build artifact means
+      # `github-release`'s `download-artifact` (merge-multiple: true) lands it in
+      # ./artifacts BEFORE all three coverage mechanisms run, so the bundle gets
+      # every one of them:
+      #   1. `attest-build-provenance` — its subject glob is
+      #      artifacts/wayland-core-*.tar.gz, which the bundle name matches;
+      #   2. `Generate checksums` — `sha256sum wayland-core-*`;
+      #   3. `manifest-build`, which digests every file in ./artifacts, and whose
+      #      output is then signed.
+      # Creating it inside `github-release` instead would land it after step 1
+      # and silently drop the attestation. That is the ordering constraint the
+      # SR-29-9 block below states in its own words: "a manifest cannot digest
+      # itself" — anything to be covered must exist before the thing covering it.
+      #
+      # `--sort=name --mtime` + a fixed owner make the tarball byte-reproducible
+      # from the tag, so the published digest is checkable by rebuilding it.
+      - name: Bundle the Desktop wire contract
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          root="crates/wcore-protocol/contracts/desktop/v1"
+          test -f "${root}/manifest.json" \
+            || { echo "::error title=No Desktop contract::${root}/manifest.json is \
+          missing, so this tag would publish an empty contract bundle"; exit 1; }
+          # Fail closed on an empty or truncated tree rather than shipping one.
+          files=$(find "${root}" -type f | wc -l)
+          echo "contract files: ${files}"
+          test "${files}" -ge 80 \
+            || { echo "::error title=Desktop contract too small::found ${files} files \
+          under ${root}, expected >= 80 (52 events + 23 commands + schemas + \
+          manifest); refusing to publish a partial contract"; exit 1; }
+          mkdir -p dist
+          tar --sort=name \
+              --mtime="@0" --owner=0 --group=0 --numeric-owner \
+              -czf "dist/wayland-core-${RELEASE_TAG}-desktop-contract-v1.tar.gz" \
+              -C crates/wcore-protocol/contracts desktop/v1
+          ls -l "dist/wayland-core-${RELEASE_TAG}-desktop-contract-v1.tar.gz"
+
+      - name: Upload the Desktop contract bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-contract-v1
+          path: dist/wayland-core-*-desktop-contract-v1.tar.gz
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

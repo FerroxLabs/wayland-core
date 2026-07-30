@@ -1,0 +1,29 @@
+=== HEAD 63236de8f72f9e2f957685044d95d634582438e0  dirty=0
+fmt_rc=0  fmt_diff_lines=0
+metadata_rc=0
+check_rc=0
+check errors=0 warnings=0
+--- every check warning, verbatim:
+warning: function `record_overwrites_so_the_surface_describes_the_LATEST_turn` should have a snake case name
+warning: `wcore-memory` (lib test) generated 1 warning
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+clippy_rc=0
+clippy errors=0 warnings=0
+    Checking wcore-protocol v0.12.25 (/root/wayland-core-contract-defects/crates/wcore-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+test_rc=101
+--- totals
+passed=311 failed=1 ignored=0 filtered_out=0
+grep: result": No such file or directory
+--- binaries run: /tmp/core-contract-defects-test.out:0
+--- failing tests:
+    checked_corpus_matches_real_serializers_byte_for_byte
+--- selfconsistency binary:
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... ok
+WLDONE

@@ -1,0 +1,19 @@
+76:running 125 tests
+203:test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+207:running 0 tests
+209:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+213:running 8 tests
+223:test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+227:running 4 tests
+233:test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+237:running 3 tests
+242:test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+246:running 11 tests
+259:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+263:running 17 tests
+282:test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+286:running 15 tests
+303:failures:
+305:---- checked_corpus_matches_real_serializers_byte_for_byte stdout ----
+312:failures:
+315:test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s

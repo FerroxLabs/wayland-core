@@ -1,0 +1,10 @@
+/tmp/core-contract-defects-panel-codex.txt:Which is correct for a serial merge train, and why? Answer with "CHOICE=A" or "CHOICE=B"
+/tmp/core-contract-defects-panel-codex.txt:CHOICE=B
+/tmp/core-contract-defects-panel-codex.txt:CHOICE=B
+/tmp/core-contract-defects-panel-gemini.txt:CHOICE=A
+/tmp/core-contract-defects-panel-kimi.txt:• This is a reasoning question, not a code task. Answer with CHOICE=A or B plus justification ≤180 words.
+/tmp/core-contract-defects-panel-kimi.txt:• CHOICE=B
+--- rc lines ---
+codex rc=0
+gemini rc=0
+kimi rc=0

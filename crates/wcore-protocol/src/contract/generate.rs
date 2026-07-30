@@ -49,6 +49,31 @@ replay and a persistent later-mutation watcher remain deferred.
   immediate post-publication mutation, not later filesystem changes over the
   full receipt lifetime.
 
+## Producer events with NO Desktop payload schema
+
+These seven `ProtocolEvent` variants are emitted on the JSON stream by the
+production sink (`wcore-agent/src/output/protocol_sink.rs` and, for
+`workspace_policy`, `wcore-cli/src/main.rs`), so a Desktop host DOES receive
+them. They are absent from `manifest.json` and from `core-event.schema.json`,
+and `producer-complete.schema.json` gives them only a bare discriminator in its
+"Non-Desktop producer inventory" branch — a `type` enum with
+`additionalProperties: true` and no payload properties at all. A host can
+therefore recognise the tag and can validate NOTHING about the body.
+
+This section exists because the gap was previously declared NOWHERE. Listing it
+is not a fix: it converts an undeclared hole into a declared one, so that
+`desktop_contract_selfconsistency.rs` can hold the line while each is modelled
+properly. `workspace_policy` is the one to model first — it carries a
+`WorkspacePolicyReceipt`, which is safety-class authority.
+
+- `workspace_policy`
+- `capability_activation`
+- `provider_attempt`
+- `provider_retry`
+- `provider_failure`
+- `mid_flight_monitor_decision`
+- `compact_offload`
+
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
 shape-only because no production emitter is proven at this source baseline.
@@ -98,10 +123,28 @@ fn inferred_schema(value: &Value) -> Value {
                     item_schemas.push(schema);
                 }
             }
+            // `anyOf`, NOT `oneOf`. Every object schema this function infers is
+            // permissive by construction — `additionalProperties: true` with no
+            // `required` (see the `Value::Object` arm below) — so no two of them are
+            // ever mutually exclusive: any object matching one matches them all.
+            // `oneOf` demands EXACTLY one branch, so a `oneOf` over inferred object
+            // schemas is unsatisfiable by construction, and the published schema then
+            // rejects the very fixture it was inferred from. That is not theoretical:
+            // `goal_snapshot`'s `goal.tasks` array has two distinct task shapes, and
+            // the emitted `oneOf` made `core-event.schema.json` reject
+            // `events/goal_snapshot.json`, so any host validating against our own
+            // published contract rejected a valid Core frame.
+            //
+            // This is inference, not assertion — it describes the shapes that were
+            // observed, and claims no exclusivity between them. `anyOf` says exactly
+            // that. The genuinely exclusive unions are built elsewhere and keep
+            // `oneOf`: `nullable_schema()` (a value or null) and the `Ok`/`Err`
+            // disposition in `provider_failover_receipt_schema()`, both of which pin
+            // `required` and `additionalProperties: false` and so really are disjoint.
             let items = match item_schemas.as_slice() {
                 [] => json!({}),
                 [schema] => schema.clone(),
-                _ => json!({"oneOf": item_schemas}),
+                _ => json!({"anyOf": item_schemas}),
             };
             json!({"items": items, "type": "array"})
         }

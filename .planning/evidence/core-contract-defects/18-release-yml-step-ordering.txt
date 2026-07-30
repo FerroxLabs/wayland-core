@@ -1,0 +1,22 @@
+=== YAML parses? ===
+  jobs: ['prepare-release', 'build', 'github-release', 'post-tag-smoke', 'publish-npm']
+  prepare-release steps:
+    - actions/checkout@v6
+    - Extract version from tag
+    - Bundle the Desktop wire contract
+    - Upload the Desktop contract bundle
+  github-release step order (first 8):
+    - Download build artifacts
+    - Attest build provenance (keyless, Sigstore-backed)
+    - Checkout source (for the release-manifest tooling)
+    - Guard — release-acceptance signing seed present
+    - Install Linux system deps
+    - Setup vx (installs Rust from vx.toml)
+    - Cache cargo
+    - Build the release-manifest tool
+  index of Download build artifacts: 0
+  index of Attest build provenance (keyless, Sigstore-backed): 1
+  index of Generate checksums: 10
+
+=== contract hits now (was 0) ===
+15

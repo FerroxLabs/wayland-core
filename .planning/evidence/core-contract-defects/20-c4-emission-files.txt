@@ -1,0 +1,39 @@
+=== grant_workspace_capability: command or event? ===
+crates/wcore-protocol/src/commands.rs:366:    GrantWorkspaceCapability {
+crates/wcore-protocol/src/commands.rs:794:            ProtocolCommand::GrantWorkspaceCapability {
+
+=== non-test production emission sites, per variant ===
+--- WorkspacePolicy
+   3 crates/wcore-cli/src/main.rs
+   2 crates/wcore-cli/src/tui/protocol_bridge.rs
+   1 crates/wcore-protocol/src/events.rs
+--- CapabilityActivation
+   1 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-agent/src/test_utils/mod.rs
+   1 crates/wcore-cli/src/main.rs
+   1 crates/wcore-cli/src/tui/engine_bridge.rs
+   2 crates/wcore-cli/src/tui/protocol_bridge.rs
+   2 crates/wcore-eval-scenarios/bin/wcore-eval-fixture.rs
+   1 crates/wcore-protocol/src/events.rs
+--- ProviderAttempt
+   1 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-cli/src/tui/engine_bridge.rs
+   1 crates/wcore-cli/src/tui/protocol_bridge.rs
+--- ProviderRetry
+   1 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-cli/src/tui/engine_bridge.rs
+   1 crates/wcore-cli/src/tui/protocol_bridge.rs
+--- ProviderFailure
+   1 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-cli/src/tui/engine_bridge.rs
+   1 crates/wcore-cli/src/tui/protocol_bridge.rs
+--- MidFlightMonitorDecision
+   1 crates/wcore-agent/src/agents/channel_sink.rs
+   1 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-agent/src/test_utils/mod.rs
+   2 crates/wcore-cli/src/tui/engine_bridge.rs
+   1 crates/wcore-cli/src/tui/protocol_bridge.rs
+   2 crates/wcore-protocol/src/events.rs
+--- CompactOffload
+   2 crates/wcore-agent/src/output/protocol_sink.rs
+   1 crates/wcore-cli/src/tui/protocol_bridge.rs
