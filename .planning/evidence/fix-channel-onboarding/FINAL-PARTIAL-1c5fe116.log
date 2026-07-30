@@ -1,0 +1,48 @@
+WLRC=0
+WLDONE
+=====FINAL=====
+commit=1c5fe1164e1cd713e7eb611e106992ac75be9baa
+
+############ CLIPPY, PER CRATE ############
+CLIPPY_wcore-channels_RC=0
+CLIPPY_wcore-channels-registry_RC=0
+CLIPPY_wcore-cli_RC=0
+CLIPPY_wcore-agent_LIB_RC=0
+
+--- the PRE-EXISTING failure, shown for the record (NOT this lane's) ---
+CLIPPY_PREEXISTING_RC=101
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_update
+   = note: `-D clippy::needless-update` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: could not compile `wcore-agent` (test "cache_ledger_engine_test") due to 1 previous error
+
+############ PROBE EXIT-CODE FIX — BOTH DIRECTIONS ############
+=== CONTROL (can it PASS?): one good channel, nothing broken ===
+    slack alone probes Unsupported, which already counts as not-ready,
+    so use the JSON surface to show the new check adds no false red:
+PROBE_ONE_GOOD_RC=1
+  outcome:  Unsupported
+wayland-core channel: 1 of 1 channels are not ready: slack
+
+=== a DISABLED channel must NOT redden the new check (gate stays satisfiable) ===
+PROBE_WITH_DISABLED_RC=1
+[2m2026-07-30T13:01:38.900671Z[0m [32m INFO[0m channel disabled; skipping [3mchannel[0m[2m=[0moff
+
+=== THE DEFECT DIRECTION: a broken config alongside a good one ===
+PROBE_WITH_BROKEN_RC=1
+[2m2026-07-30T13:01:38.955608Z[0m [33m WARN[0m channel config parse failed; skipping [3mfile[0m[2m=[0m/root/chanonb-home-probe/channels/broken.toml [3merror[0m[2m=[0mTOML parse error at line 1, column 1
+missing field `name`
+
+=== a [secrets] config alongside a good one — same path ===
+PROBE_WITH_LEGACY_SECRETS_RC=1
+9 | [secrets]
+unknown field `secrets`, expected one of `name`, `platform`, `enabled`, `options`, `inbound`
+
+############ SWEEP INSTRUMENT SELF-TEST (repaired) ############
+assert 1, known-positive (expect exactly '1'): 1
+assert 2, known-negative (expect exactly '0'): 0
+assert 3, the OLD broken form on the same negative (expect TWO lines '0' '0'): 
+    old-form line: 0
+    old-form line: 0

@@ -322,7 +322,13 @@ pub async fn auto_register_from_dir(
                 continue;
             }
         };
-        let cfg: ChannelConfig = match toml::from_str(&body) {
+        // Through the shared parser, not `toml::from_str`, so the removed
+        // `[secrets]` table produces its named migration here as well.
+        // This is the load path `gateway run` and `channel probe` use, so it
+        // is the one that matters most; a first pass wired only
+        // `scan_channel_summaries` (i.e. `channel list`) and a live run caught
+        // probe still emitting serde's generic `unknown field \`secrets\``.
+        let cfg: ChannelConfig = match wcore_channels::parse_channel_config(&name, &body) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
