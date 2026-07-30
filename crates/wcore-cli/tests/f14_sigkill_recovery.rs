@@ -1602,6 +1602,241 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
     );
 }
 
+/// The crash boundaries a degraded run is killed at.
+///
+/// A degraded run that completes cleanly and leaves nothing proves very little:
+/// a completed turn has nothing half-written by construction. The invariant the
+/// whole degrade posture rests on is that a run killed MID-EFFECT leaves
+/// nothing either — because if it can leave a partial record, then "no journal"
+/// is false and a restart forks from state nobody can read.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DegradedCrashBoundary {
+    /// Ready, no message yet. The floor: opening a degraded session must not
+    /// itself create anything.
+    BeforeAnyTurn,
+    /// The provider request has left, no response headers have arrived. The
+    /// worst case for ambiguity — the effect may or may not have landed.
+    ProviderRequestSentNoHeaders,
+    /// Response headers arrived and the stream is partially consumed.
+    ProviderStreamPartiallyConsumed,
+    /// The model asked for a tool and the approval gate is open.
+    AwaitingToolApproval,
+    /// The tool was approved and its child process is running.
+    ToolExecuting,
+}
+
+#[cfg(target_os = "linux")]
+impl DegradedCrashBoundary {
+    fn label(self) -> &'static str {
+        match self {
+            Self::BeforeAnyTurn => "before-any-turn",
+            Self::ProviderRequestSentNoHeaders => "provider-request-sent-no-headers",
+            Self::ProviderStreamPartiallyConsumed => "provider-stream-partially-consumed",
+            Self::AwaitingToolApproval => "awaiting-tool-approval",
+            Self::ToolExecuting => "tool-executing",
+        }
+    }
+}
+
+/// Drive a degraded run to `boundary`, SIGKILL it there, and return the profile
+/// residue plus the number of provider requests the fixture observed.
+///
+/// The request count is returned so the caller can assert the run REACHED the
+/// boundary it named. Without that, a boundary whose setup silently failed
+/// would produce an empty profile and read as a pass — the same shape as a
+/// concurrency test in which a participant never started.
+#[cfg(target_os = "linux")]
+async fn crash_degraded_at(boundary: DegradedCrashBoundary) -> (Vec<PathBuf>, Vec<PathBuf>, usize) {
+    let label = boundary.label();
+    let prompt = format!("F14-CRASH-{label}-PROMPT-MUST-NOT-BECOME-DURABLE");
+
+    let seed = OpenAiFixtureScript::new([OpenAiStep::text("unused")])
+        .start()
+        .await
+        .expect("start crash-boundary seed fixture");
+    let env = environment(&seed);
+    let marker = env.path().join(format!("f14-crash-{label}.log"));
+    let pid_file = env.path().join(format!("f14-crash-{label}.pid"));
+    let tool_command = format!(
+        "printf '%s\\n' \"$$\" > {} && printf 'started\\n' >> {} && exec sleep 60",
+        shell_quote(&pid_file),
+        shell_quote(&marker),
+    );
+    seed.shutdown().await.expect("stop crash-boundary seed");
+
+    let steps = match boundary {
+        DegradedCrashBoundary::BeforeAnyTurn => vec![OpenAiStep::text("MUST-NOT-DISPATCH")],
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders => {
+            vec![OpenAiStep::stall_before_headers(60_000)]
+        }
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed => {
+            vec![OpenAiStep::text_then_stall(
+                "F14-CRASH-PARTIAL-DELTA",
+                60_000,
+            )]
+        }
+        DegradedCrashBoundary::AwaitingToolApproval | DegradedCrashBoundary::ToolExecuting => {
+            vec![
+                OpenAiStep::tool_call(
+                    "f14-crash-bash",
+                    "Bash",
+                    json!({"command": tool_command, "timeout": 120_000}),
+                ),
+                OpenAiStep::text("MUST-NOT-DISPATCH-AGAIN"),
+            ]
+        }
+    };
+    let fixture = OpenAiFixtureScript::new(steps)
+        .start()
+        .await
+        .expect("start crash-boundary fixture");
+    let _tool_guard = ToolProcessGuard {
+        pid_file: pid_file.clone(),
+    };
+
+    let (mut process, _ready) =
+        launch_degraded(&env, &fixture, "f1400000000000000000000000000007").await;
+    let msg_id = format!("f14-crash-{label}");
+    if boundary != DegradedCrashBoundary::BeforeAnyTurn {
+        send_message(&mut process, &msg_id, &prompt).await;
+    }
+    match boundary {
+        DegradedCrashBoundary::BeforeAnyTurn => {}
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders => {
+            wait_for_requests(&fixture, 1).await;
+        }
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed => {
+            wait_for_requests(&fixture, 1).await;
+            let delta = process.next_type("text_delta").await;
+            assert_eq!(
+                delta["text"], "F14-CRASH-PARTIAL-DELTA",
+                "{label}: the stream did not reach the partial-consumption boundary"
+            );
+        }
+        DegradedCrashBoundary::AwaitingToolApproval => {
+            wait_for_requests(&fixture, 1).await;
+            let approval = process.next_type("approval_required").await;
+            assert_eq!(approval["call_id"], "f14-crash-bash", "{label}");
+        }
+        DegradedCrashBoundary::ToolExecuting => {
+            wait_for_requests(&fixture, 1).await;
+            let approval = process.next_type("approval_required").await;
+            assert_eq!(approval["call_id"], "f14-crash-bash", "{label}");
+            process
+                .send(json!({"type": "tool_approve", "call_id": "f14-crash-bash"}))
+                .await;
+            let running = process.next_type("tool_running").await;
+            assert_eq!(running["call_id"], "f14-crash-bash", "{label}");
+            // The tool's own marker file, not a protocol event: the child must
+            // genuinely be executing, or this boundary is a different one.
+            wait_for_file(&marker).await;
+        }
+    }
+    let observed = fixture.observation().requests.len();
+    let _diagnostics = process.sigkill().await;
+
+    // Read the profile AFTER the kill, with no clean shutdown having run, so
+    // any temp file, WAL or partially-renamed artifact is still on disk.
+    let (artifacts, leaked) = durable_residue(env.home(), &prompt);
+    let entries = session_directory_entries(env.home());
+    assert_eq!(
+        entries, 0,
+        "{label}: a degraded crash left {entries} entries in the sessions directory"
+    );
+    (artifacts, leaked, observed)
+}
+
+/// TASK: SIGKILL before and after each effect boundary; ZERO residue of any
+/// kind, not merely no `sessions/*.journal`.
+///
+/// Five boundaries run here. The unrun cells are named in the SUMMARY rather
+/// than quietly omitted — outbound channel delivery is the notable one, because
+/// this harness has no channel and inventing one would prove less than saying
+/// so.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
+    let boundaries = [
+        DegradedCrashBoundary::BeforeAnyTurn,
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders,
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed,
+        DegradedCrashBoundary::AwaitingToolApproval,
+        DegradedCrashBoundary::ToolExecuting,
+    ];
+    let mut graded = 0usize;
+    let mut dispatched = 0usize;
+    for boundary in boundaries {
+        let label = boundary.label();
+        let (artifacts, leaked, observed) = crash_degraded_at(boundary).await;
+        assert!(
+            artifacts.is_empty(),
+            "{label}: a degraded crash left durable artifacts: {artifacts:?}"
+        );
+        assert!(
+            leaked.is_empty(),
+            "{label}: a degraded crash persisted the prompt into: {leaked:?}"
+        );
+        // Prove the run REACHED its boundary. A boundary whose setup silently
+        // failed leaves an empty profile too, which is the same evidence as a
+        // pass.
+        let expected_requests = usize::from(boundary != DegradedCrashBoundary::BeforeAnyTurn);
+        assert_eq!(
+            observed, expected_requests,
+            "{label}: the run did not reach the boundary it claims to test"
+        );
+        dispatched += observed;
+        graded += 1;
+    }
+    assert_eq!(graded, boundaries.len(), "every boundary must be graded");
+    assert_eq!(
+        dispatched, 4,
+        "four of the five boundaries must have dispatched to the provider; a total \
+         of 0 would mean nothing was ever exercised"
+    );
+
+    // KNOWN-POSITIVE CONTROL for the crash path specifically. The five zeroes
+    // above are absences, and a harness that crashed before Core ever wrote
+    // anything would produce them for free. This kills a DURABLE run at the
+    // same partial-stream boundary and requires residue to exist.
+    let fixture = OpenAiFixtureScript::new([OpenAiStep::text_then_stall(
+        "F14-CRASH-CONTROL-DELTA",
+        60_000,
+    )])
+    .start()
+    .await
+    .expect("start crash-control fixture");
+    let env = environment(&fixture);
+    let vault = VaultSecret::new();
+    let control_prompt = "F14-CRASH-CONTROL-PROMPT-MUST-BECOME-DURABLE";
+    let mut control = CoreProcess::launch(
+        &env,
+        &fixture,
+        &vault,
+        "f1400000000000000000000000000008",
+        false,
+    )
+    .await;
+    send_message(&mut control, "f14-crash-control", control_prompt).await;
+    wait_for_requests(&fixture, 1).await;
+    let delta = control.next_type("text_delta").await;
+    assert_eq!(delta["text"], "F14-CRASH-CONTROL-DELTA");
+    let _ = control.sigkill().await;
+
+    let (control_artifacts, _control_leaked) = durable_residue(env.home(), control_prompt);
+    assert!(
+        !control_artifacts.is_empty(),
+        "CONTROL FAILED: killing a DURABLE run at the same partial-stream boundary \
+         left no artifacts either, so the five zeroes above prove nothing about the \
+         degrade — they only prove the walker returns empty"
+    );
+    assert_ne!(
+        session_directory_entries(env.home()),
+        0,
+        "CONTROL FAILED: the sessions directory is empty after killing a durable run"
+    );
+}
+
 #[tokio::test]
 async fn sigkill_during_model_stream_resumes_as_provider_reconciliation_without_redispatch() {
     let partial = "F14-MODEL-PARTIAL-CONTENT-MUST-NOT-REPLAY";
