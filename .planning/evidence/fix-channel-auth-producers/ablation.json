@@ -1,0 +1,97 @@
+{
+  "baseline": {
+    "wcore-channel-discord": {
+      "passed": 66,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 54,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    }
+  },
+  "H1-discord-close-capture": {
+    "wcore-channel-discord": {
+      "passed": 65,
+      "failed": 1,
+      "failed_names": [
+        "a_4004_close_publishes_auth_expired_and_stops_the_gateway"
+      ],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 54,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    }
+  },
+  "H2-discord-authexpired-publish": {
+    "wcore-channel-discord": {
+      "passed": 65,
+      "failed": 1,
+      "failed_names": [
+        "a_4004_close_publishes_auth_expired_and_stops_the_gateway"
+      ],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 54,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    }
+  },
+  "H3-slack-auth-test": {
+    "wcore-channel-discord": {
+      "passed": 66,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 50,
+      "failed": 4,
+      "failed_names": [
+        "tests::a_token_revoked_after_start_publishes_auth_expired_on_send",
+        "tests::a_rejected_bot_token_publishes_auth_expired_and_never_connects",
+        "tests::an_accepted_bot_token_connects_and_publishes_no_auth_expired",
+        "tests::an_unreachable_auth_test_is_not_treated_as_a_rejection"
+      ],
+      "build_ok": true
+    }
+  },
+  "H4-slack-send-authexpired": {
+    "wcore-channel-discord": {
+      "passed": 66,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 53,
+      "failed": 1,
+      "failed_names": [
+        "tests::a_token_revoked_after_start_publishes_auth_expired_on_send"
+      ],
+      "build_ok": true
+    }
+  },
+  "restored": {
+    "wcore-channel-discord": {
+      "passed": 66,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    },
+    "wcore-channel-slack": {
+      "passed": 54,
+      "failed": 0,
+      "failed_names": [],
+      "build_ok": true
+    }
+  }
+}
