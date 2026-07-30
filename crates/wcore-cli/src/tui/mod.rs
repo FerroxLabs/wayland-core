@@ -222,6 +222,44 @@ pub struct TuiSession {
     pub restored_tool_cards: Vec<app::ToolCardModel>,
 }
 
+/// The first-run gate: should the TUI open on the Onboarding surface?
+///
+/// `true` only when the user has **neither** a global config file **nor** a
+/// resolved provider credential. Both signals are required, and that is the
+/// whole point of this function existing.
+///
+/// The gate used to be `!global_config_path().exists()` alone. Its call site
+/// sits on the SUCCESS path of `Config::resolve_with_provenance`, so reaching
+/// it already means a provider, a credential and a model resolved — but the
+/// file test cannot see any of that. A user whose key lives in the environment
+/// or on argv was therefore shown a **"Connect a provider"** card while the
+/// status bar behind it already displayed their model.
+///
+/// That is not merely cosmetic. The card owns the keyboard, so the opening
+/// characters of the user's first message went into it and were discarded;
+/// measured on a real pty at 7.1 chars/sec against `bc90ee1c`, with
+/// `FLUX_API_KEY` exported *and* `-p flux-router -m flux-auto` passed, losses
+/// of 4 and 20 characters (UAT-TUI-UNIX F1). Onboarding exists to obtain
+/// exactly what is already in hand at this point.
+///
+/// A genuinely unconfigured user is untouched by this: `Config::resolve`
+/// returns `MissingApiKey` for them, so they never reach this call at all —
+/// `main.rs` routes them to Onboarding from the resolve-failure branch. That
+/// separation is what keeps the card reachable, and it is worth checking
+/// remains true before changing this.
+///
+/// `model` is required alongside `api_key` because a provider that resolves
+/// with no default model lands on a workspace that renders `No model
+/// configured.` **where the composer would be** — no composer at all, so a
+/// first message has nowhere to go. That is not a configured state.
+///
+/// `force_onboarding` (`wayland-core setup`) still overrides the result; see
+/// the `initial_surface` match in [`run_loop`].
+pub fn is_first_run(config_file_exists: bool, api_key: &str, model: &str) -> bool {
+    let credentials_ready = !api_key.trim().is_empty() && !model.trim().is_empty();
+    !config_file_exists && !credentials_ready
+}
+
 /// Build the status-bar [`ConfigView`](app::ConfigView) snapshot from a
 /// resolved engine `Config`. Called by `main.rs` before the `Config` is
 /// moved into the engine bootstrap.
@@ -1037,6 +1075,41 @@ mod tests {
         assert_eq!(returning.surface, surfaces::SurfaceId::Workspace);
         // The bare `App::new()` is the first-run default.
         assert_eq!(App::new().surface, surfaces::SurfaceId::Onboarding);
+    }
+
+    #[test]
+    fn the_first_run_gate_reads_credentials_not_just_the_config_file() {
+        // The defect (UAT-TUI-UNIX F1): a key in the environment and a model on
+        // argv, no config file yet. The old gate said "first run" and put a
+        // "Connect a provider" card in front of a fully connected session.
+        assert!(
+            !is_first_run(false, "flux-live-key", "flux-auto"),
+            "a resolved credential + model must NOT be treated as a first run \
+             just because no config file has been written yet"
+        );
+
+        // Both directions of the control, so the gate is not merely stuck off.
+        assert!(
+            is_first_run(false, "", ""),
+            "no config file and nothing resolved IS a first run — the card must \
+             still be reachable"
+        );
+
+        // A provider that resolved a key but no default model lands on a
+        // workspace with no composer at all, so it is not "configured".
+        assert!(
+            is_first_run(false, "some-key", ""),
+            "a key with no model is not a usable session"
+        );
+        assert!(
+            is_first_run(false, "   ", "flux-auto"),
+            "whitespace is not a credential"
+        );
+
+        // A returning user with a config file is never a first run, whatever
+        // resolution produced — this half of the gate is unchanged.
+        assert!(!is_first_run(true, "", ""));
+        assert!(!is_first_run(true, "k", "m"));
     }
 
     #[test]

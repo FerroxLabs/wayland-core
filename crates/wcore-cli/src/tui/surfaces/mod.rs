@@ -264,6 +264,19 @@ pub trait Surface {
     /// one operation, so embedded newlines never auto-submit a turn (F-041).
     fn handle_paste(&mut self, _text: String, _app: &mut App) {}
 
+    /// Surrender any text this surface buffered on the user's behalf that
+    /// belongs to the NEXT surface's composer, and forget it.
+    ///
+    /// Exists for the onboarding card, which can be on screen while the user
+    /// is already typing their first message at it. The router calls this on
+    /// the handoff to the workspace and replays the result through
+    /// `handle_paste`, so the message survives the surface change instead of
+    /// being discarded with the card. Default `None`: no other surface buffers
+    /// anything on someone else's behalf.
+    fn take_typeahead(&mut self) -> Option<String> {
+        None
+    }
+
     /// Handle a mouse event — scroll-wheel, click, or motion. The default
     /// no-op is correct for every surface that does not care about mouse
     /// (most do not — keyboard is canonical). `WorkspaceSurface` overrides
@@ -1430,6 +1443,17 @@ impl Router {
                 // Workspace never triggers a needless rebind.
                 let from_onboarding =
                     self.active.id() == SurfaceId::Onboarding && id == SurfaceId::Workspace;
+                // Rescue the first message. The user may have been typing at
+                // the onboarding card the whole time it was up; that text is
+                // held on the card and has to be taken BEFORE `switch_cached`
+                // replaces `self.active`, then replayed into the composer
+                // below. Without this the handoff is where the opening words
+                // of someone's very first message disappear (UAT-TUI-UNIX F1).
+                let rescued = if from_onboarding {
+                    self.active.take_typeahead()
+                } else {
+                    None
+                };
                 self.switch_cached(app, id);
                 if let Some(engine) = self.engine.as_ref().filter(|_| from_onboarding) {
                     // Onboarding just wrote provider + key + model to disk;
@@ -1441,7 +1465,40 @@ impl Router {
                         if !app.config.force {
                             app.mode = applied.session_mode;
                         }
+                        // Mirror the re-resolved provider + model onto the
+                        // status-bar snapshot, exactly as `/provider` does.
+                        //
+                        // Without this the ENGINE rebinds and the VIEW does
+                        // not, and the view is what the workspace gates its
+                        // composer on: `app.config.model.is_empty()` swaps the
+                        // composer for a `No model configured.` panel. So a
+                        // user could finish onboarding, have a live provider
+                        // bound, and land on a workspace with **no input line
+                        // at all** — still naming the pre-onboarding provider.
+                        // Measured on hetzner: complete onboarding over a
+                        // config resolving flux-router/flux-auto and the
+                        // workspace still read `anthropic has no default
+                        // model.`
+                        //
+                        // Only these two fields are mirrored. `force` is launch
+                        // authority stamped onto the view AFTER the snapshot is
+                        // taken (see `config_view_from`), so copying the whole
+                        // view would silently drop it.
+                        if !applied.config_view.provider.is_empty() {
+                            app.config.provider = applied.config_view.provider.clone();
+                        }
+                        if !applied.config_view.model.is_empty() {
+                            app.config.model = applied.config_view.model.clone();
+                        }
                     }
+                }
+                // Replay the rescued type-ahead into the now-active surface's
+                // composer, verbatim — the same route the palette's
+                // `CloseOverlayAndPasteToActive` uses, which deliberately
+                // bypasses the router-level paste detection: this is the
+                // user's own keystrokes arriving late, not a paste.
+                if let Some(text) = rescued {
+                    self.active.handle_paste(text, app);
                 }
                 false
             }
@@ -7117,6 +7174,111 @@ mod tests {
             app.surface,
             SurfaceId::TABS[1],
             "Tab must switch to the next tab even with a reasoning turn present"
+        );
+    }
+
+    /// The end-to-end half of the first-message fix (UAT-TUI-UNIX F1).
+    ///
+    /// `onboarding.rs` proves the card HOLDS the text; this proves the router
+    /// DELIVERS it. The two halves are separately breakable — a buffer that is
+    /// never flushed loses the message exactly as thoroughly as no buffer at
+    /// all — so the seam gets its own test.
+    ///
+    /// Driven entirely through the public router surface: keys in, rendered
+    /// frame out, no reaching into the workspace's private composer.
+    /// A workspace that will actually render a composer.
+    ///
+    /// `App::new()` carries no model, and the workspace replaces the composer
+    /// with a `No model configured.` panel in that state — so a test that
+    /// renders the default app is looking at a frame with nowhere for text to
+    /// appear, and would report a delivered message as lost. Measured: this is
+    /// the same state a real unconfigured run lands in
+    /// (`.planning/evidence/fix-tui-first-message/before/BEFORE-q23-nokeys.after.txt`).
+    fn app_with_a_model() -> App {
+        let mut app = App::new();
+        app.config.provider = "flux-router".to_string();
+        app.config.model = "flux-auto".to_string();
+        app
+    }
+
+    #[test]
+    fn a_message_typed_at_the_onboarding_card_arrives_in_the_composer() {
+        let mut app = app_with_a_model();
+        let mut router = Router::new(&app);
+        assert_eq!(
+            router.focused(),
+            SurfaceId::Onboarding,
+            "precondition: the card is up"
+        );
+
+        let sent = "Use the bash tool to run echo SLOWTYPE_TOKEN";
+        for c in sent.chars() {
+            router.handle_key(key(KeyCode::Char(c)), &mut app);
+        }
+        // Prose must not have navigated the user anywhere by itself.
+        assert_eq!(
+            router.focused(),
+            SurfaceId::Onboarding,
+            "typing prose must not walk the user out of onboarding"
+        );
+
+        // Now complete onboarding the way a user would: pick "Skip for now"
+        // with the arrows (the letter shortcuts are deliberately quiet while a
+        // message is in flight) and confirm.
+        router.handle_key(key(KeyCode::Down), &mut app);
+        router.handle_key(key(KeyCode::Down), &mut app);
+        router.handle_key(key(KeyCode::Enter), &mut app); // → Ready
+        router.handle_key(key(KeyCode::Enter), &mut app); // → Workspace
+        assert_eq!(router.focused(), SurfaceId::Workspace);
+
+        let out = render_to_string(&mut router, &app, 120, 40);
+        assert!(
+            out.contains(sent),
+            "the whole first message must be in the composer after the handoff; got:\n{out}"
+        );
+    }
+
+    /// The known-negative for the test above. If the router flushed
+    /// unconditionally — or if some other surface grew a type-ahead buffer —
+    /// ordinary navigation would start injecting text into the composer.
+    #[test]
+    fn a_deliberate_shortcut_leaves_the_composer_byte_identical_to_a_clean_one() {
+        /// The composer's rendered row, so the two runs are compared on the
+        /// thing under test rather than on the whole frame (the status bar
+        /// carries an elapsed-time counter that differs between renders).
+        fn composer_row(out: &str) -> &str {
+            out.lines().find(|l| l.contains('\u{203a}')).unwrap_or("")
+        }
+
+        // Control: a workspace reached without onboarding ever being typed at.
+        let mut control_app = app_with_a_model();
+        let mut control = Router::new(&control_app);
+        control.apply(
+            SurfaceAction::Switch(SurfaceId::Workspace),
+            &mut control_app,
+        );
+        let control_row = {
+            let out = render_to_string(&mut control, &control_app, 120, 40);
+            composer_row(&out).to_string()
+        };
+        assert!(
+            !control_row.is_empty(),
+            "the control must actually find a composer row, or this test proves nothing"
+        );
+
+        // Subject: onboarding dismissed with the deliberate `s` shortcut. The
+        // keystroke that did the dismissing must not survive into the composer.
+        let mut app = app_with_a_model();
+        let mut router = Router::new(&app);
+        router.handle_key(key(KeyCode::Char('s')), &mut app);
+        router.handle_key(key(KeyCode::Enter), &mut app);
+        assert_eq!(router.focused(), SurfaceId::Workspace);
+        let out = render_to_string(&mut router, &app, 120, 40);
+        assert_eq!(
+            composer_row(&out),
+            control_row,
+            "a deliberate shortcut must leave the composer exactly as clean as never \
+             having opened onboarding at all"
         );
     }
 }
