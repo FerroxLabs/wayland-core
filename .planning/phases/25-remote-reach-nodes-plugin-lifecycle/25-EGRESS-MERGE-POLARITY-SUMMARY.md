@@ -5,8 +5,11 @@ end-to-end, and proven with controls in both directions. One additional loosenin
 recorded; one secondary question (`egress_allow`) measured and deliberately NOT closed, with
 reasons.
 
-- Branch: `lane/egress-merge-polarity`, HEAD `2897db01d91945d2eecb7b53b62e7a774cabba50`
+- Branch: `lane/egress-merge-polarity`
 - Base: `a3e68a31e9e63767c505345eb996f5eeab2341f9` (asserted against `git ls-remote gh`)
+- Integration `27c30527` merged forward into this branch; it changed only `.planning/`
+  docs and touches `crates/wcore-config/src/config.rs` not at all, so the merge is clean and
+  every result below was re-proven after it.
 - Build host: `hetzner-dsm`, worktree `/root/wayland-egress-merge-polarity`
 - Severity of the fixed defect: **HIGH**
 
@@ -235,6 +238,36 @@ to a lane-unique path inside my own worktree, read back with `/usr/bin/grep`):
 | `wcore-config --lib` | `c81fc657` | `574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out` |
 | `cargo check --workspace --all-targets` | `449826c3` | **rc=0** (workspace-wide, never `-p`) |
 | `cargo fmt --all -- --check` | `2897db01` | rc=0 |
+| **all three re-proven AFTER merging integration `27c30527`** | **`8aa943a9`** | `8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`; `574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`; `check --workspace --all-targets` **rc=0** — `evidence/.../07-POSTMERGE-REPROVE.log` |
+
+The post-merge capture also shows the corrected assertion passing by name:
+`config::tests::untrusted_project_executable_configuration_is_inert_but_narrowing_survives ... ok`.
+
+### A second instrument rule landed mid-lane, and I re-verified against it
+
+Integration `27c30527` added a rule to `LANE-BRIEF.md` §3b: `git diff --numstat` returns **wrong
+numbers** and `git show HEAD:<path> | grep -c <needle>` returns **0 for a string that is present**,
+*even via `/usr/bin/git` and `/usr/bin/grep`* — the absolute path is not sufficient because the
+rewrite reaches the pipe. Prescribed repair: redirect to a file, then read the file with the Read
+tool.
+
+Some of my local source checks had used exactly the banned shape (a piped `grep` asserting a
+**zero**, the single easiest assertion to pass without doing any work). I re-verified every
+load-bearing local fact through the file-redirect path, with a known-positive **and** a
+known-negative in the same capture — `evidence/.../06-VERIFY-no-pipe.txt`:
+
+- the shipped `enabled: global.security.enabled,` at `config.rs:4456` — **one hit**;
+- the old `global.security.enabled && project.security.enabled` shape — present **only** at
+  `config.rs:4425`, inside my own explanatory comment, and nowhere as code. This doubles as the
+  live known-negative: the grep found the comment, so it was demonstrably alive when it reported no
+  code occurrence;
+- every `restricted.*` assignment in `restrict_untrusted_project_config` listed in full:
+  `restricted.security.enabled` is **absent** while `restricted.anvil.enabled` still shows at 4586,
+  which is the control proving the needle shape works;
+- the shared-file fence (`wcore-cli/src/lib.rs`, `wcore-cli/src/main.rs`) — **empty**, diffed
+  against the captured base SHA `a3e68a31` rather than the branch name.
+
+I did not report any figure derived from `--numstat`.
 
 Every capture records `MARKER_HEAD` **and** the built `enabled: global.security.enabled` source
 line in the same file, so no run can be attributed to a tree it did not come from.
