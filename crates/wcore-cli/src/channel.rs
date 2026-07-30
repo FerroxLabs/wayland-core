@@ -50,8 +50,8 @@ use clap::{Args, Subcommand};
 // `wcore-channels` to this crate's manifest rewrites `Cargo.lock`, a Phase-24
 // shared seam concurrent lanes conflict on.
 use wcore_channels::ChannelManager;
-use wcore_channels::health::ChannelHealth;
-use wcore_channels::probe::ProbeReport;
+use wcore_channels::health::{ChannelHealth, HealthState};
+use wcore_channels::probe::{ProbeOutcome, ProbeReport};
 use wcore_channels_registry::wcore_channels;
 
 /// The file the RUNNING gateway republishes its observed channel health into.
@@ -105,9 +105,25 @@ pub enum ChannelCmd {
     /// Fails when no gateway is running. See the module docs: a health
     /// surface that answers when it has observed nothing is the false-zero
     /// shape this phase has measured three times.
+    ///
+    /// By DEFAULT this is a report, and its exit status reflects only whether
+    /// every configured channel is registered — not what state those channels
+    /// are in. Pass `--require-healthy` to also gate on the states themselves.
     Health {
         #[arg(long)]
         json: bool,
+        /// Exit non-zero unless EVERY channel is `Healthy`, so this verb can
+        /// gate a deployment instead of only describing one.
+        ///
+        /// Opt-in rather than the default deliberately. The default status is
+        /// load-bearing for an existing caller
+        /// (`scripts/f24-c3-h6-reload-clears-error.sh`) which asserts the
+        /// rc=1 -> rc=0 transition across a `channel reload`, and a channel
+        /// that is momentarily `Degraded` mid-supervised-reconnect is not a
+        /// deployment failure for every caller. Same idiom as
+        /// `channel actions --require`.
+        #[arg(long)]
+        require_healthy: bool,
     },
     /// Ask the running gateway to re-read the channel config directory.
     ///
@@ -289,7 +305,10 @@ pub async fn run(args: ChannelArgs) -> Result<()> {
     match args.cmd {
         ChannelCmd::List { json } => list(json),
         ChannelCmd::Probe { name, json } => probe(name.as_deref(), json).await,
-        ChannelCmd::Health { json } => health(json),
+        ChannelCmd::Health {
+            json,
+            require_healthy,
+        } => health(json, require_healthy),
         ChannelCmd::Reload => reload(),
         ChannelCmd::Actions {
             name,
@@ -527,22 +546,31 @@ async fn probe(only: Option<&str>, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
         for r in &reports {
+            // `Unsupported` means the adapter ran NO check, so neither boolean
+            // below carries a measurement — `ProbeReport` stores them as plain
+            // `bool` and an unsupported report leaves both `false`. Rendering
+            // that as "INCOMPLETE" and "NOT authenticated" states two findings
+            // nothing established: 7 of the 10 shipped adapters implement no
+            // probe, so a user holding a perfectly good Slack token was told it
+            // does not authenticate. "unknown" is the honest word, and it is the
+            // one the outcome variant already means.
+            let unchecked = r.outcome == ProbeOutcome::Unsupported;
             println!("{} ({})", r.channel, r.platform);
             println!("  outcome:  {:?}", r.outcome);
             println!(
                 "  config:   {}",
-                if r.config_complete {
-                    "complete"
-                } else {
-                    "INCOMPLETE"
+                match (unchecked, r.config_complete) {
+                    (true, _) => "unknown (not checked)",
+                    (false, true) => "complete",
+                    (false, false) => "INCOMPLETE",
                 }
             );
             println!(
                 "  auth:     {}",
-                if r.authenticated {
-                    "authenticated"
-                } else {
-                    "NOT authenticated"
+                match (unchecked, r.authenticated) {
+                    (true, _) => "unknown (not checked)",
+                    (false, true) => "authenticated",
+                    (false, false) => "NOT authenticated",
                 }
             );
             println!("  identity: {}", r.identity.as_deref().unwrap_or("-"));
@@ -572,7 +600,7 @@ async fn probe(only: Option<&str>, json: bool) -> Result<()> {
 // health
 // ---------------------------------------------------------------------------
 
-fn health(json: bool) -> Result<()> {
+fn health(json: bool, require_healthy: bool) -> Result<()> {
     let home = home()?;
     let Some(report) = read_live_health(&home) else {
         // The refusal is the feature. See the module docs.
@@ -619,6 +647,38 @@ fn health(json: bool) -> Result<()> {
                 .unwrap_or_default()
         );
     }
+
+    // Opt-in state gate. The registration check above answers "is everything
+    // wired up"; this answers "is everything actually working", which is the
+    // question a deployment check is asking and the one the default exit status
+    // could not express — a channel whose credential the platform is rejecting
+    // exited 0 alongside a fully healthy one.
+    if require_healthy {
+        let unhealthy: Vec<&ChannelHealth> = report
+            .channels
+            .iter()
+            .filter(|h| h.state != HealthState::Healthy)
+            .collect();
+        if !unhealthy.is_empty() {
+            let detail: Vec<String> = unhealthy
+                .iter()
+                .map(|h| {
+                    format!(
+                        "{} ({:?}: {})",
+                        h.channel,
+                        h.state,
+                        h.reason.as_deref().unwrap_or("no reason recorded")
+                    )
+                })
+                .collect();
+            bail!(
+                "{} of {} channels are not Healthy: {}",
+                unhealthy.len(),
+                report.channels.len(),
+                detail.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -653,8 +713,6 @@ fn reload() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wcore_channels::health::HealthState;
-    use wcore_channels::probe::ProbeOutcome;
 
     fn sample() -> ChannelHealthReport {
         ChannelHealthReport {
@@ -800,5 +858,110 @@ mod tests {
         // probe must not satisfy a readiness gate.
         assert!(!ProbeReport::unsupported("c", "p").outcome.is_ready());
         assert!(ProbeOutcome::Ok.is_ready());
+    }
+
+    /// The set `--require-healthy` gates on. Encoded as a helper the CLI and
+    /// this test share, so the assertion is over the real predicate rather
+    /// than a restatement of it.
+    fn unhealthy_names(report: &ChannelHealthReport) -> Vec<&str> {
+        report
+            .channels
+            .iter()
+            .filter(|h| h.state != HealthState::Healthy)
+            .map(|h| h.channel.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn require_healthy_gates_on_every_non_healthy_state() {
+        // `Unauthenticated` is the state this lane gave a producer; it must be
+        // gateable, or the fix is visible to a human reading output and
+        // invisible to the deployment check that was the point.
+        for state in [
+            HealthState::Degraded,
+            HealthState::Disconnected,
+            HealthState::Unauthenticated,
+            HealthState::Unknown,
+        ] {
+            let r = ChannelHealthReport {
+                configured: 1,
+                registered: 1,
+                registration_error: None,
+                channels: vec![ChannelHealth {
+                    channel: "acme".into(),
+                    platform: "matrix".into(),
+                    state,
+                    reason: Some("r".into()),
+                    consecutive_errors: 0,
+                    reconnects: 0,
+                }],
+            };
+            assert_eq!(
+                unhealthy_names(&r),
+                vec!["acme"],
+                "{state:?} must trip --require-healthy"
+            );
+            // The registration check must NOT be what catches these — that is
+            // the whole defect: a rejected credential is fully registered.
+            assert!(
+                r.is_complete(),
+                "{state:?} is registered, so the pre-existing exit status is \
+                 blind to it — which is why --require-healthy exists"
+            );
+        }
+    }
+
+    #[test]
+    fn require_healthy_passes_when_everything_is_healthy() {
+        // The gate must have a reachable PASS state (LANE-BRIEF 3b-iii): a
+        // check that can only ever fail measures nothing.
+        let r = ChannelHealthReport {
+            configured: 2,
+            registered: 2,
+            registration_error: None,
+            channels: vec![
+                ChannelHealth {
+                    channel: "a".into(),
+                    platform: "slack".into(),
+                    state: HealthState::Healthy,
+                    reason: None,
+                    consecutive_errors: 0,
+                    reconnects: 0,
+                },
+                ChannelHealth {
+                    channel: "b".into(),
+                    platform: "discord".into(),
+                    state: HealthState::Healthy,
+                    reason: None,
+                    consecutive_errors: 0,
+                    reconnects: 0,
+                },
+            ],
+        };
+        assert!(
+            unhealthy_names(&r).is_empty(),
+            "two healthy channels must satisfy the gate"
+        );
+    }
+
+    #[test]
+    fn the_default_exit_status_is_unchanged_by_require_healthy() {
+        // Non-breaking guarantee. `scripts/f24-c3-h6-reload-clears-error.sh`
+        // asserts `channel health` goes rc=1 -> rc=0 across a `channel reload`,
+        // keying ONLY on registration completeness. A `Degraded` row must
+        // therefore still leave the default status alone; the sample report is
+        // exactly that case.
+        let s = sample();
+        assert_eq!(s.channels[0].state, HealthState::Degraded);
+        assert!(
+            s.is_complete(),
+            "a Degraded channel must not affect the DEFAULT exit status, or the \
+             existing reload script breaks"
+        );
+        assert_eq!(
+            unhealthy_names(&s),
+            vec!["acme"],
+            "...while --require-healthy still sees it"
+        );
     }
 }
