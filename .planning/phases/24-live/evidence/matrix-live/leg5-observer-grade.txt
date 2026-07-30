@@ -1,0 +1,19 @@
+########## THE MEASUREMENT: how many events carry the restart nonce? ##########
+expected 2 = one surviving pair (replay collapsed) + one control under a different delivery id
+expected 3 = the replay produced a duplicate; exactly-once does NOT hold across restart
+timeline_events=18
+control_nonce=mlsend-1785385106 control_count=1
+nonce=mlrst-1785385241 originals=2 all_bodies=2 ids=["$8rWWSSH7nc9lgq3FJBV_B3bLXkhNS3cWx0p6nodLxuA","$BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ"]
+
+########## the homeserver's answer to each of the three PUTs ##########
+  txn=cron:bf4c989c-0238-4a8e-8c8d-8807a6063762:1785385265000
+    status=200 stalled=True body={"event_id":"$BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ"}
+  txn=cron:bf4c989c-0238-4a8e-8c8d-8807a6063762:1785385265000
+    status=200 stalled=False body={"event_id":"$BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ"}
+  txn=cron:99a26815-f628-4669-8406-dfd05c923c78:1785385376000
+    status=200 stalled=False body={"event_id":"$8rWWSSH7nc9lgq3FJBV_B3bLXkhNS3cWx0p6nodLxuA"}
+
+########## known-negative: a nonce never sent, same capture ##########
+timeline_events=18
+control_nonce=mlrst-1785385241 control_count=2
+nonce=mlrst-0000000000 originals=0 all_bodies=0 ids=[]

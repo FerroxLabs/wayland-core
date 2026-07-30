@@ -1,0 +1,14 @@
+  ok   originals ignore the m.replace edit
+  ok   originals return the id
+  ok   countAll DOES see the edit (the two differ — so the filter does something)
+  ok   known-negative: an absent nonce counts zero
+  ok   a second distinct nonce counts one
+  ok   m.reaction and m.replace are both excluded from the original count
+  ok   redacted: empty content + redacted_because
+  ok   NOT redacted: body still present even WITH redacted_because (status-code lie caught)
+  ok   not redacted: plain event
+  ok   absent event is ABSENT not REDACTED
+  ok   empty content with NO redacted_because is AMBIGUOUS, not REDACTED
+  ok   bundled replacement read
+  ok   known-negative: no bundle
+SELFTEST PASS passed=13 failed=0
