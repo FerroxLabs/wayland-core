@@ -114,6 +114,65 @@ explicitly rather than passing off as free).
   the same home+id, then `--resume`: all three behaved, and the resume was correctly refused at
   `reserved total 32084 > limit 25000`.
 
+### t2 — B MEASURED LIVE. The panel's mechanism does NOT reproduce.
+
+Harness: `.planning/evidence/effect-accounting/{mock_tool_provider.py,run-approval.py}`.
+Drives the real `wayland-core --json-stream` engine. The loopback provider always answers with
+a destructive `Bash` tool call (`rm -rf /tmp/effacc-destructive-target`), so the default
+`approvals = "prompt"` posture must park the turn. The instant `approval_required` arrives the
+process is **SIGKILLed** — the human has not answered and now cannot. A second process then
+launches with `--resume <same id>`.
+
+Participant assertion (§6a-i): a run counts only if the mock logged a round-trip AND the engine
+actually emitted `approval_required`. **Both arms: reached_provider=True, parked_on_approval=True,
+`UNRUN_CELLS=0 of 2`.** The frame that was interrupted, verbatim:
+
+```
+{"type":"approval_required","call_id":"call_effacc_0001","resume_token":"",
+ "correlation_id":"call_effacc_0001","reason":"exec",
+ "context":"Execute: rm -rf /tmp/effacc-destructive-target"}
+```
+
+| arm | degrade notice run1/run2 | events after SIGKILL + `--resume` |
+|---|---|---|
+| `on` (journal) | no / no | `ready` — session resumes, `execution_policy.reason="resume"`, contract advertises `turn_recovery_v1: available` |
+| `off` (degraded) | yes / yes | `error` — `Error: Session 'dddddd-000004' not found` |
+
+**The pending question does not survive the degrade — that half of B is TRUE.** Everything
+built on top of it is not:
+
+- It is **not silently re-asked.** The degraded restart refuses outright, and says why twice:
+  the degrade notice states in terms *"an interrupted turn cannot be recovered"*, and a separate
+  `warning: previous run did not shut down cleanly (crash sentinel found at …/.dirty-death.<pid>)`
+  fires in both arms. A user cannot be re-asked by a session that will not open.
+- **No mechanism re-applies a prior "yes".** Journal-backed recovery classifies a pending
+  approval as `RecoveryDisposition::AwaitApproval` with
+  `RecoveryReconcileReason::ApprovalExpired` (`recovery.rs:1074-1083`, `1366-1377`), and
+  `session_lifecycle::retry` returns `RefusedApprovalExpired` for any approval whose tool effect
+  still `requires_reconciliation()` (`session_lifecycle.rs:651-669`). The single path that
+  carries a recorded approval forward, `RetryOutcome::Admitted { reapproved }`, requires a
+  terminal reconciled effect and **forks** rather than overwriting — and is unreachable with no
+  journal, because there is no journal to read.
+
+So B's danger — *"a destructive operation approved twice"* — needs the human to re-issue the
+request in a NEW conversation and approve it afresh. That is a first ask for a new request, not
+a replayed grant. **Reported as not reproducing.**
+
+Side finding, out of lane scope → BACKLOG: the emitted `approval_required` carries
+`resume_token: ""` while `docs/json-stream-protocol.md` §1.N+4 documents it as the field the host
+MUST echo back to route the decision. The value lives in `correlation_id` instead (the Wave-SC
+correlation-id model). Documented shape and emitted shape disagree.
+
+### t3 — the visibility gap, measured on the product's own surfaces
+
+`cache report` reports **one** session (the most recently updated). `cache list` prints one row
+per session plus `F23_CACHE=list sessions=5 dir=…` — **and no totals of any kind**: no summed
+USD, no summed tokens, no aggregate cost-truth grade. Measured against the degraded arm's home,
+which holds 5 ledgers for 5 restart-fragments of the same work.
+
+So the durable spend record exists and the *sum* does not. That is the precise shape of "every
+individual run believes it is within budget".
+
 **Harness defect found and repaired in-lane (§6b-ii).** `grep -c` exits 1 on zero matches, so
 `grep -c … || echo 0` emitted `0\n0`; the arithmetic aborted the launch loop after L1 and the
 first run looked like a product failure. Repaired to `grep | wc -l`, plus a meter self-test with
