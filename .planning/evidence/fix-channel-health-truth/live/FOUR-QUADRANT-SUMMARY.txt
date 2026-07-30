@@ -1,0 +1,94 @@
+########## a-401-fixed ##########
+sha256: d984fb0dec8d3049903bc1d47c3e9ba460f8bcb9bf9ab3b4c154bffee991a4e9
+token mode: bogus   handle: matrix.chtruth.token
+handle_in_config=1
+handle_in_store=1
+owners_of_this_home_BEFORE_start=0   (must be 0)
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+count_401=4
+count_M_UNKNOWN_TOKEN=1
+count_auth_stop=1
+count_mgr_terminal=1
+HEALTH_RC=0
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN",
+HEALTH2_RC=0
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN",
+REQUIRE_RC=1
+wayland-core channel: 1 of 1 channels are not Healthy: matrix (Unauthenticated: adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN)
+PROBE_RC=1
+  config:   unknown (not checked)
+  auth:     unknown (not checked)
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)
+########## b-healthy-fixed ##########
+sha256: d984fb0dec8d3049903bc1d47c3e9ba460f8bcb9bf9ab3b4c154bffee991a4e9
+token mode: real   handle: matrix.chtruth.token
+handle_in_config=1
+handle_in_store=1
+owners_of_this_home_BEFORE_start=0   (must be 0)
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+count_401=0
+count_M_UNKNOWN_TOKEN=0
+count_auth_stop=0
+count_mgr_terminal=0
+HEALTH_RC=0
+      "state": "healthy",
+HEALTH2_RC=0
+      "state": "healthy",
+REQUIRE_RC=0
+PROBE_RC=1
+  config:   unknown (not checked)
+  auth:     unknown (not checked)
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)
+########## c-absent-fixed ##########
+sha256: d984fb0dec8d3049903bc1d47c3e9ba460f8bcb9bf9ab3b4c154bffee991a4e9
+token mode: absent   handle: matrix.chtruth.ABSENT_KEY
+handle_in_config=1
+handle_in_store=0
+owners_of_this_home_BEFORE_start=0   (must be 0)
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+count_401=0
+count_M_UNKNOWN_TOKEN=0
+count_auth_stop=0
+count_mgr_terminal=0
+HEALTH_RC=0
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: Matrix access token not found at \"matrix.chtruth.ABSENT_KEY\"",
+HEALTH2_RC=0
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: Matrix access token not found at \"matrix.chtruth.ABSENT_KEY\"",
+REQUIRE_RC=1
+wayland-core channel: 1 of 1 channels are not Healthy: matrix (Disconnected: start() failed: auth failed: Matrix access token not found at "matrix.chtruth.ABSENT_KEY")
+PROBE_RC=1
+  config:   unknown (not checked)
+  auth:     unknown (not checked)
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)
+########## d-401-base ##########
+sha256: 88f6fcb4dc057ae754067970666dd22ba2812ba268145fd50170be39b04508f9
+token mode: bogus   handle: matrix.chtruth.token
+handle_in_config=1
+handle_in_store=1
+owners_of_this_home_BEFORE_start=0   (must be 0)
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+count_401=9
+count_M_UNKNOWN_TOKEN=6
+count_auth_stop=0
+count_mgr_terminal=0
+HEALTH_RC=0
+      "state": "healthy",
+HEALTH2_RC=0
+      "state": "healthy",
+REQUIRE_RC=2
+PROBE_RC=1
+  config:   INCOMPLETE
+  auth:     NOT authenticated
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)

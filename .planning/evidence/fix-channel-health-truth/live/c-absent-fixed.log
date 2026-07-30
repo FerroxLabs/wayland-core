@@ -1,0 +1,71 @@
+=== ARM c-absent-fixed ===
+binary: /root/wayland-chtruth/target/release/wayland-core
+wayland-core 0.12.25
+sha256: d984fb0dec8d3049903bc1d47c3e9ba460f8bcb9bf9ab3b4c154bffee991a4e9
+token mode: absent   handle: matrix.chtruth.ABSENT_KEY
+WAYLAND_HOME: /root/wl-chtruth-c-absent-fixed
+-- PRECONDITIONS, asserted before any measurement --
+handle_in_config=1
+handle_in_store=0
+owners_of_this_home_BEFORE_start=0   (must be 0)
+
+-- start gateway --
+gateway_pid=2423759
+-- PARTICIPANT ASSERTION (a run with no live gateway is not the experiment) --
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+
+-- gateway log: platform-facing evidence --
+count_401=0
+count_M_UNKNOWN_TOKEN=0
+count_auth_stop=0
+count_mgr_terminal=0
+[gateway] channels registered=1
+[2m2026-07-30T13:02:43.683775Z[0m [33m WARN[0m channel start() failed; skipping and continuing with the rest [3mchannel[0m[2m=[0mmatrix [3merror[0m[2m=[0mauth failed: Matrix access token not found at "matrix.chtruth.ABSENT_KEY"
+[gateway] started pid=2423759 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+
+-- channel health --json (DEFAULT exit status) --
+HEALTH_RC=0
+{
+  "configured": 1,
+  "registered": 1,
+  "channels": [
+    {
+      "channel": "matrix",
+      "platform": "matrix",
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: Matrix access token not found at \"matrix.chtruth.ABSENT_KEY\"",
+      "consecutive_errors": 0,
+      "reconnects": 0
+    }
+  ]
+}
+
+-- STICKINESS: same query again after 20s (state must not drift) --
+HEALTH2_RC=0
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: Matrix access token not found at \"matrix.chtruth.ABSENT_KEY\"",
+
+-- channel health --require-healthy (the NEW gate), FULL output --
+REQUIRE_RC=1
+configured: 1   registered: 1
+matrix (matrix)
+  state:      Disconnected
+  reason:     start() failed: auth failed: Matrix access token not found at "matrix.chtruth.ABSENT_KEY"
+  errors:     0
+  reconnects: 0
+wayland-core channel: 1 of 1 channels are not Healthy: matrix (Disconnected: start() failed: auth failed: Matrix access token not found at "matrix.chtruth.ABSENT_KEY")
+
+-- channel probe --
+PROBE_RC=1
+matrix (matrix)
+  outcome:  Unsupported
+  config:   unknown (not checked)
+  auth:     unknown (not checked)
+  identity: -
+  finding:  adapter implements no setup probe
+wayland-core channel: 1 of 1 channels are not ready: matrix
+
+-- teardown BY PID, verified --
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)

@@ -1,0 +1,72 @@
+=== ARM a-401-fixed ===
+binary: /root/wayland-chtruth/target/release/wayland-core
+wayland-core 0.12.25
+sha256: d984fb0dec8d3049903bc1d47c3e9ba460f8bcb9bf9ab3b4c154bffee991a4e9
+token mode: bogus   handle: matrix.chtruth.token
+WAYLAND_HOME: /root/wl-chtruth-a-401-fixed
+-- PRECONDITIONS, asserted before any measurement --
+handle_in_config=1
+handle_in_store=1
+owners_of_this_home_BEFORE_start=0   (must be 0)
+
+-- start gateway --
+gateway_pid=2368355
+-- PARTICIPANT ASSERTION (a run with no live gateway is not the experiment) --
+gateway_alive=yes
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+
+-- gateway log: platform-facing evidence --
+count_401=4
+count_M_UNKNOWN_TOKEN=1
+count_auth_stop=1
+count_mgr_terminal=1
+[gateway] channels registered=1
+[gateway] started pid=2368355 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-30T13:00:35.772836Z[0m [31mERROR[0m homeserver rejected the access token; stopping /sync. Rotate the token and run `channel reload` [3mreason[0m[2m=[0mhomeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN
+[2m2026-07-30T13:00:35.929142Z[0m [31mERROR[0m channel credential was rejected by the platform; health is Unauthenticated and polling has stopped. Rotate the credential and run `channel reload` [3mchannel[0m[2m=[0mmatrix
+
+-- channel health --json (DEFAULT exit status) --
+HEALTH_RC=0
+{
+  "configured": 1,
+  "registered": 1,
+  "channels": [
+    {
+      "channel": "matrix",
+      "platform": "matrix",
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN",
+      "consecutive_errors": 0,
+      "reconnects": 0
+    }
+  ]
+}
+
+-- STICKINESS: same query again after 20s (state must not drift) --
+HEALTH2_RC=0
+      "state": "unauthenticated",
+      "reason": "adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN",
+
+-- channel health --require-healthy (the NEW gate), FULL output --
+REQUIRE_RC=1
+configured: 1   registered: 1
+matrix (matrix)
+  state:      Unauthenticated
+  reason:     adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN
+  errors:     0
+  reconnects: 0
+wayland-core channel: 1 of 1 channels are not Healthy: matrix (Unauthenticated: adapter reported auth expired: homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN)
+
+-- channel probe --
+PROBE_RC=1
+matrix (matrix)
+  outcome:  Unsupported
+  config:   unknown (not checked)
+  auth:     unknown (not checked)
+  identity: -
+  finding:  adapter implements no setup probe
+wayland-core channel: 1 of 1 channels are not ready: matrix
+
+-- teardown BY PID, verified --
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)

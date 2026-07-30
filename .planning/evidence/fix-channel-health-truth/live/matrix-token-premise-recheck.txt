@@ -1,0 +1,12 @@
+homeserver_host=matrix.org
+token_len=41
+-- control A: unauthenticated /versions (server must be alive) --
+status=200
+-- control B: NO auth header /whoami (must be a DIFFERENT error) --
+status=401
+-- subject: OUR token /whoami --
+status=200
+"errcode":"M_MISSING_TOKEN"
+(above = noauth errcode)
+(above = our-token errcode)
+{"versions":["r0.0.1","r0.1.0","r0.2.0","r0.3.0","r0.4.0","r0.5.0","r0.6.0","r0.6.1","v1.1","v1.2","v1.3","v1.4","v1.5",

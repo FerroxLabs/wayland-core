@@ -230,28 +230,34 @@ impl ChannelManager {
                     let evs = {
                         let mut guard = task_slot.lock().await;
                         // Detect a dead internal background task (longpoll/gateway/
-                        // sync loop panicked or exited) BEFORE polling. The
-                        // inbox-drain connectors return Ok(vec![]) forever once
-                        // their task is gone, so without this check a silent task
-                        // death looks alive. Read is_finished() into a bool here:
-                        // task_handle() borrows &self while poll_events() needs
-                        // &mut self, so the copy breaks the borrow. A dead task
-                        // routes straight into the same supervised-reconnect
-                        // machinery the error-threshold path uses (we skip the
-                        // poll, since a dead-task connector just returns
-                        // Ok(vec![]) and would otherwise reset the error count).
+                        // sync loop panicked or exited). The inbox-drain connectors
+                        // return Ok(vec![]) forever once their task is gone, so
+                        // without this check a silent task death looks alive. Read
+                        // is_finished() into a bool here: task_handle() borrows
+                        // &self while poll_events() needs &mut self, so the copy
+                        // breaks the borrow.
                         let task_dead = guard.task_handle().is_some_and(|h| h.is_finished());
-                        let poll_outcome = if task_dead {
-                            tracing::warn!(
-                                target: "wcore_channels::manager",
-                                channel = %task_name,
-                                "connector internal task finished unexpectedly; forcing supervised reconnect"
-                            );
-                            Err(ChannelError::Transport(
-                                "connector internal task finished unexpectedly".into(),
-                            ))
-                        } else {
-                            guard.poll_events().await
+                        // DRAIN FIRST, judge the task dead second. A connector
+                        // pushes its TERMINAL event — an auth rejection above all
+                        // — immediately before its task exits, so a dead-task check
+                        // that skips the drain strands the one event that explains
+                        // WHY it exited and misreports a rejected credential as a
+                        // generic transport fault. Only an EMPTY inbox on a dead
+                        // task is a silent death; that is precisely the signal the
+                        // check was written for, and it is preserved below.
+                        let drained = guard.poll_events().await;
+                        let poll_outcome = match drained {
+                            Ok(ref evs) if evs.is_empty() && task_dead => {
+                                tracing::warn!(
+                                    target: "wcore_channels::manager",
+                                    channel = %task_name,
+                                    "connector internal task finished unexpectedly; forcing supervised reconnect"
+                                );
+                                Err(ChannelError::Transport(
+                                    "connector internal task finished unexpectedly".into(),
+                                ))
+                            }
+                            other => other,
                         };
                         match poll_outcome {
                             Ok(v) => {
@@ -384,6 +390,9 @@ impl ChannelManager {
                             }
                         }
                     };
+                    // Set when this batch carried a credential rejection. An
+                    // auth failure is TERMINAL: see the break below.
+                    let mut auth_rejected = false;
                     for event in evs {
                         // The adapter's OWN published state outranks the poll
                         // loop's inference: a connector that knows its token was
@@ -392,6 +401,9 @@ impl ChannelManager {
                         match &event {
                             ChannelEvent::ConnectionStateChanged { state } => {
                                 let mapped = HealthState::from_connection_state(*state);
+                                if mapped == HealthState::Unauthenticated {
+                                    auth_rejected = true;
+                                }
                                 record_health(
                                     &task_health,
                                     &task_name,
@@ -402,6 +414,7 @@ impl ChannelManager {
                                 );
                             }
                             ChannelEvent::AuthExpired { reason } => {
+                                auth_rejected = true;
                                 record_health(
                                     &task_health,
                                     &task_name,
@@ -417,6 +430,28 @@ impl ChannelManager {
                             channel_name: task_name.clone(),
                             event,
                         });
+                    }
+                    // A rejected credential is terminal until an operator rotates
+                    // it, which is the distinction `HealthState::Unauthenticated`
+                    // exists to draw: "rotate a token", not "wait". Leaving the
+                    // poll loop running would walk the channel straight back to a
+                    // FALSE `Healthy` — the next tick's dead-task check forces
+                    // supervised reconnect, and `start()` on these adapters only
+                    // re-reads the credential out of the store and respawns, so it
+                    // CANNOT fail on a token the platform is rejecting. It returns
+                    // Ok, the reconnect arm records `Healthy`, and the surface is
+                    // lying again within one tick. So stop here and leave the
+                    // observation standing; `channel reload` and a gateway restart
+                    // both re-register the adapter and clear it.
+                    if auth_rejected {
+                        tracing::error!(
+                            target: "wcore_channels::manager",
+                            channel = %task_name,
+                            "channel credential was rejected by the platform; \
+                             health is Unauthenticated and polling has stopped. \
+                             Rotate the credential and run `channel reload`"
+                        );
+                        break;
                     }
                 }
             });
@@ -1515,6 +1550,284 @@ mod tests {
         assert!(
             saw_good_message,
             "expected the healthy channel to actually poll + deliver"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential rejection — giving `HealthState::Unauthenticated` a producer.
+    //
+    // Measured defect: the gateway reported a Matrix channel `Healthy` while
+    // the homeserver 401'd every `/sync`, through 21 consecutive failures and a
+    // `delivered:false` send. `Unauthenticated` existed and nothing could
+    // produce it on any of the three MVP channels.
+    //
+    // The four quadrants are asserted here at the health-projection layer, and
+    // again over real HTTP in `wcore-channel-matrix`'s `sync.rs`.
+    // -----------------------------------------------------------------------
+
+    /// Models an adapter whose background task discovers a rejected credential:
+    /// it pushes the terminal event into its inbox and its task exits
+    /// immediately, which is exactly what `wcore-channel-matrix`'s `/sync` loop
+    /// and `wcore-channel-telegram`'s long-poll both do.
+    ///
+    /// `starts` counts `start()` calls, so a test can prove the manager did NOT
+    /// walk the channel back through supervised reconnect.
+    struct AuthRejectingChannel {
+        name: String,
+        handle: Option<JoinHandle<()>>,
+        inbox: std::collections::VecDeque<ChannelEvent>,
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AuthRejectingChannel {
+        fn new(name: &str) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    name: name.into(),
+                    handle: None,
+                    inbox: std::collections::VecDeque::new(),
+                    starts: Arc::clone(&starts),
+                },
+                starts,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Channel for AuthRejectingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            "authreject"
+        }
+        fn task_handle(&self) -> Option<&JoinHandle<()>> {
+            self.handle.as_ref()
+        }
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            // Note this returns Ok: `start()` on the real adapters only re-reads
+            // the credential out of the store and respawns, so it CANNOT fail on
+            // a token the platform rejects. That is precisely why supervised
+            // reconnect would record a false `Healthy` here.
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inbox.push_back(ChannelEvent::AuthExpired {
+                reason: "homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN".into(),
+            });
+            // The background task pushes the event and then dies.
+            self.handle = Some(tokio::spawn(async {}));
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            if let Some(h) = self.handle.take() {
+                h.abort();
+            }
+            Ok(())
+        }
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            Ok(self.inbox.drain(..).collect())
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            Ok(MessageReceipt {
+                id: "auth-out".into(),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name":"string","platform":"authreject"}"#
+        }
+    }
+
+    /// **QUADRANT 1 — the platform rejects a present credential.**
+    ///
+    /// Health must reach `Unauthenticated`, carry an actionable reason, and
+    /// STAY there: an auth failure is terminal until an operator rotates the
+    /// token.
+    ///
+    /// This reddens on the unfixed code twice over. (a) The adapter's task is
+    /// already finished when the first tick runs, and the old `task_dead` check
+    /// returned `Err(Transport)` *instead of* draining — so the `AuthExpired`
+    /// was stranded in the inbox and never seen at all. (b) Even once seen, the
+    /// old loop continued, and the next tick's dead-task detection drove
+    /// supervised reconnect, whose `start()` returns `Ok` and records `Healthy`.
+    #[tokio::test]
+    async fn a_rejected_credential_reports_unauthenticated_and_stays_there() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        let (ch, starts) = AuthRejectingChannel::new("rejected");
+        mgr.register(Box::new(ch)).await;
+        mgr.start_all().await.unwrap();
+
+        // Bounded wait for the state to appear.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut got = None;
+        while std::time::Instant::now() < deadline {
+            let h = mgr.health_of("rejected").expect("channel is registered");
+            if h.state == HealthState::Unauthenticated {
+                got = Some(h);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let h = got.expect(
+            "health never reached Unauthenticated — the adapter's AuthExpired was \
+             either stranded by the dead-task check or overwritten by reconnect",
+        );
+        assert!(
+            h.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("M_UNKNOWN_TOKEN")),
+            "the reason must name the platform's rejection so an operator can \
+             act on it: {:?}",
+            h.reason
+        );
+
+        // STICKINESS. Reconnect backoff base is 1s, so waiting past it is what
+        // makes this assertion mean something: on the unfixed loop the channel
+        // is back to `Healthy` by now.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let after = mgr.health_of("rejected").expect("still registered");
+        assert_eq!(
+            after.state,
+            HealthState::Unauthenticated,
+            "a rejected credential must not drift back to {:?} — reconnecting \
+             cannot fix a token the platform refuses",
+            after.state
+        );
+        assert_eq!(
+            starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "supervised reconnect must NOT re-start a channel whose credential \
+             was rejected; that is the loop that manufactured the false Healthy"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// **QUADRANT 2 — the credential is ABSENT. Proof the working case still
+    /// works.**
+    ///
+    /// This is the behaviour the live UAT confirmed was already correct, and
+    /// the one most at risk from this change. `start()` fails, so the channel
+    /// must read `Disconnected` — NOT `Unauthenticated` — and the reason must
+    /// still name the handle. Two distinct non-healthy states with two distinct
+    /// operator actions: "configure the credential" vs "rotate it".
+    #[tokio::test]
+    async fn an_absent_credential_still_reports_disconnected_naming_the_handle() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        mgr.register(Box::new(FailingStartChannel {
+            name: "absent".into(),
+        }))
+        .await;
+        mgr.start_all().await.unwrap();
+
+        let h = mgr.health_of("absent").expect("registered");
+        assert_eq!(
+            h.state,
+            HealthState::Disconnected,
+            "an absent credential is Disconnected, not Unauthenticated"
+        );
+        assert_ne!(
+            h.state,
+            HealthState::Unauthenticated,
+            "the new auth path must not swallow the absent-credential case"
+        );
+        assert!(
+            h.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("missing credential")),
+            "the reason must still name what is missing: {:?}",
+            h.reason
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// **QUADRANT 3 — everything is fine.** A working channel must never be
+    /// dragged into `Unauthenticated` by the new path. A health surface that
+    /// cries "rotate your token" at a healthy channel is worse than the bug
+    /// this fixes, so this control is load-bearing.
+    ///
+    /// The delivered message is the known-positive: without it a channel that
+    /// polled nothing at all would pass the absence assertion for free.
+    #[tokio::test]
+    async fn a_working_channel_is_never_reported_unauthenticated() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        let mut rx = mgr.subscribe();
+        let mut ok = MockChannel::new("fine");
+        ok.inject_text("c1", "alice", "hi");
+        mgr.register(Box::new(ok)).await;
+        mgr.start_all().await.unwrap();
+
+        // Known-positive: the channel really is polling and delivering.
+        let mut delivered = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !delivered {
+            if let Ok(Ok(tagged)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await
+                && matches!(tagged.event, ChannelEvent::MessageReceived { .. })
+            {
+                delivered = true;
+            }
+        }
+        assert!(
+            delivered,
+            "known-positive failed: the healthy channel delivered nothing, so \
+             the assertion below would be vacuous"
+        );
+
+        // Poll repeatedly across many ticks — a spurious fire would show up as
+        // a transition at some point, not necessarily the first sample.
+        for _ in 0..40 {
+            let h = mgr.health_of("fine").expect("registered");
+            assert_ne!(
+                h.state,
+                HealthState::Unauthenticated,
+                "a healthy channel was reported as having a rejected credential"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            mgr.health_of("fine").expect("registered").state,
+            HealthState::Healthy,
+            "a working channel must end Healthy"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// A dead task with an EMPTY inbox must still drive supervised reconnect.
+    ///
+    /// The drain-before-dead reordering could plausibly have disabled the
+    /// silent-death detection entirely; `dead_internal_task_triggers_supervised_reconnect`
+    /// above is that guard, and this asserts the health projection side of it —
+    /// a silently dead task is `Degraded`, never `Unauthenticated`.
+    #[tokio::test]
+    async fn a_silently_dead_task_is_degraded_not_unauthenticated() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        mgr.register(Box::new(DeadTaskChannel::new("silent"))).await;
+        mgr.start_all().await.unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut saw_degraded = false;
+        while std::time::Instant::now() < deadline {
+            let h = mgr.health_of("silent").expect("registered");
+            assert_ne!(
+                h.state,
+                HealthState::Unauthenticated,
+                "a dead task is not a credential rejection"
+            );
+            if h.state == HealthState::Degraded {
+                saw_degraded = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_degraded,
+            "the empty-inbox dead-task signal must still be detected after the \
+             drain-first reordering"
         );
         mgr.stop_all().await.unwrap();
     }
