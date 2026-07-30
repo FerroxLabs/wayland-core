@@ -1,0 +1,99 @@
+name: Release Rehearsal
+
+# SUPPLY-29-34 / F29-04-03. Executes the four-state release ledger, which
+# existed and which NOTHING ran.
+#
+# Measured at b2ddf113, with a known-positive in the same invocation (7 `cargo`
+# matches in release.yml, so the instrument was alive):
+#   - `state-append` and `state-verify`: ZERO occurrences in any file under
+#     .github/workflows/
+#   - `rollback` in .github/: exactly ONE occurrence, at
+#     release-manifest-drill.sh:127, where it names rollback PROTECTION
+#     (refusing a downgrade) — a different property from rollback REHEARSAL
+#   - `environment:` in .github/workflows/: ZERO
+#
+# So Phase 29's verdict was accurate: "rollback rehearsal does not happen at
+# all". A rollback path nobody has ever executed is not a rollback path. This
+# workflow executes one on every run.
+#
+# SCOPE — STATED PLAINLY, NOT IMPLIED. This rehearses the rollback_rehearsal
+# AUTHORIZATION STATE: a signed, role-bound, order-checked, evidence-bound
+# ledger record is minted and verified. It does NOT rehearse an operational
+# rollback — downloading a prior release and reinstalling it — because the
+# product has no rollback command to exercise. The updater deliberately REFUSES
+# downgrades (that is rollback protection, and it is MET). Whether an
+# operational rollback rehearsal should exist is a product question this
+# workflow does not answer and does not pretend to.
+#
+# WHY A NEW FILE. ci.yml is being edited by Phase 28's native-certification
+# work, supply-chain.yml's dependency-policy job belongs to the concurrent
+# advisories lane, and release.yml is release coordination. A new workflow
+# collides with none of them. This is the same reasoning that created
+# supply-chain.yml, recorded in its own header.
+#
+# NO `paths:` FILTER — core#193. A paths filter stops the whole workflow, so a
+# required context never arrives and the PR deadlocks. Relevance is decided
+# inside the job.
+#
+# NOT WIRED AS A REQUIRED CHECK, and it must not become one until it has run
+# green on main for a while. It blocks nobody today.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # 05:41 UTC. Offset from supply-chain.yml (04:17) and osv-scan.yml (06:23)
+    # so the three do not contend for the same runner pool.
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+# Read-only. This job mints its own throwaway keys and writes nothing back. A
+# release-adjacent job holding write permissions it does not use is a
+# lateral-movement surface, and would be a finding in its own right.
+permissions:
+  contents: read
+
+jobs:
+  state-separation:
+    name: Rollback rehearsal and state separation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # `wayland-release` pulls in wcore-config -> keyring. Same list release.yml
+      # installs for its own build of this binary; a missing system library here
+      # would fail the tool build, not the property under test.
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rehearsal
+
+      # Fails CLOSED and says which state this is. A missing drill must never
+      # read as a pass — that is the single most common way a gate stops
+      # measuring anything without anyone noticing.
+      - name: Assert the drill is present
+        run: |
+          set -euo pipefail
+          DRILL=.github/scripts/release-state-drill.sh
+          if [ ! -f "$DRILL" ]; then
+            echo "::error title=Release state drill::'$DRILL' is ABSENT. It was deleted or moved — investigate, do not skip."
+            exit 1
+          fi
+          test -s "$DRILL"
+
+      # The drill carries its own positive control, its own acceptance ceiling,
+      # three collapse attempts, and a restore step that re-proves the positive
+      # control AFTER the negatives — so a verifier that had simply stopped
+      # working cannot pass it. Every assertion reads a field out of the tool's
+      # stdout (`highest_state`, `records`, `accepted`) rather than trusting an
+      # exit code.
+      - name: Rollback-rehearsal and state-separation drill
+        run: bash .github/scripts/release-state-drill.sh

@@ -177,14 +177,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-say "NEGATIVE CONTROL 1: rollback_rehearsal signed by the PACKAGING key"
+say "NEGATIVE CONTROL 1: rollback_rehearsal signed by the RELEASE-ACCEPTANCE key"
 # ---------------------------------------------------------------------------
 # A real, cryptographically valid signature under the wrong role. If the chain
 # still verifies, role binding is decorative.
+#
+# WHY THE ACCEPTANCE KEY AND NOT THE PACKAGING KEY. The first version of this
+# control used the packaging key, and it was refused — but for the WRONG REASON:
+# `key id packaging-key signs more than one state in the same chain` fired
+# first, because packaging had already signed record 0. That is a real rule and
+# a real refusal, but it is not role binding, so the control was reporting a
+# pass for a property it never reached. The release-acceptance key has signed
+# nothing in this chain, so it isolates the role check with no other rule in
+# front of it. Verified: the refusal message changed from the key-reuse rule to
+# a role mismatch when the key changed.
 chain_role="${workdir}/chain-wrong-role.json"
 append "${chain_role}" packaging              "${evidence}/packaging.txt"  >/dev/null || fail "setup: packaging"
 append "${chain_role}" deployment_preparation "${evidence}/deployment.txt" >/dev/null || fail "setup: deployment"
-append "${chain_role}" rollback_rehearsal     "${evidence}/rehearsal.txt" packaging >/dev/null 2>&1
+append "${chain_role}" rollback_rehearsal     "${evidence}/rehearsal.txt" release_acceptance >/dev/null 2>&1
 role_line="$(verify "${chain_role}" 2>&1)"; role_rc=$?
 if [ "${role_rc}" -eq 0 ] && [ "$(field "${role_line}" highest_state)" = "rollback_rehearsal" ]; then
   fail "a rollback_rehearsal record signed by the packaging key was ACCEPTED — role binding is not enforced"
