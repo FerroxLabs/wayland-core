@@ -53,4 +53,57 @@ Not compiling it. Not `cargo test`. Driving it.
   **zero jobs scheduled** — CI starvation. macOS leg is therefore at `a903142b`, disclosed, not
   substituted with the Linux result.
 
+### T2 — binaries, both attributable by the product's OWN self-report
+| Platform | Path | sha256 | `--build-info` source |
+|---|---|---|---|
+| Linux x86_64 | `/root/wayland-uat-tui-unix/target/release/wayland-core` | `fae1287a…d059a` | **`e9bed1af`** (= integration base) |
+| macOS arm64 | CI artifact `8752771508` | `e5803944…c662b` | **`a903142b`** (ancestor, 33 behind) |
+
+`--build-info` prints the embedded source SHA, so provenance is not an inference.
+
+### T3 — TUI renders on BOTH platforms, but boot time differs 5.5x
+Measured at 1s granularity, pristine HOME, all provider keys unset, real tmux pty
+(pty proven: isatty False outside / True inside):
+- macOS: splash 1s → **onboarding at 2s**
+- Linux: splash 1s → **onboarding at 11s** (hetzner shared with other lanes; caveat noted)
+
+Onboarding surface itself is good: ASCII logo, "connect a provider to begin", paste box,
+and three routes (API key / Ollama local / skip). Instrument alive on both (needle matched).
+
+### T4 — HEADLESS CLI CANNOT COMPLETE A TURN OUT OF THE BOX (both platforms)
+`wayland-core -p flux-router -m flux-auto --no-tui "<prompt>"`:
+
+| Config | Platform | rc | What the user gets |
+|---|---|---|---|
+| pristine HOME | macOS | **1** | `error: Session persistence authority unavailable: … no OS keyring was usable and no encrypted credentials vault is unlocked` |
+| pristine HOME | Linux | **1** | identical |
+| real HOME (`backend="plaintext"`) | macOS | **1** | `Error: storage.credentials.backend is set to "plaintext", which cannot hold the confidential key that durable session recovery requires` |
+| + `WAYLAND_VAULT_PASSPHRASE` | macOS | **0** | `* WAYLAND_UAT_OK` `[turns: 1 \| tokens: 8581 in / 8 out]` |
+| + `WAYLAND_VAULT_PASSPHRASE` | Linux | **0** | `* WAYLAND_UAT_OK` `[turns: 1 \| tokens: 2563 in / 8 out]` |
+
+So the product **works**, but only after the user solves a credential-vault problem it
+raises at them on the way in. On a headless Linux server — the canonical deployment — there
+is no OS keyring, so this is the DEFAULT experience, not an edge case.
+
+Arm verified per §3b-ii by reading the product's own output, not from my env: the capture
+contains `flux-router/flux-auto` and 5× `api.fluxrouter.ai`, and **zero** `api.anthropic.com`
+— despite `/root/.wayland/.env` existing on hetzner (checked and reported by the runner).
+
+Secret discipline: key injected on stdin only, never argv/disk. Every capture swept —
+`SECRET_LEAK_HITS=0` with `SECRET_SWEEP_KNOWN_POSITIVE=1` proving the sweep was alive.
+
+### T5 — instrument defects found and REPAIRED in-lane (not just noted, per §6b-ii)
+1. pty probe redirected its own stdout to a file → reported `ISATTY=False` inside a real pty.
+   Repaired to read the pane back with `capture-pane`. It **refused to judge** rather than
+   passing, which is the harness working correctly.
+2. `pgrep -f <basename>` matched **17** unrelated processes (the checkout is named
+   `waylandcore`); `pgrep -f <abspath>` then matched **the harness itself** (`--bin <path>`
+   is in its own argv) and reported a false orphan. Repaired to exact `argv[0]` match.
+3. `grep -c . file || echo 0` produced the literal two-line value `"0\n0"` — the exact trap
+   in the brief. Replaced with `awk 'END{print NR+0}'`.
+4. `pgrep -a` is GNU-only and is **silently ignored on BSD**, so macOS captures held bare
+   PIDs with no command text — a detector that looks like it is reporting commands and is not.
+5. macOS `env` parses options before operands, so `env HOME=x -u KEY` made `-u` the command:
+   `env: -u: No such file or directory`, rc=127. GNU env tolerates it; BSD does not.
+
 (appended as work proceeds)
