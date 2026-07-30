@@ -69,10 +69,34 @@ pub fn template_dir(t: Template) -> Result<PathBuf> {
         tried.push(p);
     }
     // `CARGO_MANIFEST_DIR` is `<workspace>/crates/wcore-cli` at compile time.
+    //
+    // DEBUG ONLY, AND THAT IS A REPRODUCIBILITY REQUIREMENT (SUPPLY-29-34).
+    // `env!` expands to a string LITERAL, so the builder's absolute source path
+    // is baked into the binary. `--remap-path-prefix` cannot rewrite it —
+    // Cargo's own documentation states the path-sanitizing settings "do not
+    // affect hard-coded paths within source code strings" — so this one literal
+    // is enough to make the shipped artifact non-reproducible on its own.
+    //
+    // Measured on hetzner at 2329be9b, two clean release builds of `-p
+    // wcore-cli` from identical source at different absolute paths:
+    //   without any remap : 8 build-path strings embedded, digests DIFFER
+    //   with remap        : 7 of 8 gone (all cranelift OUT_DIR paths, plus all
+    //                       1619 registry paths), digests STILL DIFFER
+    // The single survivor was this literal. F29-REPRO-VARIANCE identified only
+    // the cranelift `OUT_DIR` class and filed `--remap-path-prefix` as the
+    // remedy; that remedy is necessary but NOT sufficient, and this is why.
+    //
+    // Release builds lose nothing real. The doc comment above already says an
+    // installed binary has no workspace beside it, so this branch cannot fire
+    // for the shipped artifact; a release build run from a workspace root is
+    // still covered by the current-directory fallback below.
+    #[cfg(debug_assertions)]
     let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .map(|r| r.join("templates").join(t.dir_name()));
+    #[cfg(not(debug_assertions))]
+    let compiled: Option<PathBuf> = None;
     if let Some(p) = compiled {
         if p.is_dir() {
             return Ok(p);
@@ -166,9 +190,25 @@ pub fn run_new(name: &str, dest: &Path, template: Template) -> Result<()> {
 /// Rewrite the scaffold's git+tag `wcore-plugin-api` dep to the in-tree path.
 /// Returns whether a rewrite happened.
 fn repoint_to_in_tree_api(scaffold: &Path) -> Result<bool> {
+    // DEBUG ONLY, for the reproducibility reason given at length on the other
+    // `CARGO_MANIFEST_DIR` site in this file (`template_dir`).
+    //
+    // BOTH SITES HAD TO BE GATED, and gating only one proved nothing: the two
+    // `env!("CARGO_MANIFEST_DIR")` expansions produce the SAME string literal,
+    // so the linker keeps a single deduplicated copy in the string table.
+    // Measured — after gating `template_dir` alone, two release builds at
+    // different absolute paths still embedded the path exactly once and their
+    // digests still differed. One remaining use is all it takes.
+    //
+    // An installed binary has no sibling `wcore-plugin-api` directory, so the
+    // `is_dir()` filter below already made this a no-op for the shipped
+    // artifact; the gate removes the baked literal without changing that.
+    #[cfg(debug_assertions)]
     let api = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(|c| c.join("wcore-plugin-api"));
+    #[cfg(not(debug_assertions))]
+    let api: Option<PathBuf> = None;
     let Some(api) = api.filter(|p| p.is_dir()) else {
         return Ok(false);
     };

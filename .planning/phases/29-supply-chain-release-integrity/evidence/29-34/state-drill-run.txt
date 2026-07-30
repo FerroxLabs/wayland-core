@@ -1,0 +1,36 @@
+
+=== build the real wayland-release binary ===
+    Finished `release` profile [optimized] target(s) in 0.25s
+
+=== mint throwaway role keys (one per state, written 0600, public halves printed) ===
+
+=== package artifacts and build+sign the manifest the chain binds to ===
+
+=== POSITIVE CONTROL: rehearse packaging -> deployment_preparation -> rollback_rehearsal ===
+STATE APPENDED state=packaging body_sha256=8acea7179affa1968802c7e1569acc8a2a54fd4d194c2f2b3a8831dec6885ead
+STATE APPENDED state=deployment_preparation body_sha256=cf6bb69ae83f99bb9707c8ef6ec31c105d49d12a3c374cde0fb6d919242febc7
+STATE APPENDED state=rollback_rehearsal body_sha256=07582f678cafc1b9a1509cf6f5fbcebb9f1856995929541f584c3c3e5e08dc91
+CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+
+=== CEILING: appending release_acceptance must NOT produce an accepted chain ===
+wayland-release: release acceptance requires an observed certification binding
+ceiling holds: acceptance refused without a certification binding
+
+=== NEGATIVE CONTROL 1: rollback_rehearsal signed by the RELEASE-ACCEPTANCE key ===
+refused as required: wayland-release: key release-acceptance-key is bound to role ReleaseAcceptance but role RollbackRehearsal is required
+
+=== NEGATIVE CONTROL 2: skip deployment_preparation ===
+refused as required: wayland-release: record at position 1 is RollbackRehearsal but canonical order requires DeploymentPreparation
+
+=== NEGATIVE CONTROL 3: the rehearsal record's evidence digest is altered ===
+refused as required: wayland-release: body digest mismatch
+
+=== RESTORE: the untouched chain must still verify ===
+CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+
+=== verdict ===
+STATE DRILL PASSED.
+  rollback_rehearsal REACHED and verified (3 records, accepted=false)
+  acceptance ceiling held without a certification binding
+  3 collapse attempts refused: wrong-role key, skipped state, altered evidence
+  untouched chain re-verified afterwards
