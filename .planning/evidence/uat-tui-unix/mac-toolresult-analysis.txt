@@ -1,0 +1,10 @@
+=== every 'Ran' result line in the approved run ===
+186:       Ran `?` · exit 0 · 0 bytes                                                  │                                │
+227:       Ran `?` · exit 0 · 0 bytes                                                  │                                │
+=== does the literal tool OUTPUT ever appear to the user? ===
+count of lines containing HELLO_FROM_UAT as bare output (not in command echo):
+12
+=== KNOWN-POSITIVE control: the string IS present somewhere (proves grep alive) ===
+52:----- SEND #1: [__LITERAL:Use the bash tool to run exactly: echo HELLO_FROM_UAT] -----
+=== KNOWN-NEGATIVE control: a string that is definitely absent ===
+0

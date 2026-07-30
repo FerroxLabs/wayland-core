@@ -1,0 +1,21 @@
+wayland-core doctor v0.12.25
+
+[PASS] binary version         v0.12.25 (matches expected)
+[WARN] chromium browser       not found on PATH — browser CDP backend unavailable
+       Hint: brew install --cask google-chrome  (optional)
+       Hint: or ensure your Chrome/Chromium has a shell alias
+[SKIP] wlrctl                 (Linux-only)
+[SKIP] grim                   (Linux-only)
+[SKIP] WAYLAND_DISPLAY        (Linux-only)
+[SKIP] X DISPLAY              (Linux-only)
+[MANUAL] macOS Accessibility  verify in System Settings -> Privacy & Security -> Accessibility (wayland-core / Terminal / iTerm must be enabled to use CUA)
+[WARN] BROWSERBASE_API_KEY    not set — Browserbase cloud backend unavailable
+       Hint: export BROWSERBASE_API_KEY=<key>  (only if you use the cloud backend)
+[PASS] ollama                 binary at /opt/homebrew/bin/ollama
+
+Summary: 2 passed, 0 missing, 2 warning, 4 skipped, 1 manual
+
+MCP servers (declared):
+  (config not loaded: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).)
+
+Run with --probe-mcp to connect-test the config-declared servers.

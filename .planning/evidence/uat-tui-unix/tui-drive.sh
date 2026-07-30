@@ -55,11 +55,13 @@ pty_control() {
 }
 
 # ---------------------------------------------------------------- args
-BIN=""; OUT=""; LABEL="run"; HOMEDIR=""; SCRUB=0; WITHFLUX=0; SETTLE=6
+BIN=""; OUT=""; LABEL="run"; HOMEDIR=""; SCRUB=0; WITHFLUX=0; SETTLE=6; SECRETS_FILE=""; FLUX_STDIN=0
 ARGS=(); SENDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest)    SELFTEST=1; shift ;;
+    --secrets)     SECRETS_FILE="$2"; shift 2 ;;
+    --flux-stdin)  FLUX_STDIN=1; shift ;;
     --bin)         BIN="$2"; shift 2 ;;
     --out)         OUT="$2"; shift 2 ;;
     --label)       LABEL="$2"; shift 2 ;;
@@ -101,6 +103,18 @@ fi
 mkdir -p "$OUT"
 SOCK="uat-$LABEL-$$"
 
+# --flux-stdin: read the credential from STDIN ONLY (LANE-BRIEF §0 exception) and
+# export it so the tmux server inherits it. Never in argv, never on disk.
+# The tmux server is started on a per-run private socket, so it takes THIS
+# environment rather than reattaching to a pre-existing server with a different one.
+if [ "$FLUX_STDIN" = "1" ]; then
+  IFS= read -r FLUX_API_KEY
+  export FLUX_API_KEY
+  [ -n "${FLUX_API_KEY:-}" ] || die "--flux-stdin given but nothing arrived on stdin"
+  WITHFLUX=1
+  export WAYLAND_VAULT_PASSPHRASE="uat-throwaway-not-a-real-secret"
+fi
+
 {
 echo "########## UAT RUN: $LABEL"
 echo "host=$(hostname) uname=$(uname -srm) date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -125,15 +139,30 @@ ENVPFX="env"
 if [ "$SCRUB" = "1" ]; then
   for k in FLUX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY \
            GROQ_API_KEY OPENROUTER_API_KEY FAL_API_KEY HF_API_KEY API_KEY PROVIDER BASE_URL MODEL; do
+    # `env -u` runs AFTER the prelude that sources the key, so scrubbing
+    # FLUX_API_KEY here would silently delete the credential --with-flux just
+    # loaded and the run would proceed unauthenticated while looking configured.
+    [ "$WITHFLUX" = "1" ] && [ "$k" = "FLUX_API_KEY" ] && continue
     ENVPFX="$ENVPFX -u $k"
   done
 fi
 [ -n "$HOMEDIR" ] && { mkdir -p "$HOMEDIR"; ENVPFX="$ENVPFX HOME=$HOMEDIR"; }
 PRELUDE=""
-if [ "$WITHFLUX" = "1" ]; then
-  # value never reaches argv, disk, or this log — only the PATH to the env file does
-  PRELUDE='set -a; . "$HOME_REAL/.wayland-secrets/flux.env"; set +a; '
-  ENVPFX="$ENVPFX HOME_REAL=${HOME_REAL:-$HOME}"
+if [ "$WITHFLUX" = "1" ] && [ "$FLUX_STDIN" = "1" ]; then
+  # Key already exported into this process; tmux inherits it. Nothing to source,
+  # and WAYLAND_VAULT_PASSPHRASE is exported above rather than placed in argv.
+  :
+elif [ "$WITHFLUX" = "1" ]; then
+  # The key value never reaches argv, disk, or this log — only the PATH to the
+  # env file does. NOTE: an earlier version referenced $HOME_REAL inside the
+  # prelude while setting HOME_REAL in the `env` that runs AFTER the prelude, so
+  # the source path expanded to "/.wayland-secrets/flux.env" and silently sourced
+  # nothing — a credential setup that fails open into an unauthenticated run.
+  [ -r "$SECRETS_FILE" ] || die "--with-flux needs a readable --secrets file (got: ${SECRETS_FILE:-<unset>})"
+  PRELUDE="set -a; . $(printf '%q' "$SECRETS_FILE"); set +a; "
+  # A headless host has no OS keyring; without this the engine refuses to start a
+  # session at all (measured on both platforms). Throwaway value, not a real secret.
+  ENVPFX="$ENVPFX WAYLAND_VAULT_PASSPHRASE=uat-throwaway-not-a-real-secret"
 fi
 QARGS=""
 for a in ${ARGS+"${ARGS[@]}"}; do QARGS="$QARGS $(printf '%q' "$a")"; done
