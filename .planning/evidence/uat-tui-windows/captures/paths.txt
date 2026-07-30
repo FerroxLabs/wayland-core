@@ -1,0 +1,43 @@
+﻿LONGPATHS_ENABLED: 1
+
+=== CASE path_spaces ===
+HOME_PATH_LEN: 49
+ARCHIVE_PATH_LEN: 59
+HOME_PATH: D:\lane-uat-tui-win\path tests\a home with spaces
+MKDIR: ok
+HOME_FILE_COUNT: 2
+CREATE_RC: 0
+ARCHIVE_EXISTS: True
+ARCHIVE_BYTES: 672
+VERIFY_RC: 0
+RESTORE_RC: 0
+RESTORE_DIR_LEN: 51
+RESTORED_MARKER_EXISTS: True
+
+=== CASE path_under260 ===
+HOME_PATH_LEN: 210
+ARCHIVE_PATH_LEN: 36
+HOME_PATH: D:\lane-uat-tui-win\deep\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd
+MKDIR: ok
+HOME_FILE_COUNT: 2
+CREATE_RC: 0
+ARCHIVE_EXISTS: True
+ARCHIVE_BYTES: 670
+VERIFY_RC: 0
+RESTORE_RC: 0
+RESTORE_DIR_LEN: 212
+RESTORED_MARKER_EXISTS: True
+
+=== CASE path_over260 ===
+HOME_PATH_LEN: 305
+ARCHIVE_PATH_LEN: 35
+HOME_PATH: D:\lane-uat-tui-win\deeper\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd\dddddddddddddddddddddddddddddd
+MKDIR: ok
+HOME_FILE_COUNT: 2
+CREATE_RC: 0
+ARCHIVE_EXISTS: True
+ARCHIVE_BYTES: 671
+VERIFY_RC: 0
+RESTORE_RC: 0
+RESTORE_DIR_LEN: 307
+RESTORED_MARKER_EXISTS: True
