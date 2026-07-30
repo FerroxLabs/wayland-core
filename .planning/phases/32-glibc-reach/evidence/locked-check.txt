@@ -1,0 +1,5 @@
+=== git status of worktree (must be clean: no dep changes) ===
+=== cargo metadata --locked ===
+rc=0
+stderr:
+metadata bytes: 4451227

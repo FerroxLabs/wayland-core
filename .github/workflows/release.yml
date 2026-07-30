@@ -654,6 +654,29 @@ jobs:
           echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
             || { echo "ERROR: --version output did not match expected shape"; exit 1; }
 
+      # Symbol-level compliance is checked at build time by
+      # check_glibc_floor.py. This is the EXECUTABLE-level counterpart: actually
+      # run the published artifact on a distro sitting exactly AT the declared
+      # floor. `ubuntu-latest` is 24.04, so the existing `--version` step above
+      # would keep passing even if the floor silently rose again — it cannot
+      # detect the very regression this lane exists to prevent.
+      #
+      # rockylinux:9 is glibc 2.34 (the declared floor) and is a different
+      # distro family from the almalinux:9 build container, so this also
+      # catches an accidental build-container-only dependency.
+      - name: Execute the artifact on a distro at the declared glibc floor
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -v "$PWD/smoke/extracted:/s:ro" rockylinux:9 bash -c '
+            dnf -y -q install openssl-libs libseccomp dbus-libs >/dev/null 2>&1
+            /s/wayland-core --version
+          ')
+          echo "version output on rockylinux:9 (glibc 2.34): ${out}"
+          echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "ERROR: artifact did not run at the declared glibc floor"; exit 1; }
+
       - name: Verify Linux aarch64 binary file shape only (cannot execute on amd64 runner)
         if: matrix.use_qemu == true
         shell: bash
