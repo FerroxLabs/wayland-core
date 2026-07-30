@@ -1431,10 +1431,17 @@ release trains rather than sessions.
 
 ## 3. What must close before a release candidate, and what can ship open
 
-> ### SUPERSEDING RE-RANK — 2026-07-30, `lane/release-rank`, measured at `4dc571c1`
+> ### SUPERSEDING RE-RANK — 2026-07-30, `lane/release-rank`, measured at `3a5cb695` (integration `690eb928`)
 >
-> **Four items block a release candidate, down from seven — and only three of them are criteria at
-> all; the highest-ranked blocker is a security defect this section had no row for.**
+> **Four items block a release candidate, down from seven criteria — and only three of the four are
+> criteria at all. The highest-ranked blocker is not an unmet criterion: it is that `cargo --locked`
+> fails, so the release workflow's own supply-chain step cannot run.**
+>
+> **This block was re-measured once mid-write and the top of the list changed.** The re-rank first
+> ranked the egress master-switch defect #1; `lane/egress-merge-polarity` **landed while this was
+> being written** (`f09d5898`), so that item is now CLOSED and struck from the list. Its own lane's
+> backlog then produced the finding that replaced it at #1. Both movements are recorded rather than
+> smoothed over, because the lesson is the ledger's own: **a blocker list decays in hours.**
 >
 > Everything from `### MUST CLOSE — 7 criteria` down to the end of `### CAN SHIP OPEN` below is
 > **SUPERSEDED and must not be read forward.** It is retained unedited per this file's convention.
@@ -1459,24 +1466,45 @@ release trains rather than sessions.
 > or a signed release-notes line), **not whether the RC waits.** Absent that discipline, "decision"
 > is where blockers go to die.
 >
-> **1. `EGRESS-01` — the egress master switch is switchable off by an untrusted project config.**
-> **No prior row in this ledger.** `wcore-config/src/config.rs:4431` is
-> `enabled: global.security.enabled && project.security.enabled`. `enabled = true` means the
-> boundary is ON, so `&&` lets **either** layer switch it off — including a project config the same
-> file twice calls *"untrusted (checked into a cloned repo)"* under GHSA-8r7g. Reinforced at
-> `:4546`, `restricted.security.enabled = project.security.enabled;`, inside
-> `restrict_untrusted_project_config` — whose own comment at `:4537` reads *"Preserve project
-> narrowing, never project grants"* and at `:4543` *"A repository may **tighten** egress"*.
-> **`false` loosens it. The code contradicts its own stated contract**, which is what makes this
-> worse than an ordinary bug: a future maintainer reading the comment will preserve the defect.
-> Reachability is maximal — clone a repo and run the agent is the canonical first user action — and
-> the failure is silent and in the privilege-loosening direction. **Both independent panel members
-> ranked this first on merit rather than novelty.** The fix exists on `lane/egress-merge-polarity`,
-> which has separately established that the naive `||` flip is itself defective (`security.enabled`
-> defaults to `true`, so `||` breaks the operator's own off switch); the shape needed is
-> presence-aware or operator-owned — and **that exact shape already exists 13 lines below at
-> `:4559`** for `skills_lifecycle` (*"Only an explicit `false` is carried forward"*).
-> **NOT YET MERGED to integration. ≈0.5 session to merge + pin with an executable test.**
+> **1. `BL-LOCKFILE-DRIFT` — `cargo --locked` fails, so the release workflow cannot run.**
+> **No criterion covers this, and it outranks everything that has one: it is not "a promise is
+> unmet", it is "the release procedure does not execute."**
+> `crates/wcore-eval-scenarios/Cargo.toml:123` declares `serial_test.workspace = true` under
+> `[dev-dependencies]`, and the committed `Cargo.lock` **omits that edge** from the
+> `wcore-eval-scenarios` stanza (`Cargo.lock:9828-9856`) while listing its two block-mates
+> `wcore-mcp` and `wcore-egress`. Cargo silently rewrites the lock on every ordinary build, so the
+> defect is invisible to normal work and fatal to a reproducible one.
+> **Measured, both directions, on `hetzner-dsm` at asserted SHA `3a5cb695`:**
+> with the committed lock, `cargo metadata --locked` → **RC=101**,
+> *"error: cannot update the lock file … because --locked was passed to prevent this"*;
+> with the cargo-repaired lock, the same command → **RC=0**. A reachable pass state and a reachable
+> fail state, per LANE-BRIEF §3b-iii.
+> **`--locked` is on the release path, not just in CI hygiene:** `release.yml:310`
+> (`cargo metadata --locked`), `supply-chain.yml:147, 150, 162` — including
+> `cargo build --locked -p wcore-eval-scenarios --bin wayland-release` — and `ci.yml:301, 691`.
+> **Every one of those invocations targets `wcore-eval-scenarios`, the drifted crate.**
+> **≈0.1 session.** The cheapest item in this ledger by an order of magnitude and the one that
+> most completely prevents a tag.
+>
+> > **Measurement note, because this one nearly self-passed.** My first `--locked` run returned
+> > **RC=0** and I almost recorded the finding as refuted. The run was invalid: my own earlier
+> > unlocked `cargo test` invocations in that worktree had **already rewritten `Cargo.lock`**, so I
+> > tested the repair rather than the defect. `git status --porcelain Cargo.lock` → `M Cargo.lock`,
+> > and `git diff` → `+ "serial_test",`. **I ran the fix before the test and the test passed.**
+> > Restoring with `git checkout -- Cargo.lock` produced the real RC=101. Local greps also disagreed
+> > with hetzner at the identical SHA for exactly this reason.
+>
+> **~~`EGRESS-01`~~ — CLOSED and MERGED (`f09d5898`), was ranked #1 in the first draft of this
+> block.** The egress master switch was `global.security.enabled && project.security.enabled`, which
+> let an **untrusted project config in a cloned repo switch the exfil boundary off**, against a
+> function whose own comment claimed *"Preserve project narrowing, never project grants."* At
+> `3a5cb695` the merge is `enabled: global.security.enabled,` (`config.rs:4456`) — operator-owned —
+> and the forwarding line in `restrict_untrusted_project_config` is **deliberately removed**
+> (`:4572-4573`). Pinned by `crates/wcore-agent/tests/egress_merge_polarity_test.rs`: **8 tests, 0
+> ignored**, including two named `control_*` cases that exercise the gate in **both** directions —
+> `control_gate_denies_exfil_when_the_project_is_silent_on_security` and
+> `control_operator_global_off_switch_disables_the_gate`, the latter pinning precisely the
+> regression a naive `||` flip would have introduced.
 >
 > **2. `27-C5` (aarch64 leg) — two shipped targets have never been executed anywhere.**
 > `release.yml:64-80` still ships **6 targets across 3 OS families**; the envelope has NOT narrowed.
@@ -1610,11 +1638,37 @@ release trains rather than sessions.
 > in Core without a wire change (`protocol_sink.rs:175-178` — same field, same type, same value
 > domain, `schema_digest` cannot observe it, so no contract bump and no manifest regeneration).
 >
-> #### Two lanes in flight, graded NOT YET MERGED
+> #### The two new BACKLOG findings, ranked
 >
-> `lane/egress-merge-polarity` (carries item 1's fix) and `lane/cli-danger-tiers` (renaming the
-> danger flags so the tier-1/tier-2 superset relationship is visible in the flag itself). Both are
-> expected before a tag; **neither is in integration at `4dc571c1`**, so neither is credited here.
+> Added at `690eb928` by `lane/egress-merge-polarity`, both **measured but not fixed**. AGENTS.md
+> §11 policy is that severity sets **repair order, not disposition** — so neither may sit unranked.
+> **Neither is an RC blocker, and both need a named owner.**
+>
+> - **`BL-LOCKFILE-DRIFT` — promoted OUT of the backlog to blocker 1 above.** The backlog entry says
+>   it *"needs an owner before any release"*; measurement upgrades that to **cannot release**.
+> - **`BL-UNTRUSTED-RESOURCE-LIMITS` (MEDIUM) — post-RC, ranked below every blocker.** Confirmed at
+>   `config.rs:4554-4556`: the comment reads *"Resource limits … can only reduce power"* directly
+>   above `restricted.default.max_tokens = project.default.max_tokens;` and the `max_turns`
+>   equivalent — **assignments with no comparison**, so an untrusted project raises rather than
+>   lowers. Same *comment-contradicts-code* family as the egress defect, and worth noting as a
+>   pattern rather than two coincidences. It is **not** blocking because it is a **ceiling, not a
+>   gate**: it can inflate cost and turn count, but crosses no trust boundary. Already pinned by
+>   `egress_merge_polarity_test.rs:443
+>   untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary`, which asserts both the
+>   raise (`100 → 999_999`, `5 → 100_000`) **and** that `security.enabled` still holds — i.e. the
+>   test itself records the severity argument. Fix is small; do it after the tag.
+>
+> #### One lane still in flight, graded NOT YET MERGED
+>
+> `lane/cli-danger-tiers` — two danger tiers named so the superset relation is visible in the flag:
+> `--dangerously-skip-permissions` (tier 1, approvals only, **OS sandbox stays ON**, with `--force`
+> and `--yolo` as aliases by construction) and `--dangerously-skip-permissions-and-sandbox`
+> (tier 2, adds the time-bounded sandbox lease). `--auto-approve` was measured **not** tier 1 and
+> correctly left alone. **At `3a5cb695` only tier 1 exists** — `main.rs:343` carries
+> `--dangerously-skip-permissions`, while tier 2 is still spelled `dangerous` (`:349`), and
+> `:1091` is still `let approval_bypass = cli.force || cli.dangerously_skip_permissions;`.
+> **Not credited in this ranking.** No item above depends on it; it is a naming-safety change, and
+> its own key deliverable — a test that fails if any spelling changes tier — is the right bar.
 
 ### MUST CLOSE — 7 criteria, ≈13–17 lane-sessions + one Desktop co-release train
 

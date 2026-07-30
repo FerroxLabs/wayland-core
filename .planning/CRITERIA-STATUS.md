@@ -1,5 +1,37 @@
 # CRITERIA STATUS — one line per criterion, measured 2026-07-30
 
+> ## RE-MEASURED 2026-07-30 (later) by `lane/release-rank` at `3a5cb695` / integration `690eb928`
+>
+> **No grade below changes.** Every row was re-checked against code and tests at HEAD, and four
+> load-bearing claims were **executed** on `hetzner-dsm` rather than read. What changes is the
+> **release-blocking ranking**, which now lives in `CRITERIA-GAP-LEDGER.md` §3's superseding block:
+> **4 items block an RC, down from 7 — and only 3 of the 4 are criteria.**
+>
+> **Three factual corrections to the justifications below** (grades survive, reasons do not):
+>
+> - **`24-C1`** — this file says no-loss *"still fails on 9 of 10 adapters."* **It is 7 of 10.**
+>   `supports_outbound_idempotency` is overridden by **three** adapters at HEAD, not one:
+>   Slack (`lib.rs:249`), **Matrix** (`:294`) and **Discord** (`:344`). Both new ones flipped only
+>   after their restart-unstable ids were fixed, and each is pinned by a named wire-binding test —
+>   both **executed, 1 passed each**. The ledger's *"≈0.5 session each for Matrix and Discord"* is
+>   already spent; **the residual is now 100% product decision and 0 sessions of implementation.**
+> - **`24-C3`** — this file says *"a new HIGH is open and unfixed."* **`F24-C3-H5` is FIXED**, via a
+>   new shared `wcore-agent/src/channel_policy.rs` (*"the ONLY place either map is built"*), read on
+>   every message (`channel_inbound.rs:261`) with tool posture included (`channel_dispatch.rs:341`).
+>   Regression test **executed: 1 passed, 0 ignored, 0 filtered out.** The grade **NOT MET still
+>   stands** — `edit`/`delete` are 0/10, `react` 5/10, `fetch_media` 9/10, all Linux-only, and five
+>   lanes have declined it — but not for the reason recorded here.
+> - **`27-C3`** — the ledger's escalation caveat (*"flips to blocking if media generation is
+>   billable — media calls currently produce no cost record"*) **can no longer fire.**
+>   `wcore-tools/src/media_cost.rs` provides a full `MediaCostLedger`/`MediaRateCard`, wired at
+>   `bootstrap.rs:1317`. Covers **image** generation only; video/TTS/voice carry no cost sites.
+>
+> **One row's blocking status inverted, and it has no entry in this file:** `cargo --locked` fails
+> at HEAD (`RC=101`, `wcore-eval-scenarios` dev-dep missing from `Cargo.lock`), and `release.yml:310`
+> plus three `supply-chain.yml` steps all use `--locked` against that exact crate. It is now the
+> **#1 RC blocker** despite being nobody's criterion. Method and captures:
+> `.planning/RELEASE-RANK-NOTES.md`.
+
 **All grades measured at `71acfd19` by `lane/ledger-regrade`, with a control in both directions per
 `LANE-BRIEF.md` §3b-iii** (can it fail, *and* can it pass). Full evidence and the superseded text
 live in `CRITERIA-GAP-LEDGER.md`; the dated correction blocks there are authoritative over the
