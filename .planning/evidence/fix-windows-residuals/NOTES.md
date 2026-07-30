@@ -168,3 +168,64 @@ before running a single test.** Step-level outcomes on 3 failed jobs show
 `Clippy (warnings = errors)` (2 jobs) or at `Pre-build wcore-cli release binary` (1 job).
 So Windows CI has been emitting **no test signal at all**.
 
+
+### Task 2 — Windows journey gate. VERDICT: it CAN pass; the DEFAULT set cannot, and should not.
+
+Permanently-red mechanism (Task Scheduler `PT1M` > the 60 s floor `every:15` is clamped to, so a
+Windows kill-and-recover ALWAYS crosses a trigger period, and both gates refused any
+`duplicates != 0`) is **genuinely fixed**: recurrence (same body, DIFFERENT identities) is now
+distinguished from replay (same identity twice), and `recurrences` is unconstrained.
+`PASSING_VERDICTS = {NO-REPEATS, RECURRENCE}`.
+
+Proven BIDIRECTIONAL on Windows at my base — `wcore-eval-scenarios --test journey_receipt_contract`
+**39 passed / 0 failed / 0 ignored / 0 filtered out**, rc=0, quadrants executing by name:
+Q1 `..._proven_recurrences_verifies` ok (reachable PASS), Q2 `..._planted_replay_is_refused` ok
+(reachable FAIL), Q3 `..._indeterminate_repeats_are_refused` ok, Q4 ok, plus
+`a_loss_is_still_refused_now_that_repeats_can_pass` and the driver/verifier agreement test.
+
+**Blocking adapters, named:** default `ADAPTERS = [slack, whatsapp, sms]` (`f24-journey.mjs:79`).
+`whatsapp` (`whatsapp.messages`) and `sms` (`twilio.messages`) emit **no delivery identity at
+all**, so their repeats are unclassifiable *in principle*; `classifyRepeats` fails closed
+(`indeterminate += repeats`) and clause 5 returns `NOT-PROVEN` however well the product behaved.
+Cannot pass until outbound delivery identity ships for Twilio/WhatsApp — a **product decision**
+per `docs/delivery-semantics.md` §6, not an implementation. Narrowing the default to the keyed
+set would be weakening what the gate measures.
+
+**Near-miss checked, not assumed:** slack was downgraded `supports_outbound_idempotency` true->false
+(live evidence; the old `true` rested on a mockito test). Slack is the adapter the one PASSING
+Windows journey used, so this could have silently re-reddened the gate. It does not: the gate never
+consults that method, it reads `idempotency_key` off the ARRIVAL (`f24-journey.mjs:1235`), and slack
+still TRANSMITS the header (`slack/src/lib.rs:244`, asserted `:601`) even though it does not honour it.
+
+**Stale ledger claims:** `CRITERIA-GAP-LEDGER.md:625` says `f24-journey.mjs:380` `platform = "slack"`
+is the ONLY such line — at HEAD there are THREE (:86 slack, :105 whatsapp, :126 sms). Same row says
+Slack is the sole `supports_outbound_idempotency` override — at HEAD FIVE override it and only
+**Matrix returns true**.
+
+### Task 3 — recommended action for Sean (nothing on the runners was touched)
+
+1. Nothing to restart — the runner is healthy; the briefed "phantom busy" theory is false.
+2. Land the clippy fixes (mine in `wcore-cron`, plus `wcore-browser`). Until both land every
+   Windows job burns ~18 min of a 2-runner pool to produce zero test signal.
+3. Only then consider a third Windows runner / smaller Windows job.
+4. Sean's ruling wanted: `install-action` logs `bash startup failure (partner-runner-images#169)`
+   twice per job. Mitigated and not the failure cause, but it sits on the critical path.
+
+Queue waits measured (6 Windows self-hosted jobs): 11.7 / 14.5 / 15.2 / 75.2 / 84.2 / 104.3 min,
+**median 45.2**. `sean-mac-arm64` median **1.4** over 12. Brief's 71.8 not reproduced; problem real.
+
+### Verification bar — UNRUN CELLS, counted (a skip is not a pass)
+
+- `wcore-agent --lib channel_lease::` on Windows — NOT RUN (top crate, full build). The supervisor
+  delegates to the `ScheduleLease` primitive proven above, but I do not claim it.
+- `wcore-cli` gateway unit tests on Windows — NOT RUN.
+- A fresh live 17-step Windows journey at my base — NOT RUN by me. The bidirectional proof is the
+  compiled verifier over committed driver-produced receipts, plus a prior lane's two real Windows
+  journeys at a nearby commit.
+- Quadrants 2 and 4 remain fixture-driven (a true replay cannot be planted at a real destination).
+
+### Fence / sweep
+Fence `crates/wcore-cli/src/{lib,main}.rs` vs captured merge-base `e7bc6d88`: **0 lines**, with a
+known-positive on the same command (`single_owner.rs` -> 2 lines). Secret sweep over the lane diff:
+8 patterns, **0 hits each**; sweeper proven alive (`clippy` -> 2, `zzz-absent-zzz` -> 0).
+No credential was used or required.
