@@ -85,10 +85,21 @@ kimi independently noted that fixing it properly needs a `max_tokens:
 Option<u32>` migration to tell "unset" from "64000" — out of scope here, and
 recorded as a finding rather than done badly.
 
-## 5. Status
+## 5. Status — COMPLETE
 
-- [x] premise verified
-- [ ] full sweep table
-- [ ] clamp written
-- [ ] both-direction controls
-- [ ] `egress_allow` trusted-path verdict
+- [x] premise verified (all six brief claims held)
+- [x] full sweep table → SUMMARY §3; found 2 further instances, both measured
+- [x] clamp written, trust-gated, + the SMART_MAX_TURNS backstop hole my first draft left
+- [x] both-direction controls: 14/14 green, 3 red on revert, 3 red on the wrong-fix variant
+- [x] `egress_allow` verdict: agree with the prior lane, by-design → SUMMARY §4
+- [x] live-proven on the real binary, both arms, known-positive in the negative arm
+
+Full write-up: `.planning/RESOURCE-LIMITS-CLAMP-SUMMARY.md`.
+
+### Correction to §2 of these notes
+
+§2 said the `max_tokens` presence gate is load-bearing. **Measured false and corrected in-source:**
+enumerated over 30 `(project, global)` pairs it is equivalent to an unclamped `min` at that site
+(0 differing cases), because the merge's own downstream presence gate already rescues the absent
+case. The absent-value landmine is real but bites a different variant — `min` at the MERGE site with
+the gate dropped — which regresses 200000 → 64000. Kept the gate, kept the test, fixed the claim.
