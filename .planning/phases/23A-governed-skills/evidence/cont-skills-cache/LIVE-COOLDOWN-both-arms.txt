@@ -1,0 +1,34 @@
+BUILD_DONE rc=0
+ARM=fail
+PROBE_POSITIVE_HTTP=503   (fail arm must be 503, ok arm 200)
+PROBE_NEGATIVE=000rc=7        (adjacent dead port)
+PRODUCT_RC=0
+STREAM_BYTES=6545
+CANNED_REQUESTS=2
+CANNED_MODE_SEEN=mode=fail 
+COOLDOWN_READY=1
+COOLDOWN_REACHED=2
+COOLDOWN_OUTCOME_CHANGED=2
+COOLDOWN_OBSERVED=2
+PRICING_STAGES="capability":"pricing_refresher","stage":"configured" "capability":"pricing_refresher","stage":"constructed" "capability":"pricing_refresher","stage":"declared" "capability":"pricing_refresher","stage":"ready" 
+CIRCUIT_OPEN_EVENTS=2
+KNOWN_POSITIVE_any_capability_activation=32
+KNOWN_NEGATIVE_bogus_capability=0
+=== ARM fail END ===
+
+ARM=ok
+PROBE_POSITIVE_HTTP=200   (fail arm must be 503, ok arm 200)
+PROBE_NEGATIVE=000rc=7        (adjacent dead port)
+PRODUCT_RC=0
+STREAM_BYTES=5503
+CANNED_REQUESTS=2
+CANNED_MODE_SEEN=mode=ok 
+COOLDOWN_READY=1
+COOLDOWN_REACHED=0
+COOLDOWN_OUTCOME_CHANGED=0
+COOLDOWN_OBSERVED=0
+PRICING_STAGES="capability":"pricing_refresher","stage":"configured" "capability":"pricing_refresher","stage":"constructed" "capability":"pricing_refresher","stage":"declared" "capability":"pricing_refresher","stage":"ready" 
+CIRCUIT_OPEN_EVENTS=0
+KNOWN_POSITIVE_any_capability_activation=26
+KNOWN_NEGATIVE_bogus_capability=0
+=== ARM ok END ===

@@ -148,8 +148,13 @@ So the shipped binary reports `cooldown_tracker` `ready` and `pricing_refresher`
    dependencies actually being available; keeping those facts separate prevents configured from
    becoming ready by implication."*
 
-## Open
+## Done
 
-- [ ] Build runtime outcome proof for `PricingRefresher` and `CooldownTracker`.
-- [ ] Replace the two unmeasured startup inputs with real construction facts.
-- [ ] Both-directions controls for all of the above.
+- [x] Runtime outcome proof for `CooldownTracker` (on `CircuitState::Open` only) and
+      `PricingRefresher` (on a published live snapshot only).
+- [x] Both unmeasured startup inputs replaced with real facts.
+- [x] Both-directions controls: unit (3 new, all mutation-proven falsifiable) and live
+      (two one-variable differentials through the shipped binary).
+
+**Final write-up: `CONT-SKILLS-CACHE-SUMMARY.md` in this directory.** These notes are the running
+log; the SUMMARY is the deliverable.
