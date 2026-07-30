@@ -1,0 +1,138 @@
+SUPPLY-29-34 -- MAKING REPRODUCIBILITY DELIBERATE
+Host: hetzner-dsm. Target: cargo build --release --locked -p wcore-cli
+      (the binary release.yml ships, ~98 MB).
+
+==========================================================================
+THE EXPERIMENT
+==========================================================================
+Two clean checkouts of the SAME commit at DIFFERENT-LENGTH absolute paths:
+
+  A = /root/wl-s2934/alpha                      (21 chars)
+  B = /root/wl-s2934/beta-considerably-longer    (39 chars)
+
+Different LENGTHS on purpose. 29-02 used /root/f29-repro/a1 and .../a2, which
+are equal-length, so an equal-length substitution could have masked a
+size-sensitive effect -- and 29-02 in fact observed a size delta it had to
+explain via string-table tail-merging. Unequal lengths remove that confound.
+
+Everything else held fixed across every arm: same commit, same lockfile
+(--locked), same toolchain (cargo 1.95.0 / rustc 1.95.0 from the repo pin),
+same host, same shared cargo registry, same profile, CARGO_BUILD_JOBS=10.
+Each tree keeps its own target/ -- never a shared CARGO_TARGET_DIR, because
+wcore-protocol bakes CARGO_MANIFEST_DIR into a digest and a shared target
+would have poisoned exactly this measurement.
+
+BOTH DIRECTIONS ARE RUN. An experiment that can only report "reproducible"
+is as useless as one that can only report "not reproducible". Arm A is the
+known-negative: it must DETECT non-reproducibility. Arms B..D are the
+treatment.
+
+==========================================================================
+ARM A -- CONTROL, NO REMAP.  Source commit 2329be9b.
+==========================================================================
+alpha e7264f4c892dd40c4791b4c0371b2f92251f8856ca322320f370e29eb56ebbe2
+beta  b818148813031d78f1091b487d516283b27cf893d24f35678f5926d31f70c240
+                                                            -> DIFFER
+
+Embedded absolute build paths, counted with `strings -a | /usr/bin/grep -c`:
+  a-alpha.bin : 8 alpha-paths, 0 beta-paths, 1619 cargo-registry paths
+  a-beta.bin  : 0 alpha-paths, 8 beta-paths, 1619 cargo-registry paths
+
+The known-negative fires. F29-REPRO-VARIANCE is independently reproduced,
+on a stronger path pair than the original.
+
+The 8, enumerated (7 + 1, and the "+1" is the whole story):
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/isle_x64.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/inst_builder.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/settings-pulley.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/isle_pulley_shared.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/settings-x86.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/settings.rs
+  <tree>/target/release/build/cranelift-codegen-55779e4ff3fe17ef/out/isle_opt.rs
+  <tree>/crates/wcore-cli            <-- NOT a build-script path. NOT file!().
+
+29-02 identified the first seven -- cranelift's build-script OUT_DIR reaching
+the binary through file!() -- and filed --remap-path-prefix as the remedy. It
+did not see the eighth, because it set CARGO_TARGET_DIR OUTSIDE the source
+tree, so the source path was a different string that its single prefix count
+never covered. Putting target/ inside the tree makes one prefix catch both
+classes, which is why this arm sees 8 where 29-02 saw 7.
+
+==========================================================================
+ARM B -- TREATMENT: --remap-path-prefix.  Source commit 2329be9b.
+==========================================================================
+RUSTFLAGS, per tree:
+  --remap-path-prefix=<tree>=/build
+  --remap-path-prefix=/root/.cargo/registry=/cargo/registry
+  --remap-path-prefix=/root/.cargo/git=/cargo/git
+
+alpha 814138bd88eef07e093f76c20768c6cfe50a1aab4c72973a92ed363f2832a543
+beta  e674890d8207d005a74c340609e4f4df80134a7aa463ffddc5074281773ad73b
+                                                            -> STILL DIFFER
+
+  b-alpha.bin : 1 alpha-path (was 8), 0 cargo-registry paths (was 1619)
+  b-beta.bin  : 0 alpha-paths, 1 beta-path (was 8), 0 registry (was 1619)
+
+The remap WORKS, and works well: all 7 cranelift OUT_DIR strings gone, all
+1619 registry paths gone. And the digests still differ, because of ONE
+surviving literal:
+
+  <tree>/crates/wcore-cli
+
+sitting in the string table next to WAYLAND_TEMPLATES_DIR, plugin-static,
+plugin-wasm and "repointed wcore-plugin-api at the in-tree crate".
+
+**THE FILED REMEDY WAS NECESSARY BUT NOT SUFFICIENT.** Had 29-02's
+--remap-path-prefix been applied and believed, the release would have been
+declared REPRODUCED while still not being reproducible. That is the finding.
+
+WHY THE REMAP CANNOT REACH IT. The literal comes from
+env!("CARGO_MANIFEST_DIR"), which rustc expands to a STRING LITERAL before
+any path remapping applies. Cargo's own documentation says the path
+sanitizing settings "do not affect hard-coded paths within source code
+strings". So no amount of --remap-path-prefix will ever remove it.
+
+AND trim-paths IS NOT AVAILABLE. Probed rather than assumed, with a
+throwaway crate:
+  error: failed to parse manifest
+  Caused by: feature `trim-paths` is required
+    ... that feature is not stabilized in this version of Cargo
+        (1.96.0 (30a34c682 2026-05-25))
+It would not have been sufficient either: trim-paths exposes CARGO_TRIM_PATHS
+for build scripts to honour VOLUNTARILY, and offers nothing for a hard-coded
+source string.
+
+Incidental, worth recording: hetzner's ambient default toolchain is 1.96.0
+while the repo pin resolves to 1.95.0. A bare `cargo` outside a repo tree is
+a different compiler from the one that builds this workspace.
+
+==========================================================================
+ARM C -- one CARGO_MANIFEST_DIR site gated.  Source commit f1334572.
+==========================================================================
+alpha bdeac6cc508ada16610c3e3a603a10222a227f403d6e6b8475d9d40701d8fdad
+beta  59a00ebf3a5f698af516d2b61710a3a162451cd80d9618fb5073bf11b58f528b
+                                                            -> STILL DIFFER
+  c-alpha.bin : 1 alpha-path.  c-beta.bin : 1 beta-path.
+
+A NEGATIVE RESULT THAT IS RECORDED, NOT BURIED. Gating template_dir's
+env!("CARGO_MANIFEST_DIR") behind #[cfg(debug_assertions)] removed one of the
+two uses and changed nothing measurable: the literal was still embedded
+exactly once. Both sites in scaffold.rs expand to the SAME string, so the
+linker keeps a single deduplicated copy and one surviving use is all it takes.
+
+This is why a partial fix must be measured rather than reasoned about. The
+diff looked correct and accomplished nothing.
+
+Regression check at this commit, in debug:
+  cargo test -p wcore-cli --lib plugin::scaffold
+  test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1893 filtered out
+identical to the pre-fix baseline at 2329be9b, and including
+`both_shipped_templates_resolve`, the test that exercises template_dir.
+(The `FAILED` line also present in that log is a NESTED fixture crate the
+test `plugin_test_propagates_a_failing_suite` deliberately builds and expects
+to fail. It is not this suite's result.)
+
+==========================================================================
+ARM D -- both sites gated.  Source commit 5fa47abd.
+==========================================================================
+See ARM-D-RESULT below (appended after the run).
