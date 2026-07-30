@@ -97,11 +97,28 @@ impl FileWatcher {
     /// last `FileWatcher` clone is dropped.
     pub fn new(root: &Path) -> Result<Self, WatchError> {
         let (tx, rx): (Sender<ExternalEvent>, _) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        // Resolve the watch root ONCE, here, so the notify callback — which
+        // runs on a platform thread and must not block — does no filesystem
+        // work per event. Both forms are kept because notify normalizes paths
+        // (macOS FSEvents resolves /var → /private/var) so the event path may
+        // be the canonical form while `root` as supplied is not.
+        let root_raw = root.to_path_buf();
+        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root_raw.clone());
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
                     let at = Instant::now();
                     for p in ev.paths {
+                        // The watch root itself is never a user edit — see
+                        // `is_watch_root`. Engine activity mutates the root
+                        // indirectly (creating `.wayland-core/` adds an entry
+                        // to it; a chmod of the project dir is an attribute
+                        // change on it) and those events carry the ROOT path,
+                        // which has no `.wayland-core` component for
+                        // `is_wcore_internal_path` to catch.
+                        if is_watch_root(&p, &root_raw, &root_canon) {
+                            continue;
+                        }
                         // F-007 (CRIT): hard-exclude wcore's own state
                         // directories from the "user edited files" signal.
                         // Session JSON, cron store, plans, and config files
@@ -257,6 +274,35 @@ fn is_wcore_internal_path(path: &Path) -> bool {
         let s = c.as_os_str().to_string_lossy();
         s == ".wayland-core" || s == ".wayland"
     })
+}
+
+/// Return `true` when `path` IS the watch root itself (the session's cwd),
+/// rather than something inside it.
+///
+/// **The self-edit loop.** `is_wcore_internal_path` filters by path COMPONENT,
+/// so it drops `<cwd>/.wayland-core/...` but is structurally unable to drop a
+/// bare `<cwd>` — the root carries none of the marker components. Yet a
+/// directory's own events are reported AGAINST that directory: creating
+/// `.wayland-core/` adds an entry to the root, and changing the project
+/// directory's permissions is an attribute change on the root. Each such event
+/// was rendered as "User edited `<cwd>` while I was thinking — re-read it
+/// before proceeding" and injected into the model's context, so the model
+/// answered the injected notice instead of the user's prompt; one observed run
+/// looped on "Re-reading now."
+///
+/// Measured on Linux at commit `7c42063e` before this filter existed:
+/// `surfaced paths: ["/tmp/.tmp5rMPaP/project [Modify(Metadata(Any))]"]`, with
+/// the watch root being exactly that path.
+///
+/// **This does not blind the feature, and that matters as much as the fix.**
+/// A genuine user edit is an event for the edited FILE, whose path is strictly
+/// longer than the root, so it is untouched here — including a file sitting
+/// directly in the root, which is the case most at risk from a rule phrased
+/// this way. The root is a directory in any case: it cannot be "re-read", so
+/// the message this filter suppresses was never actionable. Both directions
+/// are pinned in `tests/watch_self_edit_loop_test.rs`.
+fn is_watch_root(path: &Path, root_raw: &Path, root_canon: &Path) -> bool {
+    path == root_raw || path == root_canon
 }
 
 /// v0.9.1.1 F7: cap on the number of edited paths the synthetic
@@ -422,6 +468,37 @@ mod tests {
     #[test]
     fn synthetic_message_is_empty_when_no_events() {
         assert!(render_external_edit_message(&[]).is_none());
+    }
+
+    #[test]
+    fn is_watch_root_matches_the_root_itself_and_nothing_below_it() {
+        let raw = Path::new("/proj");
+        let canon = Path::new("/private/proj");
+
+        // Both resolutions of the root ARE the root. notify may deliver
+        // either, depending on platform normalization.
+        assert!(is_watch_root(Path::new("/proj"), raw, canon));
+        assert!(is_watch_root(Path::new("/private/proj"), raw, canon));
+
+        // Everything inside the root is a candidate user edit and must pass.
+        // A file sitting DIRECTLY in the root is the case an over-broad rule
+        // would swallow, so it is pinned explicitly.
+        assert!(!is_watch_root(Path::new("/proj/README.md"), raw, canon));
+        assert!(!is_watch_root(Path::new("/proj/src/main.rs"), raw, canon));
+        assert!(!is_watch_root(
+            Path::new("/private/proj/README.md"),
+            raw,
+            canon
+        ));
+
+        // The string-prefix trap: `/projector` starts with `/proj` but is a
+        // different directory. This pins the comparison as whole-path
+        // equality, so rewriting it as `starts_with` reddens here.
+        assert!(!is_watch_root(Path::new("/projector"), raw, canon));
+        assert!(!is_watch_root(Path::new("/projector/main.rs"), raw, canon));
+
+        // An ancestor of the root is not the root.
+        assert!(!is_watch_root(Path::new("/"), raw, canon));
     }
 
     #[test]
