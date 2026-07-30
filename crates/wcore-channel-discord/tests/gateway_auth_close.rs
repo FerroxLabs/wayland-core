@@ -14,7 +14,6 @@
 //! The fake gateway speaks just enough of the protocol to get to the decision
 //! point: accept, send HELLO, read IDENTIFY, then close with a chosen code.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
