@@ -175,8 +175,13 @@ a pending follow-up.)
   conversation/peer is not built.
 - A **setup doctor / token-probe** CLI to validate channel config and
   credentials interactively.
-- Outbound **idempotency nonces** (the inbound dedup already prevents
-  double-processing of platform replays).
+- Outbound idempotency **on the seven adapters whose platform provides no
+  token for it**. Slack, Matrix and Discord already transmit one and are
+  exactly-once; the other seven cannot be, and the gateway abandons rather
+  than duplicates an outcome-unknown delivery to them. This is a platform
+  limit, not a backlog item — see
+  **[Delivery semantics](delivery-semantics.md)** for the per-adapter table
+  and what to expect on restart.
 - MS Teams inbound webhook **JWT/JWKS** validation (parse exists; host
   exposure gated until then).
 

@@ -8,4 +8,5 @@
 - **[Providers & Auth](providers.md)** — Multi-provider configuration, profile inheritance, AWS Bedrock, Google Vertex AI, OAuth login
 - **[Advanced Features](advanced.md)** — Sub-agent spawning, hook system, prompt caching, VCR recording/replay, AGENTS.md hierarchical loading, memory system, plan mode, context compression, file state cache, output compaction
 - **[JSON Stream Protocol](json-stream-protocol.md)** — Host integration protocol specification (`--json-stream` mode)
+- **[Delivery Semantics](delivery-semantics.md)** — Per-adapter delivery guarantee: which channels are exactly-once, which are at-most-once, what happens to a delivery whose outcome is unknown, and what to expect on restart
 - **[Troubleshooting](troubleshooting.md)** — Common errors, diagnostics, and solutions
