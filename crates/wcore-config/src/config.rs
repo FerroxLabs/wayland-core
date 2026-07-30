@@ -2481,7 +2481,7 @@ impl Config {
             || resolved.confidential_recovery_storage_available(),
         ) {
             resolved.session.enabled = false;
-            warn_durable_sessions_disabled_once();
+            record_durable_sessions_disabled_by_host();
         }
 
         for (fallback_provider, fallback_model) in fallback_specs {
@@ -2569,6 +2569,41 @@ fn durable_sessions_must_be_disabled(
     measure_availability: impl FnOnce() -> bool,
 ) -> bool {
     session_enabled && backend.supports_confidential_material() && !measure_availability()
+}
+
+/// Set when [`durable_sessions_must_be_disabled`] fired during resolution.
+static DURABLE_SESSIONS_DISABLED_BY_HOST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Were durable sessions turned off because this HOST cannot protect them, as
+/// opposed to the operator asking for them to be off?
+///
+/// `session.enabled == false` alone cannot answer that: the two causes are
+/// indistinguishable in the resolved value, and a status surface that reports
+/// "sessions off" for an operator who never asked is exactly as unhelpful as
+/// one that reports "Healthy" for a product that cannot answer.
+///
+/// Process-global on purpose. The answer is a property of the host — no OS
+/// keyring, no unlocked vault — not of one config value, so every `Config`
+/// resolved in this process reaches the same verdict. The surfaces that need
+/// to report it (channel health, `--doctor`, a protocol status frame) sit far
+/// from the resolution site and do not hold the `Config` that made the call;
+/// threading a field to all of them would mean changing `SessionConfig`'s
+/// shape, which every test that builds one by hand constructs literally.
+///
+/// Known limitation, stated rather than hidden: a library embedder that
+/// resolves two configs with different credential backends in one process gets
+/// one flag for both. That is acceptable while the flag reports a host fact.
+#[must_use]
+pub fn durable_sessions_disabled_by_host() -> bool {
+    DURABLE_SESSIONS_DISABLED_BY_HOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Both effects of the host-forced degrade, in one place so they cannot drift
+/// apart: record it for status surfaces, and tell the operator.
+fn record_durable_sessions_disabled_by_host() {
+    DURABLE_SESSIONS_DISABLED_BY_HOST.store(true, std::sync::atomic::Ordering::Relaxed);
+    warn_durable_sessions_disabled_once();
 }
 
 /// Tell the operator, exactly once per process, that durable sessions are off
@@ -5181,6 +5216,26 @@ mod tests {
         });
         assert!(disable, "the headless case must disable durable sessions");
         assert!(measured.get(), "the probe must run in the undecided case");
+    }
+
+    /// `session.enabled == false` cannot tell a status surface WHY sessions are
+    /// off, and the two causes need opposite reporting: an operator who asked
+    /// for it wants silence, an operator whose host forced it wants to know.
+    /// This is the seam `channel health` / `--doctor` read.
+    ///
+    /// The assertion is on the TRANSITION, not on an absolute initial value:
+    /// any earlier `Config::resolve` in the same test binary could legitimately
+    /// have set the flag already on a keyring-less machine, and a test that
+    /// depended on that would be order-dependent and flaky rather than wrong.
+    #[test]
+    fn a_host_forced_degrade_is_reportable_afterwards() {
+        record_durable_sessions_disabled_by_host();
+        assert!(
+            durable_sessions_disabled_by_host(),
+            "recording a host-forced degrade must make it readable by a status \
+             surface; otherwise the only trace of it is a stderr line that has \
+             already scrolled away"
+        );
     }
 
     // -------------------------------------------------------------------------
