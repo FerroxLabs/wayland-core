@@ -1,0 +1,28 @@
+DISPLAY=:100
+--- sending 3 clicks + 2 moves via xdotool ---
+--- xev event type counts ---
+0
+ButtonPress(above) MotionNotify(below)
+0
+--- first 30 lines of xev raw ---
+xev: unrecognized event mask 'pointer'
+usage:  xev [-options ...]
+where options include:
+    -display displayname                X server to contact
+    -geometry geom                      size and location of window
+    -bw pixels                          border width in pixels
+    -bs {NotUseful,WhenMapped,Always}   backingstore attribute
+    -id windowid                        use existing window
+    -root                               use root window
+    -s                                  set save-unders attribute
+    -name string                        window name
+    -rv                                 reverse video
+    -event event_mask                   select 'event_mask' events
+           Supported event masks: keyboard mouse expose visibility structure
+                                  substructure focus property colormap
+                                  owner_grab_button randr button
+           This option can be specified multiple times to select multiple
+           event masks.
+    -1                                  display only a single line per event
+    -version                            print version and exit
+

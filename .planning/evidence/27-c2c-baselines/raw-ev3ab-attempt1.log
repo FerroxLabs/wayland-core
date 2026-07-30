@@ -1,0 +1,27 @@
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 3 tests
+test baseline_process_count_against_real_camoufox_sidecar ... ignored, needs a real camofox-browser at $WAYLAND_CAMOUFOX_BIN; run with -- --ignored
+test baseline_process_count_before_during_after ... EV3A: phase=before tracked_sessions=0 sidecar_pid=none tree_size=0
+EV3A: phase=during tracked_sessions=1 sidecar_pid=4175129 pid_alive=true tree_size=1 health=2xx
+EV3A: phase=after tracked_sessions=0 pid_alive=false tree_size=0 returned_to_baseline=true
+EV3A-SUMMARY: before_tracked=0 before_tree=0 during_tracked=1 during_tree=1 after_tracked=0 after_tree=0 leaked_processes=0
+ok
+test baseline_reaper_one_interval_both_directions ... 
+thread 'baseline_reaper_one_interval_both_directions' (4175131) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:291:5:
+assertion `left == right` failed: ARM 1: child must be live before the reaper runs
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    baseline_reaper_one_interval_both_directions
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+error: test failed, to rerun pass `-p wcore-browser --test process_count_reaper_baseline_test`

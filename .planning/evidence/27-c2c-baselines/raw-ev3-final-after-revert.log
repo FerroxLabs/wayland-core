@@ -1,0 +1,21 @@
+=== FINAL 3a/3b ===
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.38s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 3 tests
+test baseline_process_count_against_real_camoufox_sidecar ... ignored, needs a real camofox-browser at $WAYLAND_CAMOUFOX_BIN; run with -- --ignored
+test baseline_process_count_before_during_after ... ok
+test baseline_reaper_one_interval_both_directions ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.25s
+
+=== FINAL 3c ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 1 test
+test baseline_process_count_against_real_camoufox_sidecar ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.23s
+

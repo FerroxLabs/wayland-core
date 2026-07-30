@@ -1,0 +1,22 @@
+DISPLAY=:100
+--- sending: mousemove 300 200; click 1; click 3; mousemove 700 500 ---
+COUNT_ButtonPress=2
+COUNT_ButtonRelease=2
+COUNT_MotionNotify=2
+TOTAL_LINES=24
+--- sample ---
+MotionNotify event, serial 18, synthetic NO, window 0x21f,
+    root 0x21f, subw 0x0, time 2938170182, (300,200), root:(300,200),
+    state 0x0, is_hint 0, same_screen YES
+--
+ButtonPress event, serial 18, synthetic NO, window 0x21f,
+    root 0x21f, subw 0x0, time 2938170488, (300,200), root:(300,200),
+    state 0x0, button 1, same_screen YES
+--
+ButtonPress event, serial 18, synthetic NO, window 0x21f,
+    root 0x21f, subw 0x0, time 2938170895, (300,200), root:(300,200),
+    state 0x0, button 3, same_screen YES
+--
+MotionNotify event, serial 18, synthetic NO, window 0x21f,
+    root 0x21f, subw 0x0, time 2938171301, (700,500), root:(700,500),
+    state 0x0, is_hint 0, same_screen YES

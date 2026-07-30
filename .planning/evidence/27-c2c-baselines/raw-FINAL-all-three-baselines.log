@@ -1,0 +1,73 @@
+HEAD=6f68848f9810dc2ff700a32856b1bc46dd8b5dc3
+=== B1 downloads-root ===
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running tests/downloads_root_baseline_test.rs (target/debug/deps/downloads_root_baseline_test-fd08a4a66e15ff71)
+
+running 2 tests
+EV1: arm=A-in-root refused=false provider_ops=1 landed_inside_root=true
+EV1-DEFAULTROOT: out_of_root_refused=true out_of_root_provider_ops=0 in_root_admitted=true in_root_provider_ops=1 in_root_landed=true
+EV1: arm=B1-absolute refused=true provider_ops=0 file_created=false
+EV1: arm=B2-traversal refused=true provider_ops=0 file_created=false
+test baseline_default_root_is_fail_closed_pair ... ok
+EV1: arm=B3-dotfile refused=true provider_ops=0 file_created=false
+EV1: arm=B4-symlink refused=true provider_ops=0 file_created=false
+EV1: arm=C-naive-prefix-check lexically_in_root=true really_in_root=false naive_check_verdict=ADMIT real_gate_verdict=REFUSE
+EV1: arm=D-discrimination same_path_refused_under_root_A=true same_path_admitted_under_root_B=true provider_ops=1 landed=true
+EV1-SUMMARY: escape_shapes_tested=4 escape_shapes_refused=4 provider_ops_on_refusal=0 files_landed_outside_root=0 in_root_admitted=1 in_root_landed=1 discrimination_control=PASS
+test baseline_downloads_root_confinement_both_directions ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== B2a+B2b approval (xvfb, x11-test) ===
+   Compiling wcore-cua v0.12.25 (/root/wayland-27c2c/crates/wcore-cua)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s
+     Running tests/approval_gate_baseline_test.rs (target/debug/deps/approval_gate_baseline_test-1c4dec644a397f7c)
+
+running 2 tests
+test baseline_approval_gate_blocks_dispatch ... EV2A: arm=withheld outcome=PolicySuspended backend_dispatches=0
+EV2A: arm=granted outcome=Ok backend_dispatches=1
+EV2A: arm=first_time_before outcome=PolicySuspended backend_dispatches=0 arm=first_time_after outcome=Ok backend_dispatches=1
+EV2A-SUMMARY: arms=4 withheld_suspended=2 withheld_backend_dispatches=0 granted_ok=2 granted_backend_dispatches=2 discrimination=PASS
+ok
+test baseline_approval_gate_observed_on_real_x11 ... EV2B: step=1-instrument-liveness requested=(100,100) delivered_events=1 motion_at_target=true PASS
+EV2B: step=2-approval-withheld outcome=PolicySuspended requested=click(700,500) delivered_events=0 PASS
+EV2B: step=3-approval-granted outcome=Ok requested=click(700,500) delivered_events=3 buttonpress_at_target=true PASS
+EV2B: step=4-first-time-withheld delivered_events=0 step=5-first-time-granted delivered_events=3 buttonpress_at_target=true PASS
+EV2B-SUMMARY: display=:100 steps=5 instrument_liveness=PASS withheld_arms=2 withheld_delivered_events=0 granted_arms=2 granted_delivered_events_nonzero=2 discrimination=PASS
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+=== B3a+B3b process count ===
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.97s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 3 tests
+test baseline_process_count_against_real_camoufox_sidecar ... ignored, needs a real camofox-browser at $WAYLAND_CAMOUFOX_BIN; run with -- --ignored
+test baseline_process_count_before_during_after ... EV3A: phase=before tracked_sessions=0 sidecar_pid=none tree_size=0
+EV3A: phase=during tracked_sessions=1 sidecar_pid=225936 pid_alive=true tree_size=1 health=2xx
+EV3A: phase=after tracked_sessions=0 pid_alive=false tree_size=0 returned_to_baseline=true
+EV3A-SUMMARY: before_tracked=0 before_tree=0 during_tracked=1 during_tree=1 after_tracked=0 after_tree=0 leaked_processes=0
+ok
+test baseline_reaper_one_interval_both_directions ... EV3B: arm=orphan parent=dead reaper_interval_ms=200 child_alive_before=true child_alive_after=false tracked_sessions_after=0 PASS
+EV3B: arm=live-parent-control parent=alive waited_ms=2000 child_alive_after=true tracked_sessions_after=1 PASS
+EV3B-SUMMARY: arms=2 orphan_reaped_within_one_interval=true live_parent_child_survived=true discrimination=PASS
+ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.25s
+
+=== B3c real camoufox ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 1 test
+test baseline_process_count_against_real_camoufox_sidecar ... EV3C: phase=before tracked_sessions=0 tree_size=0 preexisting_sidecar=none
+EV3C: phase=during tracked_sessions=1 sidecar_pid=226370 tree_size=3 descendants=["Xvfb", "camoufox-bin"] health=2xx
+EV3C: phase=after tracked_sessions=0 tree_size=0 returned_to_baseline=true
+EV3C-SUMMARY: backend=real-camoufox before_tree=0 during_tree=3 after_tree=0 leaked_processes=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.16s
+
