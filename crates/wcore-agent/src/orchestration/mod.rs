@@ -3474,11 +3474,11 @@ mod partition_tests {
     fn registry_declarations_are_not_all_the_same() {
         let r = real_registry();
         let safe = r
-            .get("glob")
+            .get("Glob")
             .expect("glob registered")
             .is_concurrency_safe(&json!({}));
         let unsafe_ = r
-            .get("write")
+            .get("Write")
             .expect("write registered")
             .is_concurrency_safe(&json!({}));
         assert!(safe, "known-positive: glob must declare concurrency-safe");
@@ -3492,13 +3492,13 @@ mod partition_tests {
     fn adjacent_safe_real_tools_share_one_concurrent_batch() {
         let r = real_registry();
         let calls = vec![
-            call("glob", json!({"pattern": "**/*.rs"})),
-            call("grep", json!({"pattern": "fn ", "path": "."})),
+            call("Glob", json!({"pattern": "**/*.rs"})),
+            call("Grep", json!({"pattern": "fn ", "path": "."})),
         ];
         let got = shape(&partition(&r, &calls));
         assert_eq!(
             got,
-            vec![(true, vec!["glob".to_string(), "grep".to_string()])],
+            vec![(true, vec!["Glob".to_string(), "Grep".to_string()])],
             "two real concurrency-safe tools must merge into ONE parallel batch"
         );
     }
@@ -3507,17 +3507,17 @@ mod partition_tests {
     fn an_unsafe_real_tool_breaks_the_concurrent_run() {
         let r = real_registry();
         let calls = vec![
-            call("glob", json!({"pattern": "*"})),
-            call("write", json!({"path": "/x", "content": "y"})),
-            call("grep", json!({"pattern": "z", "path": "."})),
+            call("Glob", json!({"pattern": "*"})),
+            call("Write", json!({"path": "/x", "content": "y"})),
+            call("Grep", json!({"pattern": "z", "path": "."})),
         ];
         let got = shape(&partition(&r, &calls));
         assert_eq!(
             got,
             vec![
-                (true, vec!["glob".to_string()]),
-                (false, vec!["write".to_string()]),
-                (true, vec!["grep".to_string()]),
+                (true, vec!["Glob".to_string()]),
+                (false, vec!["Write".to_string()]),
+                (true, vec!["Grep".to_string()]),
             ],
             "a NOT-safe tool must terminate the batch and start its own"
         );
@@ -3531,18 +3531,18 @@ mod partition_tests {
     fn input_dependent_real_tool_is_batched_per_invocation() {
         let r = real_registry();
         let calls = vec![
-            call("git", json!({"op": "status"})),
-            call("git", json!({"op": "log"})),
-            call("git", json!({"op": "commit", "message": "m"})),
-            call("git", json!({"op": "diff"})),
+            call("Git", json!({"op": "status"})),
+            call("Git", json!({"op": "log"})),
+            call("Git", json!({"op": "commit", "message": "m"})),
+            call("Git", json!({"op": "diff"})),
         ];
         let got = shape(&partition(&r, &calls));
         assert_eq!(
             got,
             vec![
-                (true, vec!["git".to_string(), "git".to_string()]),
-                (false, vec!["git".to_string()]),
-                (true, vec!["git".to_string()]),
+                (true, vec!["Git".to_string(), "Git".to_string()]),
+                (false, vec!["Git".to_string()]),
+                (true, vec!["Git".to_string()]),
             ],
             "same tool NAME, different inputs -> different batching; partition \
              must consult the input, not just the name"
@@ -3554,14 +3554,14 @@ mod partition_tests {
     fn unknown_tool_is_not_batched_concurrently() {
         let r = real_registry();
         let calls = vec![
-            call("glob", json!({"pattern": "*"})),
+            call("Glob", json!({"pattern": "*"})),
             call("no_such_tool_exists", json!({})),
         ];
         let got = shape(&partition(&r, &calls));
         assert_eq!(
             got,
             vec![
-                (true, vec!["glob".to_string()]),
+                (true, vec!["Glob".to_string()]),
                 (false, vec!["no_such_tool_exists".to_string()]),
             ],
             "fail-closed: an unregistered name must not join a parallel batch"
@@ -3576,10 +3576,10 @@ mod partition_tests {
             ContentBlock::Text {
                 text: "thinking".to_string(),
             },
-            call("glob", json!({"pattern": "*"})),
+            call("Glob", json!({"pattern": "*"})),
         ];
         let got = shape(&partition(&r, &calls));
-        assert_eq!(got, vec![(true, vec!["glob".to_string()])]);
+        assert_eq!(got, vec![(true, vec!["Glob".to_string()])]);
     }
 
     /// THE REGRESSION GUARD tying this module to the defect that motivated it.
@@ -3620,8 +3620,8 @@ mod partition_tests {
     fn partition_retains_pointers_into_the_original_slice() {
         let r = real_registry();
         let calls = vec![
-            call("glob", json!({"pattern": "*"})),
-            call("write", json!({"path": "/x", "content": "y"})),
+            call("Glob", json!({"pattern": "*"})),
+            call("Write", json!({"path": "/x", "content": "y"})),
         ];
         let batches = partition(&r, &calls);
         for batch in &batches {

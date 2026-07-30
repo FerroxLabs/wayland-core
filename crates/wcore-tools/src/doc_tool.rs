@@ -1654,7 +1654,15 @@ mod artifact_concurrency_tests {
 
         const WRITERS: usize = 4;
         const READERS: usize = 4;
-        const READ_ROUNDS: usize = 400;
+        const WRITES_EACH: usize = 8;
+        /// Safety valve only. Readers are driven by `writers_done`, NOT by a
+        /// fixed round count: the first version of this test used 400 rounds
+        /// and every reader burned through all 400 in well under a millisecond
+        /// while the writers were still on their first 4 MB write, so
+        /// `successful_reads` was 0 and the torn-read assertion had nothing to
+        /// observe. A fixed round count makes the observation window a race
+        /// against the thing being observed.
+        const READ_ROUNDS_CAP: usize = 50_000_000;
 
         // Resolve the published path once, up front, so readers know where to
         // look. This also creates the artifact, so delete it before the race.
@@ -1668,17 +1676,22 @@ mod artifact_concurrency_tests {
         let torn = Arc::new(AtomicUsize::new(0));
         let saw_complete = Arc::new(AtomicUsize::new(0));
         let reads_done = Arc::new(AtomicUsize::new(0));
+        // Readers stay alive until every writer has finished, so the
+        // observation window always COVERS the writes.
+        let writers_done = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::new();
         for _ in 0..WRITERS {
             let (body, display) = (body.clone(), display.clone());
             let (started, barrier) = (started.clone(), barrier.clone());
+            let writers_done = writers_done.clone();
             handles.push(std::thread::spawn(move || {
                 started.fetch_add(1, Ordering::SeqCst);
                 barrier.wait();
-                for _ in 0..8 {
+                for _ in 0..WRITES_EACH {
                     let _ = write_doc_artifact(&display, &body);
                 }
+                writers_done.fetch_add(1, Ordering::SeqCst);
             }));
         }
         for _ in 0..READERS {
@@ -1687,10 +1700,12 @@ mod artifact_concurrency_tests {
             let (started, barrier) = (started.clone(), barrier.clone());
             let (torn, saw_complete, reads_done) =
                 (torn.clone(), saw_complete.clone(), reads_done.clone());
+            let writers_done = writers_done.clone();
             handles.push(std::thread::spawn(move || {
                 started.fetch_add(1, Ordering::SeqCst);
                 barrier.wait();
-                for _ in 0..READ_ROUNDS {
+                let mut rounds = 0usize;
+                loop {
                     match std::fs::read(&target) {
                         // Absent is fine: nothing published yet.
                         Err(_) => {}
@@ -1702,6 +1717,10 @@ mod artifact_concurrency_tests {
                                 torn.fetch_add(1, Ordering::SeqCst);
                             }
                         }
+                    }
+                    rounds += 1;
+                    if writers_done.load(Ordering::SeqCst) == WRITERS || rounds >= READ_ROUNDS_CAP {
+                        break;
                     }
                 }
             }));
