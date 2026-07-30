@@ -1,0 +1,17 @@
+diff --git a/crates/wcore-cron/src/lease.rs b/crates/wcore-cron/src/lease.rs
+index 37bf25c2..984bd0b6 100644
+--- a/crates/wcore-cron/src/lease.rs
++++ b/crates/wcore-cron/src/lease.rs
+@@ -473,6 +473,12 @@ mod sys {
+     }
+ 
+     pub(super) fn try_lock_exclusive(file: &File) -> std::io::Result<bool> {
++        // KNOWN-NEGATIVE MUTATION. A lease that always succeeds is a lease that
++        // guarantees nothing. If the cross-process cases still pass with this in
++        // place, they are not measuring the exclusion. Never commit this.
++        if std::env::var_os("WL_LEASE_STUB_ALWAYS_ACQUIRE").is_some() {
++            return Ok(true);
++        }
+         use std::os::windows::io::AsRawHandle;
+ 
+         // Exactly ONE byte at offset zero. On Windows the lock is MANDATORY,
