@@ -122,6 +122,82 @@ downloads root and must not escape it"* splits into two halves with different fa
    `BrowserSupervisor`. before / during / after by real PIDs in `/proc`, plus an orphan arm
    (dead parent ⇒ reaped within one interval) and a live-parent control arm (⇒ NOT reaped).
 
+## UPDATE 3 — measurement-hygiene corrections applied mid-lane
+
+**(a) rtk fabricates machine-readable counts even through absolute paths and pipes**
+(orchestrator correction, `LANE-BRIEF.md` @ `27c30527`). Every number in this lane is now
+captured by **redirecting to a file on the build host, `scp`-ing the file into
+`.planning/evidence/27-c2c-baselines/`, and reading it with the Read tool** — never through
+a Bash-rendered `grep`/`cat`. The raw captures are committed alongside this file as
+`raw-*.log` / `raw-*.txt` so any reader can re-check the figures against the source.
+Re-verified this way, retroactively: `raw-ev1-downloads-root.log` and
+`raw-ev2a-approval-tool-level.log` — both agree with what was reported (`2 passed; 0 failed;
+0 ignored; 0 measured; 0 filtered out` and `1 passed; 0 failed; 0 ignored; 0 measured;
+0 filtered out` respectively). No fabrication found in these two, but the numbers are now
+sourced correctly regardless.
+
+**(b) Which config layer the approval baseline reads.** Relevant to the
+`lane/egress-merge-polarity` finding that an untrusted project config can RAISE
+`max_tokens`/`max_turns`. **My baseline reads no merged config at all** — it constructs
+`CuaPolicy` programmatically in-process (`CuaPolicy::permissive()` then setting
+`require_approval_for_app` / `first_time_per_app_approval` directly). So the measurement is
+NOT sitting on the mis-polarisation defect. **Stated as a limitation, not a strength:** the
+baseline therefore does NOT prove that the config→`CuaPolicy` plumbing preserves approval
+settings across the trust boundary. If an untrusted project config can weaken
+`require_approval_for_app` or flip `first_time_per_app_approval` to `false`, this baseline
+would not see it. That is an untested adjacent surface and I am recording it as such.
+
+**(c) Base.** Integration moved `8955ee6e` → `690eb928` while I worked. This branch remains
+based at `8955ee6e` per the orchestrator's instruction; no rebase (forbidden by §0 anyway).
+
+## UPDATE 4 — baseline 1 CLOSED, both directions, with a known-negative mutation
+
+Raw: `raw-ev1-downloads-root.log`, `raw-ev1-mutated-known-negative.log`.
+
+**Can it pass?** ARM A (in-root dest) → admitted, provider reached **1** time with a
+canonicalized in-root path, file landed with the expected bytes. ARM D (discrimination) →
+the *same literal path* refused under root A is **admitted** under root B (its own parent),
+provider reached 1, landed. So the verdict tracks the root boundary, not an unrelated check.
+
+**Can it fail?** Four escape shapes — absolute, `..`-traversal, dotfile, and **symlink** —
+all refused, **provider reached 0 times each**, **0 files landed outside the root**.
+
+**Known-negative on my own instrument.** I replaced the symlink-resolving confinement in
+`tool.rs` with a naive lexical `starts_with` on the unresolved path (the exact defect ARM C
+describes) and re-ran: `MUTATED_RC=101`, `1 passed; 1 failed`, failing precisely at
+`B4-symlink: escape to /tmp/.tmp0XjPCg/innocent/loot.bin was NOT refused`. Mutation reverted
+(`tool.rs` clean; only a pre-existing `Cargo.lock` drift remains — see UPDATE 6), suite back
+to `2 passed; 0 failed`. **So the gate is neither permanently green nor permanently red.**
+
+## UPDATE 5 — baseline 2: tool level CLOSED; the X11 physical arm hit a real environment wall
+
+Raw: `raw-ev2a-approval-tool-level.log`, `raw-ev2b-x11-FAILED-liveness.log`,
+`raw-xtest-probe-xdotool.txt`, `raw-xtest-probe2.txt`.
+
+**2a (tool level) — CLOSED, `1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.**
+4 arms. Withheld (`require_approval_for_app`) ⇒ `PolicySuspended` with **backend dispatches
+= 0**; granted ⇒ `Ok` with **backend dispatches = 1**; first-time-per-app before approval ⇒
+`PolicySuspended`, dispatches 0; after `mark_app_seen` ⇒ `Ok`, dispatches 1. The
+zero-dispatch figure is what makes this an enforcement measurement rather than an
+error-string check: approval is not advisory, the op never reaches the desktop.
+
+**2b (real X11) — my instrument-liveness step FAILED, and it was right to.** Under
+`xvfb-run -a -s "-screen 0 1280x1024x24"` with `--features x11-test`, `2 tests` compiled and
+ran (so the feature gate works and nothing was silently skipped). The product's `MouseMove
+{x:100,y:100}` returned **`Ok`**, but `QueryPointer` read **`(640, 512)`** — the untouched
+screen centre. **A green return with no desktop effect.** Had I asserted only on the Rust
+return value, this arm would have "passed" while measuring nothing.
+
+Cause is **environmental, not ours** — independently confirmed with a second instrument
+(`raw-xtest-probe2.txt`): on this Xvfb `xdotool mousemove --sync 300 200`,
+`xdotool mousemove_relative --sync 50 50` and `xdotool click 1` **all return rc=0 and all
+leave the pointer pinned at `640,512`**. `xdpyinfo` confirms the server does advertise
+`XTEST` among its 23 extensions, and the screen is the 1280x1024 I asked for. So pointer
+*position* is not a usable observable on this display, for any tool.
+
+Switching the observable from pointer *position* to **event delivery** (what a real client
+actually sees) — see UPDATE 7.
+
 ## Standard I am holding myself to
 
 Every gate run in BOTH directions (LANE-BRIEF §3b-iii): construct the failing world and

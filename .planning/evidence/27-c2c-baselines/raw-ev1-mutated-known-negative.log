@@ -1,0 +1,25 @@
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.40s
+     Running tests/downloads_root_baseline_test.rs (target/debug/deps/downloads_root_baseline_test-fd08a4a66e15ff71)
+
+running 2 tests
+EV1: arm=A-in-root refused=false provider_ops=1 landed_inside_root=true
+EV1-DEFAULTROOT: out_of_root_refused=true out_of_root_provider_ops=0 in_root_admitted=true in_root_provider_ops=1 in_root_landed=true
+EV1: arm=B1-absolute refused=true provider_ops=0 file_created=false
+EV1: arm=B2-traversal refused=true provider_ops=0 file_created=false
+EV1: arm=B3-dotfile refused=true provider_ops=0 file_created=false
+test baseline_default_root_is_fail_closed_pair ... ok
+
+thread 'baseline_downloads_root_confinement_both_directions' (3941817) panicked at crates/wcore-browser/tests/downloads_root_baseline_test.rs:232:9:
+B4-symlink: escape to /tmp/.tmp0XjPCg/innocent/loot.bin was NOT refused
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test baseline_downloads_root_confinement_both_directions ... FAILED
+
+failures:
+
+failures:
+    baseline_downloads_root_confinement_both_directions
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-browser --test downloads_root_baseline_test`
