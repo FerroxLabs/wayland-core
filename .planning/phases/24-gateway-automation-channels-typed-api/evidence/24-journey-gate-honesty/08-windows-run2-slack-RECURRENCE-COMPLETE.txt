@@ -1,0 +1,27 @@
+[1/17] preflight-clean OK
+[2/17] binary-identity OK
+[3/17] profile-setup OK
+[4/17] sink-start OK
+[5/17] gateway-install OK
+[6/17] gateway-start OK
+[7/17] status-running OK
+[8/17] automation-add OK
+[9/17] deliveries-submit OK
+[10/17] arrival-before-kill OK
+[11/17] hard-kill OK
+[12/17] platform-recover OK
+[13/17] delivery-reconcile OK
+[14/17] upgrade-in-place OK
+[15/17] rollback OK
+[16/17] redaction-canary OK
+[17/17] drain-uninstall-clean OK
+verdict=RECURRENCE 24 repeat(s), every one under a DISTINCT delivery identity. The trigger fired again — `every:15` is rate-floored to 60s by trigger.rs:238, applied at :366 — and the product delivered each occurrence exactly once. 36 arrival(s) under as many distinct identities is a STRONGER exactly-once measurement than a run short enough to miss the boundary, not a spoiled one
+  submitted=12 arrived=36 unique=12 duplicates=24 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=24 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=0 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=0 at endpoint(s) (none)
+step-13 reconcile had read arrived=12 duplicates=0; 24 arrival(s) landed after it.
+JOURNEY COMPLETE platform=windows receipt=D:\lane-jgh\run2\windows-receipt.json
+
+rc=0

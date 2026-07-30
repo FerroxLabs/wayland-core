@@ -1,0 +1,33 @@
+[1/17] preflight-clean OK
+[2/17] binary-identity OK
+[3/17] profile-setup OK
+[4/17] sink-start OK
+[5/17] gateway-install OK
+[6/17] gateway-start OK
+[7/17] status-running OK
+[8/17] automation-add OK
+[9/17] deliveries-submit OK
+[10/17] arrival-before-kill OK
+[11/17] hard-kill OK
+[12/17] platform-recover OK
+[13/17] delivery-reconcile OK
+[14/17] upgrade-in-place OK
+[15/17] rollback OK
+[16/17] redaction-canary OK
+[17/17] drain-uninstall-clean OK
+node : JOURNEY FAILED: verdict=NOT-PROVEN 8 repeat(s) carry no delivery identity to judge by (16 unidentified arrival(s) at endpoint(s) twilio.messages,whatsapp.messages), so exactly-once can be neither established nor refuted for them. An unmeasurable property is not a clean one; this is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate
+At line:1 char:32
++ ... e-jgh\repo; node scripts\f24-journey.mjs --platform windows --run-dir ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (JOURNEY FAILED:... of a duplicate:String) [], Remote    Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  submitted=12 arrived=24 unique=12 duplicates=12 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=4 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=8 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=16 at endpoint(s) twilio.messages,whatsapp.messages
+step-13 reconcile had read arrived=12 duplicates=0; 12 arrival(s) landed after it.
+The receipt was written and records the true final counts.
+
+rc=1

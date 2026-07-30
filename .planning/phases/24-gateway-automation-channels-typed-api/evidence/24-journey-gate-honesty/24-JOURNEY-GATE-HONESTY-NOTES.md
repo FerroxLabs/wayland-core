@@ -112,6 +112,76 @@ turn `the_recurrence_section_keeps_its_measurement_and_its_correction` red —
 `7 passed; 1 failed` both times, the other seven unaffected — and the document
 restores to 0 bytes of diff.
 
+## Minute 175 — REAL Windows journeys. Not a synthetic.
+
+Two full setup-to-recovery journeys driven on `SeanD@seandesktop`, **17/17 steps
+each**, real Task Scheduler install/recover, real hard kill, real independent
+sink, against a real shipped `wayland-core.exe`
+(`C:\f28h2-target\release\wayland-core.exe`, `wayland-core 0.12.25`, source
+`9c4d2612157851abc6d810fc75d153410372dafa`, sha256 `b3b235fcd4039403…`, digest
+re-verified after two hops). Driver at lane commit `2a4751b2`, asserted after
+checkout. Work under `D:\lane-jgh\`; `C:\actions-runner-*` untouched.
+
+### Run 1 — the default three adapters
+
+```
+submitted=12 arrived=36->24 unique=12 duplicates=12 losses=0
+replays=0  recurrences=4  indeterminate=8  unidentified=16
+  at endpoint(s) twilio.messages,whatsapp.messages
+verdict=NOT-PROVEN     driver rc=1
+```
+
+**This reproduces the 2026-07-30 measurement exactly** — `recurrences=4`,
+`indeterminate=8`, `unidentified=16`, same two endpoints — which is independent
+confirmation that the committed `q3` fixture is faithful to the real shape
+rather than a tidied-up version of it.
+
+It is also the honest limit of the default adapter set: `twilio.messages` and
+`whatsapp.messages` emit no delivery identity, so 8 of the 12 repeats are
+**unjudgeable in principle** and a Windows run of that set is correctly graded
+NOT-PROVEN however well the product behaves. That is a real outbound-idempotency
+gap, not a stuck gate — and it is why `--adapters` had to become explicit before
+the passing state could be demonstrated on the real platform.
+
+### Run 2 — keyed adapters only (`--adapters slack`)
+
+```
+submitted=12 arrived=36 unique=12 duplicates=24 losses=0
+replays=0  recurrences=24  indeterminate=0  unidentified=0
+verdict=RECURRENCE
+JOURNEY COMPLETE platform=windows receipt=D:\lane-jgh\run2\windows-receipt.json
+driver rc=0
+```
+
+**`JOURNEY COMPLETE` on Windows.** Twenty-four genuine recurrences across 36
+arrivals, every one under a distinct delivery identity. Before this lane that
+receipt could not exist: the driver and the verifier each refused any
+`duplicates != 0`, and a Windows kill-and-recover leg crosses the 60 s period
+every time.
+
+Both runs' step 13 read `arrived=12 duplicates=0` — the repeats landed after it,
+which is the live F24-GWP-M1 shape, and the receipt records the true final
+counts because the headline and the breakdown now come from one snapshot.
+
+### Cross-gate agreement, on the real receipts
+
+`wayland-journey verify` built on hetzner at the same lane commit, run against
+the receipts Windows produced and the binary Windows drove:
+
+| run | driver (on Windows) | verifier (on hetzner) | rc |
+|---|---|---|---|
+| run 2 | `verdict=RECURRENCE` | `verdict=RECURRENCE` | **0** |
+| run 1 | `verdict=NOT-PROVEN` | `verdict=NOT-PROVEN` | **1** |
+
+```
+JOURNEY VERIFIED platform=windows commit=9c4d2612… steps=17 submitted=12
+arrived=36 unique=12 duplicates=24 losses=0 adapters=1/10 exercised=slack
+verdict=RECURRENCE repeats=24 (replays=0 recurrences=24 indeterminate=0 unidentified=0)
+```
+
+Note `adapters=1/10` on the success line: run 2 passes, and it is impossible to
+read as a matrix.
+
 ## Still to establish
 
 - [x] `trigger.rs` and `runner.rs` line citations at HEAD.
@@ -119,4 +189,8 @@ restores to 0 bytes of diff.
 - [x] JS: same predicate, same verdict.
 - [x] Four quadrants x two gates, both directions.
 - [x] `docs/delivery-semantics.md` §5 reworded.
-- [ ] Windows: real journey, or a faithful synthetic — SAY WHICH.
+- [x] Windows: **REAL journeys, two of them, both graded and both agreed on.**
+      Quadrants 2 and 4 remain fixture-driven — a true replay cannot be planted
+      at a real destination without the product misbehaving, and a Windows run
+      that misses the 60 s window is not something a kill-and-recover leg can be
+      made to do.

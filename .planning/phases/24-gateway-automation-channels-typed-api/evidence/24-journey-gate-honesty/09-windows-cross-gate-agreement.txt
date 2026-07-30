@@ -1,0 +1,10 @@
+=== RUN 2 (real Windows, slack only, 24 recurrences) ===
+JOURNEY VERIFIED platform=windows commit=9c4d2612157851abc6d810fc75d153410372dafa steps=17 submitted=12 arrived=36 unique=12 duplicates=24 losses=0 adapters=1/10 exercised=slack verdict=RECURRENCE repeats=24 (replays=0 recurrences=24 indeterminate=0 unidentified=0)
+VERIFIER_RC=0
+
+=== RUN 1 (real Windows, all three adapters) ===
+wayland-journey: verdict=NOT-PROVEN 8 repeat(s) carry no delivery identity to judge by (16 unidentified arrival(s) at endpoint(s) twilio.messages,whatsapp.messages), so exactly-once can be neither established nor refuted for them. An unmeasurable property is not a clean one; this is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate
+VERIFIER_RC=1
+
+=== DRIVER VERDICT RECORDED ON WINDOWS FOR RUN 2 ===
+verdict=RECURRENCE 24 repeat(s), every one under a DISTINCT delivery identity. The trigger fired again — `every:15` is rate-floored to 60s by trigger.rs:238, applied at :366 — and the product delivered each occurrence exactly once. 36 arrival(s) under as many distinct identities is a STRONGER exactly-once measurement than a run short enough to miss the boundary, not a spoiled one
