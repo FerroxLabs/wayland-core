@@ -532,30 +532,73 @@ mod store_total_tests {
     use super::*;
 
     /// One session's ledger, parameterised on the axes the total sums.
-    fn session(
-        id: &str,
+    ///
+    /// `round_trips` is derived rather than passed: a ledger whose declared
+    /// round-trip count disagrees with its priced/estimated/unpriced breakdown
+    /// is not a state the recorder can produce, and letting a test build one
+    /// would let the totals pass on inputs the product never emits.
+    struct Session {
+        id: &'static str,
         complete: bool,
-        round_trips: u64,
         uncached_input: u64,
         output: u64,
         usd: f64,
         priced: u64,
         estimated: u64,
         unpriced: u64,
-    ) -> LedgerSummary {
-        LedgerSummary {
-            session_id: id.to_owned(),
-            session_complete: complete,
-            round_trips,
-            uncached_input_tokens: uncached_input,
-            output_tokens: output,
-            cost_usd: usd,
-            uncached_equivalent_usd: usd,
-            catalog_priced_round_trips: priced,
-            estimated_round_trips: estimated,
-            unpriced_round_trips: unpriced,
-            ..LedgerSummary::default()
+    }
+
+    impl Session {
+        /// A complete, catalog-priced session — the ordinary case. Grade and
+        /// completeness are then overridden per test.
+        fn priced(id: &'static str, round_trips: u64, uncached_input: u64, usd: f64) -> Self {
+            Self {
+                id,
+                complete: true,
+                uncached_input,
+                output: 100 * round_trips,
+                usd,
+                priced: round_trips,
+                estimated: 0,
+                unpriced: 0,
+            }
         }
+
+        fn incomplete(mut self) -> Self {
+            self.complete = false;
+            self
+        }
+
+        /// Move this session's round-trips to a different pricing grade,
+        /// preserving the total count.
+        fn graded(mut self, estimated: u64, unpriced: u64) -> Self {
+            let total = self.priced + self.estimated + self.unpriced;
+            self.estimated = estimated;
+            self.unpriced = unpriced;
+            self.priced = total.saturating_sub(estimated).saturating_sub(unpriced);
+            self
+        }
+
+        fn build(&self) -> LedgerSummary {
+            LedgerSummary {
+                session_id: self.id.to_owned(),
+                session_complete: self.complete,
+                round_trips: self.priced + self.estimated + self.unpriced,
+                uncached_input_tokens: self.uncached_input,
+                output_tokens: self.output,
+                cost_usd: self.usd,
+                uncached_equivalent_usd: self.usd,
+                catalog_priced_round_trips: self.priced,
+                estimated_round_trips: self.estimated,
+                unpriced_round_trips: self.unpriced,
+                ..LedgerSummary::default()
+            }
+        }
+    }
+
+    fn totals(sessions: &[Session]) -> StoreTotals {
+        let built: Vec<LedgerSummary> = sessions.iter().map(Session::build).collect();
+        StoreTotals::of(&built)
     }
 
     /// The measured scenario, encoded: five restart-fragments of one workload,
@@ -564,8 +607,9 @@ mod store_total_tests {
     /// place the 100000 becomes visible.
     #[test]
     fn five_restart_fragments_sum_to_the_spend_no_single_session_can_show() {
-        let fragments: Vec<LedgerSummary> = (0..5)
-            .map(|i| session(&format!("frag-{i}"), true, 1, 20_000, 100, 0.25, 1, 0, 0))
+        let fragments: Vec<LedgerSummary> = ["f0", "f1", "f2", "f3", "f4"]
+            .into_iter()
+            .map(|id| Session::priced(id, 1, 20_000, 0.25).build())
             .collect();
 
         let total = StoreTotals::of(&fragments);
@@ -586,13 +630,14 @@ mod store_total_tests {
     /// times".
     #[test]
     fn incomplete_sessions_are_counted_separately_from_sessions() {
-        let total = StoreTotals::of(&[
-            session("done", true, 2, 10, 1, 0.1, 2, 0, 0),
-            session("died-1", false, 1, 10, 1, 0.1, 1, 0, 0),
-            session("died-2", false, 1, 10, 1, 0.1, 1, 0, 0),
+        let total = totals(&[
+            Session::priced("done", 2, 10, 0.1),
+            Session::priced("died-1", 1, 10, 0.1).incomplete(),
+            Session::priced("died-2", 1, 10, 0.1).incomplete(),
         ]);
         assert_eq!(total.sessions, 3);
         assert_eq!(total.incomplete_sessions, 2);
+        assert_eq!(total.round_trips, 4);
     }
 
     /// Both directions on the grade. A store total that renders `priced`
@@ -601,27 +646,27 @@ mod store_total_tests {
     /// it look more authoritative rather than less.
     #[test]
     fn the_aggregate_grade_takes_the_worst_session_in_the_store() {
-        let all_priced = StoreTotals::of(&[
-            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
-            session("b", true, 1, 10, 1, 1.0, 1, 0, 0),
+        let all_priced = totals(&[
+            Session::priced("a", 1, 10, 1.0),
+            Session::priced("b", 1, 10, 1.0),
         ]);
         assert_eq!(all_priced.cost_truth(), CostTruth::Priced);
         assert!(all_priced.cost_truth().is_trustworthy());
 
-        let one_unpriced = StoreTotals::of(&[
-            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
-            session("b", true, 1, 10, 1, 0.0, 0, 0, 1),
+        let one_unpriced = totals(&[
+            Session::priced("a", 1, 10, 1.0),
+            Session::priced("b", 1, 10, 0.0).graded(0, 1),
         ]);
         assert_eq!(one_unpriced.cost_truth(), CostTruth::Partial);
         assert!(!one_unpriced.cost_truth().is_trustworthy());
 
-        let one_estimated = StoreTotals::of(&[
-            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
-            session("b", true, 1, 10, 1, 1.0, 0, 1, 0),
+        let one_estimated = totals(&[
+            Session::priced("a", 1, 10, 1.0),
+            Session::priced("b", 1, 10, 1.0).graded(1, 0),
         ]);
         assert_eq!(one_estimated.cost_truth(), CostTruth::Estimated);
 
-        let none_priced = StoreTotals::of(&[session("a", true, 1, 10, 1, 0.0, 0, 0, 1)]);
+        let none_priced = totals(&[Session::priced("a", 1, 10, 0.0).graded(0, 1)]);
         assert_eq!(none_priced.cost_truth(), CostTruth::Unpriced);
     }
 
