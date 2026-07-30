@@ -171,3 +171,46 @@ async fn live_edit_and_delete_against_real_discord() {
 
     println!("LIVE_ACTIONS_ALL_PASSED stamp={stamp} deleted_id={}", receipt.id);
 }
+
+/// Send then edit, and **leave the message in place**, so the edit can be
+/// corroborated from OUTSIDE this process.
+///
+/// The test above proves the edit call succeeds and returns the same id. That
+/// is an in-process claim: the adapter reporting on itself. This one exists so
+/// an independent observer can read the channel afterwards and confirm the
+/// stored content actually changed — the difference between "the PATCH
+/// returned 200" and "the message says something different now".
+#[tokio::test]
+#[ignore = "contacts real Discord and leaves a message behind for external corroboration"]
+async fn live_edit_leaves_changed_content_for_an_external_observer() {
+    let home = required("WL_LIVE_DISCORD_HOME");
+    let chan = required("WL_LIVE_DISCORD_CHANNEL");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mgr = production_manager(&home).await;
+
+    let before = format!("WL-EDITPROOF-{stamp}-BEFORE");
+    let after = format!("WL-EDITPROOF-{stamp}-AFTER");
+
+    let receipt = mgr
+        .send_to(&chan, OutgoingMessage::text(chan.clone(), before.clone()))
+        .await
+        .expect("live send must succeed");
+    println!("EDITPROOF_SENT id={} content={before}", receipt.id);
+
+    let edited = mgr
+        .edit_on(&chan, &chan, &receipt.id, &after)
+        .await
+        .expect("live edit must succeed");
+    assert_eq!(edited.id, receipt.id, "edit must not create a new message");
+
+    // The observer outside this process is told exactly what to look for, in
+    // both directions: the AFTER text must be present at this id and the
+    // BEFORE text must be gone from it.
+    println!("EDITPROOF_ID={}", receipt.id);
+    println!("EDITPROOF_EXPECT_PRESENT={after}");
+    println!("EDITPROOF_EXPECT_ABSENT={before}");
+}
