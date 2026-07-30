@@ -193,7 +193,10 @@ async fn baseline_process_count_before_during_after() {
 
     // ── BEFORE ──
     let sessions_before = sup.live_sessions().len();
-    assert_eq!(sessions_before, 0, "BEFORE: supervisor must track no sessions");
+    assert_eq!(
+        sessions_before, 0,
+        "BEFORE: supervisor must track no sessions"
+    );
     println!("EV3A: phase=before tracked_sessions=0 sidecar_pid=none tree_size=0");
 
     // ── DURING ──
@@ -223,7 +226,9 @@ async fn baseline_process_count_before_during_after() {
     // The health gate is the product's own readiness signal; assert it, so the
     // "during" state is a genuinely running service and not just a live PID.
     assert!(
-        sup.healthcheck(Duration::from_secs(2)).await.unwrap_or(false),
+        sup.healthcheck(Duration::from_secs(2))
+            .await
+            .unwrap_or(false),
         "DURING: sidecar /health must be 2xx"
     );
     println!(
@@ -321,7 +326,10 @@ async fn baseline_reaper_one_interval_both_directions() {
     });
     assert_eq!(sup1.live_sessions().len(), 1);
     let before_tree = process_tree_size(orphan_pid);
-    assert_eq!(before_tree, 1, "ARM 1: child must be live before the reaper runs");
+    assert_eq!(
+        before_tree, 1,
+        "ARM 1: child must be live before the reaper runs"
+    );
 
     let cancel1 = sup1.start_reaper();
     // ONE reaper interval, plus a bounded settle margin.
@@ -365,7 +373,10 @@ async fn baseline_reaper_one_interval_both_directions() {
     let (mut keep_child, keep_pid) = spawn_real_child();
     assert!(alive(keep_pid), "ARM 2: the child never started");
     let live_parent = std::process::id();
-    assert!(alive(live_parent), "ARM 2 precondition: our own PID is alive");
+    assert!(
+        alive(live_parent),
+        "ARM 2 precondition: our own PID is alive"
+    );
     sup2.register(BackendHandle {
         session_id: "live-parent-real".into(),
         pid: keep_pid,
@@ -454,7 +465,9 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
     assert_eq!(before, 0);
     println!("EV3C: phase=before tracked_sessions=0 tree_size=0 preexisting_sidecar=none");
 
-    sup.ensure_ready().await.expect("real camoufox sidecar must become healthy");
+    sup.ensure_ready()
+        .await
+        .expect("real camoufox sidecar must become healthy");
     let live = sup.live_sessions();
     assert_eq!(live.len(), 1, "DURING: one tracked session");
     let pid = live[0].pid;
@@ -487,7 +500,9 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
     // present rather than taking the count on trust.
     let names = descendant_names(pid);
     assert!(
-        names.iter().any(|n| n.contains("camoufox") || n.contains("firefox")),
+        names
+            .iter()
+            .any(|n| n.contains("camoufox") || n.contains("firefox")),
         "DURING: no browser process among the sidecar's descendants: {names:?}"
     );
     println!(
@@ -511,9 +526,7 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
          process(es) leaked from PID {pid}"
     );
     assert_eq!(sup.live_sessions().len(), 0);
-    println!(
-        "EV3C: phase=after tracked_sessions=0 tree_size=0 returned_to_baseline=true"
-    );
+    println!("EV3C: phase=after tracked_sessions=0 tree_size=0 returned_to_baseline=true");
     println!(
         "EV3C-SUMMARY: backend=real-camoufox before_tree=0 during_tree={tree_during} \
          after_tree=0 leaked_processes=0"

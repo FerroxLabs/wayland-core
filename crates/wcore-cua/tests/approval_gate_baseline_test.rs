@@ -341,7 +341,10 @@ async fn baseline_approval_gate_observed_on_real_x11() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
-    assert!(r.is_ok(), "STEP 1: permissive MouseMove must succeed: {r:?}");
+    assert!(
+        r.is_ok(),
+        "STEP 1: permissive MouseMove must succeed: {r:?}"
+    );
     let live_events = rec.drain();
     assert!(
         live_events.contains(&SeenEvent {
@@ -468,7 +471,10 @@ async fn baseline_approval_gate_observed_on_real_x11() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
-    assert!(r.is_ok(), "STEP 5: after approval the op must succeed, got {r:?}");
+    assert!(
+        r.is_ok(),
+        "STEP 5: after approval the op must succeed, got {r:?}"
+    );
     let ft_granted_events = rec.drain();
     assert!(
         ft_granted_events.contains(&SeenEvent {

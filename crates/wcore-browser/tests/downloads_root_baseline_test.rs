@@ -53,7 +53,9 @@ use serde_json::json;
 
 use wcore_browser::op::BrowserOp;
 use wcore_browser::policy::{BrowserPolicy, PolicyAction};
-use wcore_browser::provider::{BrowserOpError, BrowserProvider, BrowserSession, OpResult, SessionCtx};
+use wcore_browser::provider::{
+    BrowserOpError, BrowserProvider, BrowserSession, OpResult, SessionCtx,
+};
 use wcore_browser::supervisor::BrowserSupervisor;
 use wcore_browser::tool::BrowserTool;
 use wcore_tools::Tool;
@@ -100,11 +102,7 @@ impl BrowserProvider for RecordingProvider {
         Ok(())
     }
 
-    async fn dispatch(
-        &self,
-        _ctx: &SessionCtx,
-        op: BrowserOp,
-    ) -> Result<OpResult, BrowserOpError> {
+    async fn dispatch(&self, _ctx: &SessionCtx, op: BrowserOp) -> Result<OpResult, BrowserOpError> {
         self.ops.lock().push(op.clone());
         if let BrowserOp::Download { dest_path, .. } = &op {
             // Perform the write a real download backend would perform. If the
@@ -188,7 +186,11 @@ async fn baseline_downloads_root_confinement_both_directions() {
         "ARM A: the op must actually REACH the provider (else the pass is vacuous)"
     );
     let dests = provider.download_dests();
-    assert_eq!(dests.len(), 1, "ARM A: exactly one Download reached the provider");
+    assert_eq!(
+        dests.len(),
+        1,
+        "ARM A: exactly one Download reached the provider"
+    );
     // The tool normalizes the path in place before dispatch; the provider must
     // therefore receive a path that is itself inside the root.
     let handed = PathBuf::from(&dests[0]);
@@ -198,7 +200,10 @@ async fn baseline_downloads_root_confinement_both_directions() {
         handed_canon.starts_with(&root_canon),
         "ARM A: provider was handed {handed_canon:?}, which is NOT inside {root_canon:?}"
     );
-    assert!(inside.exists(), "ARM A: the download must have LANDED at {inside:?}");
+    assert!(
+        inside.exists(),
+        "ARM A: the download must have LANDED at {inside:?}"
+    );
     let landed_bytes = std::fs::read(&inside).unwrap();
     assert_eq!(
         landed_bytes, b"27-C2c-BASELINE-PAYLOAD",
@@ -234,7 +239,10 @@ async fn baseline_downloads_root_confinement_both_directions() {
             ops, 0,
             "{name}: refusal must be UPSTREAM of dispatch, but the provider saw {ops} op(s)"
         );
-        assert!(!exists, "{name}: a file was created at {dest} — the escape LANDED");
+        assert!(
+            !exists,
+            "{name}: a file was created at {dest} — the escape LANDED"
+        );
         refused_count += 1;
         total_provider_ops += ops;
         if exists {
@@ -320,7 +328,9 @@ async fn baseline_default_root_is_fail_closed_pair() {
     // and never reaches the provider.
     let escape = std::env::temp_dir().join("27c2c-default-root-escape.bin");
     let _ = std::fs::remove_file(&escape);
-    let r = tool.execute(download_input(&escape.to_string_lossy())).await;
+    let r = tool
+        .execute(download_input(&escape.to_string_lossy()))
+        .await;
     assert!(
         r.is_error,
         "default-root tool must refuse an out-of-root dest: {}",
@@ -339,7 +349,9 @@ async fn baseline_default_root_is_fail_closed_pair() {
         .join("wayland-downloads")
         .join("27c2c-default-root-ok.bin");
     let _ = std::fs::remove_file(&inside);
-    let r = tool.execute(download_input(&inside.to_string_lossy())).await;
+    let r = tool
+        .execute(download_input(&inside.to_string_lossy()))
+        .await;
     assert!(
         !r.is_error,
         "default-root tool must ADMIT an in-root dest: {}",

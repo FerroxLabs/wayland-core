@@ -1,0 +1,51 @@
+=== 3a/3b with leak mutation ===
+   Compiling wcore-browser v0.12.25 (/root/wayland-27c2c/crates/wcore-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.37s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 3 tests
+test baseline_process_count_against_real_camoufox_sidecar ... ignored, needs a real camofox-browser at $WAYLAND_CAMOUFOX_BIN; run with -- --ignored
+test baseline_process_count_before_during_after ... EV3A: phase=before tracked_sessions=0 sidecar_pid=none tree_size=0
+EV3A: phase=during tracked_sessions=1 sidecar_pid=83233 pid_alive=true tree_size=1 health=2xx
+
+thread 'baseline_process_count_before_during_after' (83230) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:247:5:
+AFTER: sidecar PID 83233 is STILL ALIVE after on_session_end — process leak
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test baseline_reaper_one_interval_both_directions ... 
+thread 'baseline_reaper_one_interval_both_directions' (85639) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:339:5:
+ARM 1: orphan PID 85642 survived the reaper — cleanup policy NOT preserved
+FAILED
+
+failures:
+
+failures:
+    baseline_process_count_before_during_after
+    baseline_reaper_one_interval_both_directions
+
+test result: FAILED. 0 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 305.35s
+
+error: test failed, to rerun pass `-p wcore-browser --test process_count_reaper_baseline_test`
+RC_AB=101
+=== 3c with leak mutation ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/process_count_reaper_baseline_test.rs (target/debug/deps/process_count_reaper_baseline_test-a2686c968d0e4bd2)
+
+running 1 test
+test baseline_process_count_against_real_camoufox_sidecar ... EV3C: phase=before tracked_sessions=0 tree_size=0 preexisting_sidecar=none
+EV3C: phase=during tracked_sessions=1 sidecar_pid=167286 tree_size=3 descendants=["Xvfb", "camoufox-bin"] health=2xx
+
+thread 'baseline_process_count_against_real_camoufox_sidecar' (167283) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:508:5:
+AFTER: the real sidecar tree did not return to baseline — 7 process(es) leaked from PID 167286
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    baseline_process_count_against_real_camoufox_sidecar
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 48.62s
+
+error: test failed, to rerun pass `-p wcore-browser --test process_count_reaper_baseline_test`
+RC_C=101
