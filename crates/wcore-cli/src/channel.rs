@@ -381,7 +381,7 @@ async fn actions(only: Option<&str>, require: &[String], json: bool) -> Result<(
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!(
-            "{:<18} {:<10} {:<12} {:<12} {:<12} {:<12}",
+            "{:<18} {:<10} {:<14} {:<14} {:<14} {:<14}",
             "CHANNEL", "PLATFORM", "EDIT", "DELETE", "REACT", "TYPING"
         );
         for (name, platform, a) in &rows {
@@ -391,7 +391,7 @@ async fn actions(only: Option<&str>, require: &[String], json: bool) -> Result<(
                 wcore_channels::ActionSupport::NotImplemented => "NOT BUILT",
             };
             println!(
-                "{:<18} {:<10} {:<12} {:<12} {:<12} {:<12}",
+                "{:<18} {:<10} {:<14} {:<14} {:<14} {:<14}",
                 name,
                 platform,
                 cell(a.edit),
