@@ -61,10 +61,22 @@ an eleventh `Channel` reached through the *same* platform string (`whatsapp`) wi
 `crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` — that harness
 enumerates platforms, and this adapter adds none. Its row is derived from source only: the
 bridge's `sendText` RPC transmits no idempotency token, so
-`supports_outbound_idempotency()` is left at the trait's `false` default. **No message has ever
-been sent through it at a real WhatsApp account**, because doing so requires QR-pairing a
-personal number. Treat the row as a claim about our code and as no evidence whatever about
-WhatsApp's behaviour. See [whatsapp-bridge.md](whatsapp-bridge.md).
+`supports_outbound_idempotency()` is left at the trait's `false` default. Treat the row as a claim
+about our code and as no evidence whatever about WhatsApp's behaviour. See
+[whatsapp-bridge.md](whatsapp-bridge.md).
+
+**Update 2026-07-30 — a message HAS now been sent, and the scope of that is narrow.** A real
+number was QR-paired and a `sendText` delivered to a real WhatsApp account
+(`messageId 3EB0404DBF5C774E89077E`, recipient confirmed receipt). The session also survived a
+process kill and reconnected from stored `creds.json` with no re-pairing, which is the property
+that matters for a deployment.
+
+**But that was driven straight at the bridge over JSON-RPC, NOT through Core's
+`WhatsappBridgeChannel`.** So what is proven is that *the bridge* can send, and that pairing and
+session persistence work. The Rust adapter → bridge → WhatsApp path is **still unproven end to
+end**, and no replay of any kind has been driven, so the guarantee column above is unchanged. The
+distinction is recorded rather than blurred because collapsing it is precisely the error that put
+two false `exactly-once` rows in this table.
 
 **"NOT MEASURED" means not measured, and it is not a pass.** Seven of the ten — Email, Signal,
 iMessage, MS Teams, **Twilio SMS, WhatsApp and Telegram** — have never had a replay driven at a
