@@ -105,14 +105,24 @@ struct Loaded {
 /// Drive the real load + merge: a global `config.toml` and a project
 /// `.wayland-core.toml`, both on disk, through `Config::resolve_with_provenance`.
 fn load(global_security: &str, project_body: &str, trust: Trust) -> Loaded {
+    load_with_global(
+        &format!("[default]\nmax_tokens = {GLOBAL_SENTINEL_MAX_TOKENS}\n\n{global_security}"),
+        project_body,
+        trust,
+        true,
+    )
+}
+
+fn load_with_global(
+    global_body: &str,
+    project_body: &str,
+    trust: Trust,
+    check_sentinel: bool,
+) -> Loaded {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    std::fs::write(
-        home.path().join("config.toml"),
-        format!("[default]\nmax_tokens = {GLOBAL_SENTINEL_MAX_TOKENS}\n\n{global_security}"),
-    )
-    .unwrap();
+    std::fs::write(home.path().join("config.toml"), global_body).unwrap();
     std::fs::write(project.path().join(".wayland-core.toml"), project_body).unwrap();
 
     let _env = EnvGuard::set(&[
@@ -157,12 +167,14 @@ fn load(global_security: &str, project_body: &str, trust: Trust) -> Loaded {
     });
 
     // Instrument-alive check: the merge really read the temp global file.
-    assert_eq!(
-        resolved.value.max_tokens, GLOBAL_SENTINEL_MAX_TOKENS,
-        "the merged config did not carry the temp global config's sentinel \
-         max_tokens — the test read some OTHER global config, so nothing else \
-         it measures about [security] can be trusted"
-    );
+    if check_sentinel {
+        assert_eq!(
+            resolved.value.max_tokens, GLOBAL_SENTINEL_MAX_TOKENS,
+            "the merged config did not carry the temp global config's sentinel \
+             max_tokens — the test read some OTHER global config, so nothing else \
+             it measures about [security] can be trusted"
+        );
+    }
     // And the trust arm actually under test was the one exercised.
     assert_eq!(
         project_restricted,
@@ -404,5 +416,56 @@ fn trusted_project_egress_allow_widens_the_boundary_by_design() {
     assert!(
         matches!(decision, EgressDecision::Allow),
         "the allowlisted host is reachable; got {decision:?}"
+    );
+}
+
+// ── Sweep result: the one other loosening on the untrusted path ──────────────
+
+/// **A separate, lower-severity finding this lane MEASURED but did not fix.**
+///
+/// `restrict_untrusted_project_config` forwards six `[default]` fields under the
+/// comment *"Resource limits and read-only/approval requests can only reduce
+/// power"*. That claim is false for two of them: `max_tokens` merges
+/// "project wins if non-default" and `max_turns` merges `project.or(global)`,
+/// neither of which compares the two values — so an untrusted project can raise
+/// both ABOVE the operator's global ceiling.
+///
+/// It is recorded here rather than fixed because it is a cost/resource ceiling,
+/// not a trust boundary: the blast radius is spend and wall-clock, both of which
+/// have their own separate enforcement (`[budget]` / `[session_cap]`, which the
+/// untrusted path does NOT forward). Per the phase's severity policy that makes
+/// it a non-blocking backlog item, and unpicking it means deciding whether
+/// "stricter" is comparable for an `Option<usize>` — a design call, not a
+/// polarity typo. The test exists so the next reader finds a measurement instead
+/// of the false comment.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 100\nmax_turns = 5\n\n[security]\nenabled = true\n",
+        "[default]\nmax_tokens = 999999\nmax_turns = 100000\n",
+        Trust::Untrusted,
+        // The project overrides the sentinel on purpose here.
+        false,
+    );
+    assert!(
+        loaded.project_restricted,
+        "the untrusted path is the one under test"
+    );
+
+    assert_eq!(
+        loaded.config.max_tokens, 999_999,
+        "measured: an untrusted project RAISES max_tokens past the global 100"
+    );
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(100_000),
+        "measured: an untrusted project RAISES max_turns past the global 5"
+    );
+
+    // The boundary that matters is unaffected — this is a ceiling, not a gate.
+    assert!(
+        loaded.config.security.enabled,
+        "the egress boundary still holds; the resource ceiling is a separate axis"
     );
 }
