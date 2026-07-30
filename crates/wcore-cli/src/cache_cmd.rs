@@ -96,6 +96,7 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
     match args.cmd {
         CacheCmd::List => {
             let entries = list(&dir)?;
+            let mut summaries = Vec::with_capacity(entries.len());
             for (path, ledger) in &entries {
                 let s = ledger.summarize();
                 println!(
@@ -111,12 +112,14 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                     s.updated_at,
                     path.display(),
                 );
+                summaries.push(s);
             }
             println!(
                 "F23_CACHE=list sessions={} dir={}",
                 entries.len(),
                 dir.display()
             );
+            print_totals(&StoreTotals::of(&summaries), &dir);
             Ok(ExitCode::SUCCESS)
         }
 
@@ -217,6 +220,131 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 Ok(ExitCode::from(EXIT_COST_NOT_TRUSTWORTHY))
             }
         }
+    }
+}
+
+/// Store-wide totals across every ledger in the directory.
+///
+/// ## Why a cross-session total exists
+///
+/// Measured live on `wayland-core 0.12.25`: the only operator-configurable
+/// provider ceiling is **per session** (`budget cap 'per_session_input_tokens'`;
+/// the tracker's `per_user_daily_usd` has no TOML counterpart). So five
+/// sequential launches, each starting a fresh session, billed 100000 input
+/// tokens against a 25000-token cap with **zero** refusals — identically with
+/// durable session journalling on and degraded off, because a new session
+/// legitimately re-arms the ceiling.
+///
+/// The per-session ledgers were already on disk for every one of those launches
+/// (recording is on by default and survives the headless degrade). What was
+/// missing was the **sum**: `report` describes one session and `list` printed a
+/// bare `sessions=N` count with no totals at all. An operator whose work has
+/// fragmented across restart-sessions therefore had the data and no way to see
+/// what it added up to — the exact shape of "every individual run believes it
+/// is within budget".
+///
+/// This is **observability, not enforcement.** It cannot stop a crash loop from
+/// spending; it turns an invisible cumulative bleed into one number a human, an
+/// alert or a wrapper script can act on. A cross-session *ceiling* belongs in a
+/// dedicated, atomically-written budget store with fail-closed semantics — not
+/// bolted onto a cache-diagnostics ledger that may be pruned, partially written
+/// or absent, where fail-open silently restores the hole and fail-closed bricks
+/// every launch.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoreTotals {
+    pub sessions: usize,
+    /// Sessions whose ledger was never marked complete — the signature a crash
+    /// loop leaves behind.
+    pub incomplete_sessions: usize,
+    pub round_trips: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub uncached_equivalent_usd: f64,
+    pub catalog_priced_round_trips: u64,
+    pub estimated_round_trips: u64,
+    pub unpriced_round_trips: u64,
+}
+
+impl StoreTotals {
+    #[must_use]
+    pub fn of(summaries: &[LedgerSummary]) -> Self {
+        let mut t = Self {
+            sessions: summaries.len(),
+            ..Self::default()
+        };
+        for s in summaries {
+            if !s.session_complete {
+                t.incomplete_sessions += 1;
+            }
+            t.round_trips = t.round_trips.saturating_add(s.round_trips);
+            t.input_tokens = t.input_tokens.saturating_add(s.total_input_tokens());
+            t.output_tokens = t.output_tokens.saturating_add(s.output_tokens);
+            t.cost_usd += s.cost_usd;
+            t.uncached_equivalent_usd += s.uncached_equivalent_usd;
+            t.catalog_priced_round_trips = t
+                .catalog_priced_round_trips
+                .saturating_add(s.catalog_priced_round_trips);
+            t.estimated_round_trips = t
+                .estimated_round_trips
+                .saturating_add(s.estimated_round_trips);
+            t.unpriced_round_trips = t
+                .unpriced_round_trips
+                .saturating_add(s.unpriced_round_trips);
+        }
+        t
+    }
+
+    /// Grade the summed USD with the SAME rule a single session uses.
+    ///
+    /// Deliberately re-derived by handing the summed counts back to
+    /// [`LedgerSummary::cost_truth`] rather than re-implementing the ladder
+    /// here: two copies of a four-way grading rule is how a store total starts
+    /// reporting `priced` for a set containing an unpriced session.
+    #[must_use]
+    pub fn cost_truth(&self) -> CostTruth {
+        LedgerSummary {
+            catalog_priced_round_trips: self.catalog_priced_round_trips,
+            estimated_round_trips: self.estimated_round_trips,
+            unpriced_round_trips: self.unpriced_round_trips,
+            ..LedgerSummary::default()
+        }
+        .cost_truth()
+    }
+}
+
+/// One `F23_CACHE=total` line, plus the same cost warning `report` emits — an
+/// aggregate USD figure that renders like spend when it is a floor is the
+/// failure this surface exists to avoid, and summing many sessions makes it
+/// look *more* authoritative, not less.
+fn print_totals(t: &StoreTotals, dir: &std::path::Path) {
+    let truth = t.cost_truth();
+    println!(
+        "F23_CACHE=total sessions={} incomplete_sessions={} round_trips={} input_tokens={} \
+         output_tokens={} cost_usd={:.6} uncached_equivalent_usd={:.6} cost_truth={} \
+         catalog_priced_round_trips={} estimated_round_trips={} unpriced_round_trips={} dir={}",
+        t.sessions,
+        t.incomplete_sessions,
+        t.round_trips,
+        t.input_tokens,
+        t.output_tokens,
+        t.cost_usd,
+        t.uncached_equivalent_usd,
+        truth.as_str(),
+        t.catalog_priced_round_trips,
+        t.estimated_round_trips,
+        t.unpriced_round_trips,
+        dir.display(),
+    );
+    if truth != CostTruth::Priced {
+        println!(
+            "F23_CACHE=total_cost_warning text={} cost_truth={}",
+            match truth {
+                CostTruth::Estimated => "total_usd_is_a_family_rate_estimate_not_spend",
+                _ => "total_usd_is_a_floor_not_spend",
+            },
+            truth.as_str()
+        );
     }
 }
 
@@ -397,4 +525,116 @@ fn summary_json(s: &LedgerSummary) -> serde_json::Value {
         );
     }
     v
+}
+
+#[cfg(test)]
+mod store_total_tests {
+    use super::*;
+
+    /// One session's ledger, parameterised on the axes the total sums.
+    fn session(
+        id: &str,
+        complete: bool,
+        round_trips: u64,
+        uncached_input: u64,
+        output: u64,
+        usd: f64,
+        priced: u64,
+        estimated: u64,
+        unpriced: u64,
+    ) -> LedgerSummary {
+        LedgerSummary {
+            session_id: id.to_owned(),
+            session_complete: complete,
+            round_trips,
+            uncached_input_tokens: uncached_input,
+            output_tokens: output,
+            cost_usd: usd,
+            uncached_equivalent_usd: usd,
+            catalog_priced_round_trips: priced,
+            estimated_round_trips: estimated,
+            unpriced_round_trips: unpriced,
+            ..LedgerSummary::default()
+        }
+    }
+
+    /// The measured scenario, encoded: five restart-fragments of one workload,
+    /// each a fresh session that legitimately re-armed a 25000-token ceiling.
+    /// Per session the product refuses nothing; the store total is the only
+    /// place the 100000 becomes visible.
+    #[test]
+    fn five_restart_fragments_sum_to_the_spend_no_single_session_can_show() {
+        let fragments: Vec<LedgerSummary> = (0..5)
+            .map(|i| session(&format!("frag-{i}"), true, 1, 20_000, 100, 0.25, 1, 0, 0))
+            .collect();
+
+        let total = StoreTotals::of(&fragments);
+
+        assert_eq!(total.sessions, 5);
+        assert_eq!(total.round_trips, 5);
+        assert_eq!(total.input_tokens, 100_000);
+        assert_eq!(total.output_tokens, 500);
+        assert!((total.cost_usd - 1.25).abs() < 1e-9, "{}", total.cost_usd);
+        // Every fragment is individually under a 25000-token ceiling; the sum
+        // is 4x it. That gap is the whole reason this total exists.
+        assert!(fragments.iter().all(|s| s.total_input_tokens() < 25_000));
+        assert!(total.input_tokens > 25_000 * 3);
+    }
+
+    /// A crash loop leaves ledgers that were never marked complete. Counting
+    /// them is what distinguishes "you ran five jobs" from "one job died four
+    /// times".
+    #[test]
+    fn incomplete_sessions_are_counted_separately_from_sessions() {
+        let total = StoreTotals::of(&[
+            session("done", true, 2, 10, 1, 0.1, 2, 0, 0),
+            session("died-1", false, 1, 10, 1, 0.1, 1, 0, 0),
+            session("died-2", false, 1, 10, 1, 0.1, 1, 0, 0),
+        ]);
+        assert_eq!(total.sessions, 3);
+        assert_eq!(total.incomplete_sessions, 2);
+    }
+
+    /// Both directions on the grade. A store total that renders `priced`
+    /// because most of its sessions were priced is the single worst thing this
+    /// surface could do — it makes a floor look like a fact, and summing makes
+    /// it look more authoritative rather than less.
+    #[test]
+    fn the_aggregate_grade_takes_the_worst_session_in_the_store() {
+        let all_priced = StoreTotals::of(&[
+            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
+            session("b", true, 1, 10, 1, 1.0, 1, 0, 0),
+        ]);
+        assert_eq!(all_priced.cost_truth(), CostTruth::Priced);
+        assert!(all_priced.cost_truth().is_trustworthy());
+
+        let one_unpriced = StoreTotals::of(&[
+            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
+            session("b", true, 1, 10, 1, 0.0, 0, 0, 1),
+        ]);
+        assert_eq!(one_unpriced.cost_truth(), CostTruth::Partial);
+        assert!(!one_unpriced.cost_truth().is_trustworthy());
+
+        let one_estimated = StoreTotals::of(&[
+            session("a", true, 1, 10, 1, 1.0, 1, 0, 0),
+            session("b", true, 1, 10, 1, 1.0, 0, 1, 0),
+        ]);
+        assert_eq!(one_estimated.cost_truth(), CostTruth::Estimated);
+
+        let none_priced = StoreTotals::of(&[session("a", true, 1, 10, 1, 0.0, 0, 0, 1)]);
+        assert_eq!(none_priced.cost_truth(), CostTruth::Unpriced);
+    }
+
+    /// An empty store must not grade `priced` at $0.00 — "there is nothing to
+    /// total" must not read as "the total is a trustworthy zero". Same rule
+    /// `verify` already applies with its distinct exit code.
+    #[test]
+    fn an_empty_store_totals_to_unpriced_not_to_a_trustworthy_zero() {
+        let total = StoreTotals::of(&[]);
+        assert_eq!(total.sessions, 0);
+        assert_eq!(total.round_trips, 0);
+        assert_eq!(total.cost_usd, 0.0);
+        assert_eq!(total.cost_truth(), CostTruth::Unpriced);
+        assert!(!total.cost_truth().is_trustworthy());
+    }
 }
