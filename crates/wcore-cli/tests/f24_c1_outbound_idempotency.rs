@@ -82,11 +82,31 @@
 //!
 //! The arrival count itself is asserted with mockito's `.expect(n)` +
 //! `assert_async()`, which reports the ACTUAL hit count on failure. The
-//! discriminator for "did a dedupe token ride the wire" is structural rather
-//! than a log grep: the no-key mocks match only requests where the
-//! `Idempotency-Key` header is `Matcher::Missing`, so an adapter that started
-//! sending one would stop matching, fall through to mockito's unmatched-request
-//! 501, and redden this file. It cannot silently pass.
+//! discriminator for "did a delivery id ride the wire" is structural rather
+//! than a log grep: each mock matches only requests carrying the expected
+//! identity state, so an adapter that changed behaviour stops matching, falls
+//! through to mockito's unmatched-request 501, and reddens this file. It cannot
+//! silently pass.
+//!
+//! **The direction of three of those discriminators flipped on 2026-07-30**
+//! (`lane/twilio-whatsapp-identity`). Twilio and WhatsApp now transmit the
+//! gateway's delivery id — Twilio on the `Idempotency-Key` header, WhatsApp in
+//! the Cloud API's documented `biz_opaque_callback_data` tracking field —
+//! because a `twilio.messages` or `whatsapp.messages` arrival that carried no
+//! identity was **unclassifiable in principle**: the journey receipt could
+//! neither prove nor refute exactly-once for it, and 8 of 12 repeats in the
+//! Windows run were graded `indeterminate` for exactly that reason.
+//!
+//! Their mocks therefore match on the identity being PRESENT rather than
+//! absent. **This costs the file something and the loss is stated rather than
+//! absorbed:** "the destination cannot dedupe because we send it nothing" was a
+//! mechanical argument, and it is gone. Both bits stay `false` as a
+//! conservative default — the safe direction, since a wrong `false` abandons a
+//! delivery visibly while a wrong `true` duplicates one silently — and the
+//! measurement that would settle it is credential-gated in
+//! `wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`. Telegram's
+//! mock keeps `Matcher::Missing`, because Telegram's Bot API offers no carrier
+//! at all and that row is unchanged.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -361,15 +381,44 @@ async fn a_replayed_delivery_key_produces_two_messages_on_telegram() {
     send.assert_async().await;
 }
 
+/// Renamed and re-scoped 2026-07-30 (`lane/twilio-whatsapp-identity`).
+///
+/// **This test used to match `Idempotency-Key: Missing`, and that was the right
+/// discriminator for the claim it then carried:** the adapter transmitted
+/// nothing, so the destination *could not* deduplicate and the `false` was
+/// mechanically true. The adapter now transmits the gateway's delivery id on
+/// that header, so the old matcher stopped matching and this test went red —
+/// which is the gate working, not the gate being wrong.
+///
+/// **What it can and cannot prove now, stated plainly, because the evidence
+/// genuinely changed shape.** It still proves the arrival count at a
+/// destination that does not deduplicate: two sends of one key produce two
+/// messages. What it no longer proves is that Twilio *cannot* dedupe — that
+/// argument rested on the absence of a token and the token is now present. The
+/// `false` below is therefore a **conservative default pending measurement**,
+/// not a mechanical consequence, and this comment says so rather than letting a
+/// reader infer the older, stronger claim from an unchanged bit.
+///
+/// The asymmetry that makes the trade sound: a wrong `false` costs an abandoned
+/// delivery, which is recorded and surfaced to an operator by
+/// `wayland-core gateway abandoned`. A wrong `true` costs a silent duplicate.
+/// The unmeasured direction is the safe one.
+///
+/// The live replay that would settle it is written and credential-gated in
+/// `wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`.
 #[tokio::test]
 async fn a_replayed_delivery_key_produces_two_messages_on_sms() {
     let mut server = mockito::Server::new_async().await;
     let send = server
+        // The discriminator is now POSITIVE rather than negative: both requests
+        // must carry the exact delivery id. An adapter that stopped
+        // transmitting it falls through to mockito's 501 and reddens this file,
+        // exactly as the `Missing` matcher used to do in the other direction.
         .mock(
             "POST",
             format!("/2010-04-01/Accounts/{TWILIO_SID}/Messages.json").as_str(),
         )
-        .match_header("Idempotency-Key", Matcher::Missing)
+        .match_header("Idempotency-Key", Matcher::Exact(REPLAY_KEY.to_string()))
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(r#"{"sid":"SMf24c1000000000000000000000000","status":"queued"}"#)
@@ -403,12 +452,27 @@ async fn a_replayed_delivery_key_produces_two_messages_on_sms() {
     send.assert_async().await;
 }
 
+/// Renamed and re-scoped 2026-07-30 (`lane/twilio-whatsapp-identity`) — see the
+/// long note on the Twilio test above, which applies here verbatim except for
+/// the carrier.
+///
+/// WhatsApp's carrier is not a header: the Cloud API has a documented arbitrary
+/// tracking field, `biz_opaque_callback_data` (≤512 chars), which Meta echoes
+/// back inside the `statuses` object of the `messages` webhook. So the
+/// discriminator moves from the header to the JSON body. Meta documents it as
+/// TRACKING data and nowhere as a dedup slot, which is why the capability bit
+/// stays `false` — but that is a reading of documentation, not a measurement,
+/// and this test must not be cited as one.
 #[tokio::test]
 async fn a_replayed_delivery_key_produces_two_messages_on_whatsapp() {
     let mut server = mockito::Server::new_async().await;
     let send = server
         .mock("POST", format!("/v18.0/{WA_PHONE_ID}/messages").as_str())
-        .match_header("Idempotency-Key", Matcher::Missing)
+        // Positive discriminator: both bodies must carry the delivery id in the
+        // tracking field, so an adapter that stopped sending it reddens here.
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "biz_opaque_callback_data": REPLAY_KEY,
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"messaging_product":"whatsapp","messages":[{"id":"wamid.F24C1"}]}"#)
