@@ -109,6 +109,32 @@ fn process_tree_size(root: u32) -> usize {
     tree.len()
 }
 
+/// `comm` names of `root`'s live descendants (excluding `root` itself). Used so
+/// the evidence names the browser process rather than asserting on a bare count.
+fn descendant_names(root: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in all_pids() {
+        if p == root {
+            continue;
+        }
+        let mut cur = p;
+        for _ in 0..8 {
+            match ppid_of(cur) {
+                Some(pp) if pp == root => {
+                    if let Ok(c) = std::fs::read_to_string(format!("/proc/{p}/comm")) {
+                        out.push(c.trim().to_string());
+                    }
+                    break;
+                }
+                Some(pp) if pp > 1 => cur = pp,
+                _ => break,
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 // ── stand-in sidecar ─────────────────────────────────────────────────────
 
 /// Write an executable, argument-free HTTP health server. `launch_camoufox_program`
@@ -433,16 +459,40 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
     assert_eq!(live.len(), 1, "DURING: one tracked session");
     let pid = live[0].pid;
     assert!(alive(pid), "DURING: real sidecar PID {pid} must be alive");
-    let tree_during = process_tree_size(pid);
-    // The real sidecar spawns Xvfb + camoufox-bin, so the tree is genuinely > 1.
-    // Asserting only >= 1 would let a browser-less sidecar pass silently.
+
+    // Wait for the sidecar's BROWSER children to actually exist before measuring
+    // cleanup. Observed steady state on `hetzner-dsm` is a tree of 3: the node
+    // sidecar plus `Xvfb` plus `camoufox-bin`.
+    //
+    // This wait is load-bearing. The first run of this test tore down 1.12s after
+    // `ensure_ready` and recorded `during_tree=2` — i.e. it measured the cleanup of
+    // a sidecar whose browser had not spawned yet, and "after_tree=0" would have
+    // said nothing about whether a real browser process gets cleaned up. The leak
+    // an operator cares about is a leaked BROWSER, not a leaked node process.
+    let mut tree_during = process_tree_size(pid);
+    for _ in 0..600 {
+        tree_during = process_tree_size(pid);
+        if tree_during >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(
-        tree_during >= 2,
-        "DURING: the real sidecar must have spawned its browser children; tree={tree_during}"
+        tree_during >= 3,
+        "DURING: the real sidecar must have spawned BOTH its Xvfb and its browser \
+         process (expected tree >= 3, got {tree_during}). Measuring teardown before \
+         the browser exists would not measure browser cleanup at all."
+    );
+    // Name the descendants in the evidence, so a reader can see a real browser was
+    // present rather than taking the count on trust.
+    let names = descendant_names(pid);
+    assert!(
+        names.iter().any(|n| n.contains("camoufox") || n.contains("firefox")),
+        "DURING: no browser process among the sidecar's descendants: {names:?}"
     );
     println!(
         "EV3C: phase=during tracked_sessions=1 sidecar_pid={pid} tree_size={tree_during} \
-         health=2xx"
+         descendants={names:?} health=2xx"
     );
 
     sup.on_session_end(&live[0].session_id);
