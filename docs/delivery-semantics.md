@@ -52,6 +52,19 @@ relying on it, because that scope is narrower than "one message".
 | **Signal** (`signal-cli`) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Signal | **NOT MEASURED** |
 | **iMessage** (AppleScript) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Messages.app. **macOS only** — on Linux and Windows the adapter is not compiled in and cannot be constructed at all | **NOT MEASURED** |
 | **MS Teams** (Bot Framework) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Teams | **NOT MEASURED** |
+| **WhatsApp bridge** (`backend = "baileys"` / `"whatsapp-web"`) | none — the bridge's `sendText` RPC carries no key and neither backend accepts one | **at-most-once** | **abandoned** | zero or one message — unknowable without checking WhatsApp | **NOT MEASURED, and no replay has been driven at all** — see the note below |
+
+**The WhatsApp bridge row is weaker still, and is labelled rather than filled in.** The other
+ten rows describe adapters the registry constructs from a platform string alone. The bridge is
+an eleventh `Channel` reached through the *same* platform string (`whatsapp`) with an opt-in
+`backend` key, so it is not covered by
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` — that harness
+enumerates platforms, and this adapter adds none. Its row is derived from source only: the
+bridge's `sendText` RPC transmits no idempotency token, so
+`supports_outbound_idempotency()` is left at the trait's `false` default. **No message has ever
+been sent through it at a real WhatsApp account**, because doing so requires QR-pairing a
+personal number. Treat the row as a claim about our code and as no evidence whatever about
+WhatsApp's behaviour. See [whatsapp-bridge.md](whatsapp-bridge.md).
 
 **"NOT MEASURED" means not measured, and it is not a pass.** Four of the ten — Email, Signal,
 iMessage, MS Teams — have never had a replay driven at a real destination. Their rows are
