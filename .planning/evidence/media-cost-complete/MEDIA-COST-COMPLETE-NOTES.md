@@ -42,10 +42,56 @@ header — actually exists. Instrumenting `video_analyze` itself could only ever
 synthesise a figure, which is forbidden. So the plan is: wire the trait impls,
 and let video_analyze produce 9 genuine records rather than 1 invented one.
 
+## FINDING (HIGH) — the ledger is INERT in the shipped product
+
+This reframes the deliverable, so it is recorded before any code is written.
+
+Measured with `/usr/bin/grep` over `crates --include="*.rs"`, every hit listed:
+
+| symbol | production call sites | test call sites |
+|---|---|---|
+| `with_cost_ledger` | **0** | 3 |
+| `MediaCostLedger::shared()` / `::new()` | **0** | 5 |
+| `MediaCostLedger::summary()` | **0** | 7 |
+| `with_rate_card` | **1** (`bootstrap.rs:1334`, image_gen only) | 2 |
+
+Known-positive proving the matcher alive: `with_rate_card` returns the
+`bootstrap.rs:1334` production hit in the same invocation.
+
+So in the shipped binary today:
+
+- **`image_gen`** — rate card bound; ledger **unbound**. Its `account()` returns
+  the record JSON into the tool result, so the record does reach the model and
+  the host **per call**. Session totalling does not exist.
+- **transcription** — **no** rate card (bootstrap never binds one), **no**
+  ledger, and `account()`'s returned record is discarded at all three call
+  sites. Production effect is **a `tracing::info!` line and nothing else**.
+- Nothing anywhere reads `MediaCostSummary`. The ledger is **write-only, and
+  nothing writes to it.**
+
+**Consequence:** adding `account()` calls to three more backends would add three
+more log lines, not cost coverage. A record that reaches no ledger and no
+surface is the same category of claim as a `$0.00` — it looks like accounting
+and totals nothing. Binding a real session ledger is therefore part of the fix,
+not a nice-to-have, and the *operator rate card never reaching transcription*
+is a second live gap of the same family as the `$0.00` bug.
+
+## Wire-contract safety
+
+`price_source` / `media_cost` appear in **0** contract fixtures (control: the
+same search finds `crates/wcore-protocol/contracts/desktop/v1/...` JSON, so the
+matcher was alive). Extending `MediaUnits` therefore needs no contract
+regeneration — which is forbidden to this lane anyway.
+
 ## Plan
 
-1. Vision trait impls (anthropic / openai / gemini) — covers video_analyze too.
-2. TTS.
-3. Per shape: wire a real record, or cut it from v1. No guessed prices.
-4. Both directions on every guard (§3b-iii): non-zero cost recorded for a
+1. Extend `MediaUnits` with an explicit billing basis + token/character units.
+   Vision is token-billed and TTS is character-billed; neither is an artifact,
+   so `images` must stay 0 for both or a per-image rate card would price them
+   (the `$0.00` bug's mirror image — a *wrong* figure rather than a zero one).
+2. Vision trait impls (anthropic / openai / gemini) — covers video_analyze too.
+3. TTS.
+4. Bind one shared session ledger + the operator rate card in `bootstrap.rs`
+   across every billable media backend, closing the inert-ledger finding.
+5. Both directions on every guard (§3b-iii): non-zero cost recorded for a
    billed call, AND the guard reddens when the cost is dropped.
