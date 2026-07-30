@@ -457,15 +457,29 @@ fn comparator_rejects_a_flipped_row() {
         .guarantees
         .insert("telegram".into(), "exactly-once".into());
 
+    // TWO disagreements since 2026-07-31, and both are real: Telegram neither
+    // transmits a key NOR is uncapped, so the mutated row is false in two
+    // independent ways. Asserting `len() == 1` here would have been the weaker
+    // claim — the count is pinned so a rule silently ceasing to fire still
+    // reddens.
     let problems = disagreements(&declared, &measured);
     assert_eq!(
         problems.len(),
-        1,
-        "expected exactly one disagreement, got: {problems:?}"
+        2,
+        "expected the capability mismatch AND the bare-exactly-once-over-a-capped-adapter \
+         report, got: {problems:?}"
     );
     assert!(
-        problems[0].starts_with("telegram:") && problems[0].contains("returns false"),
-        "the disagreement must name telegram and the measured value: {problems:?}"
+        problems
+            .iter()
+            .any(|p| p.starts_with("telegram:") && p.contains("returns false")),
+        "the capability disagreement must name telegram and the measured value: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("telegram:") && p.contains("declared bare exactly-once")),
+        "the unconditional claim over a 4096-char cap must also be reported: {problems:?}"
     );
 }
 
@@ -485,11 +499,23 @@ fn comparator_rejects_a_downgraded_row() {
         .guarantees
         .insert("matrix".into(), "at-most-once".into());
 
+    // Also two since 2026-07-31: downgrading the guarantee leaves the
+    // `matrix.cap` row behind, and a cap row under a guarantee with no cap
+    // condition is itself drift — it implies a conditional promise the row no
+    // longer makes.
     let problems = disagreements(&declared, &measured);
-    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert_eq!(problems.len(), 2, "got: {problems:?}");
     assert!(
-        problems[0].starts_with("matrix:") && problems[0].contains("returns true"),
+        problems
+            .iter()
+            .any(|p| p.starts_with("matrix:") && p.contains("returns true")),
         "got: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("matrix:") && p.contains("has no cap condition")),
+        "the orphaned cap row must also be reported: {problems:?}"
     );
 }
 
