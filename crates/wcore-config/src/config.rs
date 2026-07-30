@@ -1090,6 +1090,26 @@ pub struct SessionConfig {
     pub directory: String,
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// Refuse to run at all rather than run without durable sessions.
+    ///
+    /// Default `false`, which preserves the host-forced degrade: a host with
+    /// no OS keyring and no unlocked vault turns durable sessions off and says
+    /// so. That default exists because it is the only one that lets a stock
+    /// headless Linux server work out of the box.
+    ///
+    /// It also means that, by default, **making the secure store unavailable
+    /// converts "the product refuses" into "the product runs with no recovery
+    /// journal"** — so a misconfiguration, or an attacker who can kill the
+    /// D-Bus session or strip an environment variable, can obtain execution
+    /// that leaves no durable record. Degrading must therefore be something an
+    /// operator is ALLOWED to accept, not something the absence of a keyring
+    /// can decide on their behalf.
+    ///
+    /// Setting this to `true` is that operator statement: this deployment
+    /// requires durable sessions, so a host that cannot protect them must fail
+    /// closed at startup instead of quietly becoming a different product.
+    #[serde(default)]
+    pub require_durability: bool,
 }
 
 impl Default for SessionConfig {
@@ -1098,6 +1118,7 @@ impl Default for SessionConfig {
             enabled: default_true(),
             directory: default_session_dir(),
             max_sessions: default_max_sessions(),
+            require_durability: false,
         }
     }
 }
@@ -2475,13 +2496,25 @@ impl Config {
         //
         // Deliberately narrow — see `durable_sessions_must_be_disabled` for the
         // two cases this must NOT swallow.
-        if durable_sessions_must_be_disabled(
+        //
+        // The degrade is a CAPABILITY the operator may decline. Without that,
+        // "make the keyring unavailable" is a way to obtain execution with no
+        // recovery journal — a misconfiguration or an attacker gets unrecorded
+        // work, and the product cannot tell the two apart. So the same
+        // condition that degrades by default fails CLOSED for an operator who
+        // has said this deployment requires durable sessions.
+        match host_durability_disposition(
             resolved.session.enabled,
+            resolved.session.require_durability,
             &resolved.storage.credentials.backend,
             || resolved.confidential_recovery_storage_available(),
         ) {
-            resolved.session.enabled = false;
-            record_durable_sessions_disabled_by_host();
+            HostDurabilityDisposition::Keep => {}
+            HostDurabilityDisposition::Refuse => anyhow::bail!("{}", DURABILITY_REQUIRED_REFUSAL),
+            HostDurabilityDisposition::Degrade => {
+                resolved.session.enabled = false;
+                record_durable_sessions_disabled_by_host();
+            }
         }
 
         for (fallback_provider, fallback_model) in fallback_specs {
@@ -2570,6 +2603,61 @@ fn durable_sessions_must_be_disabled(
 ) -> bool {
     session_enabled && backend.supports_confidential_material() && !measure_availability()
 }
+
+/// What resolution must do about a host that cannot protect durable sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostDurabilityDisposition {
+    /// Nothing to do: either the host can protect them, or they were already
+    /// off, or the operator chose a backend whose refusal happens elsewhere.
+    Keep,
+    /// The host cannot protect them and the operator accepts running without.
+    Degrade,
+    /// The host cannot protect them and the operator required them.
+    Refuse,
+}
+
+/// Split the host-degrade decision from the operator's policy, in one pure
+/// function, so both halves are exhaustively testable without a keyring.
+///
+/// `Degrade` and `Refuse` are reached under IDENTICAL host conditions — they
+/// differ only by `require_durability`. That is the point: the absence of a
+/// keyring decides *whether the host can deliver durability*, and the operator
+/// decides *what should happen when it cannot*. Collapsing the two is how
+/// "disable the credentials backend" became a way to get unrecorded execution.
+///
+/// The availability probe stays a closure for the reason
+/// [`durable_sessions_must_be_disabled`] gives, and this function must not
+/// measure it in any case that predicate already short-circuits.
+#[must_use]
+pub(crate) fn host_durability_disposition(
+    session_enabled: bool,
+    require_durability: bool,
+    backend: &crate::credentials::CredentialsBackend,
+    measure_availability: impl FnOnce() -> bool,
+) -> HostDurabilityDisposition {
+    if !durable_sessions_must_be_disabled(session_enabled, backend, measure_availability) {
+        return HostDurabilityDisposition::Keep;
+    }
+    if require_durability {
+        HostDurabilityDisposition::Refuse
+    } else {
+        HostDurabilityDisposition::Degrade
+    }
+}
+
+/// What an operator who set `[session] require_durability = true` is told when
+/// the host cannot deliver it.
+///
+/// A single `const` so the refusal, its cause and its remedies cannot drift
+/// from the notice emitted on the degrade path, and so a test can assert the
+/// exact operator-visible text rather than a substring it invented.
+pub const DURABILITY_REQUIRED_REFUSAL: &str = "[session] require_durability = true, but this host cannot protect a durable session: it \
+     has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than \
+     running with no recovery journal. Unlock the encrypted vault by setting \
+     WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
+     WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = \"keyring\" on a host that \
+     has one. To accept running without durable sessions on this host, set \
+     [session] require_durability = false.";
 
 /// Set when [`durable_sessions_must_be_disabled`] fired during resolution.
 static DURABLE_SESSIONS_DISABLED_BY_HOST: std::sync::atomic::AtomicBool =
@@ -4356,9 +4444,23 @@ fn merge_config_files_with_trust(
         }
     };
 
-    // Session: project overrides global
+    // Session: project overrides global.
+    //
+    // `require_durability` is TIGHTEN-ONLY across both branches, matching the
+    // `allow_no_sandbox` clamp above and for the same reason: a project
+    // `.wayland-core.toml` travels with a cloned repository and is untrusted.
+    // The `directory` branch replaces the WHOLE global session block, so a repo
+    // that merely sets a custom session directory would otherwise silently
+    // clear an operator's global "this deployment requires durable sessions"
+    // statement. An untrusted file may add the requirement; it may never
+    // remove it.
+    let require_durability =
+        global.session.require_durability || project.session.require_durability;
     let session = if project.session.directory != default_session_dir() {
-        project.session
+        SessionConfig {
+            require_durability,
+            ..project.session
+        }
     } else {
         SessionConfig {
             enabled: global.session.enabled && project.session.enabled,
@@ -4372,6 +4474,7 @@ fn merge_config_files_with_trust(
             } else {
                 global.session.max_sessions
             },
+            require_durability,
         }
     };
 
@@ -5236,6 +5339,236 @@ mod tests {
              surface; otherwise the only trace of it is a stderr line that has \
              already scrolled away"
         );
+    }
+
+    /// The degrade must be a capability the operator can DECLINE.
+    ///
+    /// Every row of the existing rule, crossed with both settings of
+    /// `require_durability`, with all three outcome counts asserted. The counts
+    /// are what make this gate able to fail in both directions: a change that
+    /// made the product always refuse, always degrade, or never do either
+    /// reddens it even if someone edited the individual row it broke.
+    ///
+    /// The load-bearing pairs are rows 1/2 and 5/6 — identical host conditions,
+    /// opposite outcomes, decided only by the operator's policy.
+    #[test]
+    fn requiring_durability_refuses_exactly_where_accepting_it_would_degrade() {
+        use crate::credentials::CredentialsBackend;
+
+        let cases = [
+            // (sessions on, require_durability, backend, storage reachable, expected)
+            //
+            // The headless server. Same host, opposite answers.
+            (
+                true,
+                false,
+                CredentialsBackend::Auto,
+                false,
+                HostDurabilityDisposition::Degrade,
+            ),
+            (
+                true,
+                true,
+                CredentialsBackend::Auto,
+                false,
+                HostDurabilityDisposition::Refuse,
+            ),
+            // A host that CAN protect them: requiring durability changes nothing,
+            // so setting the flag must never cost a working deployment anything.
+            (
+                true,
+                false,
+                CredentialsBackend::Auto,
+                true,
+                HostDurabilityDisposition::Keep,
+            ),
+            (
+                true,
+                true,
+                CredentialsBackend::Auto,
+                true,
+                HostDurabilityDisposition::Keep,
+            ),
+            // An explicit keyring the host cannot reach is the same predicament.
+            (
+                true,
+                false,
+                CredentialsBackend::Keyring,
+                false,
+                HostDurabilityDisposition::Degrade,
+            ),
+            (
+                true,
+                true,
+                CredentialsBackend::Keyring,
+                false,
+                HostDurabilityDisposition::Refuse,
+            ),
+            // Plaintext keeps its own hard refusal at session open. Requiring
+            // durability must NOT move that refusal to startup, or the operator
+            // loses the specific diagnosis that names their configured backend.
+            (
+                true,
+                false,
+                CredentialsBackend::Plaintext,
+                false,
+                HostDurabilityDisposition::Keep,
+            ),
+            (
+                true,
+                true,
+                CredentialsBackend::Plaintext,
+                false,
+                HostDurabilityDisposition::Keep,
+            ),
+            // Sessions already off by the operator's own choice. Requiring
+            // durability while disabling sessions is contradictory config, and
+            // the explicit `enabled = false` is the more specific statement.
+            (
+                false,
+                false,
+                CredentialsBackend::Auto,
+                false,
+                HostDurabilityDisposition::Keep,
+            ),
+            (
+                false,
+                true,
+                CredentialsBackend::Auto,
+                false,
+                HostDurabilityDisposition::Keep,
+            ),
+        ];
+
+        let (mut keep, mut degrade, mut refuse) = (0usize, 0usize, 0usize);
+        for (enabled, require, backend, available, expected) in &cases {
+            let actual = host_durability_disposition(*enabled, *require, backend, || *available);
+            assert_eq!(
+                actual, *expected,
+                "enabled={enabled} require_durability={require} backend={backend:?} \
+                 storage_available={available}"
+            );
+            match actual {
+                HostDurabilityDisposition::Keep => keep += 1,
+                HostDurabilityDisposition::Degrade => degrade += 1,
+                HostDurabilityDisposition::Refuse => refuse += 1,
+            }
+        }
+        assert_eq!(degrade, 2, "exactly two rows may degrade");
+        assert_eq!(refuse, 2, "exactly two rows may refuse");
+        assert_eq!(keep, 6, "the other six are untouched");
+        assert_eq!(keep + degrade + refuse, cases.len(), "every row graded");
+    }
+
+    /// The policy must not cost the probe its short-circuit, and the control
+    /// proves the probe still runs where it is genuinely needed.
+    #[test]
+    fn requiring_durability_does_not_start_probing_the_keyring_unnecessarily() {
+        use crate::credentials::CredentialsBackend;
+
+        fn never_measured() -> bool {
+            panic!("secure-storage availability must not be probed in this case");
+        }
+
+        for require in [false, true] {
+            assert_eq!(
+                host_durability_disposition(
+                    false,
+                    require,
+                    &CredentialsBackend::Auto,
+                    never_measured
+                ),
+                HostDurabilityDisposition::Keep
+            );
+            assert_eq!(
+                host_durability_disposition(
+                    true,
+                    require,
+                    &CredentialsBackend::Plaintext,
+                    never_measured
+                ),
+                HostDurabilityDisposition::Keep
+            );
+        }
+
+        let measured = std::cell::Cell::new(false);
+        let disposition =
+            host_durability_disposition(true, true, &CredentialsBackend::Auto, || {
+                measured.set(true);
+                false
+            });
+        assert_eq!(disposition, HostDurabilityDisposition::Refuse);
+        assert!(measured.get(), "the probe must run in the undecided case");
+    }
+
+    /// The refusal an operator actually reads must name the cause AND every
+    /// way out, including the way back to the degrade. A refusal that only
+    /// says "no" turns a policy into an outage with no next step.
+    #[test]
+    fn the_durability_refusal_names_its_cause_and_all_three_remedies() {
+        for needle in [
+            "require_durability = true",
+            "no usable OS keyring",
+            "no unlocked credentials vault",
+            "WAYLAND_VAULT_PASSPHRASE_FD",
+            "WAYLAND_VAULT_PASSPHRASE",
+            "backend = \"keyring\"",
+            "require_durability = false",
+        ] {
+            assert!(
+                DURABILITY_REQUIRED_REFUSAL.contains(needle),
+                "the durability refusal must mention {needle:?}: {DURABILITY_REQUIRED_REFUSAL}"
+            );
+        }
+        // Control: the same assertion on a string that is NOT in the message
+        // must fail, so the loop above is not passing on an always-true
+        // `contains`. Without this the test would also pass on an empty needle
+        // list or a `contains` that always returned true.
+        assert!(
+            !DURABILITY_REQUIRED_REFUSAL.contains("require_durability = maybe"),
+            "known-negative control: this needle must NOT be present"
+        );
+    }
+
+    /// A project `.wayland-core.toml` travels with a cloned repository. It may
+    /// ADD the durability requirement; it must never be able to REMOVE one.
+    ///
+    /// The `directory` branch of the merge replaces the whole global session
+    /// block, so this is not hypothetical: before the tighten-only clamp, a
+    /// repo that set nothing but a session directory silently cleared the
+    /// operator's global policy.
+    #[test]
+    fn an_untrusted_project_config_cannot_clear_a_global_durability_requirement() {
+        fn merged(global_require: bool, project_require: bool, project_dir: &str) -> SessionConfig {
+            let mut global = ConfigFile::default();
+            global.session.require_durability = global_require;
+            let mut project = ConfigFile::default();
+            project.session.require_durability = project_require;
+            project.session.directory = project_dir.to_string();
+            merge_config_files(global, project).session
+        }
+
+        // The exact shape of the escape: a custom directory takes the
+        // `project.session` branch wholesale.
+        assert!(
+            merged(true, false, "repo-sessions").require_durability,
+            "a project config that only changes the session directory must not \
+             clear the operator's global require_durability"
+        );
+        assert!(
+            merged(true, false, &default_session_dir()).require_durability,
+            "nor may it clear the requirement through the merge branch"
+        );
+
+        // Tightening in the other direction is allowed.
+        assert!(merged(false, true, "repo-sessions").require_durability);
+        assert!(merged(false, true, &default_session_dir()).require_durability);
+
+        // Known-negative control: with neither side requiring it, the merge must
+        // produce `false`. Without this row every assertion above would also
+        // pass on a merge hardcoded to `true`.
+        assert!(!merged(false, false, "repo-sessions").require_durability);
+        assert!(!merged(false, false, &default_session_dir()).require_durability);
     }
 
     // -------------------------------------------------------------------------

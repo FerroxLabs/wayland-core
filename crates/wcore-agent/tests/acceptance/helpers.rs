@@ -111,6 +111,7 @@ pub fn openai_config(api_key: &str) -> Config {
                 .to_string_lossy()
                 .into_owned(),
             max_sessions: 1,
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -152,6 +153,7 @@ pub fn bedrock_config() -> Config {
                 .to_string_lossy()
                 .into_owned(),
             max_sessions: 1,
+            ..Default::default()
         },
         bedrock: Some(BedrockConfig::default()),
         ..Default::default()
