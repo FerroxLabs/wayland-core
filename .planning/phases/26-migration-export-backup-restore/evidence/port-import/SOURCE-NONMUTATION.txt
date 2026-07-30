@@ -1,0 +1,25 @@
+gen_rc=0
+SELF-TEST stable=ok content-change-detected=True mode-change-detected=True
+
+case                               exit  source-unchanged
+conflict-exact                        0  YES
+conflict-casefold                     0  YES
+conflict-normalform                   0  YES
+escape-symlink-absolute               0  YES
+escape-symlink-traversal              0  YES
+escape-symlink-dir                    0  YES
+secret-in-memory-note                 0  YES
+secret-in-persona                     0  YES
+secret-in-skill-body                  0  YES
+secret-in-env                         0  YES
+exec-disguised-as-data                0  YES
+data-that-looks-executable            0  YES
+malformed-truncated                   1  YES
+malformed-wrongtype                   1  YES
+malformed-deepnest                    0  YES
+bounds-oversized-member               0  YES
+bounds-item-count                     0  YES
+win-reserved-device-name              0  YES
+win-trailing-dot                      0  YES
+
+CORPORA-RUN=19 of 19  UNRUN=0  SOURCE-MUTATED=0 []
