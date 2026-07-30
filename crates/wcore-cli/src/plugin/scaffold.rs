@@ -190,9 +190,25 @@ pub fn run_new(name: &str, dest: &Path, template: Template) -> Result<()> {
 /// Rewrite the scaffold's git+tag `wcore-plugin-api` dep to the in-tree path.
 /// Returns whether a rewrite happened.
 fn repoint_to_in_tree_api(scaffold: &Path) -> Result<bool> {
+    // DEBUG ONLY, for the reproducibility reason given at length on the other
+    // `CARGO_MANIFEST_DIR` site in this file (`template_dir`).
+    //
+    // BOTH SITES HAD TO BE GATED, and gating only one proved nothing: the two
+    // `env!("CARGO_MANIFEST_DIR")` expansions produce the SAME string literal,
+    // so the linker keeps a single deduplicated copy in the string table.
+    // Measured — after gating `template_dir` alone, two release builds at
+    // different absolute paths still embedded the path exactly once and their
+    // digests still differed. One remaining use is all it takes.
+    //
+    // An installed binary has no sibling `wcore-plugin-api` directory, so the
+    // `is_dir()` filter below already made this a no-op for the shipped
+    // artifact; the gate removes the baked literal without changing that.
+    #[cfg(debug_assertions)]
     let api = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(|c| c.join("wcore-plugin-api"));
+    #[cfg(not(debug_assertions))]
+    let api: Option<PathBuf> = None;
     let Some(api) = api.filter(|p| p.is_dir()) else {
         return Ok(false);
     };
