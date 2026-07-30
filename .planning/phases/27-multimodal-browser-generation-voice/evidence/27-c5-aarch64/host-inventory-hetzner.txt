@@ -1,0 +1,18 @@
+=== arch ===
+x86_64
+=== cross ===
+cross: absent
+=== docker ===
+/usr/bin/docker
+amd64
+=== rust targets ===
+aarch64-apple-darwin
+x86_64-pc-windows-gnu
+x86_64-unknown-linux-gnu
+=== aarch64 linker ===
+aarch64-linux-gnu-gcc: absent
+=== zig ===
+zig: absent
+=== df ===
+/dev/md2        1.8T  660G 1006G  40% /
+ssh_rc=0

@@ -1,0 +1,20 @@
+[        PASS] version_shape: matched `wayland-core <semver>`
+[        PASS] build_provenance: embedded source SHA b756001836f2ab9698d0d947272e2b59c566482c
+[        PASS] profile_isolation_holds: config path resolved inside the isolated home
+[        PASS] builtin_generation_refuses_without_credential: rc=1, named the missing credential, wrote no file
+[        PASS] builtin_generation_validates_input: rc=1, named the validation rule
+[        PASS] web_fetch_refuses_without_credential: rc=1, named the missing credential
+[        PASS] mcp_registry_discovery: 3 tools: ['Glob', 'Grep', 'Read']
+[        PASS] host_protocol_honest_init_failure: one `error`/`init_failed` frame, rc=1, retryable=False
+[        PASS] ollama_hint_is_honest: rc=0; the advertised credential-free path was reachable
+
+COUNTS total=9 pass=9 fail=0 not_measured=0
+UNEXPECTED_RED=[]
+docker_run_rc=0
+=== status read back separately ===
+WLRC=0
+PASS=9
+FAIL=0
+NOT_MEASURED=0
+UNEXPECTED_RED=
+WLDONE

@@ -1,0 +1,25 @@
+   Compiling getopts v0.2.24
+   Compiling crossbeam-channel v0.5.15
+   Compiling bincode v1.3.3
+   Compiling tower-http v0.5.2
+   Compiling is-terminal v0.4.17
+   Compiling symlink v0.1.0
+   Compiling wcore-cli v0.12.25 (/root/wayland-27c5/crates/wcore-cli)
+   Compiling smawk v0.3.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling pulldown-cmark-escape v0.11.0
+error: failed to run custom build command for `wcore-cli v0.12.25 (/root/wayland-27c5/crates/wcore-cli)`
+
+Caused by:
+  process didn't exit successfully: `/target/release/build/wcore-cli-b5f80c8fae32f7d5/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=WAYLAND_BUILD_SOURCE_SHA
+
+  --- stderr
+
+  thread 'main' (9319) panicked at crates/wcore-cli/build.rs:11:29:
+  invalid WAYLAND_BUILD_SOURCE_SHA: no source identity is available for a RELEASE build: WAYLAND_BUILD_SOURCE_SHA is unset and `git rev-parse HEAD` did not succeed. A release binary must carry an attributable source identity. Set WAYLAND_BUILD_SOURCE_SHA to 40 lowercase hexadecimal characters (in GitHub Actions: ${{ github.sha }}), or build inside a git checkout the building user can read (a container running as root over a workspace owned by another uid is refused by git with 'detected dubious ownership')
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
+BUILD_RC=101
+ls: cannot access '/root/wayland-27c5/target-27c5/aarch64-unknown-linux-gnu/release/wayland-core': No such file or directory
