@@ -39,8 +39,53 @@ distinction and a missing pointer. `docs/channels.md:183` does link delivery-sem
 appear twice, back to back. Editing accident, not a correctness defect. Reported, not silently
 fixed — the file is another lane's authority surface.
 
-## Open
+## Decision — form
 
-- Choose the form (column / table / limitations sentence) and justify.
-- Add a machine-checkable agreement assertion between README and delivery-semantics, and show
-  it can fail (§3.2) **and** that it can pass (§3b-iii).
+**A prose bullet placed immediately after the ten-platform sentence**, first in the existing
+channels bullet list. Cross-audit panel unanimous (codex `PANEL_POSITION=C`, gemini `C`, kimi
+`C`); internal adversarial pass argued for a 10-row table and lost on a specific piece of
+evidence: `delivery-semantics.md`'s own evidence cells could **not** be reduced to Yes/No — every
+one of them carries prose inside the cell ("**NOT MEASURED at a real destination** — see the
+correction below"). A README column would force the binary the authority doc itself declined to
+use, and the binary is what invites reading the seven as broken. Under-claiming is also a wrong
+claim.
+
+Rejected `:348` ("What we do not claim yet") as the location: that paragraph is about **feature
+completeness** (duplex, attachments, staged `--slash` jobs), a different axis from **evidence
+strength**, and it sits 35 lines below the claim it would be qualifying.
+
+Not mentioned: the WhatsApp Node bridge. It adds no platform (same `whatsapp` platform string,
+opt-in `backend` key), is not shipped, and has never sent a message — so the README's "ten" stays
+correct and silence is the accurate posture. Mentioning it would over-claim capability.
+
+## Enforcement — `crates/wcore-channels-registry/tests/readme_live_evidence_agreement.rs`
+
+Parses the *"Replay measured at a real destination?"* column of §2 and requires the README to
+state the same partition: both spelled counts, each platform on the correct side (exclusive —
+neither set may leak across), and the link to the enforced doc.
+
+Run on `hetzner-dsm`, worktree `/root/wayland-readme-live` at
+`c76d7c108436889c1852e6216fea16c8c7e6f21b` (SHA asserted after checkout).
+
+| run | result |
+|---|---|
+| at HEAD | `6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out` |
+| README mutated on disk, `Three` → `Four` | `WLRC=101`, `3 passed; 3 failed; 0 ignored; 0 filtered out` |
+| pre-existing `delivery_semantics_declaration` | `8 passed; 0 failed; 0 ignored; 0 filtered out` — unaffected |
+
+**Can it fail** — the mutated run reported, from the real files:
+`README says 4 platform(s) have been driven at the real platform; docs/delivery-semantics.md §2
+shows 3`. The two collateral failures are the `replace_once` guard firing
+(`control cannot be constructed: "Three of the ten" is not present in the input`), which is the
+anti-vacuity assertion proving those controls read the real README and not a private copy.
+
+**Can it pass** (§3b-iii) — `the_comparator_passes_when_a_seventh_row_becomes_measured`
+constructs the world in which Telegram *has* been driven live (doc cell rewritten, README counts
+and sides updated) and requires zero problems. It passes, so the gate has a reachable pass state
+under a changed fact and is not stuck green or stuck red.
+
+`0 ignored` / `0 filtered out` are present in every count above, so none of these runs came
+through the `rtk` cargo rewrite that strips exactly those two fields. Logs were fetched by `scp`
+and read with the Read tool, never through a proxied shell.
+
+`cargo fmt --all -- --check` → rc=0 on the Mac.
