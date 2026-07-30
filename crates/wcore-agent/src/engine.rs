@@ -3694,6 +3694,30 @@ impl AgentEngine {
     /// so the next turn cannot inherit correlations, caches, usage deltas, or
     /// plan/compaction state from the session being left.
     pub fn switch_active_session(&mut self, active_session: ActiveSession) -> anyhow::Result<()> {
+        // Journal writer #3, and the one the headless-keyring fix left open.
+        //
+        // Writers #1 (`init_session`) and #2 (the resume constructor) are both
+        // governed by the `session.enabled` decision `Config::resolve` now takes
+        // at startup. This one was not: it accepts an `ActiveSession` built by
+        // the CALLER and assigns `self.session_journal = Some(journal)`
+        // unconditionally. A caller that constructs its own `SessionManager` —
+        // exactly what `channel_dispatch` does, which is how writer #2 was
+        // reached — can therefore hand a live journal to an engine whose durable
+        // sessions are off, re-arming the every-turn failure the startup degrade
+        // exists to prevent.
+        //
+        // REFUSE, rather than silently dropping the journal the way writer #2
+        // does. The difference is deliberate: resume is a routine path that must
+        // keep working in degraded mode, so dropping the handle there is a
+        // graceful degrade. A *switch* is an explicit request to move onto
+        // another PERSISTED session, and on a host with durable sessions off no
+        // such session exists. Half-honouring it would leave the engine claiming
+        // to be on session B with nothing behind it — a worse lie than an error.
+        if !self.config.session.enabled {
+            anyhow::bail!(
+                "cannot switch sessions: durable session persistence is disabled for this run"
+            );
+        }
         if self.active_journal_turn_id.is_some() {
             anyhow::bail!("cannot switch sessions while a durable turn is active");
         }
@@ -24275,6 +24299,63 @@ mod audit_2026_05_22_tests {
         assert!(
             manager.load_for_run(&session_b.id).is_ok(),
             "a rejected switch must release the unused B authority"
+        );
+    }
+
+    /// Journal writer #3 must honour the startup degrade.
+    ///
+    /// `Config::resolve` turns `session.enabled` off on a host with no usable
+    /// credential store. Writers #1 (`init_session`) and #2 (the resume
+    /// constructor) honour that; #3 did not, and would install a live journal
+    /// on an engine that must not hold one — re-arming the every-turn failure
+    /// the degrade exists to prevent.
+    ///
+    /// The PASS direction of this behaviour (switch succeeds when durable
+    /// sessions are on) is covered by
+    /// `live_session_switch_transfers_journal_authority_and_runtime_state`
+    /// above, so the guard is proven able to both fail and pass.
+    #[tokio::test]
+    async fn switch_is_refused_when_durable_sessions_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14002a"))
+            .unwrap();
+        let session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14002b"))
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+
+        // The degraded host: resolve has already forced this off.
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = false;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+        assert!(
+            !engine.has_durable_journal(),
+            "writer #2's guard should already have dropped the inherited journal"
+        );
+
+        let error = engine.switch_active_session(active_b).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("durable session persistence is disabled"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !engine.has_durable_journal(),
+            "a refused switch must not install a journal on a degraded engine"
         );
     }
 

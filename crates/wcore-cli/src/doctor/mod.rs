@@ -193,6 +193,7 @@ async fn collect_checks(version: &str) -> Vec<CheckResult> {
     // 5. Optional providers — warnings only, never flip the exit code.
     out.push(check_browserbase());
     out.push(check_ollama().await);
+    out.push(check_durable_sessions());
 
     out
 }
@@ -503,6 +504,80 @@ async fn print_mcp_section(probe: bool) {
 }
 
 // -- helpers ------------------------------------------------------------
+
+/// Report whether durable session persistence is on, and — when it is off —
+/// **which of the two very different reasons** turned it off.
+///
+/// This is the consumer `durable_sessions_disabled_by_host()` was added for.
+/// The headless-keyring fix degrades gracefully on a host with no usable
+/// credential store, and announces it on stderr once at startup. The
+/// cross-audit panel's dissenting REFUSE vote rested on that not being
+/// enough: a degraded capability has to be *reportable* on demand, not only
+/// printed into a log nobody kept.
+///
+/// Two things here are easy to get wrong and are done on purpose:
+///
+/// 1. **This check resolves the config itself.** The flag is a side effect of
+///    `Config::resolve`, and doctor's only other `Config::resolve` calls live
+///    in `print_mcp_section`, which runs AFTER `collect_checks`. A check that
+///    merely *read* the flag would therefore observe `false` always — a row
+///    with no reachable failing state, which proves exactly nothing.
+///
+/// 2. **Host-forced is tested BEFORE `session.enabled`.** By the time resolve
+///    returns, a host-forced degrade has already set `session.enabled = false`,
+///    so testing the config value first would collapse "the operator asked for
+///    this" into "this host cannot do it". Those two want opposite reporting:
+///    the first is a normal, healthy configuration; the second is a capability
+///    the operator did not choose to lose and probably wants back.
+fn check_durable_sessions() -> CheckResult {
+    const LABEL: &str = "durable sessions";
+    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+        Err(e) => CheckResult {
+            label: LABEL,
+            outcome: Outcome::Warn {
+                detail: format!("cannot report: config did not resolve ({e})"),
+                hints: vec!["run `wayland-core --config-path` and check that file".into()],
+            },
+        },
+        Ok(cfg) => {
+            if wcore_config::config::durable_sessions_disabled_by_host() {
+                CheckResult {
+                    label: LABEL,
+                    outcome: Outcome::Warn {
+                        detail: "OFF — forced by this host, not by your config".to_string(),
+                        hints: vec![
+                            "this host has no usable OS keyring and no unlocked credentials vault"
+                                .into(),
+                            "prompts, channels, tools and replies all work; conversation history \
+                             is not saved and an interrupted turn cannot be recovered"
+                                .into(),
+                            "to restore: set WAYLAND_VAULT_PASSPHRASE_FD (preferred) or \
+                             WAYLAND_VAULT_PASSPHRASE"
+                                .into(),
+                            "to accept it and silence the startup notice: set [session] \
+                             enabled = false in config.toml"
+                                .into(),
+                        ],
+                    },
+                }
+            } else if !cfg.session.enabled {
+                CheckResult {
+                    label: LABEL,
+                    outcome: Outcome::Pass {
+                        detail: "off by configuration ([session] enabled = false)".to_string(),
+                    },
+                }
+            } else {
+                CheckResult {
+                    label: LABEL,
+                    outcome: Outcome::Pass {
+                        detail: "on".to_string(),
+                    },
+                }
+            }
+        }
+    }
+}
 
 fn skip(label: &'static str, reason: &str) -> CheckResult {
     CheckResult {
