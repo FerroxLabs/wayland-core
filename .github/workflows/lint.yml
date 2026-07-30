@@ -1,0 +1,114 @@
+# Lint — a fast fmt + clippy verdict that the integration branch can actually GET.
+#
+# WHY THIS FILE EXISTS (measured 2026-07-30, lane/fix-clippy-gate).
+#
+# `cargo clippy --workspace --all-targets -- -D warnings` exited 101 at integration
+# head `e7bc6d88`, with nine lint errors across four crates. Eighteen merges had
+# landed that day without anyone noticing. The obvious hypothesis — that CI runs a
+# narrower clippy scope — is FALSE: `ci.yml`'s "Clippy (warnings = errors)" step
+# runs the exact full-workspace command, and `ci.yml` fires on pushes to the
+# integration branch and to `lane/**`.
+#
+# The real cause is that `ci.yml` almost never REACHES that step on the integration
+# branch. Its concurrency group is `${{ github.workflow }}-${{ github.ref }}` with
+# `cancel-in-progress: false` for branch pushes — deliberately, so that the parallel
+# `lane/**` fan-out does not cancel itself. But `cancel-in-progress: false` does not
+# mean "run them all": GitHub holds at most ONE pending run per group and CANCELS the
+# older pending one when a newer run enters. The integration branch receives merges
+# far faster than a full `ci.yml` run completes, so each queued run is superseded
+# before a single job is created.
+#
+# Measured via the REST API, `branch=plan/f20-unified-audit-repair`:
+#
+#   * 2026-07-30: 45 runs — 42 cancelled, 1 failure, 2 still pending.
+#     ONE verdict out of 43 completed runs.
+#   * last 100 runs (since 2026-07-29T06:22Z): 91 cancelled, 5 failure, 2 success.
+#   * four cancelled runs sampled individually: `jobs.total_count == 0` for every one
+#     — they were cancelled at the concurrency gate before any job existed. Each
+#     run's `updated_at` matches the next run's `created_at` to within a second,
+#     which is the supersede-the-pending-run mechanism, visible in the timestamps.
+#
+# `ci.yml`'s comment already recorded the symptom ("The integration branch got NINE
+# macOS jobs in 10.8 h and produced ZERO CI verdicts in 9 h") without naming this as
+# the cause.
+#
+# So the gap is not scope and not the command — it is that the expensive matrix run
+# is structurally unable to report on a branch that moves this fast. This workflow
+# is the cheap half of `ci.yml` (fmt + clippy, Linux only, no matrix, no tests, no
+# artifacts) with `cancel-in-progress: TRUE`, which inverts the failure mode: a burst
+# of merges cancels the STALE lint runs and always leaves the CURRENT head with a
+# verdict in progress. `ci.yml` is untouched — its `cancel-in-progress: false` is
+# correct for what it does, and changing it would break the lane artifact fan-out
+# documented at the top of that file.
+#
+# `--keep-going` is deliberate and is the second lesson of the same lane. Without it
+# cargo stops scheduling units at the first failing crate, so the run reports a LOWER
+# BOUND rather than an inventory: the fail-fast run at `e7bc6d88` showed two errors in
+# one file, and the `--keep-going` run at the same SHA showed nine across four. A
+# previous lane's finding was wrongly written off as stale on the strength of the
+# fail-fast list. Same family as the `--no-fail-fast` drift `ci.yml` documents at its
+# nextest step.
+
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - plan/f20-unified-audit-repair
+      - 'lane/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed per ref, and cancelling UNCONDITIONALLY — unlike `ci.yml`. For a lint
+  # verdict only the current head is interesting, and cancel-on-supersede is
+  # precisely what stops a fast-moving branch from starving the gate. See the
+  # header for the measurement that motivated the difference.
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: fmt + clippy (workspace, all targets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      # Same disk reclaim the ci.yml Linux legs use — a full --all-targets
+      # clippy of this 54-crate workspace does not fit in the default free space.
+      - name: Free disk space (drop unused preinstalled toolchains)
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          echo "=== AFTER ==="; df -h /
+
+      - name: Install Linux system deps (libdbus + libseccomp + mold linker)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
+
+      - name: Setup vx (installs the Rust pinned in vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Check formatting
+        run: vx cargo fmt --all -- --check
+
+      # `--keep-going` so the report is an inventory, not a lower bound. See header.
+      - name: Clippy (warnings = errors, workspace, all targets)
+        run: vx cargo clippy --workspace --all-targets --keep-going -- -D warnings
