@@ -70,6 +70,24 @@ pub(crate) struct PreparedRequestBinding<'a> {
 /// discloses nothing — while collapsing it produced the live UAT defect D3:
 /// three unrelated causes rendered as one string that told a user to configure
 /// a credentials backend they had already configured.
+///
+/// # Whether these are fatal is a decided question — read the ADR before changing it
+///
+/// `NoSecureBackendAvailable` in particular has been decided **twice, in opposite
+/// directions**: refuse the turn (2026-07-16, `906287e1`, "fail closed instead of
+/// replaying ambiguous effects") and then degrade durable sessions off and run
+/// (2026-07-30, `c73ac417`, a release blocker on every keyring-less Linux host).
+/// The second decision was taken by a cross-audit panel that was never shown the
+/// first, and it turned the first one's test red.
+///
+/// Both decisions, the measured causation between them, the refutation of the
+/// second one's reasoning, and what a future revisit must have in front of it are
+/// merged into `docs/decisions/0003-durable-sessions-without-a-secure-store.md`.
+///
+/// If you arrived here from a red assertion in
+/// `crates/wcore-cli/tests/f14_sigkill_recovery.rs`, that test is **not stale** —
+/// it encodes the 2026-07-16 side of a live disagreement. Read ADR 0003 §7 before
+/// re-pointing or deleting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum RecoveryConfidentialError {
     #[error(
