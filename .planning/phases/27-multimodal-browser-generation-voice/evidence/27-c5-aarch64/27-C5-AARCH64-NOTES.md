@@ -88,8 +88,67 @@ The harness `scripts/f27-packaged-smoke.py` already carries its own falsifier:
 I must re-establish BOTH directions **on aarch64 itself**, not inherit them from x86_64 —
 otherwise my aarch64 run has no control at all. Recorded as a TODO until done.
 
-## 6. Log
+## 6. RESULT — `aarch64-unknown-linux-gnu` = **8 PASS / 1 RED / 0 NOT MEASURED**
+
+**First execution of this artifact in the project's history.** Byte-identical grade to the
+three platforms already recorded.
+
+- Artifact: `wayland-core-v0.12.25-aarch64-unknown-linux-gnu.tar.gz`, published release
+  `v0.12.25`.
+- **Digest verified against the published `wayland-core-checksums.txt`:**
+  `214bc7f87052b3bfb2e00cf1637223217e4c15e0ec84435b54918fdc23518380` — matches
+  (`archive-digest-verification.txt`). The other two aarch64 archives were verified in the
+  same capture and also match.
+- Embedded build provenance read out of the binary itself: `source 61b79c4`.
+- Host: **linux/arm64 guest on this Apple Silicon Mac** under Docker Desktop's
+  Virtualization.framework, `ubuntu:24.04` + `libdbus-1-3` + `libseccomp2` + `python3 3.12.3`,
+  glibc 2.39.
+- Counts read back from `--status-file` by a **separate** call, not from an exit status:
+  `WLRC=0 PASS=8 FAIL=1 NOT_MEASURED=0 UNEXPECTED_RED=` then `WLDONE`.
+- `total=9` — **nine probes ran; zero were skipped.** No NOT-MEASURED cell inside the run.
+
+### This is virtualization, not emulation — and I measured it rather than asserting it
+
+`host-arm64-guest-nativeness.txt`:
+
+- `uname -m` = `aarch64`, kernel `6.12.76-linuxkit`.
+- **`/proc/sys/fs/binfmt_misc` is not even mounted** — there is therefore *no* registered
+  cross-architecture interpreter of any kind in the guest. A qemu-user setup requires a
+  binfmt handler; there is none, so nothing is translating instructions.
+- `/proc/cpuinfo` reports **`CPU implementer: 0x61` (Apple)** with `paca`/`pacg` (ARMv8.3
+  pointer authentication), `jscvt`, `bf16`, `i8mm`, `ebf16` — the Apple Silicon feature set.
+  qemu's TCG CPU does not report implementer 0x61 or that feature vector.
+
+So the ARM64 instructions in the release binary are being executed by Apple ARM cores.
+**I am labelling this "real aarch64 hardware, virtualized guest OS" and not "bare metal",**
+and it is emphatically not the qemu path that `release.yml` deleted.
+
+## 7. A finding I nearly reported and then refuted with a control
+
+The binary **fails to load on Ubuntu 22.04** (`linux-aarch64-ldd-ubuntu2204.txt`):
+
+```
+/bin-under-test/wayland-core: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
+/bin-under-test/wayland-core: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+libdbus-1.so.3 => not found
+```
+
+My first read was "the aarch64 build has a higher glibc floor than x86_64, and nobody noticed
+because it is never executed." **That is false.** I ran the same `readelf -V` extraction over
+BOTH published Linux binaries in one capture (`glibc-floor-differential.txt`): the maximum
+required version is `GLIBC_2.39` for **both** `aarch64-unknown-linux-gnu` and
+`x86_64-unknown-linux-gnu`. The floor is a project-wide property, not an aarch64 regression.
+
+Instrument controls in that same capture: known-positive `GLIBC_2.17` → **91** hits;
+known-negative `GLIBC_9.99` → **0** hits. The grep was alive in both directions.
+
+**What survives as a real (non-aarch64) note:** every Linux release artifact requires
+glibc >= 2.39, i.e. Ubuntu 24.04 / Debian 13 or newer. Ubuntu 22.04 LTS is supported until
+2027 and cannot run either binary. Recording it; it is out of this lane's scope to fix.
+
+## 8. Log
 
 - Notes committed before any measurement, per §6b-i.
+- `aarch64-unknown-linux-gnu` smoked: 8 PASS / 1 RED. Evidence committed.
 </content>
 </invoke>

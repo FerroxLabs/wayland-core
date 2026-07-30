@@ -1,0 +1,20 @@
+[        PASS] version_shape: matched `wayland-core <semver>`
+[        PASS] build_provenance: embedded source SHA 61b79c4
+[        PASS] profile_isolation_holds: config path resolved inside the isolated home
+[        PASS] builtin_generation_refuses_without_credential: rc=1, named the missing credential, wrote no file
+[        PASS] builtin_generation_validates_input: rc=1, named the validation rule
+[        PASS] web_fetch_refuses_without_credential: rc=1, named the missing credential
+[        PASS] mcp_registry_discovery: 3 tools: ['Glob', 'Grep', 'Read']
+[        PASS] host_protocol_honest_init_failure: one `error`/`init_failed` frame, rc=1, retryable=False
+[        FAIL] ollama_hint_is_honest: followed the engine's own instruction verbatim and it still failed with MissingApiKey -- the advertised credential-free path does not exist
+
+COUNTS total=9 pass=8 fail=1 not_measured=0
+UNEXPECTED_RED=[]
+docker_run_rc=0
+=== status file read back by a SEPARATE call ===
+WLRC=0
+PASS=8
+FAIL=1
+NOT_MEASURED=0
+UNEXPECTED_RED=
+WLDONE

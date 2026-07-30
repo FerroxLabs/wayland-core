@@ -1,0 +1,111 @@
+{
+  "binary": "/bin-under-test/wayland-core",
+  "platform": {
+    "system": "Linux",
+    "release": "6.12.76-linuxkit",
+    "machine": "aarch64",
+    "python": "3.12.3"
+  },
+  "counts": {
+    "total": 9,
+    "pass": 8,
+    "fail": 1,
+    "not_measured": 0
+  },
+  "expected_red": [
+    "ollama_hint_is_honest"
+  ],
+  "unexpected_red": [],
+  "probes": [
+    {
+      "id": "version_shape",
+      "criterion": "C5",
+      "what": "packaged binary reports a SemVer identity",
+      "grade": "PASS",
+      "why": "matched `wayland-core <semver>`",
+      "rc": 0,
+      "stdout_head": "wayland-core 0.12.25\n",
+      "stderr_head": ""
+    },
+    {
+      "id": "build_provenance",
+      "criterion": "C5",
+      "what": "packaged binary names the source it was built from",
+      "grade": "PASS",
+      "why": "embedded source SHA 61b79c4",
+      "rc": 0,
+      "stdout_head": "wayland-core 0.12.25 (source 61b79c4)\n",
+      "stderr_head": ""
+    },
+    {
+      "id": "profile_isolation_holds",
+      "criterion": "C5",
+      "what": "WAYLAND_HOME confines config resolution to the isolated profile",
+      "grade": "PASS",
+      "why": "config path resolved inside the isolated home",
+      "rc": 0,
+      "stdout_head": "/tmp/f27-smoke-home-2u3d3w99/config.toml\n",
+      "stderr_head": ""
+    },
+    {
+      "id": "builtin_generation_refuses_without_credential",
+      "criterion": "C3",
+      "what": "built-in image generation with no credential refuses loudly and writes no file",
+      "grade": "PASS",
+      "why": "rc=1, named the missing credential, wrote no file",
+      "rc": 1,
+      "stdout_head": "",
+      "stderr_head": "wayland-core image: no Flux API key (set --api-key, $FLUX_API_KEY, or [providers.flux-router] in config): no Flux API key found\n"
+    },
+    {
+      "id": "builtin_generation_validates_input",
+      "criterion": "C3",
+      "what": "built-in image generation rejects an empty prompt before any network call",
+      "grade": "PASS",
+      "why": "rc=1, named the validation rule",
+      "rc": 1,
+      "stdout_head": "",
+      "stderr_head": "wayland-core image: image: --prompt must be non-empty\n"
+    },
+    {
+      "id": "web_fetch_refuses_without_credential",
+      "criterion": "C3",
+      "what": "built-in web fetch with no credential refuses loudly",
+      "grade": "PASS",
+      "why": "rc=1, named the missing credential",
+      "rc": 1,
+      "stdout_head": "",
+      "stderr_head": "wayland-core fetch: no Flux API key (set --api-key, $FLUX_API_KEY, or [providers.flux-router] in config): no Flux API key found\n"
+    },
+    {
+      "id": "mcp_registry_discovery",
+      "criterion": "C3",
+      "what": "the tool registry enumerates over MCP stdio with no credential",
+      "grade": "PASS",
+      "why": "3 tools: ['Glob', 'Grep', 'Read']",
+      "rc": 0,
+      "stdout_head": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{\"tools\":{\"listChanged\":false}},\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{\"name\":\"wcore-mcp\",\"version\":\"0.12.25\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"description\":\"Reads a file from the local filesystem. Returns content with line numbers.\\n\\nUsage:\\n- The file_path parameter must be an absolute path, not a relative path.\\n- By default, it reads the entire file. Use offset and limit for partial reads on large files.\\n- To read just one definition from a large Rust/TypeScript/JavaScript file, pass symbol=\\\"name\\\" (a function, struct,",
+      "stderr_head": ""
+    },
+    {
+      "id": "host_protocol_honest_init_failure",
+      "criterion": "C1",
+      "what": "the host protocol emits one structured error and stops when it cannot start",
+      "grade": "PASS",
+      "why": "one `error`/`init_failed` frame, rc=1, retryable=False",
+      "rc": 1,
+      "stdout_head": "{\"type\":\"error\",\"error\":{\"code\":\"init_failed\",\"message\":\"Engine failed to start during init: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).\\nProvider 'anthropic' requires an API key. To use a LOCAL model with Ollama, select a model id prefixed with `ollama:` (e.g. `ollama:qwen3-coder:30b`) \u2014 no API key is needed. Otherwise add a key via onboarding or set ANTHROPIC_API_KEY / OPENAI_API_KEY.\",\"retryable\":false}}\n",
+      "stderr_head": "warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/f27-smoke-home-2u3d3w99/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor \u2014 preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles \u2014 re-enter them for this profile.\nError: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).\n"
+    },
+    {
+      "id": "ollama_hint_is_honest",
+      "criterion": "C2",
+      "what": "the engine's own no-credential remediation instruction actually works",
+      "grade": "FAIL",
+      "why": "followed the engine's own instruction verbatim and it still failed with MissingApiKey -- the advertised credential-free path does not exist",
+      "rc": 1,
+      "stdout_head": "{\"type\":\"error\",\"error\":{\"code\":\"init_failed\",\"message\":\"Engine failed to start during init: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).\\nProvider 'anthropic' requires an API key. To use a LOCAL model with Ollama, select a model id prefixed with `ollama:` (e.g. `ollama:qwen3-coder:30b`) \u2014 no API key is needed. Otherwise add a key via onboarding or set ANTHROPIC_API_KEY / OPENAI_API_KEY.\",\"retryable\":false}}\n",
+      "stderr_head": "warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/f27-smoke-home-2u3d3w99/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor \u2014 preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles \u2014 re-enter them for this profile.\nError: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).\n"
+    }
+  ]
+}
