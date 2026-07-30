@@ -491,6 +491,35 @@ fn every_protocol_event_variant_is_modelled_or_declared_deferred() {
 
     let deferred = String::from_utf8(generated_artifacts().unwrap()["DEFERRED.md"].clone())
         .expect("DEFERRED.md must be UTF-8");
+    // A DECLARATION is a Markdown list item, not any mention. Mutation testing caught
+    // this: deleting `- ``workspace_policy``` from DEFERRED left the gate GREEN,
+    // because the surrounding prose happens to say "``workspace_policy`` is the one to
+    // model first" and a substring search accepted that as a declaration. Prose drifts
+    // and gets reworded; a list item is a deliberate entry. Requiring the list form is
+    // what makes deleting an entry actually redden this gate.
+    let declared = deferred
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("- ")
+                .and_then(|item| item.trim().strip_prefix('`'))
+                .and_then(|item| item.strip_suffix('`'))
+                .filter(|item| !item.contains('`'))
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+
+    // Both directions on the list-item extractor itself, before anything trusts it.
+    assert!(
+        declared.contains("ordinary_turn_tool_replay_reducer"),
+        "the DEFERRED list-item extractor found none of the pre-existing entries, so \
+         every `declared` lookup below would be a free FAIL"
+    );
+    assert!(
+        !declared.contains("ready"),
+        "the extractor reports `ready` as deferred, so every lookup below would be a \
+         free PASS"
+    );
 
     let desktop = manifest["events"]
         .as_array()
@@ -511,7 +540,7 @@ fn every_protocol_event_variant_is_modelled_or_declared_deferred() {
         if modelled {
             continue;
         }
-        if deferred.contains(&format!("`{wire_type}`")) {
+        if declared.contains(&wire_type) {
             continue;
         }
         unmodelled.push(wire_type);
