@@ -143,6 +143,30 @@ audit:
 deny:
     vx cargo deny --manifest-path Cargo.toml check
 
+# Re-derive every advisory suppression's parent trace from Cargo.lock and fail
+# when the documented trace disagrees with the real graph (F29-02-H1).
+#
+# `audit` and `deny` above answer "is this advisory muted?". Neither checks
+# whether the JUSTIFICATION for muting it is true. That is the gap F29-02-H1
+# came through: `.cargo/audit.toml` silenced RUSTSEC-2026-0194/0195 on a stated
+# "sole path" of quick-xml <- plist <- syntect <- wcore-cli when the lockfile had
+# THREE direct parent edges. The reachability argument was correct about the path
+# it named — and that was the only safe one of the three. 0194 was reachable from
+# a user-supplied .xlsx: calamine 0.26.1's `next_cell()` calls
+# `BytesStart::attributes()` with the default duplicate check on.
+#
+# It is not a one-off. Two more traces were found wrong by hand on 2026-07-29:
+# `paste` named ratatui as a puller (false) and omitted the tokenizers root, and
+# `rustls-pemfile` claimed "only via bollard", naming one of two direct edges.
+# Three instances, three human re-derivations. This makes it mechanical.
+#
+# Runs the self-test first so the gate is proved able to fail before it is
+# trusted to pass, and prints SUPPRESSIONS_EXAMINED so a run that checked
+# nothing is distinguishable from a run that checked everything.
+verify-suppressions:
+    python3 scripts/verify-suppression-traces.py --self-test
+    python3 scripts/verify-suppression-traces.py
+
 # ── Coverage ──────────────────────────────────────────────────────────────
 coverage:
     vx cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info
@@ -171,7 +195,10 @@ _auto-commit-fixes:
 # ── All checks (mirrors CI exactly) ───────────────────────────────────────
 # `deny` added 2026-07-29 (lane 29-deny) — see the `deny` recipe above for why
 # it was held out until the verdict went green.
-check-all: fmt-check lint test-ci hakari-verify audit deny
+# `verify-suppressions` added 2026-07-30 (lane f29-h1-advisories): audit and deny
+# check whether an advisory is muted; this checks whether the stated reason for
+# muting it is TRUE against the real graph. See the recipe above.
+check-all: fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
