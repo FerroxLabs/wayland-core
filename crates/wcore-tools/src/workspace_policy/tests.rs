@@ -109,7 +109,7 @@ fn session_capability_grant_refreshes_secret_deny_for_new_read_root() {
     let policy = WorkspacePolicy::trusted_local(workspace.path());
     assert!(
         !policy
-            .secret_deny_paths()
+            .secret_deny_paths_dynamic()
             .contains(&std::fs::canonicalize(&credential).unwrap())
     );
     policy.grant_session_capability(&executable).unwrap();
@@ -281,7 +281,7 @@ fn contained_includes_project_env_excludes_main_rs() {
     std::fs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
 
     let p = WorkspacePolicy::contained(root);
-    let deny = p.secret_deny_paths();
+    let deny = p.secret_deny_paths_dynamic();
 
     let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
     assert!(
@@ -305,7 +305,7 @@ fn trusted_excludes_project_env() {
     std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
 
     let p = WorkspacePolicy::trusted_local(root);
-    let deny = p.secret_deny_paths();
+    let deny = p.secret_deny_paths_dynamic();
 
     let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
     assert!(
@@ -334,12 +334,14 @@ fn trusted_denies_wayland_profile_credentials() {
     // in this binary, so this mutation cannot race another.
     unsafe { std::env::set_var("WAYLAND_HOME", &wh) };
     let p = WorkspacePolicy::trusted_local(root);
-    // SAFETY: serial test; restore prior value (deny is already computed).
+    // The deny list is resolved on demand (it reads `WAYLAND_HOME` at call
+    // time), so it must be materialized BEFORE the env var is restored.
+    let deny = p.secret_deny_paths_dynamic();
+    // SAFETY: serial test; restore prior value.
     match &prev {
         Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
         None => unsafe { std::env::remove_var("WAYLAND_HOME") },
     }
-    let deny = p.secret_deny_paths();
 
     let cred = std::fs::canonicalize(wh.join("credentials.toml")).unwrap();
     assert!(
@@ -358,7 +360,7 @@ fn trusted_denies_wayland_profile_credentials() {
 fn every_deny_path_is_absolute() {
     let dir = tempfile::tempdir().unwrap();
     let p = WorkspacePolicy::contained(dir.path());
-    for path in p.secret_deny_paths() {
+    for path in p.secret_deny_paths_dynamic() {
         assert!(path.is_absolute(), "deny path must be absolute: {path:?}");
     }
 }
@@ -377,7 +379,7 @@ fn contained_symlink_to_env_is_denied() {
     std::os::unix::fs::symlink(".env", root.join("notes.txt")).unwrap();
 
     let p = WorkspacePolicy::contained(root);
-    let deny = p.secret_deny_paths();
+    let deny = p.secret_deny_paths_dynamic();
 
     // canonicalize(notes.txt) resolves to canonicalize(.env)
     let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
@@ -404,15 +406,15 @@ fn with_project_secret_deny_denies_project_env_for_bash() {
 
     let local = WorkspacePolicy::trusted_local(root);
     assert!(
-        !local.secret_deny_paths().contains(&env_canon),
+        !local.secret_deny_paths_dynamic().contains(&env_canon),
         "local keyboard session must stay EXEMPT (may read own .env)"
     );
 
     let remote = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
     assert!(
-        remote.secret_deny_paths().contains(&env_canon),
+        remote.secret_deny_paths_dynamic().contains(&env_canon),
         "Full/remote session must deny project .env; deny={:?}",
-        remote.secret_deny_paths()
+        remote.secret_deny_paths_dynamic()
     );
 }
 
@@ -475,13 +477,11 @@ fn with_project_secret_deny_is_idempotent() {
 
     let once = WorkspacePolicy::trusted_local(root)
         .with_project_secret_deny()
-        .secret_deny_paths()
-        .to_vec();
+        .secret_deny_paths_dynamic();
     let twice = WorkspacePolicy::trusted_local(root)
         .with_project_secret_deny()
         .with_project_secret_deny()
-        .secret_deny_paths()
-        .to_vec();
+        .secret_deny_paths_dynamic();
     assert_eq!(once, twice, "double-apply must not duplicate deny entries");
 }
 
@@ -512,10 +512,17 @@ fn secret_read_deny_required_tracks_project_secret_denial() {
 
 // ── #234: Bash OS-deny recomputed per-exec (post-bootstrap TOCTOU) ─────────
 
-/// #234 core: a Full/remote policy denies a secret CREATED AFTER
-/// construction via `secret_deny_paths_dynamic()`, while the frozen
-/// `secret_deny_paths()` (what `bash.rs` used before) MISSES it — proving the
-/// dynamic re-walk is what closes the `Bash cat terraform.tfstate` gap.
+/// #234 core: a Full/remote policy denies a secret CREATED AFTER construction
+/// via `secret_deny_paths_dynamic()` — the `Bash cat terraform.tfstate` gap.
+///
+/// This test used to also assert that the frozen construction-time
+/// `secret_deny_paths()` MISSED these files, as the contrast that motivated
+/// #234. That half is gone because the frozen list itself is gone: it had no
+/// production reader left (only this accessor's own tests), and keeping a
+/// stale `pub` deny-list next to the live one invited a future caller to pick
+/// the weaker of the two. Deleting it also took a full recursive no-prune walk
+/// of the workspace off the TUI boot path. The surviving half is the one that
+/// describes enforcement.
 #[test]
 fn dynamic_deny_catches_post_bootstrap_secret_remote() {
     let dir = tempfile::tempdir().unwrap();
@@ -530,10 +537,6 @@ fn dynamic_deny_catches_post_bootstrap_secret_remote() {
     let pem = std::fs::canonicalize(root.join("deploy.pem")).unwrap();
     let tf = std::fs::canonicalize(root.join("terraform.tfstate")).unwrap();
 
-    assert!(
-        !p.secret_deny_paths().contains(&pem) && !p.secret_deny_paths().contains(&tf),
-        "frozen list must MISS post-bootstrap secrets (that is the #234 gap)"
-    );
     let dynamic = p.secret_deny_paths_dynamic();
     assert!(
         dynamic.contains(&pem),
@@ -572,10 +575,17 @@ fn dynamic_deny_local_keyboard_unchanged() {
     let root = dir.path();
     let p = WorkspacePolicy::trusted_local(root);
     std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
-    assert_eq!(
-        p.secret_deny_paths_dynamic(),
-        p.secret_deny_paths().to_vec(),
-        "local keyboard session stays exempt — no dynamic walk"
+    // No project walk for this posture: nothing under the workspace root may
+    // appear in the deny list at all. (This used to be phrased as "equals the
+    // frozen list"; the frozen list is gone, so it is now stated directly.)
+    let under_root: Vec<_> = p
+        .secret_deny_paths_dynamic()
+        .into_iter()
+        .filter(|path| path.starts_with(root))
+        .collect();
+    assert!(
+        under_root.is_empty(),
+        "local keyboard session stays exempt — no project walk; got {under_root:?}"
     );
     let env = std::fs::canonicalize(root.join(".env")).unwrap();
     assert!(
@@ -648,12 +658,6 @@ fn contained_denies_secret_inside_machine_dirs() {
     std::fs::write(root.join("node_modules").join("v").join("id.pem"), b"k").unwrap();
     let p = WorkspacePolicy::contained(root);
     let secret = std::fs::canonicalize(root.join("node_modules").join("v").join("id.pem")).unwrap();
-    // Both the frozen construction-time list and the dynamic list must cover it.
-    assert!(
-        p.secret_deny_paths().contains(&secret),
-        "Contained construction-time deny must cover node_modules secret; got {:?}",
-        p.secret_deny_paths()
-    );
     assert!(
         p.secret_deny_paths_dynamic().contains(&secret),
         "Contained dynamic deny must cover node_modules secret; got {:?}",
