@@ -108,11 +108,50 @@ must not touch that arm. Quadrant 2 of the four-way control covers it.
 
 ---
 
+## M5 — the fix, and proof each part of it is load-bearing
+
+Built at `0ee1e1e7`, hetzner worktree `/root/wayland-chtruth`, SHA asserted
+`0ee1e1e7e804c876419d9ec260cb0b9d399641ea` after checkout (LANE-BRIEF §2a).
+
+Three production hunks:
+
+1. `wcore-channel-matrix/src/sync.rs` — classify a 401/403 and publish `AuthExpired`.
+2. `wcore-channels/src/manager.rs` — drain the inbox BEFORE judging the task dead.
+3. `wcore-channels/src/manager.rs` — an auth rejection ends the poll loop.
+
+### Gates must be able to fail (§3.2) — and to pass (§3b-iii). Both were run.
+
+Each hunk was reverted independently *with the tests left untouched* and the suite re-run.
+Ablation is by exact-string replacement that **asserts exactly one occurrence** and aborts
+otherwise, so a silently-missed revert cannot masquerade as a green.
+
+| run | wcore-channel-matrix | wcore-channels | test that reddened | symptom |
+|---|---|---|---|---|
+| **fixed** | 45 passed / 0 failed | 122 passed / 0 failed | — | — |
+| all three reverted | **44 / 1 FAILED** | **121 / 1 FAILED** | `a_401_publishes_auth_expired_and_stops_the_loop` + `a_rejected_credential_reports_unauthenticated_and_stays_there` | *"a rejected token is terminal: the loop must exit, not back off forever"*; then `left: Degraded, right: Unauthenticated` |
+| only hunk 2 reverted | 45 / 0 | **121 / 1 FAILED** | `a_rejected_credential…` | *"supervised reconnect must NOT re-start a channel whose credential was rejected"* — the event was stranded in the inbox |
+| only hunk 3 reverted | 45 / 0 | **121 / 1 FAILED** | `a_rejected_credential…` | drifted back to `Degraded` |
+
+Hunk 1 is isolated by the same table: the matrix 401 test passes **iff** hunk 1 is present
+(45/45 in both single-manager-hunk runs, 44/45 when hunk 1 is gone).
+
+**The controls stayed GREEN in every ablation** — that is what makes the reds meaningful rather
+than a suite that simply collapses. `a_500_is_not_an_auth_rejection_and_does_not_stop_the_loop`,
+`a_healthy_sync_publishes_no_auth_expired`, `an_absent_credential_still_reports_disconnected_naming_the_handle`,
+`a_working_channel_is_never_reported_unauthenticated` and
+`a_silently_dead_task_is_degraded_not_unauthenticated` all passed in all four runs.
+
+All counts read from logs `scp`'d off hetzner and opened with the Read tool — never a Bash-side
+counter (see M0). Every `test result` line carries `0 ignored; 0 filtered out`, and all nine new
+tests were confirmed present **by name** in the passing run, against §3.2's zero-tests-exit-0 trap.
+
 ## Status
 
 - [x] M0 instrument check
 - [x] M1 premise re-verified (partially false — reported, not papered over)
 - [x] M2 root cause located in source
 - [x] M3 two blocking interactions found before coding
-- [ ] fix
-- [ ] four-quadrant control
+- [x] M4/M5 fix + ablation proof (quadrants 1-4 at unit level, both directions)
+- [ ] exit-code decision
+- [ ] probe's unsupportable claim
+- [ ] live 401 proof
