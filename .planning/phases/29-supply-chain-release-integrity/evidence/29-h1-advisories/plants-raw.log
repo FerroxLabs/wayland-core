@@ -1,0 +1,109 @@
+############ PLANT A: can cargo audit still SEE a real advisory? ############
+# Known-positive: the PRE-FIX lockfile, which contains quick-xml 0.31.0 + 0.39.4.
+prefix lock sha: 60f35e737989acef4b650f1164fb6674594291e2b4a53dec8db27958908738ed  /tmp/f29h1-prefix.lock
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1173 security advisories (from /root/.cargo/advisory-db)
+    Updating crates.io index
+    Scanning /tmp/f29h1-prefix.lock for vulnerabilities (1017 crate dependencies)
+Crate:     quick-xml
+Version:   0.31.0
+Title:     Unbounded namespace-declaration allocation in `NsReader` enables memory-exhaustion denial of service
+Date:      2026-06-29
+ID:        RUSTSEC-2026-0195
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0195
+Severity:  7.5 (high)
+Solution:  Upgrade to >=0.41.0
+
+Crate:     quick-xml
+Version:   0.31.0
+Title:     Quadratic run time when checking a start tag for duplicate attribute names
+Date:      2026-06-29
+ID:        RUSTSEC-2026-0194
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0194
+Severity:  7.5 (high)
+Solution:  Upgrade to >=0.41.0
+
+Crate:     quick-xml
+Version:   0.39.4
+Title:     Unbounded namespace-declaration allocation in `NsReader` enables memory-exhaustion denial of service
+Date:      2026-06-29
+ID:        RUSTSEC-2026-0195
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0195
+Severity:  7.5 (high)
+Solution:  Upgrade to >=0.41.0
+
+Crate:     quick-xml
+Version:   0.39.4
+Title:     Quadratic run time when checking a start tag for duplicate attribute names
+Date:      2026-06-29
+ID:        RUSTSEC-2026-0194
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0194
+Title:     Multiple soundness issues
+Date:      2023-09-03
+ID:        RUSTSEC-2023-0086
+URL:       https://rustsec.org/advisories/RUSTSEC-2023-0086
+
+error: 4 vulnerabilities found!
+warning: 7 allowed warnings found
+RC_PLANT_A=1
+
+############ PLANT B: can cargo deny FAIL? ############
+plant applied
+error[unmaintained]: `ttf-parser` is unmaintained
+    ┌─ /root/wayland-f29h1/Cargo.lock:714:1
+    │
+714 │ ttf-parser 0.25.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ unmaintained advisory detected
+                      │   └── wcore-agent v0.12.25 (*)
+                      └── wcore-skills v0.12.25
+                          ├── wcore-agent v0.12.25 (*)
+                          ├── wcore-cli v0.12.25 (*)
+                          ├── wcore-eval v0.12.25
+                          │   └── (dev) wcore-evolve v0.12.25
+                          │       └── wcore-agent v0.12.25 (*)
+                          └── wcore-evolve v0.12.25 (*)
+
+advisories FAILED
+RC_PLANT_B=1
+restoredB-clean=YES
+
+############ PLANT C: does MY gate catch drift in the REAL files? ############
+tampered: rustls-pemfile trace now claims ONLY bollard (the real historic defect)
+lockfile packages parsed: 1029  (parser self-test: OK)
+  .github/osv-scanner.toml: 7 suppression(s)
+  deny.toml: 5 suppression(s)
+SUPPRESSIONS_EXAMINED=12
+SUPPRESSIONS_FAILED=1
+
+FAIL [C2-PARENTS] .github/osv-scanner.toml  RUSTSEC-2025-0134
+      rustls-pemfile@2.2.0: declared ['bollard'] but graph has ['bollard', 'rustls-native-certs'] — UNDOCUMENTED parents ['rustls-native-certs']
+
+verify-suppression-traces: FAILED (1 of 12)
+RC_PLANT_C=1
+
+############ PLANT D: stale mute (crate gone from lockfile) ############
+lockfile packages parsed: 1029  (parser self-test: OK)
+  .github/osv-scanner.toml: 7 suppression(s)
+  deny.toml: 5 suppression(s)
+SUPPRESSIONS_EXAMINED=12
+SUPPRESSIONS_FAILED=1
+
+FAIL [C1-STALE] deny.toml  RUSTSEC-2026-0192
+      ttf-parser@0.99.0 is not in Cargo.lock — delete this suppression or correct the version
+
+verify-suppression-traces: FAILED (1 of 12)
+RC_PLANT_D=1
+
+############ PLANT E: expiry actually bites ############
+/tmp/f29h1-plants.log:prefix lock sha: 60f35e737989acef4b650f1164fb6674594291e2b4a53dec8db27958908738ed  /tmp/f29h1-prefix.lock
+/tmp/f29h1-plants.log:RC_PLANT_A=1
+/tmp/f29h1-plants.log:advisories FAILED
+/tmp/f29h1-plants.log:RC_PLANT_B=1
+/tmp/f29h1-plants.log:restoredB-clean=YES
+/tmp/f29h1-plants.log:RC_PLANT_C=1
+/tmp/f29h1-plants.log:RC_PLANT_D=1
+/tmp/f29h1-plants.log:RC_PLANT_E=1
+/tmp/f29h1-plants.log:tree-clean=YES
+/tmp/f29h1-plants.log:final Cargo.lock sha: 200e0d8d54a070e3b49d71a80832e1f20d39ad0007268e2811f38b50338b7995  Cargo.lock
+/tmp/f29h1-plants.log:RC_FINAL_GREEN=0
+/tmp/f29h1-lane-gates.log:advisories ok, bans ok, licenses ok, sources ok
