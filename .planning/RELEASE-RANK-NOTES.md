@@ -15,7 +15,40 @@ can pass. All load-bearing greps via `/usr/bin/grep`; all git via `/usr/bin/git`
 
 ---
 
-## Status: MEASURED — §3 rewritten
+## Status: COMPLETE — §3 rewritten, every reported number re-derived
+
+## Re-derivation of every reported number (orchestrator correction, 2026-07-30)
+
+The orchestrator's `rtk` guidance was upgraded mid-lane: the absolute path is **not** sufficient,
+because `git diff --numstat` was measured fabricating a machine-readable count and
+`git show | grep -c` returned 0 for a present string, both under `/usr/bin/`. Since this lane's
+whole deliverable is counts, **every number was re-derived through a file+Read capture** with a
+known-positive and a known-negative in the same capture (`cap44`, `cap45`).
+
+| # | Number | Reported | Re-derived | Changed? |
+|---|---|---|---|---|
+| N1 | `media_cost.rs` size | 27.0 KB (from `ls`, which rtk rewrites) | **27,696 B** | no |
+| N2 | 3 journey logs + 3 receipts | 530 / 532 / 595 · 10530 / 11022 / 13973 | **identical** | no |
+| N3 | channel adapters | 10 | **10** | no |
+| N4 | `supports_outbound_idempotency` overrides | 3 (Slack, Matrix, Discord) | **3** | no |
+| N5 | egress regression tests | 8 tests, 0 ignored | **8 / 0** | no |
+| N6 | panel prompt bytes | 6,359 | **6,372** | **YES** |
+| T1 | `wcore-cron event_producer` | 11 passed / 0 ignored / 0 filtered | **identical** | no |
+| T2 | `wcore-channel-matrix idempotency` | 1 passed / 0 ignored / 35 filtered | **identical** | no |
+| T3 | `wcore-channel-discord idempotency` | 1 passed / 0 ignored / 57 filtered | **identical** | no |
+| T4 | `f24_c3_h5_reload_policies_test` | 1 passed / 0 ignored / 0 filtered | **identical** | no |
+
+**One number changed and it is not load-bearing: N6, 6,359 → 6,372 bytes.** The original came from
+`${#Q}` on a shell variable built by `$(cat …)`, which strips trailing newlines; `wc -c` on the file
+is authoritative. It affects nothing but the panel-integrity note. **Every load-bearing figure —
+the 3-of-10 tally, the adapter count, all four executed test results — re-derived identically.**
+
+**The most consequential re-derivation was not in that table.** See `BL-LOCKFILE-DRIFT` below: my
+first `--locked` measurement returned RC=0 and was **invalid**, because my own earlier unlocked
+`cargo test` runs had already rewritten `Cargo.lock` in that worktree. The correct answer is
+**RC=101**. That was caught only by checking `git status --porcelain Cargo.lock` and seeing
+`M Cargo.lock`. **A build tool that repairs the thing you are about to test is a self-passing
+instrument**, and it is a new member of the standing list.
 
 ## Live verification on hetzner (NOT a source reading)
 
@@ -43,8 +76,9 @@ is asserted as **1, not 0**, which is what makes them meaningful. T1 includes
 
 ## Cross-audit panel — and ONE VOTE WAS CONTAMINATED
 
-Per LANE-BRIEF §4, with a lane-unique prompt path (`panel-Q-release-rank.txt`, 6,359 bytes, first
-and last bytes verified before dispatch) and `< /dev/null` on every member.
+Per LANE-BRIEF §4, with a lane-unique prompt path (`panel-Q-release-rank.txt`, **6,372 bytes** by
+`wc -c` — I first recorded 6,359 from `${#Q}`, which strips trailing newlines; see the re-derivation
+table above) and `< /dev/null` on every member.
 
 | Member | Vote | Independent? |
 |---|---|---|
@@ -287,6 +321,39 @@ i.e. the presence-aware treatment `lane/egress-merge-polarity` independently con
 shown the orchestrator's originally-prescribed `||` is itself defective (`security.enabled`
 defaults to `true`, so `||` breaks the operator's off switch). Graded here as **NOT YET MERGED**
 per my brief. Same for `lane/cli-danger-tiers`.
+
+### `BL-LOCKFILE-DRIFT` — the new #1 blocker, and a self-passing instrument caught in the act
+
+`crates/wcore-eval-scenarios/Cargo.toml:123` declares `serial_test.workspace = true` under
+`[dev-dependencies]`. The **committed** `Cargo.lock` omits that edge from the `wcore-eval-scenarios`
+stanza (`Cargo.lock:9828-9856`) while listing its two block-mates `wcore-mcp` and `wcore-egress`.
+
+**Both-direction control, on `hetzner-dsm` at asserted SHA `3a5cb695` (§3b-iii satisfied):**
+
+| Lock state | `cargo metadata --locked` |
+|---|---|
+| cargo-repaired (dirty) | **RC=0** — a reachable pass state |
+| committed (`git checkout -- Cargo.lock`) | **RC=101**, *"cannot update the lock file … because --locked was passed"* |
+
+`cargo check --locked -p wcore-eval-scenarios --all-targets` likewise passes only on the repaired
+lock. **`--locked` is on the release path:** `release.yml:310`; `supply-chain.yml:147, 150, 162`
+(incl. `cargo build --locked -p wcore-eval-scenarios --bin wayland-release`); `ci.yml:301, 691`.
+**Every one targets the drifted crate.**
+
+**How this nearly self-passed, and the new instrument lesson.** My first run returned **RC=0** and I
+was one keystroke from writing "backlog finding refuted". It was invalid: the four test runs I had
+done earlier *in that same worktree* were unlocked, so **cargo had already written the missing edge
+into `Cargo.lock` before I tested for its absence.** I ran the fix, then ran the test, then read the
+pass. Caught only by `git status --porcelain Cargo.lock` → `M Cargo.lock` and
+`git diff Cargo.lock` → `+ "serial_test",`.
+
+> **A build tool that repairs state as a side effect of an unrelated earlier command is a
+> self-passing instrument.** It is not on the standing list and it should be. The general form:
+> *before testing for the absence of X, assert that nothing you ran earlier could have created X.*
+> Note this also explains a local-vs-remote disagreement that looked like an `rtk` fabrication —
+> my Mac said the edge was absent, hetzner said present, at the identical SHA. Both were telling
+> the truth about different files. **Not every disagreement is a corrupted instrument; check for a
+> mutated input first.**
 
 ### Other CAN SHIP OPEN rows re-checked — no adverse movement
 
