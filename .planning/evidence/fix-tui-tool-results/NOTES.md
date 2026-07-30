@@ -100,3 +100,65 @@ input and once as a fabricated `?` from the formatter.
 - [ ] Task 2 — 13-formatter audit table
 - [ ] Task 3 — cross-audit + contract decision
 - [ ] Task 4 — can-fail test
+
+---
+
+## T1 — live repro: the 12-formatter audit result
+
+Full table in the SUMMARY. Headline: **11 of 12 formatters mismatch the payload their
+real tool produces.** Only `generic` (shape-agnostic) does not, and it still fabricates
+`completed in 0.0s`. Field sweep with known-positive controls in `field-sweep.txt`.
+
+## T1b — the live pty harness, and an instrument defect I created and repaired
+
+`ttr-drive.sh`, derived from the merged `fix-tui-first-message` lane's harness.
+
+**Instrument defect found on the first BEFORE run and repaired in-lane (§6b-ii).**
+My first `extract_card` assumed the compact widget's ONE-line shape and matched any line
+containing both `Bash(` and `·`. The path the TUI actually uses
+(`workspace.rs::push_tool_card_lines`) renders **two** lines:
+
+```
+     ● Bash({ "command": "echo LINUX_UAT_TOKEN" }) · done      <- header: has Bash( and ·
+       Ran `?` · exit 0 · 0 bytes                              <- body: the formatter summary
+```
+
+The old matcher locked onto the **header**, whose `· done` chip is correct on a broken
+build. It would have graded the defect **ABSENT on a completely unfixed binary** — a
+false green. Verified against the original UAT capture
+`.planning/evidence/uat-tui-unix/l3-tui-turn.log:226-227`.
+
+Repaired, and the self-test now carries FOUR assertions: known-positive, known-negative,
+**the old matcher would have missed it**, and **it can read a fixed build** (§3b-iii — a
+gate with no reachable pass state is as useless as one with no reachable fail state).
+
+## T1c — BLOCKER on the live repro, and a SEPARATE product defect it exposed
+
+The model will not execute the requested Bash call. Root cause measured, not guessed:
+
+`bootstrap.rs:3139` mounts a `FileWatcher` on cwd unconditionally (no config knob). The
+engine drains it per turn and bundles a synthetic user message —
+`` User edited `<path>` while I was thinking — re-read it before proceeding `` — into the
+user's turn. **The model answers that instead of the prompt.**
+
+Measured across four configurations:
+
+| cwd | config | external-edit injections | model called Bash? |
+|-----|--------|--------------------------|--------------------|
+| `/root/fixtui-scratch` | defaults | 8 | no |
+| `/root/fixtui-scratch` | `[memory] enabled=false`, `[session] enabled=false` | 2 | no |
+| `/root/fixtui-ro` (chmod 555, one pre-existing file) | same | 3 | no |
+| `/root/fixtui-scratch` via TUI + warm-up turn | same | (not captured) | no |
+
+The reported event path is the **watched directory itself** (`/root/fixtui-scratch`), not
+a file under it. That is why `watch.rs::is_wcore_internal_path` — which walks components
+looking for a `.wayland-core` / `.wayland` segment — never fires: creating
+`.wayland-core/` inside cwd bumps **cwd's own mtime**, and the event path that surfaces
+is the parent, which contains no internal-directory component.
+
+So the engine reports **its own writes** to the model as user edits, on the first turn of
+every session in a fresh directory. This is NOT this lane's defect and is NOT being fixed
+here; it is reported as a finding.
+
+Note also `[memory] enabled = false` did not stop `.wayland-core/memory/memory.db{,-wal,-shm}`
+from being created — recorded, not investigated.
