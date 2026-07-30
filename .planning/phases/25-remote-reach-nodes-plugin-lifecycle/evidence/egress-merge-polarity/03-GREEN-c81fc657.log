@@ -1,18 +1,45 @@
-MARKER_HEAD=c81fc65734da2900dc744320556a019bce3d0608
-MARKER_MERGE_LINE=4456:        enabled: global.security.enabled,
-MARKER_SEG_ONE_BEGIN
+EMP_START_AGENT
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/egress_merge_polarity_test.rs (target/debug/deps/egress_merge_polarity_test-65ba928632d3172b)
+
 running 7 tests
-test trusted_project_config_must_not_disable_the_egress_gate ... ok
-test control_operator_global_off_switch_disables_the_gate ... ok
 test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
 test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test trusted_project_config_must_not_disable_the_egress_gate ... ok
+test control_operator_global_off_switch_disables_the_gate ... ok
 test operator_off_switch_survives_a_project_silent_on_security ... ok
 test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
 test untrusted_project_config_must_not_disable_the_egress_gate ... ok
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
-MARKER_SEG_ONE_RC=0
-MARKER_SEG_TWO_BEGIN
-running 574 tests
-test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 105.20s
-MARKER_SEG_TWO_RC=0
-MARKER_ALLDONE
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EMP_RC_AGENT=0
+EMP_START_CONFIG
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+test credentials::tests::encrypted_file_wrong_passphrase_fails_unlock ... ok
+test credentials::tests::migrate_discards_orphaned_ciphertext_without_kdf ... ok
+test credentials::tests::passphrase_fd_authority_survives_provider_then_confidential_store_open ... ok
+test credentials::tests::open_store_auto_isolated_migrates_plaintext_to_vault ... ok
+test credentials::tests::migrate_merges_without_clobbering_existing_vault_keys ... ok
+test credentials::tests::open_store_encrypted_file_migrates_plaintext_once ... ok
+
+test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 105.26s
+
+EMP_RC_CONFIG=0
+EMP_START_CHECK
+warning: function `record_overwrites_so_the_surface_describes_the_LATEST_turn` should have a snake case name
+   --> crates/wcore-memory/src/activation.rs:198:8
+    |
+198 |     fn record_overwrites_so_the_surface_describes_the_LATEST_turn() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `record_overwrites_so_the_surface_describes_the_latest_turn`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `wcore-memory` (lib test) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+EMP_RC_CHECK=0
+EMP_ALLDONE
