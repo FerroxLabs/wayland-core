@@ -1,0 +1,13 @@
+### RUN 30513699696 (lane/slack-live) run-level:
+status=in_progress conclusion=null created=2026-07-30T04:22:20Z started=2026-07-30T04:22:20Z
+
+### its jobs:
+2026-07-30T04:22:20Z  2026-07-30T04:22:22Z  2026-07-30T04:26:47Z  success  GitHub Actions 1000034571  Browser live e2e (chromium) (ubuntu-latest)
+2026-07-30T04:22:20Z  2026-07-30T04:22:30Z  2026-07-30T04:55:36Z  failure  GitHub Actions 1000034570  CI (linux-containerized)
+2026-07-30T04:22:20Z  2026-07-30T04:22:22Z  2026-07-30T04:38:27Z  success  GitHub Actions 1000034573  Build (x86_64-unknown-linux-gnu)
+2026-07-30T04:22:20Z  2026-07-30T04:22:22Z  2026-07-30T04:56:59Z  success  GitHub Actions 1000034572  Build (aarch64-pc-windows-msvc)
+2026-07-30T04:22:20Z  2026-07-30T07:24:57Z  -  in_progress  SEANDESKTOP  CI (Array)
+2026-07-30T04:22:20Z  2026-07-30T04:22:27Z  2026-07-30T04:38:20Z  success  GitHub Actions 1000034574  Build (aarch64-unknown-linux-gnu)
+2026-07-30T04:22:20Z  2026-07-30T04:22:22Z  2026-07-30T04:27:02Z  success  GitHub Actions 1000034575  Eval acceptance gate (Linux, containerized)
+2026-07-30T04:22:20Z  2026-07-30T06:53:39Z  2026-07-30T07:00:59Z  success  sean-mac-arm64  Build (aarch64-apple-darwin) [self-hosted]
+2026-07-30T04:22:20Z  2026-07-30T04:22:23Z  2026-07-30T04:53:24Z  success  GitHub Actions 1000034576  Build (x86_64-pc-windows-msvc)
