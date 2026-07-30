@@ -9,37 +9,14 @@ use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
 use super::build_ssrf_safe_tool_client;
+// 27-C3. `cost_from_headers` started here and now lives in `shared.rs`: five
+// billable backends need it, and three of them were discarding
+// `resp.headers()` entirely.
+use super::shared::cost_from_headers;
 use wcore_tools::media_cost::{
-    MediaCostLedger, MediaCostRecord, MediaRateCard, MediaUnits, ReportedCost,
+    MediaAccounting, MediaCostLedger, MediaCostRecord, MediaRateCard, MediaUnits,
 };
 use wcore_tools::transcription_tools::{TranscriptionBackend, TranscriptionOutcome};
-
-/// 27-C3 (accounting). Response headers that carry a per-call dollar figure.
-///
-/// Transcription is the one media shape measured to return a real cost in a
-/// header — Phase 27 captured `x-flux-cost-usd` on a live FluxRouter
-/// transcription, while the same account's image call returned no figure in
-/// any channel. Until this backend recorded it, that number was read off the
-/// wire by nobody: `resp.headers()` was dropped on the floor.
-const COST_HEADERS: &[&str] = &["x-flux-cost-usd", "x-cost-usd", "x-openai-cost-usd"];
-
-/// Read a provider-reported cost out of the response headers.
-///
-/// Returns `None` when no header is present or the value does not parse —
-/// never a zero. An unparseable header means we do not know the cost, and
-/// "unknown" and "free" are not the same claim.
-fn cost_from_headers(headers: &reqwest::header::HeaderMap) -> Option<ReportedCost> {
-    for name in COST_HEADERS {
-        if let Some(usd) = headers
-            .get(*name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<f64>().ok())
-        {
-            return Some(ReportedCost::from_header(*name, usd));
-        }
-    }
-    None
-}
 
 /// Billable units for one transcription, read from a `verbose_json` reply.
 ///
@@ -64,13 +41,10 @@ pub struct OpenAiCompatWhisperBackend {
     endpoint: String,
     model: String,
     backend_id: &'static str,
-    /// 27-C3. Session ledger for the billable call this backend makes.
-    /// `None` by default so every existing construction site is unchanged and
-    /// behaviour is identical until a host binds one.
-    ledger: Option<Arc<MediaCostLedger>>,
-    /// Operator-configured prices. Empty by default; a transcription is
-    /// duration-billed, so a per-image card deliberately does not price it.
-    rate_card: MediaRateCard,
+    /// 27-C3. Session ledger + operator price list for the billable call this
+    /// backend makes. Unbound by default so every existing construction site is
+    /// unchanged and behaviour is identical until a host binds one.
+    accounting: MediaAccounting,
 }
 
 impl OpenAiCompatWhisperBackend {
@@ -81,33 +55,35 @@ impl OpenAiCompatWhisperBackend {
             endpoint,
             model,
             backend_id,
-            ledger: None,
-            rate_card: MediaRateCard::default(),
+            accounting: MediaAccounting::default(),
         }
+    }
+
+    /// 27-C3. Bind the session ledger and the operator price list together, so
+    /// this backend cannot end up wired for one and not the other.
+    pub fn with_accounting(mut self, accounting: MediaAccounting) -> Self {
+        self.accounting = accounting;
+        self
     }
 
     /// 27-C3. Bind a session ledger so transcription spend accumulates
     /// somewhere a host can total it. Mirrors
     /// `ImageGenerationTool::with_cost_ledger`.
     pub fn with_cost_ledger(mut self, ledger: Arc<MediaCostLedger>) -> Self {
-        self.ledger = Some(ledger);
+        self.accounting.ledger = Some(ledger);
         self
     }
 
     /// 27-C3. Bind an operator price list.
     pub fn with_rate_card(mut self, rate_card: MediaRateCard) -> Self {
-        self.rate_card = rate_card;
+        self.accounting.rate_card = rate_card;
         self
     }
 
     /// Record one billable transcription. Returns the record so a caller can
     /// assert on it without a ledger bound.
     fn account(&self, record: MediaCostRecord) -> MediaCostRecord {
-        tracing::info!(target: "media_cost", "{}", record.summary_line());
-        if let Some(ledger) = &self.ledger {
-            ledger.record(record.clone());
-        }
-        record
+        self.accounting.account(record)
     }
 
     /// Resolved request endpoint. Exposed so the resolver wiring is
@@ -265,7 +241,7 @@ impl TranscriptionBackend for OpenAiCompatWhisperBackend {
             &self.model,
             billed_units,
             reported_cost,
-            &self.rate_card,
+            &self.accounting.rate_card,
         );
 
         if transcript.is_empty() {

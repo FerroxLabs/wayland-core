@@ -39,7 +39,10 @@ use wcore_egress::EgressClient as Client;
 use wcore_config::config::Config;
 
 use super::build_ssrf_safe_tool_client;
-use super::shared::{OPENAI_API_BASE, join_openai_endpoint, openai_wire_media_base, read_env_key};
+use super::shared::{
+    OPENAI_API_BASE, cost_from_headers, join_openai_endpoint, openai_wire_media_base, read_env_key,
+};
+use wcore_tools::media_cost::{MediaAccounting, MediaCostRecord, MediaOutcome, MediaUnits};
 use wcore_tools::tts_tool::{
     TtsBackend, TtsError, TtsFormat, TtsProvider, TtsRequest, TtsResponse,
 };
@@ -116,20 +119,38 @@ pub(crate) fn openai_tts_backend_from_config(config: &Config) -> Option<OpenAiTt
 ///    never sees a tool it can't call. Doctor reports "TTS hidden:
 ///    set OPENAI_API_KEY or ELEVENLABS_API_KEY".
 pub fn build_tts_backend(config: &Config) -> Option<Arc<dyn TtsBackend>> {
+    build_tts_backend_with_accounting(config, &MediaAccounting::default())
+}
+
+/// [`build_tts_backend`], with the session cost ledger and the operator's rate
+/// card bound to whichever cloud arm resolves.
+///
+/// The **Piper arm is deliberately left unaccounted**: it synthesises locally
+/// and makes no provider call, so there is nothing billable to record. Giving
+/// it a cost record would put a `$0.00`-shaped row in the ledger for work that
+/// genuinely is free, which is a different claim from every other row there.
+pub fn build_tts_backend_with_accounting(
+    config: &Config,
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn TtsBackend>> {
     if let Some(backend) = openai_tts_backend_from_config(config) {
         tracing::info!(
             "tts: using OpenAI TTS at {} (active OpenAI-wire provider)",
             config.base_url
         );
-        return Some(Arc::new(backend));
+        return Some(Arc::new(backend.with_accounting(accounting.clone())));
     }
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
         tracing::info!("tts: using OpenAI TTS (OPENAI_API_KEY found)");
-        return Some(Arc::new(OpenAiTtsBackend::new(key)));
+        return Some(Arc::new(
+            OpenAiTtsBackend::new(key).with_accounting(accounting.clone()),
+        ));
     }
     if let Some(key) = read_env_key("ELEVENLABS_API_KEY") {
         tracing::info!("tts: using ElevenLabs (ELEVENLABS_API_KEY found)");
-        return Some(Arc::new(ElevenLabsTtsBackend::new(key)));
+        return Some(Arc::new(
+            ElevenLabsTtsBackend::new(key).with_accounting(accounting.clone()),
+        ));
     }
     #[cfg(feature = "piper_tts")]
     {
@@ -310,6 +331,8 @@ pub struct OpenAiTtsBackend {
     api_key: String,
     endpoint: String,
     model: String,
+    /// 27-C3. Ledger + operator price list. Unbound by default.
+    accounting: MediaAccounting,
 }
 
 impl OpenAiTtsBackend {
@@ -333,7 +356,14 @@ impl OpenAiTtsBackend {
             api_key,
             endpoint,
             model,
+            accounting: MediaAccounting::default(),
         }
+    }
+
+    /// 27-C3. Bind the session ledger and operator price list.
+    pub fn with_accounting(mut self, accounting: MediaAccounting) -> Self {
+        self.accounting = accounting;
+        self
     }
 
     /// Resolved request endpoint (`{base_url}/audio/speech`). Exposed so the
@@ -380,6 +410,16 @@ impl TtsBackend for OpenAiTtsBackend {
         let endpoint = self.endpoint.clone();
         let output_path = request.output_path.clone();
         let format = request.format;
+        let accounting = self.accounting.clone();
+        let model = self.model.clone();
+        // 27-C3. Speech synthesis is billed per character of input text
+        // (OpenAI publishes $15 per 1M characters). Counted locally from the
+        // text we are about to send, so unlike a token count it is always
+        // known — including on the failure paths, where it is what the
+        // operator would be charged for if the provider did bill.
+        let units = MediaUnits::text_characters(
+            u32::try_from(request.text.chars().count()).unwrap_or(u32::MAX),
+        );
 
         let inner = async move {
             let resp = client
@@ -390,9 +430,15 @@ impl TtsBackend for OpenAiTtsBackend {
                 .body(body.to_string())
                 .send()
                 .await
+                // The request never reached the provider, so nothing was
+                // billed and there is no record to make.
                 .map_err(|e| TtsError::Other(format!("openai tts request failed: {e}")))?;
 
             let status = resp.status();
+            // 27-C3: read the cost header BEFORE the body is consumed. A TTS
+            // response body is raw audio, so the header is the ONLY channel a
+            // dollar figure can arrive in for this shape.
+            let reported = cost_from_headers(resp.headers());
             if !status.is_success() {
                 // Capture rate-limit Retry-After if surfaced (R-H2 listed).
                 let retry_after = resp
@@ -406,18 +452,45 @@ impl TtsBackend for OpenAiTtsBackend {
                 if let Some(ra) = retry_after {
                     msg.push_str(&format!(" (Retry-After: {ra})"));
                 }
+                // Provider reached and the call rejected. Whether it billed is
+                // unknown, so this is recorded as billing-unknown, not $0.00.
+                accounting.account(MediaCostRecord::for_failure(
+                    "text_to_speech",
+                    "openai",
+                    &model,
+                    units.clone(),
+                    format!("http_{}", status.as_u16()),
+                ));
                 return Err(TtsError::Other(msg));
             }
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| TtsError::Other(format!("openai tts body read failed: {e}")))?;
+            let record = MediaCostRecord::for_success(
+                "text_to_speech",
+                "openai",
+                &model,
+                units.clone(),
+                reported,
+                &accounting.rate_card,
+            );
+            let bytes = resp.bytes().await.map_err(|e| {
+                // HTTP 200 — the provider synthesised the audio and billed for
+                // it; we failed to read it back.
+                accounting.account(record.clone().with_outcome(MediaOutcome::Failed {
+                    category: "body_read_failed".to_string(),
+                }));
+                TtsError::Other(format!("openai tts body read failed: {e}"))
+            })?;
             let bytes_vec = bytes.to_vec();
             if bytes_vec.is_empty() {
+                // A product-side rejection of work the provider performed and
+                // billed for, so the record keeps its resolved price.
+                accounting.account(record.with_outcome(MediaOutcome::Failed {
+                    category: "empty_audio_body".to_string(),
+                }));
                 return Err(TtsError::Other(
                     "openai tts returned empty audio body".to_string(),
                 ));
             }
+            accounting.account(record);
             atomic_write(&parent, &output_path, &bytes_vec)?;
             Ok::<_, TtsError>(TtsResponse {
                 path: output_path,
@@ -448,6 +521,8 @@ pub struct ElevenLabsTtsBackend {
     api_key: String,
     endpoint_base: String,
     model_id: String,
+    /// 27-C3. Ledger + operator price list. Unbound by default.
+    accounting: MediaAccounting,
 }
 
 impl ElevenLabsTtsBackend {
@@ -467,7 +542,14 @@ impl ElevenLabsTtsBackend {
             api_key,
             endpoint_base,
             model_id,
+            accounting: MediaAccounting::default(),
         }
+    }
+
+    /// 27-C3. Bind the session ledger and operator price list.
+    pub fn with_accounting(mut self, accounting: MediaAccounting) -> Self {
+        self.accounting = accounting;
+        self
     }
 }
 
@@ -489,6 +571,13 @@ impl TtsBackend for ElevenLabsTtsBackend {
         let api_key = self.api_key.clone();
         let output_path = request.output_path.clone();
         let format = request.format;
+        let accounting = self.accounting.clone();
+        let model_id = self.model_id.clone();
+        // 27-C3. ElevenLabs bills per character of input text, same basis as
+        // OpenAI speech.
+        let units = MediaUnits::text_characters(
+            u32::try_from(request.text.chars().count()).unwrap_or(u32::MAX),
+        );
 
         let inner = async move {
             let resp = client
@@ -503,6 +592,8 @@ impl TtsBackend for ElevenLabsTtsBackend {
                 .map_err(|e| TtsError::Other(format!("elevenlabs tts request failed: {e}")))?;
 
             let status = resp.status();
+            // 27-C3: header is the only cost channel — the body is audio.
+            let reported = cost_from_headers(resp.headers());
             if !status.is_success() {
                 let retry_after = resp
                     .headers()
@@ -518,18 +609,39 @@ impl TtsBackend for ElevenLabsTtsBackend {
                 if let Some(ra) = retry_after {
                     msg.push_str(&format!(" (Retry-After: {ra})"));
                 }
+                accounting.account(MediaCostRecord::for_failure(
+                    "text_to_speech",
+                    "elevenlabs",
+                    &model_id,
+                    units.clone(),
+                    format!("http_{}", status.as_u16()),
+                ));
                 return Err(TtsError::Other(msg));
             }
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| TtsError::Other(format!("elevenlabs tts body read failed: {e}")))?;
+            let record = MediaCostRecord::for_success(
+                "text_to_speech",
+                "elevenlabs",
+                &model_id,
+                units.clone(),
+                reported,
+                &accounting.rate_card,
+            );
+            let bytes = resp.bytes().await.map_err(|e| {
+                accounting.account(record.clone().with_outcome(MediaOutcome::Failed {
+                    category: "body_read_failed".to_string(),
+                }));
+                TtsError::Other(format!("elevenlabs tts body read failed: {e}"))
+            })?;
             let bytes_vec = bytes.to_vec();
             if bytes_vec.is_empty() {
+                accounting.account(record.with_outcome(MediaOutcome::Failed {
+                    category: "empty_audio_body".to_string(),
+                }));
                 return Err(TtsError::Other(
                     "elevenlabs tts returned empty audio body".to_string(),
                 ));
             }
+            accounting.account(record);
             atomic_write(&parent, &output_path, &bytes_vec)?;
             Ok::<_, TtsError>(TtsResponse {
                 path: output_path,

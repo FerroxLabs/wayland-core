@@ -43,7 +43,8 @@ use wcore_tools::video_analyze_tool::{
 };
 use wcore_tools::vision_tools::{VisionBackend, VisionOutcome};
 
-use super::{build_ssrf_safe_tool_client, build_vision_backend};
+use super::{build_ssrf_safe_tool_client, build_vision_backend_with_accounting};
+use wcore_tools::media_cost::MediaAccounting;
 
 /// Two-layer outer wall-clock cap for the WHOLE pipeline (closes R-H1).
 /// ffmpeg + N vision calls + 1 synthesis call can take a while; cap at
@@ -509,13 +510,28 @@ fn select_step(_frame_count: usize) -> usize {
 pub async fn build_video_analyze_backend(
     config: &wcore_config::config::Config,
 ) -> Option<Arc<dyn VideoAnalysisBackend>> {
+    build_video_analyze_backend_with_accounting(config, &MediaAccounting::default()).await
+}
+
+/// [`build_video_analyze_backend`], with the session cost ledger bound.
+///
+/// **This is the single highest-value binding in the media surface.** This
+/// backend makes no provider call of its own — it fans every billable call out
+/// to the vision backend, `DEFAULT_FRAME_COUNT` frames plus one synthesis pass,
+/// so a single `video_analyze` tool call is nine billable provider calls. All
+/// nine were invisible to accounting. Binding the accounting here is what makes
+/// them nine visible rows rather than one invisible tool call.
+pub async fn build_video_analyze_backend_with_accounting(
+    config: &wcore_config::config::Config,
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn VideoAnalysisBackend>> {
     if !check_ffmpeg_available().await {
         tracing::warn!(
             "video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)"
         );
         return None;
     }
-    let vision = build_vision_backend(config)?;
+    let vision = build_vision_backend_with_accounting(config, accounting)?;
     tracing::info!("video_analyze: ffmpeg + vision backend present — tool enabled");
     Some(Arc::new(FfmpegFrameVideoBackend::new(vision)))
 }

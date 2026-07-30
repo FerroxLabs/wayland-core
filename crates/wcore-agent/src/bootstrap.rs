@@ -1318,6 +1318,26 @@ impl AgentBootstrap {
         // arg defaults to `false` (opt-in only); a future config field at
         // `builtin_tools.image_gen.allow_pollinations_fallback` will surface
         // it to users without recompiling.
+        // 27-C3 — ONE session-scoped media cost ledger, shared by every
+        // billable media backend registered below.
+        //
+        // Before this, `with_cost_ledger` had zero production call sites: the
+        // ledger type existed, was tested, and was never constructed outside a
+        // test, so `MediaCostSummary` could not be computed for a real session
+        // at all. The rate card was bound to image generation and to nothing
+        // else, so an operator who filled in `[tools.media_pricing]` had it
+        // silently ignored for transcription, vision and speech — every
+        // billable shape except the one it was wired to.
+        //
+        // Sharing one ledger across backends is what makes `video_analyze`
+        // legible: its nine provider calls land in the same place as
+        // everything else, and a session total is the sum of what was actually
+        // spent rather than of what one backend happened to be wired for.
+        let media_cost_ledger = wcore_tools::media_cost::MediaCostLedger::shared();
+        let media_accounting = wcore_tools::media_cost::MediaAccounting::new(
+            std::sync::Arc::clone(&media_cost_ledger),
+            wcore_tools::media_cost::MediaRateCard::new(self.config.tools.media_pricing.clone()),
+        );
         if let Some(b) =
             crate::tool_backends::image_gen::build_image_gen_backend(&self.config, false)
         {
@@ -1331,9 +1351,8 @@ impl AgentBootstrap {
             // presented as the provider's own number.
             registry.register(Box::new(
                 wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b)
-                    .with_rate_card(wcore_tools::media_cost::MediaRateCard::new(
-                        self.config.tools.media_pricing.clone(),
-                    )),
+                    .with_rate_card(media_accounting.rate_card.clone())
+                    .with_cost_ledger(std::sync::Arc::clone(&media_cost_ledger)),
             ));
         }
         // `web` tool — wired to a real search backend so the model
@@ -1352,7 +1371,10 @@ impl AgentBootstrap {
         // (Anthropic preferred, OpenAI / Gemini auto-fallback). If
         // NONE of the three keys is set the resolver returns None and
         // the tool stays hidden via `Tool::is_available() == false`.
-        if let Some(vision_backend) = crate::tool_backends::build_vision_backend(&self.config) {
+        if let Some(vision_backend) = crate::tool_backends::build_vision_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(wcore_tools::vision_tools::VisionAnalyzeTool::new(
                 vision_backend,
                 crate::tool_backends::build_image_fetcher(),
@@ -1362,7 +1384,10 @@ impl AgentBootstrap {
         // Whisper next, then the active OpenAI-wire provider (Flux Router /
         // OpenAI) resolved from config, then `FLUX_API_KEY`. If none resolves
         // the tool hides itself via `Tool::is_available()`.
-        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend(&self.config) {
+        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(
                 wcore_tools::transcription_tools::TranscribeAudioTool::new(
                     stt_backend,
@@ -1373,7 +1398,10 @@ impl AgentBootstrap {
         // v0.9.0 W1 B2 — tts: OpenAI > ElevenLabs > (feature-gated piper).
         // Resolver returns None when no provider is configured; tool is then
         // hidden via `is_available() == false`.
-        if let Some(b) = crate::tool_backends::tts::build_tts_backend(&self.config) {
+        if let Some(b) = crate::tool_backends::tts::build_tts_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(wcore_tools::tts_tool::TtsTool::with_backend(b)));
         }
         // v0.9.0 W1 B10 — voice_mode: cpal-backed recorder + STT bridge.
@@ -1416,7 +1444,11 @@ impl AgentBootstrap {
         // tokio::sync::OnceCell; `.await` is legal here because `build()`
         // is async.
         if let Some(b) =
-            crate::tool_backends::video_analyze::build_video_analyze_backend(&self.config).await
+            crate::tool_backends::video_analyze::build_video_analyze_backend_with_accounting(
+                &self.config,
+                &media_accounting,
+            )
+            .await
         {
             registry.register(Box::new(
                 wcore_tools::video_analyze_tool::VideoAnalyzeTool::with_backend(b),
@@ -2892,11 +2924,22 @@ impl AgentBootstrap {
         // channel media enricher (further down) needs the same STT backend the
         // tool registry got, and the resolver is now config-aware so it cannot
         // be called after the move. `Option<Arc<_>>` is cheap to clone.
-        let media_transcription = crate::tool_backends::build_transcription_backend(&self.config);
+        // 27-C3: the channel media enricher transcribes inbound audio and
+        // analyses inbound images on the user's paid account exactly as the
+        // tool surface does, so it shares the same session ledger. Media that
+        // arrives over a channel costs the same money as media the model asks
+        // for.
+        let media_transcription = crate::tool_backends::build_transcription_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        );
         // Same constraint, same reason, for vision: `build_vision_backend` became
         // config-aware closing BL-F24-C3-H7, so it too must be resolved before
         // `self.config` moves into the engine.
-        let media_vision = crate::tool_backends::build_vision_backend(&self.config);
+        let media_vision = crate::tool_backends::build_vision_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        );
 
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_active_with_provider(
