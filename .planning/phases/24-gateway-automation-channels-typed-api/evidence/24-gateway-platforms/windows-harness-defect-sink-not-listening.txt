@@ -1,0 +1,15 @@
+=== is sink listening? ===
+
+=== direct POST to sink from this host ===
+POST_FAILED: Unable to connect to the remote server
+=== any error/reason fields in deliveries.jsonl? ===
+=== distinct states ===
+
+Name      Count
+----      -----
+accepted     52
+attempted    52
+settled      52
+
+
+

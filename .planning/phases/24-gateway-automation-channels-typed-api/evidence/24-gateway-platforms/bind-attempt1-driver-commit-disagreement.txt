@@ -1,0 +1,13 @@
+=== VERIFY macos ===
+JOURNEY VERIFIED platform=macos commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+macos_verify_rc=0
+=== VERIFY windows ===
+windows_verify_rc=1
+=== VERIFY linux ===
+wayland-journey: per-adapter arrived sums to 24 but the receipt's top-level count is 12; the breakdown and the headline are describing different runs
+JOURNEY VERIFIED platform=linux commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+linux_verify_rc=0
+
+############ BIND — PASS DIRECTION (three receipts, one candidate) ############
+BIND_RC=1
+wayland-journey: receipts disagree on the driver commit: ["18d8d938f7e5850d627aba5d24e7cde1673a8070", "24143f95d54572188ab28b4a6d4217c86159eb6a", "3dcda272cf31f8844f4b757954037d9abb95bcaa"]
