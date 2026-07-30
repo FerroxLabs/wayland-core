@@ -1,0 +1,16 @@
+=== BASELINE ===
+  BASELINE: binary RAN 23 tests
+    catch-direction    (exec-disguised-as-data must be contained) : 0 FAILED
+    passthru-direction (data-that-looks-exec must NOT be contained): 0 FAILED
+    test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.55s
+=== M1 classifier blinded (always Data) ===
+  M1: binary RAN 23 tests
+    catch-direction    (exec-disguised-as-data must be contained) : 1 FAILED
+    passthru-direction (data-that-looks-exec must NOT be contained): 0 FAILED
+    test result: FAILED. 20 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+=== M2 classifier over-broad (always Executable) ===
+  M2: binary RAN 23 tests
+    catch-direction    (exec-disguised-as-data must be contained) : 0 FAILED
+    passthru-direction (data-that-looks-exec must NOT be contained): 0 FAILED
+    test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.84s
+=== restored dirty=0 ===

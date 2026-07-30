@@ -1,0 +1,11 @@
+--- case=data-that-looks-executable ---
+Imported 1 profile (0 skipped), 0 MCP servers, 0 credentials.
+Accounting: discovered=2 imported=2 quarantined=0 excluded=0 (the last three sum to the first).
+  Personas and memory notes are STAGED under migrate-imported/ — they are not active until
+--- case=exec-disguised-as-data ---
+Will be QUARANTINED — imported but INERT until you promote them (1):
+  Quarantined content is written outside every directory the agent loads skills from,
+Imported 1 profile (0 skipped), 0 MCP servers, 0 credentials.
+Accounting: discovered=2 imported=1 quarantined=1 excluded=0 (the last three sum to the first).
+Quarantined 1 item — inert until an explicit promotion:
+  Review with: wayland-core migrate quarantined
