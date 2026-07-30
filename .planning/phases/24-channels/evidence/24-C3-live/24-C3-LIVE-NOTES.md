@@ -186,6 +186,73 @@ MESSAGE CONTENT toggle is on; bit 18 is the verified-app equivalent. So the owne
 holds and inbound content would be non-empty **if the socket could connect**. The inbound
 failure is ours, not a missing intent.
 
+## CAPABILITY 5: outbound idempotency — **FAIL. The doc is WRONG and must change.**
+
+### 5a. The platform measurement — Discord's `nonce` does not deduplicate. At all.
+
+`BL-24C1-DISCORD-WINDOW` asked how long Discord's dedup window is. **The window does not
+exist.** Same channel, same author, byte-identical nonce, replayed at four delays:
+
+| delay | first id | second id | verdict |
+|---|---|---|---|
+| 0 s | 1532233150594289704 | 1532233156847992891 | **DUPLICATE** |
+| 5 s | 1532233158874108034 | 1532233181867278427 | **DUPLICATE** |
+| 30 s | 1532233187801960489 | 1532233320211943434 | **DUPLICATE** |
+| 90 s | 1532233322401370353 | 1532233706088038480 | **DUPLICATE** |
+
+Not even at **zero** delay. Three controls, because a permanently-DUPLICATE verdict would be a
+permanently-red gate (§3b-iii) and worth nothing:
+
+1. **The nonce is accepted, not rejected.** `POST` returns 200 and Discord **echoes it back**:
+   `nonce_sent= wl715feade0e1664b3`, `nonce_echoed_in_create_response= wl715feade0e1664b3`. So
+   the field is valid, well-formed and under the 25-char cap — the absence of dedup is not a
+   malformed token.
+2. **The comparator CAN report identity** — two GETs of one message compare equal (`True`).
+3. **A same-id outcome is reachable through this very API** — `PATCH` returns the same id as
+   the `POST` (`True`). So "DEDUPED" is an achievable world; the gate can pass.
+
+`nonce` is a client-side reconciliation echo, not a server-side idempotency key.
+
+### 5b. The product measurement — a real restart produced a real duplicate
+
+Outcome-unknown was manufactured honestly, through the adapter's **own** `api_base_url` seam
+(the field `config.rs:52-70` says exists for exactly this): a local proxy forwards the create
+to real Discord and then never responds. The message lands; the product never learns the
+outcome. That is precisely the `F24-C-H1` shape, not a simulation of it.
+
+| step | evidence |
+|---|---|
+| trigger is `once:` — **cannot fire twice** | `cron add --trigger once:2026-07-30T03:52:46Z`, job `97ce67c3-52f0-48da-92e1-80692363a555` |
+| attempt 1 reached real Discord, with the key on the wire | proxy: `FORWARDED id=1532234475344498829 nonce=wle82e6651cfa60bb8` |
+| gateway 1 start state | `carried=0 (unattempted 0 / unknown-outcome 0)` |
+| gateway killed `-9` mid-send | `GW1_KILLED alive=no` |
+| **gateway 2 start state — the product's own words** | **`carried=1 (unattempted 0 / unknown-outcome 1)`** |
+| `gateway abandoned`, before and after | `No abandoned deliveries recorded` — the spine never abandons Discord, because Discord claims it dedupes |
+| **arrivals at Discord, baseline 0** | **`ARRIVALS_AT_DISCORD= 2`** — `1532234475344498829` @03:52:46.462 and `1532234524996538478` @03:52:58.300 |
+| known-negative control on the log scan | `0` for an absent string — instrument alive |
+
+**The nonce on the wire is provably the product's derivation from the delivery id:**
+
+```
+nonce_for_key('cron:97ce67c3-52f0-48da-92e1-80692363a555:1785383566000') = wle82e6651cfa60bb8  MATCH
+nonce_for_key(... millis+1)                                             = wle82e6751cfa60d6b  correctly no match
+```
+
+So this was one delivery id, replayed across a genuine process restart, carrying the identical
+key — and it produced **two messages**. It is not the `F24-GWP-H1` "second scheduler mints a
+new id" confound: a `once:` trigger has exactly one scheduled instant, and the gateway itself
+reported the delivery as **carried, unknown-outcome** rather than as a new fire.
+
+### 5c. Why this is WORSE than the seven at-most-once adapters
+
+`supports_outbound_idempotency() == true` makes the spine take the `:216-220` re-attempt arm
+instead of the `:201-215` abandon arm. So for Discord the gateway **deliberately re-sends a
+possibly-delivered message**, on the strength of a suppression the destination does not
+perform. The seven honest `false` adapters abandon and hand the operator a nameable delivery;
+Discord silently posts the second copy. **A false `true` is more dangerous than an honest
+`false`** — which is the exact argument `delivery-semantics.md` §6 already makes, applied to
+the row that violates it.
+
 ## Log
 
 - [t0] Worktree created, SHA asserted, brief + delivery-semantics + ledger 24-C3 rows read.
