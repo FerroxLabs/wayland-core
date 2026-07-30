@@ -291,7 +291,6 @@ mod tests {
             platform: "slack".to_string(),
             enabled: true,
             options: toml::Table::new(),
-            secrets: toml::Table::new(),
             inbound,
         }
     }

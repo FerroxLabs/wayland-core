@@ -32,7 +32,10 @@ pub mod webhook;
 pub use actions::{ActionSupport, NativeActions};
 pub use binding::{Binding, BindingSource, BindingTable, ConversationRef, RouteTarget};
 pub use chunk::chunk_message;
-pub use config::{ChannelConfig, ChannelConfigLoader};
+pub use config::{
+    CREDENTIAL_HANDLE_MARKER, ChannelConfig, ChannelConfigLoader, credential_handles,
+    parse_channel_config,
+};
 pub use dispatch::{
     AccessDecision, AckMode, AutoReplyRateLimiter, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW,
     DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome,

@@ -406,8 +406,16 @@ pub struct ChannelSummary {
     pub known_platform: bool,
     /// The configured `[options]` key names (no values).
     pub option_keys: Vec<String>,
-    /// The referenced `[secrets]` key names (no values).
-    pub secret_keys: Vec<String>,
+    /// Every credentials-store handle this config refers to, as
+    /// `(dotted option path, handle)` — e.g.
+    /// `("credential_handle_bot_token", "slack.acme.bot_token")`.
+    ///
+    /// Replaces the removed `secret_keys`, which summarised the inert
+    /// `[secrets]` table. A handle is **not** a secret — it is the lookup
+    /// key, and the adapters already print it in their own "not found at
+    /// credential_handle …" errors — so listing it here leaks nothing and
+    /// is what tells an operator which credentials they still owe.
+    pub credential_handles: Vec<(String, String)>,
     /// `Some(message)` if the file could not be read/parsed — surfaced so a
     /// broken config is visible rather than silently absent.
     pub parse_error: Option<String>,
@@ -442,7 +450,7 @@ pub fn scan_channel_summaries(dir: &Path) -> Vec<ChannelSummary> {
             enabled: false,
             known_platform: false,
             option_keys: Vec::new(),
-            secret_keys: Vec::new(),
+            credential_handles: Vec::new(),
             parse_error: Some(msg),
         };
         let body = match std::fs::read_to_string(&path) {
@@ -452,19 +460,22 @@ pub fn scan_channel_summaries(dir: &Path) -> Vec<ChannelSummary> {
                 continue;
             }
         };
-        match toml::from_str::<ChannelConfig>(&body) {
+        // Routed through the shared parser so a legacy `[secrets]` table
+        // surfaces its named migration message here too — `channel list` is
+        // where an operator looks first when a channel will not load, and
+        // the generic serde line is what sent the UAT round-tripping.
+        match wcore_channels::parse_channel_config(&stem, &body) {
             Ok(cfg) => {
                 let mut option_keys: Vec<String> = cfg.options.keys().cloned().collect();
                 option_keys.sort();
-                let mut secret_keys: Vec<String> = cfg.secrets.keys().cloned().collect();
-                secret_keys.sort();
+                let credential_handles = wcore_channels::credential_handles(&cfg.options);
                 out.push(ChannelSummary {
                     known_platform: channel_factory_for(&cfg.platform).is_some(),
                     name: cfg.name,
                     platform: cfg.platform,
                     enabled: cfg.enabled,
                     option_keys,
-                    secret_keys,
+                    credential_handles,
                     parse_error: None,
                 });
             }
@@ -524,12 +535,15 @@ mod tests {
     #[test]
     fn scan_summaries_reports_status_and_never_leaks_secret_values() {
         let dir = TempDir::new().unwrap();
-        // Known platform, enabled, with options + a secret reference.
+        // Known platform, enabled, with options + a credential handle.
+        // `SECRETVALUE` is the *handle*, not the secret: the assertion at the
+        // end of this test is that no VALUE leaks, and the store is never
+        // opened here, so nothing in this scan can carry one.
         std::fs::write(
             dir.path().join("myslack.toml"),
             "name = \"myslack\"\nplatform = \"slack\"\nenabled = true\n\
              [options]\nchannel = \"#general\"\n\
-             [secrets]\nbot_token = \"keychain:slack:SECRETVALUE\"\n",
+             credential_handle_bot_token = \"slack.myslack.bot_token\"\n",
         )
         .unwrap();
         // Known platform but disabled.
@@ -546,6 +560,17 @@ mod tests {
         .unwrap();
         // Unparseable file — must surface as a parse_error, not vanish.
         std::fs::write(dir.path().join("broken.toml"), "name = = not valid").unwrap();
+        // A config still carrying the REMOVED `[secrets]` table. Two jobs: it
+        // is the known-positive that keeps the leak assertion below alive
+        // (`SECRETVALUE` genuinely appears on disk, so a dump that contained
+        // it would really be a leak), and it proves the named migration
+        // message reaches `channel list` rather than only the loader.
+        std::fs::write(
+            dir.path().join("legacy.toml"),
+            "name = \"legacy\"\nplatform = \"slack\"\n\
+             [secrets]\nbot_token = \"keychain:slack:SECRETVALUE\"\n",
+        )
+        .unwrap();
 
         let summaries = scan_channel_summaries(dir.path());
         let by = |n: &str| {
@@ -559,7 +584,14 @@ mod tests {
         assert_eq!(slack.platform, "slack");
         assert!(slack.known_platform && slack.enabled);
         assert!(slack.option_keys.contains(&"channel".to_string()));
-        assert!(slack.secret_keys.contains(&"bot_token".to_string()));
+        assert_eq!(
+            slack.credential_handles,
+            vec![(
+                "credential_handle_bot_token".to_string(),
+                "slack.myslack.bot_token".to_string()
+            )],
+            "the handle a config expects is what tells an operator what to store"
+        );
 
         assert!(!by("mytg").enabled, "disabled channel must read disabled");
         assert!(
@@ -571,8 +603,25 @@ mod tests {
             "the broken file must surface a parse_error"
         );
 
-        // The secret VALUE must never appear anywhere in the summaries — only
-        // the key NAME (`bot_token`) is surfaced.
+        // The removed `[secrets]` table must reach `channel list` as the named
+        // migration, not as serde's generic `unknown field` line.
+        let legacy = by("legacy")
+            .parse_error
+            .clone()
+            .expect("a [secrets] config must surface a parse_error");
+        assert!(
+            legacy.contains("[secrets]") && legacy.contains("channel credential set"),
+            "the migration must be named and actionable, got: {legacy}"
+        );
+        assert!(
+            !legacy.contains("unknown field"),
+            "the named error must win over deny_unknown_fields, got: {legacy}"
+        );
+
+        // The secret VALUE must never appear anywhere in the summaries. This
+        // is only meaningful because `legacy.toml` above really does contain
+        // `SECRETVALUE` on disk — without that known-positive the assertion
+        // would pass on an empty scan.
         let dump = format!("{summaries:?}");
         assert!(
             !dump.contains("SECRETVALUE"),

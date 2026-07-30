@@ -137,6 +137,61 @@ pub enum ChannelCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Store, list and remove the credentials a channel config refers to.
+    #[command(subcommand)]
+    Credential(CredentialCmd),
+}
+
+/// `wayland-core channel credential …` — the write side of the credential
+/// handle.
+///
+/// # Why this exists
+///
+/// A channel config never holds a secret; it holds a *handle*, which is a
+/// lookup key into the `CredentialsStore`. Until this verb there was no way
+/// to put anything under one: the whole `wcore-cli` tree contained a single
+/// `CredentialsStore::put` call and it was a provider OAuth token. `auth` is
+/// not that path either — it writes `[providers.<slug>].api_key` into
+/// `config.toml`, not into the store. So the documented deployment model
+/// ("credentials are handles resolved from the credentials store") had no
+/// reachable implementation and the only working route was hand-writing the
+/// store file, which no document describes.
+///
+/// # Why the value is read from stdin and never taken as an argument
+///
+/// `auth add <provider> <key>` takes the secret in `argv`, where it lands in
+/// shell history and is world-readable in `ps` for the life of the process.
+/// That is the existing idiom and it is the one part of it not worth copying.
+/// There is deliberately no `--value` flag: the only way in is stdin.
+#[derive(Debug, Clone, Subcommand)]
+pub enum CredentialCmd {
+    /// Store a credential under `handle`, reading the value from stdin.
+    ///
+    /// The value is whatever arrives on stdin with one trailing newline
+    /// stripped, so both `printf %s "$tok" | … set h` and
+    /// `echo "$tok" | … set h` store the same bytes. An empty stdin is
+    /// rejected rather than stored: a channel whose handle resolves to ""
+    /// fails later, further from the cause.
+    Set {
+        /// The credentials-store key, e.g. `slack.acme.bot_token`. Get the
+        /// exact spelling from `channel credential list`.
+        handle: String,
+    },
+    /// List every handle the on-disk channel configs refer to and whether
+    /// the store currently has a value for it.
+    ///
+    /// Prints handles and presence only — never a value. Exits non-zero when
+    /// any handle is missing, so it is usable as a pre-flight gate and not
+    /// only as a report.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete the value stored under `handle`.
+    Remove {
+        /// The credentials-store key to delete.
+        handle: String,
+    },
 }
 
 /// Resolve the home whose `channels/` directory and gateway files we act on.
@@ -296,7 +351,158 @@ pub async fn run(args: ChannelArgs) -> Result<()> {
             require,
             json,
         } => actions(name.as_deref(), &require, json).await,
+        ChannelCmd::Credential(cmd) => credential(cmd),
     }
+}
+
+// ---------------------------------------------------------------------------
+// credential — the write side of the credential handle
+// ---------------------------------------------------------------------------
+
+/// Open the credentials store the adapters will read from at `start()`.
+///
+/// Routed through the same [`resolve_config_for_credentials`] the gateway and
+/// `probe` use, so a credential written here is guaranteed to be looked for in
+/// the same place. Resolving them independently is how a store gets written in
+/// one location and read from another — the F24-D-H2 shape recorded above
+/// `ChannelHealthReport`.
+fn open_store() -> Result<Arc<dyn wcore_config::credentials::CredentialsStore>> {
+    let config = resolve_config_for_credentials()?;
+    let store = config
+        .open_credentials_store()
+        .context("cannot open the credentials store")?;
+    Ok(Arc::from(store))
+}
+
+/// Every `(channel, option path, handle)` the on-disk configs refer to.
+///
+/// A config that will not parse contributes nothing and is reported by
+/// `channel list`; this surface is about handles, so it stays quiet about
+/// parse errors rather than duplicating that report.
+fn configured_handles(dir: &Path) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for s in wcore_channels_registry::scan_channel_summaries(dir) {
+        for (path, handle) in s.credential_handles {
+            out.push((s.name.clone(), path, handle));
+        }
+    }
+    out
+}
+
+fn credential(cmd: CredentialCmd) -> Result<()> {
+    match cmd {
+        CredentialCmd::Set { handle } => credential_set(&handle),
+        CredentialCmd::List { json } => credential_list(json),
+        CredentialCmd::Remove { handle } => credential_remove(&handle),
+    }
+}
+
+fn credential_set(handle: &str) -> Result<()> {
+    use std::io::Read;
+
+    if handle.trim().is_empty() {
+        bail!("the credential handle must not be empty");
+    }
+
+    let mut value = String::new();
+    std::io::stdin()
+        .read_to_string(&mut value)
+        .context("cannot read the credential value from stdin")?;
+    // Strip exactly one trailing newline (and a CR before it) so a value
+    // piped with `echo` matches one piped with `printf %s`. Anything more
+    // would silently mangle a secret that legitimately ends in whitespace.
+    if let Some(v) = value.strip_suffix('\n') {
+        value = v.strip_suffix('\r').unwrap_or(v).to_string();
+    }
+    if value.is_empty() {
+        bail!(
+            "no credential value arrived on stdin — pipe the secret in, e.g. \
+             `printf %s \"$TOKEN\" | wayland-core channel credential set {handle}`. \
+             There is deliberately no --value flag: an argument would be visible \
+             in shell history and in `ps`."
+        );
+    }
+
+    let store = open_store()?;
+    store
+        .put(handle, &value)
+        .map_err(|e| anyhow::anyhow!("cannot store the credential: {e}"))?;
+
+    // The handle is echoed; the value never is, and its length is not
+    // reported either — a length is a real hint about a secret.
+    println!("stored credential under handle {handle:?}");
+    Ok(())
+}
+
+fn credential_remove(handle: &str) -> Result<()> {
+    let store = open_store()?;
+    store
+        .delete(handle)
+        .map_err(|e| anyhow::anyhow!("cannot delete the credential: {e}"))?;
+    println!("removed credential handle {handle:?}");
+    Ok(())
+}
+
+fn credential_list(json: bool) -> Result<()> {
+    let home = home()?;
+    let dir = channels_dir(&home);
+    let handles = configured_handles(&dir);
+    let store = open_store()?;
+
+    // Presence, never the value. A store error is NOT folded into "absent":
+    // an unreadable store and an empty one are different problems and the
+    // false zero of conflating them is this phase's most-measured defect.
+    let mut rows = Vec::new();
+    for (channel, option, handle) in &handles {
+        let present = match store.get(handle) {
+            Ok(Some(v)) => Some(!v.is_empty()),
+            Ok(None) => Some(false),
+            Err(_) => None,
+        };
+        rows.push((channel, option, handle, present));
+    }
+    let missing = rows.iter().filter(|r| r.3 != Some(true)).count();
+
+    if json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(channel, option, handle, present)| {
+                serde_json::json!({
+                    "channel": channel,
+                    "option": option,
+                    "handle": handle,
+                    "stored": present,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if rows.is_empty() {
+        println!(
+            "no channel config in {} refers to a credential handle",
+            dir.display()
+        );
+    } else {
+        println!("credential handles referenced by {}:", dir.display());
+        for (channel, option, handle, present) in &rows {
+            let state = match present {
+                Some(true) => "stored",
+                Some(false) => "MISSING",
+                None => "UNREADABLE",
+            };
+            println!("  {channel:<16} {option:<34} {handle:<32} {state}");
+        }
+        if missing > 0 {
+            println!(
+                "\n{missing} handle(s) have no value. Store each with:\n  \
+                 printf %s \"$SECRET\" | wayland-core channel credential set <handle>"
+            );
+        }
+    }
+
+    if missing > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +660,13 @@ fn list(json: bool) -> Result<()> {
                     "enabled": s.enabled,
                     "known_platform": s.known_platform,
                     "option_keys": s.option_keys,
-                    "secret_keys": s.secret_keys,
+                    "credential_handles": s.credential_handles
+                        .iter()
+                        .map(|(path, handle)| serde_json::json!({
+                            "option": path,
+                            "handle": handle,
+                        }))
+                        .collect::<Vec<_>>(),
                     "parse_error": s.parse_error,
                 })
             })
@@ -479,6 +691,14 @@ fn list(json: bool) -> Result<()> {
         println!("  {:<20} {:<12} {}", s.name, s.platform, state);
         if let Some(err) = &s.parse_error {
             println!("      config error: {err}");
+        }
+        // The handles a config expects are the other half of "why isn't this
+        // working": the config can be perfect and the channel still dead
+        // because nothing was ever stored under them. Printing them here is
+        // what makes `channel credential set` discoverable from the verb an
+        // operator already runs first.
+        for (path, handle) in &s.credential_handles {
+            println!("      credential: {path} -> {handle}");
         }
     }
     Ok(())
