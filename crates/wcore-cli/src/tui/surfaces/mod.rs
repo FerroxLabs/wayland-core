@@ -7161,9 +7161,24 @@ mod tests {
     ///
     /// Driven entirely through the public router surface: keys in, rendered
     /// frame out, no reaching into the workspace's private composer.
+    /// A workspace that will actually render a composer.
+    ///
+    /// `App::new()` carries no model, and the workspace replaces the composer
+    /// with a `No model configured.` panel in that state — so a test that
+    /// renders the default app is looking at a frame with nowhere for text to
+    /// appear, and would report a delivered message as lost. Measured: this is
+    /// the same state a real unconfigured run lands in
+    /// (`.planning/evidence/fix-tui-first-message/before/BEFORE-q23-nokeys.after.txt`).
+    fn app_with_a_model() -> App {
+        let mut app = App::new();
+        app.config.provider = "flux-router".to_string();
+        app.config.model = "flux-auto".to_string();
+        app
+    }
+
     #[test]
     fn a_message_typed_at_the_onboarding_card_arrives_in_the_composer() {
-        let mut app = App::new();
+        let mut app = app_with_a_model();
         let mut router = Router::new(&app);
         assert_eq!(
             router.focused(),
@@ -7211,7 +7226,7 @@ mod tests {
         }
 
         // Control: a workspace reached without onboarding ever being typed at.
-        let mut control_app = App::new();
+        let mut control_app = app_with_a_model();
         let mut control = Router::new(&control_app);
         control.apply(
             SurfaceAction::Switch(SurfaceId::Workspace),
@@ -7228,7 +7243,7 @@ mod tests {
 
         // Subject: onboarding dismissed with the deliberate `s` shortcut. The
         // keystroke that did the dismissing must not survive into the composer.
-        let mut app = App::new();
+        let mut app = app_with_a_model();
         let mut router = Router::new(&app);
         router.handle_key(key(KeyCode::Char('s')), &mut app);
         router.handle_key(key(KeyCode::Enter), &mut app);

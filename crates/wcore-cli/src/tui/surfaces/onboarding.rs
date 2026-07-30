@@ -3120,10 +3120,15 @@ mod tests {
     /// prose is in flight, and still confirms when it is not.
     #[test]
     fn a_bare_space_confirms_ready_only_when_no_message_is_in_flight() {
-        // In flight: the space belongs to the sentence.
+        // In flight: the space belongs to the sentence. Reach Ready by
+        // ARROWS, not by the `s` shortcut — see the trade-off test below for
+        // why mixing the two is a deliberately different case.
         let mut surface = fresh();
         let mut app = App::new();
-        surface.handle_key(char('s'), &mut app); // deliberate skip → Ready
+        surface.handle_key(key(KeyCode::Down), &mut app);
+        surface.handle_key(key(KeyCode::Down), &mut app);
+        surface.handle_key(key(KeyCode::Enter), &mut app); // → Ready via Skip
+        assert_eq!(surface.step, Step::Ready);
         type_str(&mut surface, &mut app, "hello world");
         assert_eq!(
             surface.step,
@@ -3139,6 +3144,29 @@ mod tests {
             action,
             SurfaceAction::Switch(SurfaceId::Workspace)
         ));
+    }
+
+    /// The one case the lookahead resolves the "wrong" way, pinned so it is a
+    /// known cost rather than a surprise.
+    ///
+    /// Press `s` to skip and then immediately start typing, and the `s`
+    /// survives into the composer as a stray leading character. The rule
+    /// cannot tell that apart from `summarize this repo`, and it has to pick a
+    /// side: keeping the character costs a visible, editable `s` here; dropping
+    /// it costs a SILENT missing letter there. Silent loss is the defect this
+    /// whole change exists to end, so the buffer keeps the character.
+    #[test]
+    fn a_skip_followed_immediately_by_typing_keeps_the_s_by_design() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        surface.handle_key(char('s'), &mut app);
+        assert_eq!(surface.step, Step::Ready, "the skip still happened");
+        type_str(&mut surface, &mut app, "hello world");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("shello world"),
+            "documented trade: a visible stray character beats a silent missing one"
+        );
     }
 
     /// Typing at the card must be correctable and abandonable, or the buffer
