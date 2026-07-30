@@ -32,3 +32,11 @@ wcore-channel-imessage = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+# tests/live_slack_actions.rs — reads writes back from the real Slack Web API
+# (the adapter has no read path; it receives by webhook) and signs an Events API
+# payload with an implementation independent of the adapter's own.
+serde_json = { workspace = true }
+wcore-egress = { workspace = true }
+hmac = "0.12"
+sha2 = { workspace = true }
+hex = "0.4"
