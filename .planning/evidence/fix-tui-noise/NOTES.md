@@ -198,3 +198,170 @@ its own evidence. Handed off with the measurements above rather than guessed at.
    structurally 0 and would have "proved" gitignore was respected by *both* walkers. Repaired to
    count `O_DIRECTORY` opens of the directory itself and to attribute them per thread id, which
    is what separated the two walkers above.
+
+## T+4h — AFTER: measured on the fixed binary
+
+Binary sha256 `7e50e9d5b1e0c94eeec69ee547b67ac1cef36026ab3c39cf84ac20c663580be0`,
+`--build-info` source **`1e0a61d3…`** = this lane's fix commit. Same host, same lane home,
+same prompt, and — for the stderr/stdout table — the **same empty working directory**, so the
+before/after pair is not confounded by the cwd effect diagnosed above.
+
+### Items 1, 3 and 5 — before/after, same cwd
+
+| | BEFORE `e7bc6d88` | AFTER `1e0a61d3` |
+|---|---|---|
+| stderr lines on a trivial turn | **41** (20 INFO + 19 WARN) | **2** (0 INFO, 0 WARN, 0 ERROR) |
+| stdout | **5 bytes**, `2a 20 33 39 31` = `* 391`, no terminator | **4 bytes**, `33 39 31 0a` = `391\n` |
+| `* ` prefix present | YES | NO |
+| ends with newline | NO | YES |
+| trace record retained anywhere | **none** — lost when the terminal scrolls | **39 lines / 7,447 bytes** in `$WAYLAND_HOME/logs/wayland-core.log` |
+| answer correct (`391`) | yes | yes |
+
+The 2 remaining stderr lines are the `[turns: … | tokens: …]` stats block, which is a
+deliberate per-turn summary, not engine spew.
+
+### Both-directions proof (§3b-iii — a gate must be able to pass AND to fail)
+
+"The logs are gone" is trivially satisfiable by breaking logging, so the harness refuses to
+report the quiet number without the inverse in the same run:
+
+| direction | `RUST_LOG` | stderr lines | stderr INFO/WARN | log file |
+|---|---|---|---|---|
+| A (default) | unset | **2** | 0 / 0 | **39 lines, 20 INFO + 19 WARN**, contains `spotify_playback` |
+| B (opt-in) | `info` | **41** | **20 / 19** | not written (previous behaviour, unchanged) |
+
+So the full record is reachable two ways — on disk without asking, and on stderr for anyone who
+asks — and the exact pre-fix behaviour is one env var away. **No new flag was invented**;
+`RUST_LOG` already existed and already worked.
+
+### Item 4 — `--help`
+
+| | BEFORE | AFTER |
+|---|---|---|
+| `--help` lines | 215 | 211 |
+| `--help` lines carrying an internal id | **26** | **0** |
+| `-h` lines carrying an internal id | **25** | **0** |
+| `session --help` | 1 | **0** |
+
+Matcher controls green in the same capture both times: known-positive 1, known-negative 0,
+`Usage` present 1.
+
+### The regression test can fail — proven by seeding, not asserted
+
+`crates/wcore-cli/tests/help_no_internal_ids.rs`, three states measured on hetzner:
+
+| state | rc | counts |
+|---|---|---|
+| clean | 0 | `5 passed; 0 failed; 0 ignored; 0 filtered out` |
+| one seeded id (`/// F-089: Disable colored output`) | **101** | `3 passed; 2 failed` — `` `--help` leaks 1 internal identifier(s) at users`` |
+| reverted | 0 | `5 passed; 0 failed; 0 ignored; 0 filtered out` |
+
+Both `--help` and `-h` reddened on the single seeded line, and the file also ships the two
+matcher controls the class needs: `matcher_rejects_seeded_internal_ids` (fires on all 14 strings
+the UAT found — so the pattern cannot silently become inert) and
+`matcher_accepts_ordinary_help_prose` (must not fire on real help sentences — so the pattern
+cannot be widened into unpassability).
+
+### Item 2 / C3 — TUI first paint AFTER, at 100 ms resolution
+
+The UAT measured at 1 s granularity, which cannot tell one 9 s stall from ninety 100 ms ones.
+
+| cwd | splash visible | usable surface | largest single gap in the boot log |
+|---|---|---|---|
+| empty dir | 0.13 s | **0.36 / 0.36 / 0.36 s** | **0.013 s** |
+| `/root` (~2.5M entries) | 0.13 s | **10.63 / 10.53 / 10.63 s** | **10.26 / 10.17 / 10.19 s** |
+
+Three runs each, same binary, same host, same minute. The entire wait is ONE gap. And the same
+Linux binary in an empty directory reaches a usable surface in **0.36 s — 5.5x faster than the
+"macOS 2 s" the UAT used as its good baseline.** The platform framing does not survive contact
+with the measurement.
+
+TUI logging still works after the change (`BOOT_LOG_LINES=31` on every run), so the fix did not
+break the path it inherited.
+
+## Gates (hetzner, at `1e0a61d3`, status read back from a file, never from an ssh exit code)
+
+```
+WLFMT=0       cargo fmt --all -- --check
+WLMETA=0      cargo metadata --locked
+WLCHECK=0     cargo check --workspace --all-targets
+WLCLIPPYC=0   cargo clippy -p wcore-cli   --all-targets -- -D warnings
+WLCLIPPYA=101 cargo clippy -p wcore-agent --all-targets -- -D warnings   <- PRE-EXISTING, proven below
+WLCLIPPY_AGENT_LIB=0  cargo clippy -p wcore-agent --lib -- -D warnings   (the target I changed)
+```
+
+| suite | passed | failed | ignored | filtered out |
+|---|---|---|---|---|
+| `-p wcore-cli --test help_no_internal_ids` | 5 | 0 | 0 | 0 |
+| `-p wcore-cli --lib` | **1917** | 0 | 1 | 0 |
+| `-p wcore-agent --lib` (default 96 threads) | 2232 | **20** | 3 | 0 |
+| `-p wcore-agent --lib -- --test-threads=8` | **2252** | **0** | 3 | 0 |
+| `-p wcore-agent --lib engine::audit_2026_05_22_tests -- --test-threads=1` | **77** | **0** | 0 | 2178 |
+| `-p wcore-cli --tests` (all integration targets) | many | **1** | — | — |
+| `-p wcore-cli --test f14_sigkill_recovery` (solo) | 10 | **1** | 1 | 0 |
+
+### The two reds are both PRE-EXISTING, proven not asserted
+
+**`clippy -p wcore-agent --all-targets`** — 4 × `needless_borrow` in
+`crates/wcore-agent/tests/user_model_identity_wire.rs` (lines 229/337/396/472), a file that is
+**byte-identical to base** (`git diff --quiet e7bc6d88 HEAD -- <path>` → identical) and was last
+touched on 2026-07-29 by `39b69fe2`, another lane. Measured directly: with my only
+`wcore-agent` change reverted via `git checkout e7bc6d88 -- crates/wcore-agent/src/output/terminal.rs`
+— making the crate byte-identical to base — clippy still exits **101 with the same 4 errors**.
+`clippy -p wcore-agent --lib`, which covers the file I did change, is **0**.
+
+**`f14_sigkill_recovery::isolated_profile_without_secure_store_fails_before_turn_or_provider_intent`**
+— `ready` frame carries no `session_id` (`left: None`, `right: Some("f1400000…")`). Two
+independent checks: (a) it fails identically under `RUST_LOG=info`, which disables the new
+file-sink path entirely, so the logging change is not implicated; (b) with **both** my source
+files reverted to base and **both crates recompiled** (`Compiling wcore-agent`, `Compiling
+wcore-cli`, `Finished in 14.38s` — verified in the log, because a probe that silently skipped
+the rebuild would have measured MY binary and proved nothing), the test still fails
+`0 passed; 1 failed`. Pre-existing red in integration.
+
+**The 20 `wcore-agent` failures are load, not regression** — every one is
+`session journal writer lease is already held at /tmp/…`, all in one module, and that module
+alone is 77/77; the whole lib at 8 threads is 2252/0. This is the contention class LANE-BRIEF §6
+names, and the isolated number is the one to believe.
+
+## Cross-audit panel — the one real judgement call
+
+*Should default INFO logging go to a FILE, or should stderr just be lowered to WARN/ERROR with no
+file?*
+
+| auditor | verdict |
+|---|---|
+| codex `gpt-5.6-sol` | **KEEP_FILE** — quiet stderr plus retained diagnostics is right for an end-user CLI; 12-factor targets long-running services; CI sets `RUST_LOG=info` |
+| gemini `3.1-pro-preview` | **DROP FILE** — 12-factor says logs are an event stream; a hidden file is unmanaged disk growth and blinds CI scrapers |
+| kimi K3 | **KEEP FILE**, but send WARN to stderr too, not only ERROR |
+
+Majority 2–1 for the file, and I hold it — but the minority carried the sharper objection and it
+is recorded rather than dismissed.
+
+**kimi's amendment is refuted by measurement, which is why it was worth measuring.** In THIS
+product the 19 WARN lines *are* the noise: `tts: no TTS backend configured — tool hidden`,
+`video_analyze: ffmpeg not found`, `transcription: no API key found`, `image_gen: no API key
+found`, `not advertising browser_suite`, `semantic search degraded`. Routing WARN to stderr takes
+the default from 2 lines back to **21** — which is still the defect the lane was opened for. The
+level these lines carry is wrong for what they say (a static capability inventory is not a
+warning about this run), but re-levelling them spans many crates several lanes own, so it is
+listed as a follow-up, not smuggled in here.
+
+**gemini's objection is partly correct and is recorded as a defect I introduced:** the log file
+has **no rotation**, and this change extends unbounded append from TUI runs only to *every*
+headless run. Measured: **7,447 bytes per trivial turn.** Pre-existing for the TUI path, but the
+growth rate is now materially higher. Follow-up, with the number.
+
+## Instrument defect #4 — found by the gate runner, repaired in-lane
+
+The naive `grep '^test result:'` count-readback produced a **FALSE RED**: `wcore-cli`'s
+`plugin::scaffold::tests::plugin_test_propagates_a_failing_suite` scaffolds a throwaway crate
+containing `fn always_fails() { panic!("deliberate") }` and runs a **nested** `cargo test` on it
+to prove a failing suite propagates. The nested run's `test result: FAILED. 0 passed; 1 failed`
+lands in the same log, so an outer suite of 1917/0 with rc=0 read as broken.
+
+Repaired in `gates.sh`: result lines are now keyed to the `Running <target>` line above them and
+only targets under this crate's own `target/debug/deps/` are counted, with the nested-inclusive
+count retained alongside so the two can be cross-checked. This is the fourth instrument defect
+this lane found in its own harness, and the second that would have produced a wrong number in
+the report rather than a visible error.
