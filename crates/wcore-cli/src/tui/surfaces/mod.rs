@@ -5014,7 +5014,11 @@ mod tests {
     /// by wall clock instead, and sleep rather than yield so the runtime can
     /// actually make progress on timers and blocking work.
     async fn await_session_switch(router: &mut Router, app: &mut App) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Derived, not hardcoded: a literal in the message silently goes stale
+        // the moment the budget changes, which was observed while proving this
+        // assert can fire (budget mutated to 2s, message still said 30s).
+        let budget = std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + budget;
         loop {
             router.poll_session_switch(app);
             if !router
@@ -5028,7 +5032,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "session switch did not complete within 30s"
+                "session switch did not complete within {budget:?}"
             );
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
