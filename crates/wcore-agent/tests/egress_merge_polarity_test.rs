@@ -533,18 +533,26 @@ fn a_project_silent_on_resource_limits_leaves_the_operator_ceiling_alone() {
     let loaded = load_with_global(
         "[default]\nmax_tokens = 200000\nmax_turns = 7\n\n[security]\nenabled = true\n",
         // A real project file that is SILENT on both resource limits.
-        "[default]\nmodel = \"some-project-model\"\n",
+        "[default]\nsystem_prompt = \"project-body-marker\"\n",
         Trust::Untrusted,
         false,
     );
     assert!(loaded.project_restricted, "untrusted path under test");
 
-    // Instrument-alive check: prove the project file was actually read, so the
-    // two assertions below are not passing because nothing loaded at all.
+    // Instrument-alive check: prove the project file was actually READ and its
+    // `[default]` block reached the merge, so the two ceiling assertions below
+    // are not passing merely because nothing loaded at all.
+    //
+    // `system_prompt` is used rather than `model` deliberately: `model` is NOT
+    // among the fields `restrict_untrusted_project_config` forwards, so probing
+    // with it fails on an untrusted project even when the file loaded perfectly.
+    // Measured — the first draft of this test used `model` and this assertion
+    // caught it.
     assert_eq!(
-        loaded.config.model, "some-project-model",
-        "the project config was not read — the ceiling assertions below would be \
-         vacuous"
+        loaded.config.system_prompt.as_deref(),
+        Some("project-body-marker"),
+        "the project config's [default] block did not reach the merge — the \
+         ceiling assertions below would be vacuous"
     );
 
     assert_eq!(
