@@ -114,6 +114,49 @@ impl MediaUnits {
         }
     }
 
+    /// A duration-billed call that produces **no image artifact** —
+    /// transcription and speech synthesis, which providers bill per second of
+    /// audio rather than per artifact.
+    ///
+    /// `images: 0` is the honest count here, not a placeholder: a transcription
+    /// genuinely produces zero images. That makes `images` unusable as a
+    /// pricing multiplier for this shape, which is why
+    /// [`MediaCostRecord::for_success`] refuses to apply a per-image rate card
+    /// to it rather than multiplying by zero and reporting `$0.00`.
+    pub fn audio_seconds(seconds: f64) -> Self {
+        Self {
+            images: 0,
+            width: None,
+            height: None,
+            billed_seconds: Some(seconds),
+        }
+    }
+
+    /// A duration-billed call whose duration the provider did not report.
+    ///
+    /// Distinct from [`Self::audio_seconds`] with `0.0`, which would claim the
+    /// provider processed zero seconds of audio. This says "we do not know",
+    /// matching the `Option` discipline the rest of the module uses.
+    pub fn audio_of_unknown_duration() -> Self {
+        Self {
+            images: 0,
+            width: None,
+            height: None,
+            billed_seconds: None,
+        }
+    }
+
+    /// True when this call produced no image artifact, and is therefore billed
+    /// on something other than artifacts (seconds of audio, characters of
+    /// text). Keyed on `images == 0` rather than on the presence of
+    /// `billed_seconds`, because a provider that declines to report a duration
+    /// does not thereby turn a transcription into an image call — and if it
+    /// did, the call would land in `calls_of_unknown_size`, a figure that is
+    /// supposed to mean "we produced pixels but could not measure them".
+    pub fn is_duration_billed(&self) -> bool {
+        self.images == 0
+    }
+
     /// Total megapixels produced, or `None` when the dimensions are unknown.
     /// This is the unit most image providers price on, and it separates
     /// `landscape` (1536x1024) from `square` (1024x1024) — i.e. it changes
@@ -249,6 +292,18 @@ impl MediaCostRecord {
         let backend_id = backend_id.into();
         let (cost_usd, price_source) = match reported {
             Some(r) => (Some(r.usd), r.source),
+            // A per-image rate card can only price a call that produced
+            // images. Applying it to a duration-billed call (transcription,
+            // speech synthesis — `images == 0`) multiplies the rate by zero
+            // and records **$0.00 for a call that cost real money**, which is
+            // precisely the lie this module exists to prevent. Such a call
+            // falls through to `unpriced`, keeping its billed seconds.
+            None if units.images == 0 => (
+                None,
+                PriceSource::Unpriced {
+                    reason: UnpricedReason::ProviderReportsNoCost,
+                },
+            ),
             None => match rate_card.lookup(&backend_id) {
                 Some((entry, usd_per_image)) => (
                     Some(usd_per_image * f64::from(units.images)),
@@ -413,7 +468,21 @@ pub struct MediaCostSummary {
     /// Calls whose dimensions the surface did not report. Reported alongside
     /// `megapixels` for the same reason `unpriced_calls` sits alongside
     /// `total_usd`: a total that silently omits them is misleading.
+    ///
+    /// Counts **image** calls only. A transcription has no dimensions to
+    /// report and never will, so folding it in here would inflate a figure
+    /// that is supposed to mean "we produced pixels but could not measure
+    /// them" with calls that produced no pixels at all.
     pub calls_of_unknown_size: usize,
+    /// Total seconds of audio billed across the session, for the
+    /// duration-billed shapes (transcription, speech synthesis). Sits
+    /// alongside `images`/`megapixels` rather than being folded into them:
+    /// seconds and pixels are different billable units and summing them
+    /// would produce a number that means nothing.
+    pub billed_seconds: f64,
+    /// Number of duration-billed calls. Reported so `billed_seconds` can be
+    /// read the same way `total_usd` is read against `unpriced_calls`.
+    pub duration_billed_calls: usize,
 }
 
 /// Session-scoped accumulation of [`MediaCostRecord`]s.
@@ -449,6 +518,8 @@ impl MediaCostLedger {
             images: 0,
             megapixels: 0.0,
             calls_of_unknown_size: 0,
+            billed_seconds: 0.0,
+            duration_billed_calls: 0,
         };
         for r in records.iter() {
             match r.cost_usd {
@@ -459,9 +530,15 @@ impl MediaCostLedger {
                 None => summary.unpriced_calls += 1,
             }
             summary.images += r.units.images;
-            match r.units.megapixels() {
-                Some(mp) => summary.megapixels += mp,
-                None => summary.calls_of_unknown_size += 1,
+            if r.units.is_duration_billed() {
+                summary.duration_billed_calls += 1;
+                summary.billed_seconds += r.units.billed_seconds.unwrap_or(0.0);
+            } else {
+                match r.units.megapixels() {
+                    Some(mp) => summary.megapixels += mp,
+                    // An image call whose size the surface did not report.
+                    None => summary.calls_of_unknown_size += 1,
+                }
             }
         }
         summary
@@ -716,6 +793,153 @@ mod tests {
             (s2.megapixels - s.megapixels).abs() < 1e-12,
             "an unknown-size call must not move the megapixel total"
         );
+    }
+
+    /// **The $0.00 trap.** A per-image rate card must never price a
+    /// duration-billed call, because `usd_per_image * 0 images` is `0.0` and
+    /// would record a real, billable transcription as free — the exact lie
+    /// this module was written to prevent, arriving through the pricing path
+    /// instead of the reporting path.
+    #[test]
+    fn rate_card_never_prices_a_duration_billed_call_as_zero() {
+        // A rate card that DOES match this backend by name.
+        let rc = card(&[("flux-router", 0.08)]);
+        let audio = MediaCostRecord::for_success(
+            "transcribe_audio",
+            "flux-router",
+            "whisper-1",
+            MediaUnits::audio_seconds(12.5),
+            None,
+            &rc,
+        );
+        assert_eq!(
+            audio.cost_usd, None,
+            "a per-image card must not price an audio call"
+        );
+        assert_eq!(
+            audio.price_source,
+            PriceSource::Unpriced {
+                reason: UnpricedReason::ProviderReportsNoCost
+            }
+        );
+        let rendered = audio.summary_line();
+        assert!(
+            !rendered.contains("$0.00"),
+            "a billable audio call must never render as $0.00: {rendered}"
+        );
+        // The units survive being unpriced — that is the whole point.
+        assert_eq!(audio.units.billed_seconds, Some(12.5));
+
+        // KNOWN-POSITIVE (can this path still price anything?): the SAME rate
+        // card, same backend id, applied to an IMAGE call, does produce a
+        // figure. Without this the assertion above would pass on an
+        // implementation whose rate card had simply stopped working.
+        let image = MediaCostRecord::for_success(
+            "image_generate",
+            "flux-router",
+            "flux-1",
+            MediaUnits::one_image(1024, 1024),
+            None,
+            &rc,
+        );
+        assert_eq!(
+            image.cost_usd,
+            Some(0.08),
+            "the same card must still price an image call"
+        );
+    }
+
+    /// A provider-reported figure must still reach a duration-billed call —
+    /// the refusal above is specific to the per-image rate card, not a blanket
+    /// "audio is never priced". FluxRouter really does return
+    /// `x-flux-cost-usd` on transcription, so this is the production shape.
+    #[test]
+    fn duration_billed_call_still_takes_a_provider_reported_figure() {
+        let rc = card(&[("flux-router", 0.08)]);
+        let r = MediaCostRecord::for_success(
+            "transcribe_audio",
+            "flux-router",
+            "whisper-large-v3",
+            MediaUnits::audio_seconds(30.0),
+            Some(ReportedCost::from_header("x-flux-cost-usd", 0.0031)),
+            &rc,
+        );
+        assert_eq!(r.cost_usd, Some(0.0031));
+        assert!(
+            r.price_source.is_provider_reported(),
+            "a header figure must be labelled provider-reported, not rate-card"
+        );
+        assert_ne!(
+            r.price_source,
+            PriceSource::LocalRateCard {
+                entry: "flux-router".to_string()
+            },
+            "the matching rate-card entry must not shadow the provider's own number"
+        );
+    }
+
+    /// Seconds and pixels are different billable units. Rolling audio into the
+    /// image-shaped fields would make both meaningless.
+    #[test]
+    fn summary_keeps_audio_and_image_units_separate() {
+        let ledger = MediaCostLedger::new();
+        let empty = MediaRateCard::default();
+        ledger.record(MediaCostRecord::for_success(
+            "image_generate",
+            "b",
+            "m",
+            MediaUnits::one_image(1024, 1024),
+            None,
+            &empty,
+        ));
+        ledger.record(MediaCostRecord::for_success(
+            "transcribe_audio",
+            "b",
+            "m",
+            MediaUnits::audio_seconds(42.0),
+            None,
+            &empty,
+        ));
+
+        let s = ledger.summary();
+        assert_eq!(s.calls, 2);
+        assert_eq!(s.images, 1, "the audio call produced no image");
+        assert!(
+            (s.billed_seconds - 42.0).abs() < 1e-9,
+            "billed_seconds: {}",
+            s.billed_seconds
+        );
+        assert_eq!(s.duration_billed_calls, 1);
+        // The regression this guards: an audio call has no dimensions and
+        // never will, so it must NOT be counted as an image call whose size
+        // went unreported.
+        assert_eq!(
+            s.calls_of_unknown_size, 0,
+            "an audio call is not an image of unknown size"
+        );
+        assert!(
+            (s.megapixels - 1.048_576).abs() < 1e-9,
+            "audio must not move the megapixel total: {}",
+            s.megapixels
+        );
+
+        // KNOWN-NEGATIVE: an IMAGE call of genuinely unknown size MUST still
+        // raise `calls_of_unknown_size`. Without this, the assertion above
+        // would pass on an implementation that had simply stopped counting.
+        ledger.record(MediaCostRecord::for_success(
+            "image_generate",
+            "b",
+            "m",
+            MediaUnits::images_of_unknown_size(2),
+            None,
+            &empty,
+        ));
+        let s2 = ledger.summary();
+        assert_eq!(
+            s2.calls_of_unknown_size, 1,
+            "an unsized IMAGE call must still be counted"
+        );
+        assert_eq!(s2.duration_billed_calls, 1, "and it is not duration-billed");
     }
 
     /// The JSON the model and the host see must carry the price source, not

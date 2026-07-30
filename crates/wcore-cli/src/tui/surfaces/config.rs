@@ -1181,6 +1181,19 @@ pub(crate) enum ProviderStatus {
     /// surface. Until the probe exists we report this honest "unknown"
     /// rather than a false "device ready" (D028).
     DeviceUnprobed,
+    /// The capability is **not compiled into this binary** because its cargo
+    /// feature was off at build time.
+    ///
+    /// 27-C4: this is distinct from every other non-ok state and the
+    /// distinction is the point. `DeviceUnprobed` / `DeviceUnavailable` /
+    /// `NotConfigured` all say *"the capability is here and something about
+    /// your machine or config is not ready"* — they read to a user as
+    /// **broken**. This one says *"the capability is absent from the artifact
+    /// you are running"*, which reads as **not built**, and is the only one of
+    /// the five that a user cannot fix without a different binary. Rendering
+    /// an absent feature as merely-unprobed is a half-claim: it invites the
+    /// user to go hunting for a microphone problem that does not exist.
+    NotCompiledIn { feature: &'static str },
     /// Deferred to a future version.
     Deferred,
 }
@@ -1196,7 +1209,23 @@ impl ProviderStatus {
             ProviderStatus::DeviceAvailable => "✓ device ready",
             ProviderStatus::DeviceUnavailable => "⚠ no audio device",
             ProviderStatus::DeviceUnprobed => "· device not probed",
+            ProviderStatus::NotCompiledIn { .. } => "· not in this build",
             ProviderStatus::Deferred => "· not yet available",
+        }
+    }
+
+    /// The remedy line for a status the user cannot fix by changing config.
+    ///
+    /// Only [`ProviderStatus::NotCompiledIn`] has one: every other state is
+    /// actionable from the running binary (set an env var, plug in a mic, run
+    /// an OAuth flow), whereas an uncompiled feature needs a different build.
+    /// Returning `None` elsewhere keeps the render path from inventing advice.
+    pub fn remedy(self) -> Option<String> {
+        match self {
+            ProviderStatus::NotCompiledIn { feature } => Some(format!(
+                "    not compiled into this binary — rebuild with `--features {feature}`"
+            )),
+            _ => None,
         }
     }
 
@@ -1333,7 +1362,12 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderEntry] = &[
     ProviderEntry {
         name: "voice_mode",
         category: "Audio",
-        description: "Local microphone capture via cpal. No env var needed.",
+        // 27-C4: the build requirement is part of the capability's identity,
+        // not a footnote. Stated unconditionally because it is true in both
+        // builds — a `--features voice` binary satisfies it, a default one
+        // does not — so the static catalog stays pure data with no `cfg`.
+        description: "Local microphone capture via cpal. Requires a build with \
+                      `--features voice`; no env var needed.",
         env_vars: &[],
         signup_url: "",
         deferred: false,
@@ -1508,7 +1542,15 @@ fn resolve_voice_mode_status() -> ProviderStatus {
     }
     #[cfg(not(feature = "voice"))]
     {
-        ProviderStatus::DeviceUnprobed
+        // 27-C4. This used to report `DeviceUnprobed`, which was honest about
+        // the *probe* but not about the *binary*: it says "we have not checked
+        // your audio device", when the truth is that no mic-capture code was
+        // linked at all and no probe will ever run. A user reading "device not
+        // probed" against the description "Local microphone capture via cpal.
+        // No env var needed." reasonably concludes the feature is present and
+        // their hardware is at fault. It is not — the feature is absent from
+        // the artifact, and `--features voice` is the only way to get it.
+        ProviderStatus::NotCompiledIn { feature: "voice" }
     }
 }
 
@@ -3137,7 +3179,14 @@ impl ConfigSurface {
             };
             let status_style = if status.is_ok() {
                 Style::default().fg(t.success)
-            } else if matches!(status, ProviderStatus::Deferred) {
+            } else if matches!(
+                status,
+                ProviderStatus::Deferred | ProviderStatus::NotCompiledIn { .. }
+            ) {
+                // 27-C4: muted, not warning. A warning colour tells the user
+                // something on their machine needs attention; an uncompiled
+                // feature is a property of the build, and there is nothing
+                // for them to fix here.
                 Style::default().fg(t.text_muted)
             } else {
                 Style::default().fg(t.warning)
@@ -3147,8 +3196,13 @@ impl ConfigSurface {
                 Span::styled(format!("{:<22}", entry.name), name_style),
                 Span::styled(status.label().to_string(), status_style),
             ]));
-            // The env-var hint, dimmed.
-            let var_hint = if entry.env_vars.is_empty() {
+            // The env-var hint, dimmed. 27-C4: an uncompiled feature's remedy
+            // outranks it — "(no env var — auto-detected)" is actively
+            // misleading for a capability that is not in the binary, because
+            // it promises auto-detection that no linked code can perform.
+            let var_hint = if let Some(remedy) = status.remedy() {
+                remedy
+            } else if entry.env_vars.is_empty() {
                 "    (no env var — auto-detected)".to_string()
             } else {
                 format!("    env: {}", entry.env_vars.join(" | "))
@@ -5075,20 +5129,110 @@ mod tests {
         );
     }
 
-    /// With the `voice` feature OFF the cpal backend is not linked, so we
-    /// cannot probe audio devices and MUST report the honest "not probed"
-    /// state (explicitly not an `is_ok()` value). This is the only path that
-    /// is deterministic regardless of build features (D028).
+    /// 27-C4. With the `voice` feature OFF the cpal backend is not linked at
+    /// all, so the honest report is that the capability is **absent from this
+    /// binary** — not that its device is "unprobed".
+    ///
+    /// This test previously asserted `DeviceUnprobed`. That was honest about
+    /// the probe and dishonest about the artifact: `DeviceUnprobed` sits in the
+    /// same family as `DeviceUnavailable` / `NotConfigured`, all of which tell
+    /// the user *something on your machine is not ready*. A user who reads that
+    /// against a row described as "Local microphone capture via cpal" goes
+    /// looking for a microphone fault that cannot exist, and nothing on the
+    /// screen names the build flag that would actually give them the feature.
     #[cfg(not(feature = "voice"))]
     #[test]
-    fn voice_mode_status_is_unprobed_when_feature_off() {
+    fn voice_mode_reports_not_compiled_in_when_feature_off() {
         let status = resolve_voice_mode_status();
         assert_eq!(
             status,
-            ProviderStatus::DeviceUnprobed,
-            "feature-off voice_mode must report DeviceUnprobed, not a false readiness claim"
+            ProviderStatus::NotCompiledIn { feature: "voice" },
+            "feature-off voice_mode must say it is absent from the build"
         );
-        assert!(!status.is_ok(), "DeviceUnprobed must never count as ready");
+        assert!(!status.is_ok(), "an uncompiled feature is never ready");
+
+        // The remedy must name the actual cargo flag, or the state is just a
+        // differently-worded dead end.
+        let remedy = status.remedy().expect("NotCompiledIn must carry a remedy");
+        assert!(
+            remedy.contains("--features voice"),
+            "remedy must name the build flag, got: {remedy}"
+        );
+
+        // KNOWN-NEGATIVE (can this assertion fail?): a capability that IS
+        // compiled in must NOT report NotCompiledIn, and must NOT carry a
+        // remedy. Without this the test above would pass on an implementation
+        // that returned NotCompiledIn for every row in the catalog.
+        let anthropic = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "Anthropic")
+            .expect("catalog must contain the Anthropic row");
+        let anthropic_status = resolve_provider_status(anthropic);
+        assert!(
+            !matches!(anthropic_status, ProviderStatus::NotCompiledIn { .. }),
+            "a compiled-in provider must never report NotCompiledIn, got {anthropic_status:?}"
+        );
+        assert!(
+            anthropic_status.remedy().is_none(),
+            "only an uncompiled feature may carry a build remedy"
+        );
+    }
+
+    /// 27-C4, the other direction (`LANE-BRIEF` §3b-iii: a gate must be able to
+    /// PASS, not merely to fail). The check above asserts an absence; on its
+    /// own an absence assertion is satisfiable by a resolver that is simply
+    /// broken. This constructs the state the product claims to detect — the
+    /// row rendered from the real catalog — and confirms the honest text is
+    /// actually reachable and actually reaches the user.
+    #[cfg(not(feature = "voice"))]
+    #[test]
+    fn voice_mode_row_tells_the_user_it_is_not_in_this_build() {
+        let entry = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "voice_mode")
+            .expect("catalog must contain the voice_mode row");
+
+        // The row must not be marked `deferred` — it is not a future feature,
+        // it is a present feature behind a build flag, and conflating the two
+        // would tell the user to wait for something that already exists.
+        assert!(
+            !entry.deferred,
+            "voice_mode is buildable today; `deferred` would misdescribe it"
+        );
+
+        // The description must name the build requirement. This is the claim
+        // the criterion turns on: the shipped binary must not present voice as
+        // an unconditionally-available capability.
+        assert!(
+            entry.description.contains("--features voice"),
+            "voice_mode description must state the build requirement, got: {}",
+            entry.description
+        );
+
+        let status = resolve_provider_status(entry);
+        assert_eq!(status.label(), "· not in this build");
+        assert!(
+            !status.label().contains("not probed"),
+            "the old wording implied a hardware problem; it must be gone"
+        );
+
+        // KNOWN-POSITIVE liveness control for the two assertions above: prove
+        // the catalog lookup and the description matcher are alive by finding
+        // a string that IS present for a DIFFERENT reason on another row. A
+        // dead `contains` returns false and would silently satisfy a
+        // negative-shaped assertion.
+        let meet = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "google_meet")
+            .expect("catalog must contain the google_meet row");
+        assert!(
+            meet.description.contains("OAuth"),
+            "liveness control failed: description matcher is not working"
+        );
+        assert!(
+            !meet.description.contains("--features voice"),
+            "the build-flag matcher must discriminate between rows"
+        );
     }
 
     /// With the `voice` feature ON the resolver runs the same cpal probe the
@@ -5116,6 +5260,18 @@ mod tests {
             status,
             ProviderStatus::DeviceUnprobed,
             "feature-on voice_mode must not return the permanent 'not probed' badge"
+        );
+        // 27-C4: and it must not claim to be absent from a build that contains
+        // it. This is the "can it pass" half of the NotCompiledIn control —
+        // the state must be reachable when the feature is off AND unreachable
+        // when it is on, or it is not measuring the build at all.
+        assert!(
+            !matches!(status, ProviderStatus::NotCompiledIn { .. }),
+            "a voice-enabled build must never report the feature as uncompiled"
+        );
+        assert!(
+            status.remedy().is_none(),
+            "a compiled-in feature must not tell the user to rebuild"
         );
         assert_eq!(
             status.is_ok(),
