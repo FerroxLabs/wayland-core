@@ -1,0 +1,40 @@
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+                           __      __  _____ _____.___.____       _____    _______  ________
+                          /  \    /  \/  _  \\__  |   |    |     /  _  \   \      \ \______ \
+                          \   \/\/   /  /_\  \/   |   |    |    /  /_\  \  /   |   \ |    |  \
+                           \        /    |    \____   |    |___/    |    \/    |    \|    `   \
+                            \__/\  /\____|__  / ______|_______ \____|__  /\____|__  /_______  /
+                                 \/         \/\/              \/       \/         \/        \/
+
+                                                 the autonomous AI agent
+
+                                                                                                    /config.toml has per
+missions 0o644; tigh
+
+
+
+
+
+                         A terminal AI agent that reads, writes, and runs code in your project.
+
+                                               Try: explain this codebase
+                                     /connect to paste an API key and add a provider
+                                               Try: /model to pick a model
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › Use the bash tool to run echo Q3DELIVERED
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-auto │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 48s
+

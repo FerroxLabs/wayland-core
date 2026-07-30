@@ -1,0 +1,15 @@
+• This is an advisory question, answer directly in the exact shape.
+
+• PANEL_POSITION=C
+  SPACE_BOUND=UNBIND
+  DIGITS=REMOVE
+
+  WHY: The type-ahead is a clever machine sitting on top of a category error: a surface cannot hold both "every keystroke is text" and "bare keystrokes are commands" without a modal distinction, and every lookahead just moves the ambiguity to a longer prefix of real prose ('s ', '1 ', 'o ' are real message openers — "1 thing first:", "ok so", "so..."). Option A (Alt chords) is broken on macOS terminals, where Alt emits dead keys/ESC-prefixes inconsistently across iTerm/Terminal/WezTerm, so it is not portable for a cross-platform CLI; B just relocates the bug — a bare '?' prefix is itself prose ("? what does this do"). The strongest objection to C is that it's the most keystroke-expensive for keyboard-first users, and the j/k crowd loses muscle memory — but the modal's cursor already exists, arrows+Enter are universal, and the onboarding card runs once per install, so the efficiency cost is paid almost never while the prose-loss bug is paid by confused first-time users, exactly the users you cannot afford to lose.
+
+  DISCOVERABILITY: The card already renders a cursor on the active row; add a footer line "↑/↓ move · Enter select" — discoverability is then identical to every other TUI menu the user has ever seen, with nothing to memorize.
+
+  RISK: A returning user who learned 's'/'o'/'j' must now press arrows+Enter (and any docs or demo videos showing letter accelerators go stale) — mitigate with a one-release transitional hint, not by keeping the bindings.
+
+  One supporting note: unbinding SPACE is not optional garnish, it is the same bug — SPACE-as-dismiss only "worked" because the type-ahead masks it, and under C nothing needs it since Enter is the activate key. Keep the accelerators *reachable* per your constraint by documenting that arrow-navigation IS the retained path to every action the letters performed; no capability is removed, only the ambiguous trigger.
+
+To resume this session: kimi -r session_0d4da631-cdb9-45d4-8821-0d3e7d2cea0e

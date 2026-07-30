@@ -332,12 +332,24 @@ impl OnboardingSurface {
     /// Arrow keys and Enter are outside this entirely and remain the way to
     /// drive the card once the letter shortcuts have gone quiet.
     ///
-    /// KNOWN COST, pinned by `a_message_beginning_with_two_shortcut_characters_
-    /// loses_them`: a message whose first TWO characters both bind shortcuts
-    /// (`1 …`, `s …`) fires both and loses both, because case 2 applies twice
-    /// before any prose establishes itself. The alternative — letting only one
-    /// shortcut ever fire — breaks pressing `s` then space, which is a thing
-    /// people do repeatedly, to save two characters in a case that is rare.
+    /// FORMER KNOWN COST, now closed by UNBINDING SPACE. A message whose first
+    /// TWO characters both bind shortcuts used to fire both and lose both,
+    /// because case 2 applies twice before any prose establishes itself. In
+    /// practice that second character was almost always the SPACE of `s …`,
+    /// `1 …`, `o …`, because space was bound to activate/dismiss. Space is now
+    /// prose on every step (see `is_accelerator`), so the held first character
+    /// is promoted by it and the sentence survives intact.
+    ///
+    /// The objection that used to block this — "you would break pressing `s`
+    /// then space to skip-then-confirm" — dissolved with the same change:
+    /// skip-then-confirm is `s` then Enter, and Enter is navigation, which is
+    /// outside this path entirely.
+    ///
+    /// RESIDUAL, narrower, pinned by
+    /// `two_adjacent_letter_shortcuts_still_lose_the_first`: two accelerator
+    /// LETTERS with no space between them (`ok …` → `o` then `k`) still fire
+    /// both. Closing that would mean only one shortcut may ever fire, which
+    /// breaks `j` then `j`; the arrow keys remain the unambiguous path.
     fn absorb_printable(&mut self, ch: char, is_accelerator: bool) -> bool {
         if is_accelerator && self.typeahead.is_empty() {
             // Case 2. Any previously held character fired its own shortcut and
@@ -413,9 +425,14 @@ impl OnboardingSurface {
                 }
                 matches!(ch, 'k' | 'j' | 'o' | 's')
             }
-            Step::PickProvider | Step::AddMore => matches!(ch, 'k' | 'j' | ' '),
-            Step::Ready if self.existing_config.is_some() => matches!(ch, 'k' | 'j' | ' '),
-            Step::Ready => ch == ' ',
+            Step::PickProvider | Step::AddMore => matches!(ch, 'k' | 'j'),
+            Step::Ready if self.existing_config.is_some() => matches!(ch, 'k' | 'j'),
+            // SPACE is deliberately NOT an accelerator on any step. It is the
+            // most common character in prose, and binding it to
+            // activate/dismiss is what turned a single mistaken letter into a
+            // destroyed sentence: `s` skipped, and the space after it
+            // confirmed. Enter is the activate key everywhere.
+            Step::Ready => false,
             // Validating / ProbingOllama answer only to Esc; every printable
             // key there is prose. Name and the focused key field never reach
             // this function (see `has_focused_field`).
@@ -832,7 +849,8 @@ impl OnboardingSurface {
                 self.pick_cursor = (self.pick_cursor + 1) % len;
                 SurfaceAction::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            // Enter only — SPACE is prose. See `is_accelerator`.
+            KeyCode::Enter => {
                 let provider = Provider::ALL[self.pick_cursor];
                 self.start_validation(provider);
                 SurfaceAction::None
@@ -890,7 +908,8 @@ impl OnboardingSurface {
                 self.move_add_more(1);
                 SurfaceAction::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => match self.add_more {
+            // Enter only — SPACE is prose. See `is_accelerator`.
+            KeyCode::Enter => match self.add_more {
                 AddMoreChoice::AddAnother => {
                     // Loop back to Connect with a fresh key field.
                     self.step = Step::Connect;
@@ -954,7 +973,10 @@ impl OnboardingSurface {
                     }
                     return SurfaceAction::None;
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                // Enter only — SPACE is prose. This arm WRITES CONFIG on
+                // Overwrite, so a bound space let a prose character commit a
+                // destructive choice.
+                KeyCode::Enter => {
                     if cursor == ReadyChoice::Overwrite {
                         self.write_config(true);
                     }
@@ -975,7 +997,8 @@ impl OnboardingSurface {
 
         // ── No conflict — the plain Ready step ───────────────────────
         match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') => SurfaceAction::Switch(SurfaceId::Workspace),
+            // Enter only — SPACE is prose. See `is_accelerator`.
+            KeyCode::Enter => SurfaceAction::Switch(SurfaceId::Workspace),
             KeyCode::Esc => {
                 // Back to Connect to change the choice. The gathered
                 // providers stay — a config write that already happened
@@ -3104,16 +3127,20 @@ mod tests {
         assert_eq!(s.take_typeahead(), None);
     }
 
-    /// Ready's accelerator is a bare space, which is why the losses in the UAT
-    /// always ended at a word boundary. Prove the space is neutralised while
-    /// prose is in flight, and still confirms when it is not.
+    /// SPACE is prose on every step, unconditionally — it is no longer an
+    /// accelerator anywhere. Enter is the activate key. This is the change
+    /// that closed the two-shortcut-character residual, because the second
+    /// of those two characters was nearly always the space.
+    ///
+    /// Both directions are asserted here: the space must NOT act, and Enter
+    /// must still act. A test that only proved the first would pass on a
+    /// surface whose keyboard handling had been deleted outright.
     #[test]
-    fn a_bare_space_confirms_ready_only_when_no_message_is_in_flight() {
-        // In flight: the space belongs to the sentence. Reach Ready by
-        // ARROWS, not by the `s` shortcut — see the trade-off test below for
-        // why mixing the two is a deliberately different case.
-        let mut surface = fresh();
+    fn space_is_prose_everywhere_and_enter_still_confirms() {
         let mut app = App::new();
+
+        // Prose survives: a space mid-sentence must not confirm the card.
+        let mut surface = fresh();
         surface.handle_key(key(KeyCode::Down), &mut app);
         surface.handle_key(key(KeyCode::Down), &mut app);
         surface.handle_key(key(KeyCode::Enter), &mut app); // → Ready via Skip
@@ -3125,50 +3152,147 @@ mod tests {
             "the space inside `hello world` must not confirm the card"
         );
         assert_eq!(surface.take_typeahead().as_deref(), Some("hello world"));
-        // Not in flight: the space is the documented confirm.
+
+        // A bare space with NOTHING in flight is still prose, not a confirm.
+        // This is the arm that changed: it used to Switch.
+        let mut surface = fresh();
+        surface.handle_key(char('s'), &mut app); // → Ready
+        assert_eq!(surface.step, Step::Ready);
+        let action = surface.handle_key(char(' '), &mut app);
+        assert!(
+            matches!(action, SurfaceAction::None),
+            "a bare space must no longer dismiss the card"
+        );
+
+        // The shortcut still works: `s` to skip, Enter to confirm.
         let mut surface = fresh();
         surface.handle_key(char('s'), &mut app);
-        let action = surface.handle_key(char(' '), &mut app);
-        assert!(matches!(
-            action,
-            SurfaceAction::Switch(SurfaceId::Workspace)
-        ));
+        assert_eq!(surface.step, Step::Ready, "`s` must still skip");
+        let action = surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert!(
+            matches!(action, SurfaceAction::Switch(SurfaceId::Workspace)),
+            "Enter must still confirm Ready"
+        );
     }
 
-    /// The residual hole, pinned so it is a measured cost and not a surprise.
+    /// The former residual, now CLOSED. This test previously asserted that
+    /// `s hello` kept only ` hello`; it asserts the opposite now, because
+    /// SPACE is no longer an accelerator and therefore promotes the held `s`
+    /// instead of firing a second shortcut.
     ///
-    /// A message whose first TWO characters both bind shortcuts has each of
-    /// them read as the shortcut it is documented to be, because no prose has
-    /// yet arrived to establish that a sentence is being written. Measured
-    /// cost: `s hello` keeps ` hello` — the leading `s` is gone (and in the
-    /// live router the space also fires the handoff, so `hello` is what
-    /// reaches the composer).
-    ///
-    /// Closing it would mean letting only one shortcut ever fire per card,
-    /// which breaks `s` then space and `j` then `j` — things people do
-    /// repeatedly — to save one character in a case that needs a first message
-    /// beginning `s `, `o `, `1 ` or the like.
-    ///
-    /// If this ever needs closing, the honest fix is to stop binding bare
-    /// letters as accelerators on a surface that also receives prose, not to
-    /// make the lookahead cleverer.
+    /// Kept under its own name rather than deleted: the shape it describes is
+    /// the one the live UAT measured (4, 20 and 37 characters destroyed, every
+    /// loss ending at a word boundary), so it is the regression that matters.
     #[test]
-    fn a_message_beginning_with_two_shortcut_characters_loses_the_first() {
+    fn a_message_beginning_with_a_shortcut_letter_and_a_space_survives_intact() {
         let mut surface = fresh();
         let mut app = App::new();
         type_str(&mut surface, &mut app, "s hello");
         assert_eq!(
             surface.take_typeahead().as_deref(),
-            Some(" hello"),
-            "known residual: a leading `s ` is read as skip-then-confirm"
+            Some("s hello"),
+            "the leading `s ` must survive: space is prose, so it promotes the held `s`"
         );
-        // The far commoner shape — one shortcut letter then prose — is NOT
-        // affected, which is what keeps the residual narrow. Control:
+        // Cursor-motion letters, which stay on the Connect step.
+        for msg in ["j hello", "k hello"] {
+            let mut surface = fresh();
+            type_str(&mut surface, &mut app, msg);
+            assert_eq!(
+                surface.take_typeahead().as_deref(),
+                Some(msg),
+                "`{msg}` must survive intact"
+            );
+        }
+        // The digit accelerator only exists when env keys were detected, so it
+        // MUST be exercised on a surface that has them — on a bare `fresh()`
+        // `1` is not an accelerator at all and the assertion would pass
+        // without testing anything. (`a` is deliberately NOT in this list; it
+        // lands on a step with a focused text field, which is pinned
+        // separately by `a_connect_all_diverts_prose_into_the_name_field`.)
+        let mut surface = OnboardingSurface::with_env_keys(vec![
+            env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
+            env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
+        ]);
+        type_str(&mut surface, &mut app, "1 hello");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("1 hello"),
+            "`1 hello` must survive intact"
+        );
+        // The commoner shape — one shortcut letter then prose — is unaffected.
         let mut surface = fresh();
         type_str(&mut surface, &mut app, "summarize this repo");
         assert_eq!(
             surface.take_typeahead().as_deref(),
             Some("summarize this repo")
+        );
+    }
+
+    /// A SEPARATE hole that unbinding SPACE does not close, found while
+    /// writing the test above and pinned to the measured behaviour rather than
+    /// to what was predicted.
+    ///
+    /// `a` (offered when 2+ env keys were detected) connects every detected
+    /// key and lands on `Step::Name`, which HAS a focused text field. The
+    /// type-ahead deliberately stays out of the way of focused fields, so the
+    /// rest of the sentence is typed into the "what should I call you" input
+    /// instead of being buffered. Nothing reaches the composer.
+    ///
+    /// Worse than the character loss: `connect_all_env_keys` calls
+    /// `persist_env_provider_selection`, so this path WRITES config.toml. A
+    /// first message beginning `a ` therefore both selects a provider the user
+    /// never chose and diverts their prose into a name field.
+    ///
+    /// Recorded as a finding, not fixed here: closing it means either an
+    /// env-key cursor (so `a`/digits can be reached by arrows and committed
+    /// with Enter) or making the write conditional, both of which are larger
+    /// UX changes than this lane's brief sanctions and want their own
+    /// cross-audit. See the lane SUMMARY.
+    #[test]
+    fn a_connect_all_diverts_prose_into_the_name_field() {
+        let mut app = App::new();
+        let mut surface = OnboardingSurface::with_env_keys(vec![
+            env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
+            env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
+        ]);
+        type_str(&mut surface, &mut app, "a hello");
+        assert_eq!(
+            surface.step,
+            Step::Name,
+            "`a` connects every detected key and advances to the Name step"
+        );
+        assert_eq!(
+            surface.take_typeahead(),
+            None,
+            "the Name step has a focused field, so nothing is buffered"
+        );
+        assert!(
+            !surface.name.value().is_empty(),
+            "the prose went into the name field: {:?}",
+            surface.name.value()
+        );
+    }
+
+    /// The narrower residual that SURVIVES the space unbinding: two
+    /// accelerator LETTERS adjacent, with no space to promote the first.
+    ///
+    /// Pinned so it is a measured cost and not a surprise. Closing it would
+    /// mean only one shortcut may ever fire per card, which breaks `j` then
+    /// `j`; the arrow keys remain the unambiguous path, and this shape needs a
+    /// first message beginning with two accelerator letters in a row.
+    #[test]
+    fn two_adjacent_letter_shortcuts_still_lose_the_first() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        // `j` and `k` both move the Connect cursor, so the step does NOT
+        // change between them — which is what makes this the clean case.
+        // Case 2 applies twice: the held `j` is replaced by `k` without being
+        // promoted, so the `j` is lost. The space then promotes the `k`.
+        type_str(&mut surface, &mut app, "jk hello");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("k hello"),
+            "known narrower residual: two adjacent accelerator letters"
         );
     }
 

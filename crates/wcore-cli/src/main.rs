@@ -1084,6 +1084,20 @@ fn danger_tiers(cli: &Cli) -> (bool, bool) {
     (cli.dangerously_skip_permissions, cli.dangerous)
 }
 
+/// The advice printed when stdin is not a TTY and no prompt was given.
+///
+/// Lifted out of `run()` for the same reason as `danger_tiers` above: the
+/// product and the test read the SAME bytes, so the test cannot pass against
+/// a stale copy of the message.
+///
+/// UAT-W1: this used to end `pass a prompt with -p`. `-p` is the short form of
+/// `--provider` (see the `Cli` derive), so a user who followed the product's
+/// own advice got `Unknown provider: '<their prompt>'`. The prompt is a
+/// trailing positional, not a flag.
+const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal and no prompt was given.\n\
+     Use --json-stream for headless/piped use, or pass the prompt as an\n\
+     argument: wayland-core \"your prompt here\".";
+
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
     // Record protocol mode before ANY fallible startup work, so every refusal
@@ -2053,10 +2067,9 @@ async fn run() -> anyhow::Result<ExitCode> {
     // explicitly opted into the line-REPL (they know what they're doing).
     // `--json-stream` is handled before this point and never hits here.
     if prompt.is_empty() && !cli.no_tui && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!(
-            "wayland-core: stdin is not a terminal and no prompt was given.\n\
-             Use --json-stream for headless/piped use, or pass a prompt with -p."
-        );
+        // Any flag this advice names is checked against the real clap
+        // definition by `non_tty_advice_names_only_flags_that_do_what_it_says`.
+        eprintln!("{NON_TTY_NO_PROMPT_ADVICE}");
         return Ok(ExitCode::FAILURE);
     }
 
@@ -5916,6 +5929,97 @@ mod tests {
     use std::time::Duration;
     use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    /// UAT-W1 — the product's own error advised the wrong flag.
+    ///
+    /// The non-TTY message told the user to `pass a prompt with -p`. `-p` is
+    /// the short form of `--provider`, so obeying it yields
+    /// `Unknown provider: 'Reply'`. The prompt is a trailing positional.
+    ///
+    /// This fails if the advice names ANY flag that does not do what the
+    /// advice says. It resolves each flag token against the REAL clap
+    /// definition (`Cli::command()`), never against a copy of the message, so
+    /// it cannot drift and cannot pass tautologically.
+    #[test]
+    fn non_tty_advice_names_only_flags_that_do_what_it_says() {
+        use clap::CommandFactory;
+
+        /// Resolve a `--long` / `-s` token to the clap argument id it
+        /// actually binds to, or `None` if no such argument exists.
+        fn resolve(cmd: &clap::Command, token: &str) -> Option<String> {
+            let name = token.trim_start_matches('-');
+            cmd.get_arguments()
+                .find(|a| {
+                    if token.starts_with("--") {
+                        a.get_long() == Some(name)
+                            || a.get_all_aliases().is_some_and(|v| v.contains(&name))
+                    } else {
+                        name.chars().count() == 1 && a.get_short() == name.chars().next()
+                    }
+                })
+                .map(|a| a.get_id().to_string())
+        }
+
+        let cmd = Cli::command();
+
+        // ── Controls, BOTH directions, so the resolver is proven alive ──
+        // Known-positive: a flag that exists resolves to its id.
+        assert_eq!(
+            resolve(&cmd, "--json-stream").as_deref(),
+            Some("json_stream"),
+            "resolver is dead: it cannot even find --json-stream"
+        );
+        // The exact token that carried the bug. This documents the trap: if
+        // `-p` is ever put back in the advice, the loop below reports it as
+        // `provider`, not as a way to pass a prompt.
+        assert_eq!(
+            resolve(&cmd, "-p").as_deref(),
+            Some("provider"),
+            "`-p` is expected to be --provider; the advice must not offer it \
+             as a way to pass a prompt"
+        );
+        // Known-negative: a flag that does not exist resolves to nothing.
+        assert_eq!(
+            resolve(&cmd, "--definitely-not-a-real-flag"),
+            None,
+            "resolver is not discriminating: it matched a nonexistent flag"
+        );
+        // The prompt really is a positional, so no flag can ever be the right
+        // answer. If this changes, the advice should change with it.
+        assert!(
+            cmd.get_arguments().any(|a| a.get_id() == "prompt"
+                && a.get_long().is_none()
+                && a.get_short().is_none()),
+            "`prompt` is no longer a bare positional — revisit the advice"
+        );
+
+        // ── The assertion itself ──
+        let tokens: Vec<&str> = NON_TTY_NO_PROMPT_ADVICE
+            .split(|c: char| c.is_whitespace() || c == '"' || c == ',')
+            .map(|t| t.trim_end_matches('.'))
+            .filter(|t| t.starts_with('-') && t.len() > 1)
+            .collect();
+
+        // Vacuity guard: a message naming no flags at all would pass the loop
+        // below without checking anything.
+        assert!(
+            !tokens.is_empty(),
+            "no flag tokens extracted from the advice — the extractor is dead, \
+             or the advice stopped naming any flag"
+        );
+
+        for token in tokens {
+            let id = resolve(&cmd, token).unwrap_or_else(|| {
+                panic!("the advice names `{token}`, which is not an argument at all")
+            });
+            assert_eq!(
+                id, "json_stream",
+                "the advice names `{token}`, which is clap argument `{id}` — \
+                 that is not a way to pass a prompt. The prompt is a trailing \
+                 positional: wayland-core \"your prompt\"."
+            );
+        }
+    }
 
     #[test]
     fn host_runtime_mcp_requires_an_immutable_assistant_scope() {
