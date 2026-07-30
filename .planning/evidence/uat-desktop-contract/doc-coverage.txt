@@ -1,0 +1,31 @@
+### CONTROLS
+  known-positive `ready`      documented=True
+  known-positive `text_delta` documented=True
+  known-negative `zzz_fake`   documented=False
+
+### EVENTS: 44/59 documented; 15 NOT documented
+    anvil_receipt_invalidated
+    goal_control_refused
+    goal_snapshot
+    goal_transition
+    mcp_failed
+    mcp_removal_result
+    plugin_registration_failed
+    provider_failover_receipt
+    runtime_diagnostics_snapshot
+    runtime_diagnostics_unavailable
+    tool_panicked
+    unknown_tool_effect_resolved
+    workflow_finished
+    workflow_node_event
+    workflow_started
+
+### COMMANDS: 16/24 documented; 8 NOT documented
+    get_runtime_diagnostics
+    goal_advance
+    goal_cancel
+    goal_declare_task
+    goal_open
+    goal_resync
+    remove_mcp_server
+    resolve_unknown_tool_effect

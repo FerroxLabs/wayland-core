@@ -1,0 +1,99 @@
+=== SELF-TEST ===
+  [PASS] known-positive ProtocolEvent parses >30 variants
+  [PASS] known-negative unknown enum yields None
+  [PASS] repair adds line numbers so dupes are explainable
+
+=== ProtocolEvent  (events.rs lines 558..1314) ===
+variant count: 62
+duplicate tags: ['sub_agent_event', 'workflow_finished', 'workflow_started']
+  L559   Ready                                  -> ready
+  L577   ExecutionPolicy                        -> execution_policy
+  L583   WorkspacePolicy                        -> workspace_policy
+  L587   SessionRecoverySnapshot                -> session_recovery_snapshot
+  L599   SessionRecoveryReplay                  -> session_recovery_replay
+  L609   SessionRecoveryUnavailable             -> session_recovery_unavailable
+  L616   TurnRecoveryLifecycle                  -> turn_recovery_lifecycle
+  L628   UnknownToolEffectResolved              -> unknown_tool_effect_resolved
+  L635   CapabilityActivation                   -> capability_activation
+  L639   StreamStart                            -> stream_start
+  L642   TextDelta                              -> text_delta
+  L646   Thinking                               -> thinking
+  L657   ToolRequest                            -> tool_request
+  L662   ToolRunning                            -> tool_running
+  L667   ToolResult                             -> tool_result
+  L677   ToolCancelled                          -> tool_cancelled
+  L682   StreamEnd                              -> stream_end
+  L704   Error                                  -> error
+  L709   Info                                   -> info
+  L713   ConfigChanged                          -> config_changed
+  L716   McpReady                               -> mcp_ready
+  L725   McpFailed                              -> mcp_failed
+  L730   McpRemovalResult                       -> mcp_removal_result
+  L740   RuntimeDiagnosticsSnapshot             -> runtime_diagnostics_snapshot
+  L747   RuntimeDiagnosticsUnavailable          -> runtime_diagnostics_unavailable
+  L764   TraceEvent                             -> trace_event
+  L779   SessionCost                            -> session_cost
+  L794   SubAgentEvent                          -> sub_agent_event
+  L804   CorrelatedSubAgentEvent                -> sub_agent_event  (rename=sub_agent_event)
+  L828   WorkflowStarted                        -> workflow_started
+  L837   CorrelatedWorkflowStarted              -> workflow_started  (rename=workflow_started)
+  L848   WorkflowNodeEvent                      -> workflow_node_event
+  L866   WorkflowFinished                       -> workflow_finished
+  L873   CorrelatedWorkflowFinished             -> workflow_finished  (rename=workflow_finished)
+  L891   ToolChunk                              -> tool_chunk
+  L913   ProviderCircuitEvent                   -> provider_circuit_event
+  L925   ProviderFailoverReceipt                -> provider_failover_receipt
+  L931   ProviderAttempt                        -> provider_attempt
+  L939   ProviderRetry                          -> provider_retry
+  L945   ProviderFailure                        -> provider_failure
+  L951   MidFlightMonitorDecision               -> mid_flight_monitor_decision
+  L969   ApprovalRequired                       -> approval_required
+  L987   Suspend                                -> suspend
+  L994   ApprovalResume                         -> approval_resume
+  L1009  BudgetExceeded                         -> budget_exceeded
+  L1017  BudgetGrantResult                      -> budget_grant_result
+  L1035  ToolPanicked                           -> tool_panicked
+  L1055  PluginRegistrationFailed               -> plugin_registration_failed
+  L1073  PluginEvent                            -> plugin_event
+  L1087  EvolutionEvent                         -> evolution_event
+  L1103  BrowserEvent                           -> browser_event
+  L1121  BrowserPolicyDenied                    -> browser_policy_denied
+  L1133  CuaEvent                               -> cua_event
+  L1150  CuaPolicyDenied                        -> cua_policy_denied
+  L1181  HostSendMessageRequest                 -> host_send_message_request
+  L1207  CompactOffload                         -> compact_offload
+  L1239  AnvilReceipt                           -> anvil_receipt
+  L1250  AnvilReceiptInvalidated                -> anvil_receipt_invalidated
+  L1266  GoalSnapshot                           -> goal_snapshot
+  L1281  GoalTransition                         -> goal_transition
+  L1303  GoalControlRefused                     -> goal_control_refused
+  L1313  Pong                                   -> pong
+
+=== ProtocolCommand  (commands.rs lines 262..403) ===
+variant count: 24
+duplicate tags: []
+  L263   Message                                -> message
+  L269   Stop                                   -> stop
+  L270   ToolApprove                            -> tool_approve
+  L282   ToolDeny                               -> tool_deny
+  L287   InitHistory                            -> init_history
+  L290   SetMode                                -> set_mode
+  L293   SetConfig                              -> set_config
+  L307   ContinueWithBudget                     -> continue_with_budget
+  L311   SessionResync                          -> session_resync
+  L314   ResumeTurn                             -> resume_turn
+  L318   ResolveInterruptedApproval             -> resolve_interrupted_approval
+  L323   ResolveUnknownToolEffect               -> resolve_unknown_tool_effect
+  L325   GetRuntimeDiagnostics                  -> get_runtime_diagnostics
+  L328   GoalOpen                               -> goal_open
+  L330   GoalDeclareTask                        -> goal_declare_task
+  L333   GoalAdvance                            -> goal_advance
+  L337   GoalCancel                             -> goal_cancel
+  L340   GoalResync                             -> goal_resync
+  L341   AddMcpServer                           -> add_mcp_server
+  L361   RemoveMcpServer                        -> remove_mcp_server
+  L366   GrantWorkspaceCapability               -> grant_workspace_capability
+  L380   ApprovalResume                         -> approval_resume
+  L394   HostSendMessageResult                  -> host_send_message_result
+  L402   Ping                                   -> ping
+

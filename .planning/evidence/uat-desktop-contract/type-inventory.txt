@@ -1,0 +1,126 @@
+### CORPUS events: filename -> type(s) found in content
+  anvil_receipt.json                            ['anvil_receipt']
+  anvil_receipt_invalidated.json                ['anvil_receipt_invalidated']
+  approval_required.json                        ['approval_required']
+  approval_resume.json                          ['approval_resume']
+  browser_event.json                            ['browser_event']
+  browser_policy_denied.json                    ['browser_policy_denied']
+  budget_exceeded.json                          ['budget_exceeded']
+  budget_grant_result.json                      ['budget_grant_result']
+  config_changed.json                           ['config_changed']
+  cua_event.json                                ['cua_event']
+  cua_policy_denied.json                        ['cua_policy_denied']
+  error.json                                    ['error']
+  evolution_event.json                          ['evolution_event']
+  execution_policy.json                         ['execution_policy']
+  goal_control_refused.json                     ['goal_control_refused']
+  goal_snapshot.json                            ['goal_snapshot']
+  goal_transition.json                          ['goal_transition']
+  host_send_message_request.json                ['host_send_message_request']
+  info.json                                     ['info']
+  mcp_failed.json                               ['mcp_failed']
+  mcp_ready.json                                ['mcp_ready']
+  mcp_removal_result.json                       ['mcp_removal_result']
+  plugin_event.json                             ['plugin_event']
+  plugin_registration_failed.json               ['plugin_registration_failed']
+  pong.json                                     ['pong']
+  provider_circuit_event.json                   ['provider_circuit_event']
+  provider_failover_receipt.json                ['provider_failover_receipt']
+  ready.json                                    ['ready']
+  runtime_diagnostics_snapshot.json             ['runtime_diagnostics_snapshot']
+  runtime_diagnostics_unavailable.json          ['runtime_diagnostics_unavailable']
+  session_cost.json                             ['session_cost']
+  session_recovery_replay.json                  ['session_recovery_replay']
+  session_recovery_snapshot.json                ['session_recovery_snapshot']
+  session_recovery_unavailable.json             ['session_recovery_unavailable']
+  stream_end.json                               ['stream_end']
+  stream_start.json                             ['stream_start']
+  sub_agent_event.json                          ['sub_agent_event']
+  suspend.json                                  ['suspend']
+  text_delta.json                               ['text_delta']
+  thinking.json                                 ['thinking']
+  tool_cancelled.json                           ['tool_cancelled']
+  tool_chunk.json                               ['tool_chunk']
+  tool_panicked.json                            ['tool_panicked']
+  tool_request.json                             ['tool_request']
+  tool_result.json                              ['tool_result']
+  tool_running.json                             ['tool_running']
+  trace_event.json                              ['trace_event']
+  turn_recovery_lifecycle.json                  ['turn_recovery_lifecycle']
+  unknown_tool_effect_resolved.json             ['unknown_tool_effect_resolved']
+  workflow_finished.json                        ['workflow_finished']
+  workflow_node_event.json                      ['workflow_node_event']
+  workflow_started.json                         ['workflow_started']
+  TOTAL event fixtures: 52
+
+### CORPUS commands: filename -> type(s)
+  add_mcp_server.json                           ['add_mcp_server']
+  approval_resume.json                          ['approval_resume']
+  continue_with_budget.json                     ['continue_with_budget']
+  get_runtime_diagnostics.json                  ['get_runtime_diagnostics']
+  goal_advance.json                             ['goal_advance']
+  goal_cancel.json                              ['goal_cancel']
+  goal_declare_task.json                        ['goal_declare_task']
+  goal_open.json                                ['goal_open']
+  goal_resync.json                              ['goal_resync']
+  host_send_message_result.json                 ['host_send_message_result']
+  init_history.json                             ['init_history']
+  message.json                                  ['message']
+  ping.json                                     ['ping']
+  remove_mcp_server.json                        ['remove_mcp_server']
+  resolve_interrupted_approval.json             ['resolve_interrupted_approval']
+  resolve_unknown_tool_effect.json              ['resolve_unknown_tool_effect']
+  resume_turn.json                              ['resume_turn']
+  session_resync.json                           ['session_resync']
+  set_config.json                               ['set_config']
+  set_mode.json                                 ['set_mode']
+  stop.json                                     ['stop']
+  tool_approve.json                             ['tool_approve']
+  tool_deny.json                                ['tool_deny']
+  TOTAL command fixtures: 23
+
+### DESKTOP index.ts switch/case inventory (grouped by switch subject)
+  switch#1 on `event.type`  (33 cases)
+      L674: ready
+      L681: stream_start
+      L686: text_delta
+      L690: thinking
+      L694: tool_request
+      L718: tool_running
+      L735: tool_result
+      L761: tool_cancelled
+      L781: stream_end
+      L792: error
+      L809: info
+      L817: config_changed
+      L826: mcp_ready
+      L837: mcp_failed
+      L846: pong
+      L855: tool_chunk
+      L867: browser_policy_denied
+      L879: browser_event
+      L889: cua_policy_denied
+      L903: cua_event
+      L920: tool_panicked
+      L936: plugin_registration_failed
+      L954: provider_circuit_event
+      L987: budget_exceeded
+      L1003: approval_required
+      L1038: suspend
+      L1050: approval_resume
+      L1063: trace_event
+      L1075: session_cost
+      L1088: sub_agent_event
+      L1101: plugin_event
+      L1114: evolution_event
+      L1135: host_send_message_request
+  switch#2 on `tool.category`  (4 cases)
+      L1194: edit
+      L1201: exec
+      L1208: mcp
+      L1216: info
+  default: arms at lines [1152, 1217]
+
+### RAW SETS
+corpus_event_types (52): ['anvil_receipt', 'anvil_receipt_invalidated', 'approval_required', 'approval_resume', 'browser_event', 'browser_policy_denied', 'budget_exceeded', 'budget_grant_result', 'config_changed', 'cua_event', 'cua_policy_denied', 'error', 'evolution_event', 'execution_policy', 'goal_control_refused', 'goal_snapshot', 'goal_transition', 'host_send_message_request', 'info', 'mcp_failed', 'mcp_ready', 'mcp_removal_result', 'plugin_event', 'plugin_registration_failed', 'pong', 'provider_circuit_event', 'provider_failover_receipt', 'ready', 'runtime_diagnostics_snapshot', 'runtime_diagnostics_unavailable', 'session_cost', 'session_recovery_replay', 'session_recovery_snapshot', 'session_recovery_unavailable', 'stream_end', 'stream_start', 'sub_agent_event', 'suspend', 'text_delta', 'thinking', 'tool_cancelled', 'tool_chunk', 'tool_panicked', 'tool_request', 'tool_result', 'tool_running', 'trace_event', 'turn_recovery_lifecycle', 'unknown_tool_effect_resolved', 'workflow_finished', 'workflow_node_event', 'workflow_started']
+corpus_cmd_types (23): ['add_mcp_server', 'approval_resume', 'continue_with_budget', 'get_runtime_diagnostics', 'goal_advance', 'goal_cancel', 'goal_declare_task', 'goal_open', 'goal_resync', 'host_send_message_result', 'init_history', 'message', 'ping', 'remove_mcp_server', 'resolve_interrupted_approval', 'resolve_unknown_tool_effect', 'resume_turn', 'session_resync', 'set_config', 'set_mode', 'stop', 'tool_approve', 'tool_deny']

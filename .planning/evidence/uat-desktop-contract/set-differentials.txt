@@ -1,0 +1,91 @@
+### CARDINALITIES
+  Core ProtocolEvent variants        : 62
+  Core distinct event WIRE TAGS      : 59   (dupes merged: ['sub_agent_event', 'workflow_finished', 'workflow_started'])
+  Corpus event fixtures / types      : 52
+  Desktop handled event types        : 33
+  Core ProtocolCommand tags          : 24
+  Corpus command fixtures / types    : 23
+  Desktop declared command types     : 11
+
+### A. Core emits, CORPUS does not cover  (n=7)
+    capability_activation
+    compact_offload
+    mid_flight_monitor_decision
+    provider_attempt
+    provider_failure
+    provider_retry
+    workspace_policy
+
+### B. Corpus covers, Core does NOT emit (dead fixtures)  (n=0)
+
+### C. Core emits, DESKTOP does not handle  (n=26)
+    anvil_receipt
+    anvil_receipt_invalidated
+    budget_grant_result
+    capability_activation
+    compact_offload
+    execution_policy
+    goal_control_refused
+    goal_snapshot
+    goal_transition
+    mcp_removal_result
+    mid_flight_monitor_decision
+    provider_attempt
+    provider_failover_receipt
+    provider_failure
+    provider_retry
+    runtime_diagnostics_snapshot
+    runtime_diagnostics_unavailable
+    session_recovery_replay
+    session_recovery_snapshot
+    session_recovery_unavailable
+    turn_recovery_lifecycle
+    unknown_tool_effect_resolved
+    workflow_finished
+    workflow_node_event
+    workflow_started
+    workspace_policy
+
+### D. Desktop handles, Core does NOT emit (dead arms)  (n=0)
+
+### E. Corpus covers, Desktop does not handle  (n=19)
+    anvil_receipt
+    anvil_receipt_invalidated
+    budget_grant_result
+    execution_policy
+    goal_control_refused
+    goal_snapshot
+    goal_transition
+    mcp_removal_result
+    provider_failover_receipt
+    runtime_diagnostics_snapshot
+    runtime_diagnostics_unavailable
+    session_recovery_replay
+    session_recovery_snapshot
+    session_recovery_unavailable
+    turn_recovery_lifecycle
+    unknown_tool_effect_resolved
+    workflow_finished
+    workflow_node_event
+    workflow_started
+
+### F. Core accepts, corpus does not cover (commands)  (n=1)
+    grant_workspace_capability
+
+### G. Desktop sends, Core does NOT accept (commands)  (n=0)
+
+### H. Core accepts, Desktop never sends (commands)  (n=13)
+    continue_with_budget
+    get_runtime_diagnostics
+    goal_advance
+    goal_cancel
+    goal_declare_task
+    goal_open
+    goal_resync
+    grant_workspace_capability
+    remove_mcp_server
+    resolve_interrupted_approval
+    resolve_unknown_tool_effect
+    resume_turn
+    session_resync
+

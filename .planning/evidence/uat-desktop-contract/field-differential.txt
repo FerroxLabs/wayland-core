@@ -1,0 +1,33 @@
+Desktop declared event variants parsed: 33
+WCoreCapabilities props: 18   TokenUsage: 4   TurnCost: 4   ToolInfo: 4
+
+### FIELD-LEVEL DIVERGENCES (only for types Desktop DOES handle)
+  corpus/config_changed.json   [config_changed]
+      EXTRA in capabilities:WCoreCapabilities: ['memory_enabled', 'online_evolution', 'user_model_backend']
+  corpus/ready.json   [ready]
+      EXTRA (Core sends, Desktop type lacks): ['contract', 'execution_policy']
+      EXTRA in capabilities:WCoreCapabilities: ['memory_enabled', 'online_evolution', 'user_model_backend']
+  corpus/session_cost.json   [session_cost]
+      EXTRA in per_turn:TurnCost: ['priced']
+  corpus/stream_end.json   [stream_end]
+      EXTRA (Core sends, Desktop type lacks): ['agent_run_id', 'usage_delta']
+      EXTRA in usage:TokenUsage: ['active_window_percent']
+  corpus/sub_agent_event.json   [sub_agent_event]
+      EXTRA (Core sends, Desktop type lacks): ['child_run_id', 'child_sequence', 'event_id', 'run_id']
+  live(first ready)   [ready]
+      EXTRA (Core sends, Desktop type lacks): ['contract', 'execution_policy']
+      EXTRA in capabilities:WCoreCapabilities: ['user_model_backend', 'memory_enabled']
+  live(first config_changed)   [config_changed]
+      EXTRA in capabilities:WCoreCapabilities: ['user_model_backend', 'memory_enabled']
+  live(first error)   [error]
+      MISSING (Desktop type requires, Core omits): ['msg_id']
+
+  fixtures/frames with field divergence: 8
+
+### CONTROL — independently reproduce tsc's 5 excess-property findings
+  [PASS] corpus/config_changed.json -> memory_enabled
+  [PASS] corpus/ready.json -> memory_enabled
+  [PASS] corpus/session_cost.json -> priced
+  [PASS] corpus/stream_end.json -> active_window_percent
+  [PASS] corpus/sub_agent_event.json -> child_run_id
+  CONTROL OVERALL: PASS

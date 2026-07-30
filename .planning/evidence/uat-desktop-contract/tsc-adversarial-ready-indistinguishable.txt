@@ -1,0 +1,4 @@
+adv-ready.ts(4,264): error TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
+adv-ready.ts(7,264): error TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
+adv-ready.ts(10,264): error TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
+adv-ready.ts(13,264): error TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
