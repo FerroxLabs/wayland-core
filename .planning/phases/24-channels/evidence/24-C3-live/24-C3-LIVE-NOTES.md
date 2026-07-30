@@ -93,9 +93,106 @@ and 3 cannot be driven through a shipped operator verb. They are driven through 
 **production factory** (`channel_factory_for`, the same constructor the binary uses) against
 real Discord, and the missing surface is reported as a defect rather than papered over.
 
+## Live environment (hetzner, `/root/wl-discord-live-home`)
+
+Real config, real credential, real destination. Token reached hetzner **on stdin only** — never
+in `argv`, never in a log, never in this repo. Written by the product's own plaintext
+credentials backend shape (`[secrets]`, mode 600) at `$WAYLAND_HOME/credentials.toml`.
+
+Setup bug that was MINE, not the product's, recorded so the next lane does not lose the hour:
+`discord.live.bot_token = "…"` is a TOML **dotted key** and nests as
+`secrets.discord.live.bot_token`. `PlaintextCredentialsStore::get` looks up the FLAT key, so it
+read `None` and the product correctly reported *"credential … is not present"*. The key must be
+**quoted**: `"discord.live.bot_token" = "…"`.
+
+## CAPABILITY: setup/auth — PASS
+
+`wayland-core channel probe`, `PROBE_RC=0`:
+
+```
+1532226655102173318 (discord)
+  outcome:  Ok
+  config:   complete
+  auth:     authenticated
+  identity: 1532224324075913297
+```
+
+The identity the PRODUCT authenticated as equals the bot id I obtained independently from
+`GET /users/@me` before the product ran. First live product↔Discord contact on this programme.
+
+## CAPABILITY 1: send — PASS
+
+Driven end-to-end through the shipped binary: `cron add --trigger once:… --channel … --text
+WL-LIVE-SEND-1785382891`, then `gateway run`. No curl in the send path.
+
+| | |
+|---|---|
+| baseline, marker absent before the run | `baseline_marker_hits= 0` (channel had 1 unrelated message) |
+| after the product ran, read by the independent observer | `MARKER_ARRIVALS= 1` |
+| author | `WaylandCoreBot`, `bot=True` |
+| content | `'WL-LIVE-SEND-1785382891'` — exact |
+
+Delivery id: job `7eacc300-1c2d-4661-984c-8bde6eb33348`, trigger `once:2026-07-30T03:42:26Z`.
+
+Note on corroboration: `nonce` reads back as `None` on a **history** GET. That is not evidence
+the nonce was absent — Discord does not echo `nonce` in `GET /channels/{id}/messages`. I do NOT
+claim key-on-wire from this read; it is measured separately in the idempotency section.
+
+## DEFECT F24-C3-D2 (HIGH) — the Discord inbound WebSocket cannot connect AT ALL
+
+**This is why six lanes never proved inbound: in the shipped binary it cannot work.**
+
+```
+thread 'tokio-rt-worker' panicked at rustls-0.23.40/src/crypto/mod.rs:249:14:
+Could not automatically determine the process-level CryptoProvider from Rustls crate features.
+Call CryptoProvider::install_default() before this point to select a provider manually, or
+make sure exactly one of the 'aws-lc-rs' and 'ring' features is enabled.
+```
+
+Measured over one ~120 s `gateway run`, with a known-negative control in the same capture:
+
+| | |
+|---|---|
+| `Could not automatically determine the process-level CryptoProvider` | **84** |
+| known-negative `ZZZ-NOT-PRESENT-CONTROL` (same file, same tool) | **0** — instrument alive |
+| `forcing supervised reconnect` | **84** — one per panic, a tight loop |
+
+**The discriminating control is that outbound worked in the same process.** REST send (reqwest)
+succeeded and the message arrived; only the Gateway WebSocket path panics. So this is not
+network, not the token, not hetzner egress — it is the WS TLS stack having no installed
+`CryptoProvider`.
+
+**The false line:** after every panic the supervisor logs
+`INFO channel reconnected; resuming polling`. Nothing reconnected and nothing is polling. A
+reader of that log sees recovery 84 times over.
+
+**Credit where due, measured rather than assumed:** `channel health` does NOT claim healthy —
+it reports `state: Degraded`, `reason: supervised reconnect in progress`, `errors: 5`,
+`reconnects: 16`. Two real problems remain: the reason implies a transient state when the loop
+is permanent, and **`HEALTH_RC=0`** — health exits 0 while Degraded, so it cannot be used as
+the deployment gate `channel actions --require` is shaped to be.
+
+## Privileged intent — verified MYSELF, as instructed
+
+`GET /applications/@me` → `app_flags= 565248`:
+
+```
+GATEWAY_MESSAGE_CONTENT=False
+GATEWAY_MESSAGE_CONTENT_LIMITED=True   <- the toggle IS enabled
+```
+
+Bit 19 (`_LIMITED`) is the flag Discord sets for an unverified app in <100 guilds whose
+MESSAGE CONTENT toggle is on; bit 18 is the verified-app equivalent. So the owner's claim
+holds and inbound content would be non-empty **if the socket could connect**. The inbound
+failure is ours, not a missing intent.
+
 ## Log
 
 - [t0] Worktree created, SHA asserted, brief + delivery-semantics + ledger 24-C3 rows read.
 - [t0] NOTES committed before any network work.
 - [t1] Observer control passed both directions. hetzner egress + build (1m49s) OK.
 - [t1] Premise refutation #1 and finding F24-C3-D1 recorded.
+- [t2] Live home built on hetzner; probe authenticated as the real bot.
+- [t2] SEND PASS, corroborated 0→1 at Discord by the independent observer.
+- [t3] DEFECT F24-C3-D2 found: inbound WS panics 84× in 120 s; health says Degraded, rc=0.
+- [t3] MESSAGE CONTENT intent verified enabled from Discord's own app flags.
