@@ -7,8 +7,25 @@ use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
 use super::build_ssrf_safe_tool_client;
+use super::shared::reported_cost;
 use base64::Engine as _;
+use wcore_tools::media_cost::{MediaAccounting, MediaCostRecord, MediaOutcome, MediaUnits};
 use wcore_tools::vision_tools::{VisionBackend, VisionOutcome};
+
+/// Billable units for one Gemini vision call, read from `usageMetadata`.
+/// A count the provider omitted stays `None`.
+fn units_from_response(parsed: &serde_json::Value) -> MediaUnits {
+    let tokens = |p: &str| {
+        parsed
+            .pointer(p)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    MediaUnits::tokens(
+        tokens("/usageMetadata/promptTokenCount"),
+        tokens("/usageMetadata/candidatesTokenCount"),
+    )
+}
 
 /// Gemini vision backend. Uses the `generateContent` endpoint with an
 /// `inline_data` block. Free tier covers ~1500 requests/day on
@@ -20,6 +37,8 @@ pub struct GeminiVisionBackend {
     /// Endpoint base, up to and including `/v1beta/models`. Overridable in
     /// tests so the error path can be exercised against a mock host.
     endpoint_base: String,
+    /// 27-C3. Ledger + operator price list. Unbound by default.
+    accounting: MediaAccounting,
 }
 
 const GEMINI_VISION_ENDPOINT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -33,7 +52,14 @@ impl GeminiVisionBackend {
             api_key,
             model,
             endpoint_base: GEMINI_VISION_ENDPOINT_BASE.to_string(),
+            accounting: MediaAccounting::default(),
         }
+    }
+
+    /// 27-C3. Bind the session ledger and operator price list.
+    pub fn with_accounting(mut self, accounting: MediaAccounting) -> Self {
+        self.accounting = accounting;
+        self
     }
 
     #[cfg(test)]
@@ -43,6 +69,7 @@ impl GeminiVisionBackend {
             api_key,
             model,
             endpoint_base,
+            accounting: MediaAccounting::default(),
         }
     }
 }
@@ -87,8 +114,17 @@ impl VisionBackend for GeminiVisionBackend {
             }
         };
         let status = resp.status();
+        // 27-C3: read any cost header before the body is consumed.
+        let header_cost = reported_cost(resp.headers(), None);
         let txt = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.accounting.account(MediaCostRecord::for_failure(
+                "vision_analyze",
+                "gemini",
+                &self.model,
+                MediaUnits::tokens(None, None),
+                format!("http_{}", status.as_u16()),
+            ));
             return VisionOutcome::Err {
                 message: format!(
                     "gemini vision returned HTTP {}: {}",
@@ -100,21 +136,41 @@ impl VisionBackend for GeminiVisionBackend {
         let parsed: serde_json::Value = match serde_json::from_str(&txt) {
             Ok(v) => v,
             Err(e) => {
+                self.accounting.account(MediaCostRecord::for_failure(
+                    "vision_analyze",
+                    "gemini",
+                    &self.model,
+                    MediaUnits::tokens(None, None),
+                    "response_parse_failed",
+                ));
                 return VisionOutcome::Err {
                     message: format!("gemini vision JSON parse failed: {e}"),
                 };
             }
         };
+        let record = MediaCostRecord::for_success(
+            "vision_analyze",
+            "gemini",
+            &self.model,
+            units_from_response(&parsed),
+            header_cost.or_else(|| super::shared::cost_from_body(&parsed)),
+            &self.accounting.rate_card,
+        );
         let analysis = parsed
             .pointer("/candidates/0/content/parts/0/text")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_default();
         if analysis.is_empty() {
+            self.accounting
+                .account(record.with_outcome(MediaOutcome::Failed {
+                    category: "empty_response".to_string(),
+                }));
             return VisionOutcome::Err {
                 message: "gemini vision returned no text content".to_string(),
             };
         }
+        self.accounting.account(record);
         VisionOutcome::Ok { analysis }
     }
 }
