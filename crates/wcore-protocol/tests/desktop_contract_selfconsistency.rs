@@ -497,16 +497,20 @@ fn every_protocol_event_variant_is_modelled_or_declared_deferred() {
     // model first" and a substring search accepted that as a declaration. Prose drifts
     // and gets reworded; a list item is a deliberate entry. Requiring the list form is
     // what makes deleting an entry actually redden this gate.
+    // Take the FIRST backticked token on a list-item line. Both entry styles in
+    // DEFERRED.md are declarations and both must count:
+    //   - `bare_tag`
+    //   - `tag_with_prose`: followed by an explanation that wraps over more lines
+    // A first cut required the line to END in a backtick, so it matched only the bare
+    // style and found none of the three pre-existing entries. The liveness assertion
+    // below is what reported that, rather than the gate quietly failing everything.
     let declared = deferred
         .lines()
-        .filter_map(|line| {
-            line.trim_start()
-                .strip_prefix("- ")
-                .and_then(|item| item.trim().strip_prefix('`'))
-                .and_then(|item| item.strip_suffix('`'))
-                .filter(|item| !item.contains('`'))
-                .map(str::to_string)
-        })
+        .filter_map(|line| line.trim_start().strip_prefix("- "))
+        .filter_map(|item| item.trim().strip_prefix('`'))
+        .filter_map(|item| item.split('`').next())
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
         .collect::<BTreeSet<_>>();
 
     // Both directions on the list-item extractor itself, before anything trusts it.
