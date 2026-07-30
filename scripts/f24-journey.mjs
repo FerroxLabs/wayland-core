@@ -186,7 +186,7 @@ class StepFailure extends Error {}
 
 function parseArgs(argv) {
   const out = {};
-  const known = new Set(['--platform', '--run-dir', '--binary']);
+  const known = new Set(['--platform', '--run-dir', '--binary', '--adapters']);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!known.has(arg)) throw new StepFailure(`unknown argument ${arg}`);
@@ -200,7 +200,52 @@ function parseArgs(argv) {
   if (!PLATFORMS[out.platform]) {
     throw new StepFailure(`--platform must be one of ${Object.keys(PLATFORMS).join('|')}`);
   }
+  out.adapters = selectAdapters(out.adapters);
   return out;
+}
+
+/// Which adapters this run drives. Defaults to ALL of them, and narrowing is
+/// opt-in and explicit.
+///
+/// # Why it is selectable at all
+///
+/// On a platform slow enough to cross a trigger period — Windows always is —
+/// every submitted body arrives twice, and the run can only be GRADED for
+/// exactly-once on the arrivals that carry a delivery identity. Two of the three
+/// default adapters emit none, so a real Windows run of the default set is
+/// correctly graded `NOT-PROVEN` no matter how well the product behaves. That is
+/// an honest refusal about a real outbound-idempotency gap, not a stuck gate —
+/// but it means the DEFAULT set cannot demonstrate the passing state on Windows,
+/// and a claim that the gate can pass there has to be shown, not argued.
+///
+/// So the set is a parameter. It is deliberately NOT defaulted to the keyed
+/// adapters: that would quietly trade adapter coverage — a separate criterion,
+/// and the one Phase 24 was previously caught overstating — for a greener
+/// verdict. Narrowing must be typed out, it lands in the receipt's
+/// `adapter_coverage`, and `wayland-journey verify --min-adapters N` still
+/// refuses a narrow run whenever the claim being made is a matrix.
+export function selectAdapters(spec) {
+  if (spec === undefined) return ADAPTERS;
+  const wanted = spec
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (wanted.length === 0) {
+    throw new StepFailure('--adapters was given no names; omit it to drive all of them');
+  }
+  const known = new Set(ADAPTERS.map((a) => a.adapter));
+  for (const name of wanted) {
+    if (!known.has(name)) {
+      throw new StepFailure(
+        `--adapters names ${name}, which this journey does not configure. ` +
+          `Known: ${[...known].join(',')}`,
+      );
+    }
+  }
+  const chosen = new Set(wanted);
+  // Filtered from ADAPTERS rather than rebuilt from the names, so the order and
+  // the endpoint bindings stay the ones the table declares.
+  return ADAPTERS.filter((a) => chosen.has(a.adapter));
 }
 
 // Run an argv, never a shell string. Every argument this journey passes is a
@@ -272,6 +317,10 @@ function sleep(ms) {
 class Journey {
   constructor(args) {
     this.args = args;
+    // The adapter set this run drives. `parseArgs` resolves `--adapters`;
+    // constructing a Journey directly (the tests, the quadrant generator) gets
+    // the full table unless it says otherwise.
+    this.adapters = args.adapters ?? ADAPTERS;
     this.table = PLATFORMS[args.platform];
     this.runDir = path.resolve(args.runDir);
     this.binary = path.resolve(args.binary);
@@ -474,7 +523,7 @@ class Journey {
     // It does now. Each adapter lands on a DISTINCT endpoint, which is what
     // makes the per-adapter tally an observation rather than a restatement of
     // the config.
-    for (const spec of ADAPTERS) {
+    for (const spec of this.adapters) {
       fs.writeFileSync(
         path.join(this.home, 'channels', `${spec.channel}.toml`),
         spec.config(this.sinkUrl).join('\n'),
@@ -602,12 +651,12 @@ class Journey {
     // what the sink independently observed rather than assumed to agree.
     this.bodyAdapter = new Map();
     const lines = [];
-    const perAdapter = new Map(ADAPTERS.map((s) => [s.adapter, 0]));
+    const perAdapter = new Map(this.adapters.map((s) => [s.adapter, 0]));
     for (let i = 1; i <= DELIVERY_COUNT; i += 1) {
       // Round-robin, so the split is even and no adapter can be starved by an
       // ordering accident into contributing zero and being silently dropped
       // from the coverage list.
-      const spec = ADAPTERS[(i - 1) % ADAPTERS.length];
+      const spec = this.adapters[(i - 1) % this.adapters.length];
       const body = `f24j-delivery-${String(i).padStart(2, '0')}`;
       this.bodies.push(body);
       this.bodyAdapter.set(body, spec.adapter);
@@ -629,7 +678,7 @@ class Journey {
     const split = [...perAdapter.entries()].map(([a, n]) => `${a}=${n}`).join(' ');
     this.step(
       'deliveries-submit',
-      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', '<per-adapter>', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT} across ${ADAPTERS.length} adapters`,
+      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', '<per-adapter>', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT} across ${this.adapters.length} adapters (${this.adapters.map((a) => a.adapter).join(',')})`,
       `submitted=${DELIVERY_COUNT}\nsubmitted_by_adapter=${split}\n${lines.join('\n')}`,
     );
   }
@@ -669,7 +718,7 @@ class Journey {
     // restatement this receipt exists to refuse.
     const exercised = [];
     let attributed = 0;
-    for (const spec of ADAPTERS) {
+    for (const spec of this.adapters) {
       const mine = seen.filter((a) => a.endpoint === spec.endpoint);
       const submitted = [...this.bodyAdapter.entries()].filter(
         ([, adapter]) => adapter === spec.adapter,

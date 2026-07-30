@@ -148,6 +148,74 @@ test('the driver refuses a missing required argument', () => {
   );
 });
 
+test('--adapters defaults to all of them and narrowing must be typed out', () => {
+  // CAN IT PASS / CAN IT FAIL, on the one knob that could be used to buy a
+  // greener verdict with less coverage.
+  const base = ['--platform', 'linux', '--run-dir', '/tmp/x', '--binary', '/bin/true'];
+
+  // Omitted: the full table. This is the direction that matters — a default
+  // that quietly narrowed to the keyed adapters would trade adapter coverage,
+  // a separate criterion, for an easier exactly-once verdict.
+  assert.deepEqual(parseArgs(base).adapters, ADAPTERS);
+  assert.equal(ADAPTERS.length, 3);
+
+  // Named: exactly those, in table order, with the table's endpoint bindings.
+  const one = parseArgs([...base, '--adapters', 'slack']).adapters;
+  assert.deepEqual(one.map((a) => a.adapter), ['slack']);
+  assert.equal(one[0].endpoint, 'chat.postMessage');
+  const two = parseArgs([...base, '--adapters', 'sms, slack']).adapters;
+  assert.deepEqual(two.map((a) => a.adapter), ['slack', 'sms'], 'table order, not argument order');
+
+  // An unknown name is refused rather than silently dropped — dropping it would
+  // narrow the run further than the operator asked and still look successful.
+  assert.throws(
+    () => parseArgs([...base, '--adapters', 'slack,telegram']),
+    (error) => /does not configure/.test(error.message) && /Known: slack,whatsapp,sms/.test(error.message),
+  );
+  assert.throws(
+    () => parseArgs([...base, '--adapters', ' , ']),
+    (error) => /no names/.test(error.message),
+  );
+});
+
+test('a narrowed run carries its narrowness into the receipt', () => {
+  // The safeguard that makes the knob honest: whatever it is set to lands in
+  // `adapter_coverage`, so `verify --min-adapters N` can still refuse it and a
+  // reader of the success line sees `adapters=1/10`.
+  const j = new Journey({
+    platform: hostPlatform() in PLATFORMS ? hostPlatform() : 'linux',
+    runDir: tmpdir(),
+    binary: process.execPath,
+    adapters: ADAPTERS.filter((a) => a.adapter === 'slack'),
+  });
+  for (const name of CANONICAL_STEPS) j.step(name, `cmd ${name}`, `out ${name}`);
+  j.candidateCommit = 'f'.repeat(40);
+  j.binaryVersion = 'x';
+  j.binarySha256 = '0'.repeat(64);
+  for (let i = 1; i <= 3; i += 1) {
+    const body = `narrow-${i}`;
+    j.bodies.push(body);
+    j.bodyAdapter.set(body, 'slack');
+  }
+  j.counts.submitted = 3;
+  fs.mkdirSync(j.runDir, { recursive: true });
+  fs.writeFileSync(
+    j.journalPath,
+    `${j.bodies
+      .map((b) =>
+        JSON.stringify({ text: b, endpoint: 'chat.postMessage', idempotency_key: `cron:${b}:1`, suppressed: false }),
+      )
+      .join('\n')}\n`,
+  );
+  const receipt = j.receipt();
+  assert.deepEqual(
+    receipt.adapter_coverage.exercised.map((e) => e.adapter),
+    ['slack'],
+    'the receipt must NAME the one adapter, so nobody can read the run as three',
+  );
+  assert.equal(receipt.adapter_coverage.registered_total, 10);
+});
+
 test('the driver refuses an unknown platform', () => {
   assert.throws(
     () => parseArgs(['--platform', 'plan9', '--run-dir', '/tmp/x', '--binary', '/bin/true']),
