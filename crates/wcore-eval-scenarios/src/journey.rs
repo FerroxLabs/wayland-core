@@ -1541,7 +1541,10 @@ mod tests {
         }
 
         let mut over = recurred();
-        over.delivery_identity.as_mut().expect("identity").unidentified = 999;
+        over.delivery_identity
+            .as_mut()
+            .expect("identity")
+            .unidentified = 999;
 
         let mut replayed = recurred();
         {

@@ -1202,7 +1202,10 @@ fn the_verifier_and_the_driver_return_the_same_verdict_on_the_same_receipt() {
             "{name}: driver_passed={driver_passed} verifier_passed={verifier_passed}"
         );
         assert_eq!(driver_passed, driver_should_pass, "{name}: wrong quadrant");
-        assert_eq!(driver, expected, "{name}: neither gate matched the quadrant");
+        assert_eq!(
+            driver, expected,
+            "{name}: neither gate matched the quadrant"
+        );
         compared += 1;
     }
     // §"a skip is not a pass": count the pairs that actually ran. A loop over a
@@ -1276,7 +1279,11 @@ fn a_forged_classification_that_does_not_partition_the_repeats_is_refused() {
     ]);
     assert!(!output.status.success(), "{}", stdout(&output));
     let text = stderr(&output);
-    assert_eq!(verdict_token(&text), "CLASSIFICATION-UNRECONCILED", "{text}");
+    assert_eq!(
+        verdict_token(&text),
+        "CLASSIFICATION-UNRECONCILED",
+        "{text}"
+    );
 }
 
 #[test]
