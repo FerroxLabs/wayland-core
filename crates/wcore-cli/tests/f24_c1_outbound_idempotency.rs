@@ -5,13 +5,26 @@
 //! Phase 24 Success Criterion 1 claims a no-duplicate delivery guarantee. Its
 //! 12-of-12 no-duplicate tally was taken **entirely through the Slack adapter**
 //! (`scripts/f24-journey.mjs:380` sets `platform = "slack"` and is the only
-//! `platform =` line in that driver), and Slack is the **only** adapter in the
-//! workspace that overrides `Channel::supports_outbound_idempotency`
-//! (`wcore-channel-slack/src/lib.rs:234`; the trait default at
+//! `platform =` line in that driver), and when this file was written Slack was
+//! the only adapter in the workspace overriding
+//! `Channel::supports_outbound_idempotency` (trait default at
 //! `wcore-channels/src/lib.rs:139` is `false`).
 //!
-//! The pre-existing planning record already states that the other nine adapters
-//! therefore have their outcome-unknown deliveries *abandoned* rather than
+//! **That is no longer true and this header is corrected rather than left to
+//! rot (2026-07-30, `lane/24c1-declaration`).** Three adapters now override it:
+//! Slack (`wcore-channel-slack/src/lib.rs:249`), Matrix
+//! (`wcore-channel-matrix/src/lib.rs:294`) and Discord
+//! (`wcore-channel-discord/src/lib.rs:344`). Seven inherit `false`, not nine.
+//!
+//! **This file measures a FOUR-adapter subset** (Slack, Telegram, Twilio SMS,
+//! WhatsApp) — the four that can be driven over real HTTP at a local fixture.
+//! It is deliberately not a census, and it would still pass if a fifth adapter
+//! silently changed its capability. The all-ten census lives in
+//! `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which
+//! binds every adapter to the published table in `docs/delivery-semantics.md`.
+//!
+//! The pre-existing planning record already states that the non-overriding
+//! adapters have their outcome-unknown deliveries *abandoned* rather than
 //! duplicated. What nothing in the phase had ever done is **measure** it on any
 //! adapter other than Slack. Reasoning from the trait is not measurement: a
 //! `false` could be a truthful capability declaration OR an unimplemented stub
@@ -460,7 +473,12 @@ async fn slack_is_the_known_positive_and_puts_the_same_key_on_the_wire_both_time
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn capability_is_declared_true_by_slack_alone_across_the_configurable_matrix() {
+/// Renamed 2026-07-30: this asserted "by Slack ALONE" while checking four of
+/// ten adapters, so it would have passed unchanged after Matrix and Discord
+/// gained the capability — a name claiming a census the body does not perform.
+/// The census is
+/// `wcore-channels-registry::delivery_semantics_declaration::exactly_three_adapters_are_exactly_once`.
+async fn slack_declares_the_capability_and_the_three_http_fixture_adapters_do_not() {
     let mut server = mockito::Server::new_async().await;
     telegram_background_mocks(&mut server).await;
     let base = server.url();
