@@ -597,9 +597,7 @@ async fn print_durable_sessions_section() {
                     "           to restore: set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file"
                 );
                 println!("           descriptor, preferred) or WAYLAND_VAULT_PASSPHRASE");
-                println!(
-                    "           to accept it and silence the startup notice: set [session]"
-                );
+                println!("           to accept it and silence the startup notice: set [session]");
                 println!("           enabled = false in config.toml");
             }
         },
