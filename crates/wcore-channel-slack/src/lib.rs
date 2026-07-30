@@ -287,6 +287,74 @@ impl Channel for SlackChannel {
             .map_err(ChannelError::from)
     }
 
+    /// Slack: `chat.update` and `chat.delete` are real, `reactions.add` is real,
+    /// and there is **no bot-usable typing API** — the `users.setPresence`
+    /// surface is a user-token affordance, not a per-conversation typing
+    /// indicator a bot token can drive. So typing is a permanent absence, not a
+    /// backlog item, and it is recorded as one.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::*;
+        wcore_channels::NativeActions::none()
+            .edit(Implemented)
+            .delete(Implemented)
+            .react(Implemented)
+            .typing(PlatformHasNoApi)
+            .note("typing: Slack exposes no bot-token typing indicator")
+    }
+
+    /// `chat.update` — see [`api::update_message`]. `message_id` is the Slack
+    /// message `ts`, exactly as it arrives in a send receipt.
+    async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let bot_token = self
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
+        let req = api::UpdateMessageRequest {
+            channel: conversation_id.to_string(),
+            ts: message_id.to_string(),
+            text: new_text.to_string(),
+        };
+        let resp = api::update_message(&self.http, &self.config.api_base_url, bot_token, &req)
+            .await
+            .map_err(ChannelError::from)?;
+        let ts = resp.ts.unwrap_or_else(|| message_id.to_string());
+        let secs: i64 = ts
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Ok(MessageReceipt {
+            id: ts,
+            conversation_id: resp.channel.unwrap_or_else(|| conversation_id.to_string()),
+            ts_secs: secs,
+        })
+    }
+
+    /// `chat.delete` — see [`api::delete_message`].
+    async fn delete_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let bot_token = self
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
+        let req = api::DeleteMessageRequest {
+            channel: conversation_id.to_string(),
+            ts: message_id.to_string(),
+        };
+        api::delete_message(&self.http, &self.config.api_base_url, bot_token, &req)
+            .await
+            .map(|_| ())
+            .map_err(ChannelError::from)
+    }
+
     async fn fetch_media(
         &self,
         attachment: &wcore_channels::Attachment,
@@ -740,5 +808,157 @@ mod tests {
         let err = ch.start().await.unwrap_err();
         assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
         assert_eq!(ch.state(), ConnectionState::Connecting);
+    }
+
+    // ---- native actions: edit / delete (Phase 24 C3) ----------------------
+
+    /// The edit reaches `chat.update` with the bearer, the `ts` and the new
+    /// text — asserted on the WIRE, not on the return value.
+    ///
+    /// `mock.assert_async()` is the load-bearing line: without it the test
+    /// would pass against an adapter that never issued a request at all, which
+    /// is precisely the shape a defaulted `Unsupported` would produce if the
+    /// override were removed and the error swallowed.
+    #[tokio::test]
+    async fn edit_hits_chat_update_with_bearer_ts_and_text() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.update")
+            .match_header("authorization", "Bearer xoxb-test-token")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "channel": "C1",
+                "ts": "1234.567",
+                "text": "edited body"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1234.567","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+
+        let receipt = ch
+            .edit_message("C1", "1234.567", "edited body")
+            .await
+            .expect("edit succeeds");
+        assert_eq!(receipt.id, "1234.567");
+        assert_eq!(receipt.conversation_id, "C1");
+        assert_eq!(receipt.ts_secs, 1234);
+
+        mock.assert_async().await;
+    }
+
+    /// The delete reaches `chat.delete` with `channel` + `ts` and nothing else.
+    #[tokio::test]
+    async fn delete_hits_chat_delete_with_channel_and_ts() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.delete")
+            .match_header("authorization", "Bearer xoxb-test-token")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "channel": "C1",
+                "ts": "1234.567"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1234.567","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+
+        ch.delete_message("C1", "1234.567")
+            .await
+            .expect("delete succeeds");
+
+        mock.assert_async().await;
+    }
+
+    /// **The failing direction.** A platform `ok:false` must surface as an
+    /// error, never as a silent success — a caller that believes a message was
+    /// deleted when it still exists is the worst outcome this operation has.
+    ///
+    /// This is the control for the two cases above: they prove the gate can
+    /// pass, this proves it can fail.
+    #[tokio::test]
+    async fn a_platform_refusal_is_an_error_not_a_silent_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/chat.delete")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"message_not_found"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+
+        let err = ch.delete_message("C1", "9999.000").await.unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("message_not_found"),
+            "the platform's own code must reach the operator, got {rendered}"
+        );
+        // …and specifically NOT `Unsupported`, which would mean the override
+        // vanished and the trait default answered instead.
+        assert!(
+            !matches!(err, ChannelError::Unsupported { .. }),
+            "got Unsupported — the edit/delete override is missing"
+        );
+    }
+
+    /// Auth failure on a mutate is `Auth`, distinctly from a platform refusal,
+    /// so an operator is told to fix the token rather than to fix the message.
+    #[tokio::test]
+    async fn an_invalid_token_on_edit_is_auth_not_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/chat.update")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"invalid_auth"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+
+        let err = ch.edit_message("C1", "1.0", "x").await.unwrap_err();
+        assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
+    }
+
+    /// The declaration and the behaviour must agree — the same binding
+    /// `slack_declares_idempotency_only_because_it_sends_the_header` makes for
+    /// outbound idempotency, applied to native actions.
+    #[tokio::test]
+    async fn native_action_declaration_matches_behaviour() {
+        use wcore_channels::ActionSupport;
+        let ch = SlackChannel::new("test", cfg_for("https://unused.example"), store_for_test());
+        let a = ch.native_actions();
+        assert_eq!(a.edit, ActionSupport::Implemented);
+        assert_eq!(a.delete, ActionSupport::Implemented);
+        assert_eq!(a.react, ActionSupport::Implemented);
+        // Slack genuinely has no bot typing API. This must be the PERMANENT
+        // state, not the backlog one — recording it as `NotImplemented` would
+        // put a task on a list that can never be completed.
+        assert_eq!(a.typing, ActionSupport::PlatformHasNoApi);
+        assert!(!a.note.is_empty(), "a non-implemented op must say why");
+
+        // Not started → the ops answer Auth (token not loaded), which proves
+        // the override exists. A missing override would answer Unsupported.
+        let e = ch.edit_message("C1", "1.0", "x").await.unwrap_err();
+        assert!(
+            !matches!(e, ChannelError::Unsupported { .. }),
+            "declared Implemented but the trait default answered: {e:?}"
+        );
+        let d = ch.delete_message("C1", "1.0").await.unwrap_err();
+        assert!(
+            !matches!(d, ChannelError::Unsupported { .. }),
+            "declared Implemented but the trait default answered: {d:?}"
+        );
     }
 }
