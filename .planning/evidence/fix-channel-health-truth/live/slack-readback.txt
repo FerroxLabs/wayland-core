@@ -1,0 +1,6 @@
+=== Slack read-back: private channel wayland-test C0BLR1UKKU6 ===
+api_ok="ok":true
+total_messages=2
+channel_join_system_records=2
+any WL- test residue: 
+any CHTRUTH residue: 0

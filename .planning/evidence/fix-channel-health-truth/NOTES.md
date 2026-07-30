@@ -145,13 +145,63 @@ All counts read from logs `scp`'d off hetzner and opened with the Read tool — 
 counter (see M0). Every `test result` line carries `0 ignored; 0 filtered out`, and all nine new
 tests were confirmed present **by name** in the passing run, against §3.2's zero-tests-exit-0 trap.
 
-## Status
+## M6 — the brief's SECOND premise is also false: the Matrix token is LIVE
+
+> Brief: "The Matrix token is REVOKED — `M_UNKNOWN_TOKEN` — a free, genuine source of a real 401."
+
+Measured before use, instrument alive in both directions in one session
+(`live/matrix-token-premise-recheck.txt`):
+
+| probe | result |
+|---|---|
+| unauthenticated `/_matrix/client/versions` | **200** with a real payload — server reachable |
+| `/whoami` with **no** token | **401 `M_MISSING_TOKEN`** — a *different* error, so auth IS enforced |
+| `/whoami` with **our** token | **200**, `@seandonahoe:matrix.org` — **the token WORKS** |
+
+Had I trusted the brief, quadrant 1 would have been built on a working credential. Substitute
+401 source: a syntactically-valid unregistered token, which **matrix.org itself** rejects
+`401 M_UNKNOWN_TOKEN` on the exact `/sync` path the adapter calls. Nothing was revoked. Bonus:
+the live token supplies quadrant 3 on the *same* adapter, so q1 and q3 differ by ONE variable.
+
+## M7 — live four-quadrant proof (see `live/`)
+
+Each arm on its OWN `WAYLAND_HOME`, asserting `gateway_alive=yes` and exactly one owning process
+(before=0 / during=1 / after=0).
+
+| arm | binary | credential | 401s | health state | sticky 20s | `--require-healthy` |
+|---|---|---|---|---|---|---|
+| 1 rejected | `d984fb0d` FIXED | bogus → real `M_UNKNOWN_TOKEN` | 4 (`M_UNKNOWN_TOKEN`=1) | **`unauthenticated`** | yes | **rc=1** |
+| 2 absent | `d984fb0d` FIXED | handle not in store | 0 | **`disconnected`** naming the handle | yes | rc=1 |
+| 3 all fine | `d984fb0d` FIXED | **real live token** | 0 | **`healthy`** | yes | **rc=0** |
+| 4 ORIGINAL | `88f6fcb4` **BASE** | bogus → real `M_UNKNOWN_TOKEN` | **9** (`M_UNKNOWN_TOKEN`=6) | **`healthy`** ← the bug | yes | rc=2 (flag absent) |
+
+Arm 1 vs 4: only the BINARY differs. Arm 1 vs 3: only the TOKEN differs. Base hammered 9×401;
+fixed stopped after 1 (the UAT saw 21 at `Healthy`).
+
+## M8 — three instrument defects in MY OWN harness, repaired and re-run
+
+1. `rtk` fabricated a count (M0): bash `wc -l` = 0 for a 15-line file.
+2. **TOML dotted keys**: `matrix.chtruth.token = "…"` under `[secrets]` builds nested tables, not
+   the flat key the store reads. First arm-1 run measured an ABSENT credential believing it was a
+   rejected one. Repaired by quoting, and the precondition now asserts the quoted form.
+3. **`pkill -f "WAYLAND_HOME=X"` matched nothing** — the var is in the ENVIRONMENT, not argv — and
+   `pgrep -fc` was blind for the identical reason, so the dead teardown reported success. **Five
+   gateways accumulated on one health file**; a later arm read an earlier arm's state. All four
+   first-pass arms were invalid. Repaired with per-arm homes, kill-by-pid verified via `kill -0`,
+   and owner counting through `/proc/<pid>/environ`. Another lane's gateway
+   (`/root/f24-gw-run3/home`) was identified by environ and left running.
+
+## Status — COMPLETE
 
 - [x] M0 instrument check
-- [x] M1 premise re-verified (partially false — reported, not papered over)
+- [x] M1 premise 1 re-verified (partially FALSE — telegram already reaches `Unauthenticated`)
 - [x] M2 root cause located in source
 - [x] M3 two blocking interactions found before coding
-- [x] M4/M5 fix + ablation proof (quadrants 1-4 at unit level, both directions)
-- [ ] exit-code decision
-- [ ] probe's unsupportable claim
-- [ ] live 401 proof
+- [x] M4/M5 fix + per-hunk ablation proof (each hunk load-bearing; controls green throughout)
+- [x] M6 premise 2 re-verified (FALSE — token is live)
+- [x] M7 live four-quadrant proof on the shipped binary, incl. pre-fix reproduction
+- [x] M8 harness defects repaired and affected arms re-run
+- [x] exit-code decision: opt-in `--require-healthy` (a real consumer gates on the default)
+- [x] probe's unsupportable claim: renders `unknown (not checked)`; JSON shape unchanged
+- [x] credential sweep 0 hits both hosts (known-positive proves the sweeper alive)
+- [x] Slack read-back: 2 `channel_join` records, 0 residue — nothing was posted
