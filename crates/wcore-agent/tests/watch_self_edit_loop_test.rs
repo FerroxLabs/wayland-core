@@ -57,6 +57,41 @@ fn drain_report(watcher: &FileWatcher) -> (Option<String>, Vec<String>) {
     (render_external_edit_message(&events), paths)
 }
 
+/// HARNESS REPAIR #2 — a fixed `sleep(SETTLE)` before a Direction-2 assertion
+/// is a BUDGET, not a deadline: the same defect as the `await_session_switch`
+/// reschedule budget this lane also fixed. FSEvents delivery latency varies,
+/// and the same Direction-2 test was measured PASSING and FAILING at the same
+/// pre-fix commit because 600 ms sometimes was and sometimes was not enough.
+///
+/// Wait until the wanted path actually appears, or a real wall-clock deadline
+/// expires. Events must be ACCUMULATED across polls because `drain` empties
+/// the channel — draining twice and looking only at the second result loses
+/// the first batch, which is its own way to fail.
+async fn drain_until(
+    watcher: &FileWatcher,
+    want: &str,
+    budget: Duration,
+) -> (Option<String>, Vec<String>) {
+    let deadline = std::time::Instant::now() + budget;
+    let mut acc = Vec::new();
+    loop {
+        acc.extend(watcher.drain_external_events());
+        let msg = render_external_edit_message(&acc);
+        let hit = msg.as_deref().is_some_and(|m| m.contains(want));
+        if hit || std::time::Instant::now() >= deadline {
+            let paths = acc
+                .iter()
+                .map(|e| format!("{} [{:?}]", e.path.display(), e.kind))
+                .collect::<Vec<_>>();
+            return (msg, paths);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wall-clock budget for a genuine edit to be delivered and rendered.
+const EDIT_BUDGET: Duration = Duration::from_secs(10);
+
 // ── Harness self-test (LANE-BRIEF §6b-ii) ────────────────────────────────
 // Three assertions, because two would pass on the BROKEN harness too:
 //   (a) known-positive — a realistically-named root renders as an edit;
@@ -204,9 +239,9 @@ async fn genuine_edit_in_subdirectory_still_surfaces() {
     tokio::time::sleep(ARM).await;
 
     std::fs::write(root.join("src/main.rs"), b"fn main() {}").expect("write");
-    tokio::time::sleep(SETTLE).await;
 
-    let (msg, paths) = drain_report(&watcher);
+    let (msg, paths) = drain_until(&watcher, "main.rs", EDIT_BUDGET).await;
+    eprintln!("[shape] genuine_edit_in_subdirectory surfaced: {paths:#?}");
     let msg = msg.unwrap_or_else(|| {
         panic!("a genuine user edit MUST still be reported; surfaced paths: {paths:#?}")
     });
@@ -227,9 +262,9 @@ async fn genuine_edit_of_file_directly_in_watch_root_still_surfaces() {
     tokio::time::sleep(ARM).await;
 
     std::fs::write(root.join("README.md"), b"# hello").expect("write");
-    tokio::time::sleep(SETTLE).await;
 
-    let (msg, paths) = drain_report(&watcher);
+    let (msg, paths) = drain_until(&watcher, "README.md", EDIT_BUDGET).await;
+    eprintln!("[shape] genuine_edit_directly_in_watch_root surfaced: {paths:#?}");
     let msg = msg.unwrap_or_else(|| {
         panic!(
             "a genuine user edit of a file in the watch root MUST still be \
@@ -256,8 +291,8 @@ async fn real_edit_survives_concurrent_engine_state_churn() {
     std::fs::write(root.join("notes.txt"), b"user typed this").expect("user write");
     std::fs::write(root.join(".wayland-core/sessions/s.json"), b"{}").expect("engine write");
 
-    tokio::time::sleep(SETTLE).await;
-    let (msg, paths) = drain_report(&watcher);
+    let (msg, paths) = drain_until(&watcher, "notes.txt", EDIT_BUDGET).await;
+    eprintln!("[shape] real_edit_with_engine_churn surfaced: {paths:#?}");
     let msg = msg.unwrap_or_else(|| {
         panic!("the user's edit was lost amid engine churn; surfaced paths: {paths:#?}")
     });
