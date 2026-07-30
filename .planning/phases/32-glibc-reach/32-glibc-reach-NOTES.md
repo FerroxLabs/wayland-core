@@ -42,11 +42,66 @@ present string). Therefore:
 - Every capture carries a **known-positive and a known-negative** in the same file.
 - `${PIPESTATUS[0]}` is not used (dies in dash); anything needing it runs under `bash -c`.
 
+## MEASUREMENT 1 — brief premises resolved
+
+**P2 CONFIRMED.** `/root/wayland/target/release/wayland-core` (hetzner, mtime 2026-07-30 02:58Z)
+references `GLIBC_2.39` as its maximum. Instrument controls in the same capture: known-positive
+`GLIBC_2.2.5` → **62** hits; known-negative `GLIBC_9.99` → **0**. So the grep was alive and the
+absence is real.
+
+**P3 CONFIRMED — my suspicion was WRONG, and I am recording that.** I predicted the aarch64 leg
+would already be low because it is a `cross` build. Measured instead: the default
+`ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main` image is **Ubuntu 24.04 with a glibc 2.39
+aarch64 sysroot** (`/usr/aarch64-linux-gnu/lib/libc.so.6` → "Ubuntu GLIBC 2.39-0ubuntu8"). Both
+legs really are at 2.39. The brief was right and my inference was wrong.
+
+**`cross` 0.2.5's image is Ubuntu 16.04 / glibc 2.23** — a very low floor, but its apt repos are
+long dead (16.04 is EOL and archived) and `Cross.toml`'s `pre-build` does `apt-get update` plus
+four arm64 `-dev` installs, so that image cannot satisfy this tree. It also predates OpenSSL 3
+(see below), which rules it out independently.
+
+## MEASUREMENT 2 — the finding that changes the answer: OpenSSL 3 is a HARD ABI FLOOR
+
+The brief frames this as a pure glibc problem. It is not. `ldd` on the shipped binary:
+
+```
+libssl.so.3    => /lib/x86_64-linux-gnu/libssl.so.3
+libcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3
+libseccomp.so.2, libdbus-1.so.3, libgcc_s.so.1, libm.so.6, libc.so.6
+```
+
+`openssl-sys` + `native-tls` are in `Cargo.lock`, and the binary carries **`NEEDED libssl.so.3`**.
+That soname only exists on OpenSSL 3 distros. So the build container's OpenSSL major version is a
+second, independent reach constraint that moves in the OPPOSITE direction to glibc:
+
+| Base | glibc | OpenSSL soname | Verdict |
+|---|---|---|---|
+| `rockylinux:8` / `almalinux:8` / manylinux_2_28 | 2.28 | `libssl.so.1.1` | **REJECTED** — the brief's "best reach" option would emit a binary needing `libssl.so.1.1`, which does **not exist** on Ubuntu 22.04, Debian 12 or RHEL 9. It trades a glibc break for an OpenSSL break **on exactly the distros we are trying to reach**, and is therefore *worse*, not better. |
+| `debian:11` | 2.31 | `libssl.so.1.1` | REJECTED, same reason. |
+| **`almalinux:9` / `rockylinux:9`** | **2.34** | `libssl.so.3` | **Best x86_64 option.** Lowest glibc that still carries OpenSSL 3. Supported to 2032. |
+| `ubuntu:22.04` | 2.35 | `libssl.so.3` | Best easily-available **arm64 multiarch** base with OpenSSL 3. |
+| `ubuntu:24.04` (status quo) | 2.39 | `libssl.so.3` | current, worst reach |
+
+So the brief's option ranking inverts once the OpenSSL ABI is measured: **option 1 as written is
+unshippable, and the reachable floor is 2.34 (x86_64) / 2.35 (aarch64), not 2.28.**
+
+Going below 2.34 would require vendoring/statically linking OpenSSL, which changes the dependency
+graph and means the product stops receiving distro OpenSSL security updates — a product decision,
+not a build-container choice, so it is out of scope for this lane and recorded as a follow-up.
+
+## Chosen plan
+
+- **x86_64** → build in `almalinux:9` (glibc 2.34, `libssl.so.3`).
+- **aarch64** → build in `ubuntu:22.04` with arm64 multiarch cross toolchain (glibc 2.35,
+  `libssl.so.3`), replacing `cross` on the release path.
+- Add a CI gate that reads each Linux artifact's max `GLIBC_*` and fails if it exceeds a declared
+  per-target floor, proven in BOTH directions.
+
 ## Status
 
 - [x] Read LANE-BRIEF, MILESTONE-SHIP, release.yml, Cross.toml
 - [x] P1 verified from source
-- [ ] P2/P3 measured
-- [ ] Option chosen and justified
+- [x] P2/P3 measured; P3 refuted my own counter-hypothesis
+- [x] OpenSSL 3 ABI constraint discovered — inverts the brief's option ranking
 - [ ] New floor measured for both targets
 - [ ] CI gate added, proven in both directions
