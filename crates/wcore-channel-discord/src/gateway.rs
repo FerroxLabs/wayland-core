@@ -559,6 +559,39 @@ pub(crate) enum ReconnectReason {
     InvalidSessionFatal,
 }
 
+/// Discord's gateway close code for a rejected bot token.
+///
+/// <https://discord.com/developers/docs/topics/opcodes-and-status-codes>
+/// documents 4004 as "Authentication failed — the account token sent with your
+/// identify payload is incorrect", and marks it explicitly **not**
+/// reconnectable.
+pub(crate) const CLOSE_AUTHENTICATION_FAILED: u16 = 4004;
+
+/// Classify a gateway close code as a credential rejection.
+///
+/// `Some(label)` means the platform rejected the token itself, so reconnecting
+/// can only re-send the same rejected token. Everything else — including a
+/// close frame with NO code — stays `None` and takes the ordinary resumable
+/// reconnect path, because "the socket shut" and "the token is wrong" are
+/// different operator actions and only one of them is fixed by waiting.
+pub(crate) fn auth_rejection_for_close_code(code: Option<u16>) -> Option<String> {
+    match code {
+        Some(CLOSE_AUTHENTICATION_FAILED) => Some(
+            "discord gateway closed with 4004 (authentication failed): the bot token was \
+             rejected at IDENTIFY"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Read the numeric close code out of a close frame, if the peer sent one.
+fn close_code_of(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> Option<u16> {
+    frame.map(|f| u16::from(f.code))
+}
+
 /// Decide the next handshake given the carried session state and why the
 /// last session ended. Pure so the policy is unit-testable in isolation
 /// from the socket.
@@ -711,6 +744,25 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
         .await
         {
             Ok(SessionExit::Shutdown) => break,
+            Ok(SessionExit::AuthRejected { reason }) => {
+                // Publish the terminal event BEFORE leaving the loop. The
+                // manager drains the inbox before it judges this task dead
+                // (wcore-channels manager.rs), so the event queued here is what
+                // turns a dead gateway task into `HealthState::Unauthenticated`
+                // ("rotate the token") instead of a generic transport fault
+                // ("wait"). Exiting without queueing it would strand the one
+                // fact that explains why the gateway stopped.
+                tracing::error!(
+                    target: "wcore_channel_discord::gateway",
+                    reason = %reason,
+                    "discord rejected the bot token; stopping the gateway loop"
+                );
+                inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::AuthExpired { reason });
+                break;
+            }
             Ok(SessionExit::Reconnect(next_reason)) => {
                 // Surface Reconnecting so the manager/UI sees the gap.
                 inbox
@@ -788,6 +840,10 @@ enum SessionExit {
     /// Reconnect requested. The carried reason tells the outer loop
     /// whether to RESUME or fall back to a fresh IDENTIFY.
     Reconnect(ReconnectReason),
+    /// Discord rejected the bot token (gateway close 4004). TERMINAL: the
+    /// outer loop publishes `AuthExpired` and stops, because every reconnect
+    /// would re-IDENTIFY with the same rejected token.
+    AuthRejected { reason: String },
 }
 
 // One Gateway session carries many independent connection parameters;
@@ -869,7 +925,13 @@ async fn run_one_session(
         let text = match frame {
             WsMessage::Text(t) => t,
             WsMessage::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
-            WsMessage::Close(_) => return Err("close frame before HELLO".to_string()),
+            WsMessage::Close(frame) => {
+                let code = close_code_of(frame.as_ref());
+                if let Some(reason) = auth_rejection_for_close_code(code) {
+                    return Ok(SessionExit::AuthRejected { reason });
+                }
+                return Err(format!("close frame before HELLO (code {code:?})"));
+            }
             _ => continue,
         };
         let Some(payload) = parse_payload(&text) else {
@@ -972,7 +1034,18 @@ async fn run_one_session(
                         let _ = sink.send(WsMessage::Pong(p)).await;
                         continue;
                     }
-                    WsMessage::Close(_) => return Err("close frame".to_string()),
+                    WsMessage::Close(frame) => {
+                        // The close CODE is the whole signal here. Discarding it
+                        // (as this arm used to) turns a 4004 credential
+                        // rejection into a generic transport fault, which the
+                        // outer loop then retries forever against a token the
+                        // platform has already refused.
+                        let code = close_code_of(frame.as_ref());
+                        if let Some(reason) = auth_rejection_for_close_code(code) {
+                            return Ok(SessionExit::AuthRejected { reason });
+                        }
+                        return Err(format!("close frame (code {code:?})"));
+                    }
                     _ => continue,
                 };
 
@@ -1297,6 +1370,43 @@ mod tests {
         assert!(invalid_session_resumable(&yes));
         assert!(!invalid_session_resumable(&no));
         assert!(!invalid_session_resumable(&bare));
+    }
+
+    #[test]
+    fn close_4004_is_classified_as_a_credential_rejection() {
+        let reason = auth_rejection_for_close_code(Some(CLOSE_AUTHENTICATION_FAILED))
+            .expect("4004 is Discord's authentication-failed code and must be recognised");
+        assert!(
+            reason.contains("4004"),
+            "the reason an operator reads must name the code: {reason}"
+        );
+    }
+
+    #[test]
+    fn ordinary_close_codes_are_not_credential_rejections() {
+        // The known-negative half. If this ever starts returning Some, every
+        // dropped socket becomes a permanent Unauthenticated and the channel
+        // stops reconnecting for a fault that waiting would have fixed.
+        //
+        // 4000 unknown error, 4008 rate limited and 4009 session timed out are
+        // all RESUMABLE; 1000/1006 are ordinary socket closes; `None` is a
+        // close frame carrying no code at all.
+        for code in [
+            None,
+            Some(1000),
+            Some(1006),
+            Some(4000),
+            Some(4008),
+            Some(4009),
+        ] {
+            assert!(
+                auth_rejection_for_close_code(code).is_none(),
+                "close code {code:?} is not a credential rejection and must stay resumable"
+            );
+        }
+        // Positive control in the same test, so a classifier that returned
+        // None for EVERYTHING could not pass this assertion set.
+        assert!(auth_rejection_for_close_code(Some(4004)).is_some());
     }
 
     #[test]
