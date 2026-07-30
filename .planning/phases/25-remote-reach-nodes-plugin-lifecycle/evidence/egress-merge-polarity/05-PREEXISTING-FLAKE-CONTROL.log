@@ -1,0 +1,74 @@
+# Pre-existing-flake control — wcore-agent --lib is NOT clean at base
+
+## A. base a3e68a31 (the ORIGINAL '&&' merge), full suite
+MARKER_HEAD=a3e68a31e9e63767c505345eb996f5eeab2341f9
+MARKER_MERGE_LINE=4431:        enabled: global.security.enabled && project.security.enabled,
+running 2237 tests
+test result: FAILED. 2215 passed; 19 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.48s
+
+### base failing test names (19)
+test child_transaction::tests::rejects_append_reopen_reduce_corruption ... FAILED
+test engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay ... FAILED
+test engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch ... FAILED
+test engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools ... FAILED
+test engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch ... FAILED
+test engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call ... FAILED
+test engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch ... FAILED
+test engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch ... FAILED
+test engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session ... FAILED
+test goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition ... FAILED
+test orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary ... FAILED
+test orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects ... FAILED
+test session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral ... FAILED
+test session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable ... FAILED
+test session::tests::active_session_holds_exclusive_lease_until_drop ... FAILED
+test session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority ... FAILED
+test session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror ... FAILED
+test session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal ... FAILED
+test session::tests::test_f034_empty_session_gc ... FAILED
+
+## B. my commit 449826c3, same full suite, same host, minutes apart
+MARKER_HEAD=449826c3bbded7742ec39887f0dffe6d2e2d565f
+MARKER_CHECK_RC=0
+running 2237 tests
+test result: FAILED. 2221 passed; 13 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.48s
+
+### my failing test names (13)
+test engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay ... FAILED
+test engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch ... FAILED
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... FAILED
+test engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch ... FAILED
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... FAILED
+test engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch ... FAILED
+test engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session ... FAILED
+test goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition ... FAILED
+test orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects ... FAILED
+test session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral ... FAILED
+test session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable ... FAILED
+test session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority ... FAILED
+test session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror ... FAILED
+
+## C. the 2 names that failed for me but not at base, run in ISOLATION, 3 rounds each
+### at base a3e68a31
+MARKER_HEAD=a3e68a31e9e63767c505345eb996f5eeab2341f9
+MARKER_ROUND_1_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_ROUND_1_RC=0
+MARKER_ROUND_2_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_ROUND_2_RC=0
+MARKER_ROUND_3_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_ROUND_3_RC=0
+MARKER_ALLDONE
+### at my commit 2897db01
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+MARKER_FLAKE_1_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_1_RC=0
+MARKER_FLAKE_2_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_2_RC=0
+MARKER_FLAKE_3_BEGIN
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_3_RC=0
