@@ -2441,10 +2441,13 @@ async fn run_tui_mode(
     let session_store_dir: std::path::PathBuf = config.session.directory.clone().into();
     let session_store_max = config.session.max_sessions;
 
-    // First-run gate: a true first run has no global config file yet, so
-    // the TUI opens on the Onboarding surface. A returning user lands on
-    // the Workspace.
-    let first_run = !config::global_config_path().exists();
+    // First-run gate — see `tui::is_first_run` for why the config file alone is
+    // not enough to answer this (UAT-TUI-UNIX F1).
+    let first_run = tui::is_first_run(
+        config::global_config_path().exists(),
+        &config.api_key,
+        &config.model,
+    );
 
     // The single engine→TUI event channel. Three producers forward onto
     // it — the `ChannelSink` (streaming events), the `ChannelEmitter`

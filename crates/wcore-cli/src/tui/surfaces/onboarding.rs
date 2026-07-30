@@ -48,7 +48,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent};
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -241,6 +241,42 @@ pub struct OnboardingSurface {
     /// instead of a live `path.exists()` check avoids a spurious conflict
     /// dialog when `connect_all_env_keys` pre-writes the file mid-flow.
     config_existed_at_start: bool,
+    /// Prose the user typed at this card while no text field had focus —
+    /// held for the workspace composer instead of being thrown away.
+    ///
+    /// The steps without a focused field (Connect's path list, Ready) used to
+    /// answer every unrecognized key with `SurfaceAction::None`, which is a
+    /// silent discard. That is survivable on its own; what made it a HIGH is
+    /// that some of those keys are NOT unrecognized — `s` is "skip", ` ` is
+    /// "confirm" — so an ordinary English sentence typed at the card walks
+    /// itself through onboarding and the characters that did the walking are
+    /// gone. Buffering them here, and flushing on the handoff to the
+    /// workspace (`Router::apply`'s `Switch` arm), is what makes the first
+    /// message survive whichever surface it was aimed at.
+    typeahead: String,
+    /// The most recent printable key, held for exactly one more keystroke
+    /// before it is classified. See [`OnboardingSurface::absorb_printable`].
+    provisional: Option<ProvisionalKey>,
+}
+
+/// One printable keystroke that has not yet been classified as a deliberate
+/// shortcut or as the first letter of a sentence.
+///
+/// Both readings are legitimate for the same byte: `s` on the Connect step is
+/// the documented shortcut for "Skip for now", and it is also how `summarize
+/// this repo` starts. A single keystroke cannot distinguish them, so the
+/// decision waits one key. A printable key next means prose (the character is
+/// promoted into the type-ahead buffer); Enter, Esc or an arrow next means the
+/// user was navigating, and a character that really did fire a shortcut is
+/// dropped rather than left as litter in the composer.
+#[derive(Debug, Clone, Copy)]
+struct ProvisionalKey {
+    /// The character as typed.
+    ch: char,
+    /// Whether it actually triggered an accelerator on the step it arrived on.
+    /// A character that triggered nothing was prose the surface ignored, so it
+    /// is kept even when the next key is navigation.
+    fired: bool,
 }
 
 impl Default for OnboardingSurface {
@@ -281,6 +317,120 @@ impl OnboardingSurface {
             ollama_reachable: None,
             ollama_probe_rx: None,
             config_existed_at_start,
+            typeahead: String::new(),
+            provisional: None,
+        }
+    }
+
+    // ── Type-ahead: keep what the user typed at the card ─────────────────
+
+    /// Absorb one printable character typed on a step that has **no** focused
+    /// text field.
+    ///
+    /// Returns `true` when the character was taken as type-ahead, in which case
+    /// the caller must NOT run the accelerator bound to it.
+    ///
+    /// The rule is one keystroke of lookahead: the first printable key is held
+    /// provisionally and its accelerator still runs, so deliberate shortcuts
+    /// stay instant. The moment a second printable key arrives the user is
+    /// evidently writing a sentence, so the held character is promoted into the
+    /// buffer along with the new one and accelerators go quiet for the rest of
+    /// the card. Arrow keys and Enter are untouched by this and remain the way
+    /// to drive the flow — see the note on [`Self::settle_provisional`].
+    fn absorb_printable(&mut self, ch: char, is_accelerator: bool) -> bool {
+        if self.typeahead.is_empty() && self.provisional.is_none() {
+            self.provisional = Some(ProvisionalKey {
+                ch,
+                fired: is_accelerator,
+            });
+            return false;
+        }
+        self.promote_provisional();
+        self.typeahead.push(ch);
+        true
+    }
+
+    /// Fold a held character into the buffer: the next printable key proved it
+    /// was prose. Unconditional — even a character that fired an accelerator is
+    /// kept, because the user plainly meant to type it, and losing one letter
+    /// from the front of their sentence is the defect this exists to close.
+    fn promote_provisional(&mut self) {
+        if let Some(p) = self.provisional.take() {
+            self.typeahead.push(p.ch);
+        }
+    }
+
+    /// Resolve a held character on a NON-printable key (Enter, Esc, an arrow).
+    ///
+    /// Deliberate navigation means the preceding keystroke was a deliberate
+    /// shortcut, so a character that fired one is dropped — otherwise pressing
+    /// `s` to skip would leave a stray `s` sitting in the composer. A character
+    /// that fired nothing is kept: it was prose the surface had no use for, and
+    /// a one-character first word is still a first word.
+    fn settle_provisional(&mut self) {
+        if let Some(p) = self.provisional.take()
+            && !p.fired
+        {
+            self.typeahead.push(p.ch);
+        }
+    }
+
+    /// Erase the last buffered character, so a typo at the card is correctable
+    /// rather than baked into the message that lands in the composer.
+    fn backspace_typeahead(&mut self) {
+        if self.provisional.take().is_none() {
+            self.typeahead.pop();
+        }
+    }
+
+    /// Drop everything buffered. Bound to Esc on the no-field steps: it is the
+    /// escape hatch back to single-letter shortcuts for a user who started
+    /// typing at the card and then decided to use it as a card.
+    fn clear_typeahead(&mut self) {
+        self.typeahead.clear();
+        self.provisional = None;
+    }
+
+    /// True when a printable key is currently being buffered rather than acted
+    /// on. Drives the readout so the buffering is visible instead of being one
+    /// more thing that happens to the user's keystrokes without telling them.
+    fn typeahead_active(&self) -> bool {
+        !self.typeahead.is_empty()
+    }
+
+    /// True when the current step has a focused text field, so keys belong to
+    /// that field and the type-ahead buffer must stay out of the way.
+    fn has_focused_field(&self) -> bool {
+        matches!(self.step, Step::Connect if self.editing_key) || self.step == Step::Name
+    }
+
+    /// Whether `ch` currently runs an accelerator on the active step.
+    ///
+    /// Mirrors the per-step `handle_*_key` dispatch tables; they must be
+    /// changed together. Only used to decide whether a *held* character should
+    /// survive a following navigation key — getting it wrong costs at most one
+    /// stray or one missing character, never the sentence.
+    fn is_accelerator(&self, ch: char) -> bool {
+        match self.step {
+            Step::Connect => {
+                if let Some(d) = ch.to_digit(10) {
+                    let d = d as usize;
+                    if d >= 1 && d <= self.env_keys.len() {
+                        return true;
+                    }
+                }
+                if ch == 'a' && self.env_keys.len() >= 2 {
+                    return true;
+                }
+                matches!(ch, 'k' | 'j' | 'o' | 's')
+            }
+            Step::PickProvider | Step::AddMore => matches!(ch, 'k' | 'j' | ' '),
+            Step::Ready if self.existing_config.is_some() => matches!(ch, 'k' | 'j' | ' '),
+            Step::Ready => ch == ' ',
+            // Validating / ProbingOllama answer only to Esc; every printable
+            // key there is prose. Name and the focused key field never reach
+            // this function (see `has_focused_field`).
+            _ => false,
         }
     }
 
@@ -1486,6 +1636,56 @@ impl OnboardingSurface {
         );
     }
 
+    /// Draw the type-ahead readout across the bottom of the surface.
+    ///
+    /// Drawn outside the step card, so it appears on every step without any of
+    /// them having to make room. Nothing renders when the buffer is empty.
+    ///
+    /// This line is the difference between "we kept your text" and "we kept
+    /// your text but you had no way to know". The original defect was silent —
+    /// characters vanished with no error and no indication — and a fix that
+    /// held them silently would leave the user in the same position of not
+    /// being able to tell what the product did with their keystrokes.
+    fn render_typeahead(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if !self.typeahead_active() || area.height < 2 {
+            return;
+        }
+        let row = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        // Reserve room for the label and the trailing hint, then show the TAIL
+        // of the buffer — the characters just typed, which is where a person
+        // looks to check what they are writing.
+        const LABEL: &str = "Type-ahead: ";
+        const HINT: &str = "   (kept for your first message · ⌫ edit · ⎋ discard)";
+        let budget = (area.width as usize).saturating_sub(LABEL.len() + HINT.len() + 2);
+        let shown: String = if self.typeahead.chars().count() > budget {
+            let skip = self.typeahead.chars().count() - budget.saturating_sub(1);
+            std::iter::once('…')
+                .chain(self.typeahead.chars().skip(skip))
+                .collect()
+        } else {
+            self.typeahead.clone()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    LABEL,
+                    Style::default()
+                        .fg(theme.orange)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(shown, Style::default().fg(theme.text)),
+                Span::styled(HINT, Style::default().fg(theme.text_muted)),
+            ]))
+            .style(Style::default().bg(theme.bg)),
+            row,
+        );
+    }
+
     /// The progress footer. Mirrors the active step.
     fn step_footer(&self, theme: &Theme) -> Paragraph<'static> {
         let on_connect = matches!(self.step, Step::Connect | Step::Validating);
@@ -1645,9 +1845,46 @@ impl Surface for OnboardingSurface {
             Step::Name => self.render_name(frame, area, theme),
             Step::Ready => self.render_ready(frame, area, theme),
         }
+        self.render_typeahead(frame, area, theme);
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> SurfaceAction {
+        // ── Type-ahead gate ──────────────────────────────────────────────
+        // Applied once, here, for every step that has no focused text field.
+        // Those steps answer a handful of keys and DISCARD the rest, and two
+        // of the keys they answer — `s` and a bare space — are ordinary
+        // English, so a first message typed at this card used to walk itself
+        // into the workspace leaving its opening words behind. Nothing below
+        // sees a character that the buffer has claimed.
+        //
+        // Deliberately NOT applied when a field has focus: there the keys are
+        // already going somewhere the user can see and edit.
+        if !self.has_focused_field() {
+            match key.code {
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if self.absorb_printable(c, self.is_accelerator(c)) {
+                        return SurfaceAction::None;
+                    }
+                }
+                KeyCode::Backspace if self.typeahead_active() || self.provisional.is_some() => {
+                    self.backspace_typeahead();
+                    return SurfaceAction::None;
+                }
+                KeyCode::Esc if self.typeahead_active() => {
+                    // The way back to single-letter shortcuts for someone who
+                    // started typing at the card and then decided to use it.
+                    self.clear_typeahead();
+                    return SurfaceAction::None;
+                }
+                // Enter, Esc and the arrows are deliberate navigation, which
+                // settles whatever character is currently being held.
+                _ => self.settle_provisional(),
+            }
+        }
         match self.step {
             Step::Connect => self.handle_connect_key(key, app),
             Step::PickProvider => self.handle_pick_provider_key(key),
@@ -1686,6 +1923,20 @@ impl Surface for OnboardingSurface {
         };
         let current = field.value().to_string();
         *field = Input::new(format!("{current}{cleaned}"));
+    }
+
+    /// Hand over everything the user typed at this card that was destined for
+    /// the composer, and forget it. Called by `Router::apply` on the handoff to
+    /// the workspace.
+    fn take_typeahead(&mut self) -> Option<String> {
+        // A character still held provisionally either fired a shortcut (it was
+        // navigation, drop it) or was ignored prose (keep it) — the same
+        // decision Enter makes, so reuse it.
+        self.settle_provisional();
+        if self.typeahead.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.typeahead))
     }
 }
 
@@ -2765,5 +3016,234 @@ mod tests {
             !text.contains("connected") && !text.contains("Connected"),
             "AddMore probed nothing — it must not claim a connection; got:\n{text}"
         );
+    }
+
+    // ── Type-ahead: the first message must survive the card ──────────────
+    //
+    // These are written from UAT-TUI-UNIX F1 and from the live reproduction at
+    // bc90ee1c, not from the implementation. The exact strings and the exact
+    // loss counts are the ones a real pty produced at 7.1 chars/sec, so a
+    // regression here is a regression a user would actually feel.
+
+    /// The headline case, and the one measured live: 4 characters gone.
+    ///
+    /// `Use ` was destroyed because `s` is the Connect step's "skip" shortcut
+    /// and the following space is the Ready step's "confirm". Nothing about
+    /// this sentence is unusual — that is the point.
+    #[test]
+    fn a_first_message_typed_at_the_card_is_not_eaten_by_the_skip_shortcut() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        let sent = "Use the bash tool to run echo SLOWTYPE_TOKEN";
+        type_str(&mut surface, &mut app, sent);
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some(sent),
+            "every character typed at the onboarding card must be held for the composer"
+        );
+    }
+
+    /// The discriminating case. The live baseline lost exactly 20 characters
+    /// here — `MARKERSTART_what is ` — because the uppercase `S` of
+    /// `MARKERSTART` does NOT fire the shortcut and the lowercase `s` of `is`
+    /// does. A fix that merely stopped `s` firing at position 0 would pass the
+    /// test above and still fail this one.
+    #[test]
+    fn a_first_message_survives_an_s_that_appears_mid_sentence() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        let sent = "MARKERSTART_what is two plus two_MARKEREND";
+        type_str(&mut surface, &mut app, sent);
+        assert_eq!(surface.take_typeahead().as_deref(), Some(sent));
+        // And the card must still be up: nothing the user typed as prose may
+        // walk them out of onboarding they have not completed.
+        assert_eq!(surface.step, Step::Connect);
+    }
+
+    /// A message that OPENS with a shortcut letter. The one-key lookahead is
+    /// the only thing standing between this and a silently missing `s`.
+    #[test]
+    fn a_first_message_beginning_with_a_shortcut_letter_keeps_that_letter() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        type_str(&mut surface, &mut app, "summarize this repo");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("summarize this repo"),
+            "the leading 's' is the first letter of the user's word, not a keypress they lost"
+        );
+    }
+
+    /// The other direction of the same lookahead, and the control that proves
+    /// the fix did not simply disable the shortcuts. A deliberate `s` must
+    /// still skip, and must NOT leave a stray character in the composer.
+    #[test]
+    fn a_deliberate_skip_still_skips_and_leaves_nothing_behind() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        surface.handle_key(char('s'), &mut app);
+        assert_eq!(surface.step, Step::Ready, "`s` must still mean skip");
+        let action = surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert!(
+            matches!(action, SurfaceAction::Switch(SurfaceId::Workspace)),
+            "Ready must still hand off to the workspace"
+        );
+        assert_eq!(
+            surface.take_typeahead(),
+            None,
+            "a deliberate shortcut must not litter the composer with its own keystroke"
+        );
+    }
+
+    /// The other shortcuts must survive too, or the fix has traded one broken
+    /// surface for another.
+    #[test]
+    fn the_single_key_shortcuts_all_still_fire_when_pressed_first() {
+        let mut s = fresh();
+        let mut app = App::new();
+        s.handle_key(char('j'), &mut app);
+        assert_eq!(s.selected, Path::Ollama, "`j` must still move the cursor");
+        let mut s = fresh();
+        s.handle_key(char('k'), &mut app);
+        assert_eq!(s.selected, Path::Skip, "`k` must still wrap upward");
+        let mut s = OnboardingSurface::with_env_keys(vec![
+            env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
+            env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
+        ]);
+        s.handle_key(char('1'), &mut app);
+        assert_eq!(s.step, Step::AddMore, "`1` must still connect env key 1");
+        assert_eq!(s.take_typeahead(), None);
+    }
+
+    /// Ready's accelerator is a bare space, which is why the losses in the UAT
+    /// always ended at a word boundary. Prove the space is neutralised while
+    /// prose is in flight, and still confirms when it is not.
+    #[test]
+    fn a_bare_space_confirms_ready_only_when_no_message_is_in_flight() {
+        // In flight: the space belongs to the sentence.
+        let mut surface = fresh();
+        let mut app = App::new();
+        surface.handle_key(char('s'), &mut app); // deliberate skip → Ready
+        type_str(&mut surface, &mut app, "hello world");
+        assert_eq!(
+            surface.step,
+            Step::Ready,
+            "the space inside `hello world` must not confirm the card"
+        );
+        assert_eq!(surface.take_typeahead().as_deref(), Some("hello world"));
+        // Not in flight: the space is the documented confirm.
+        let mut surface = fresh();
+        surface.handle_key(char('s'), &mut app);
+        let action = surface.handle_key(char(' '), &mut app);
+        assert!(matches!(
+            action,
+            SurfaceAction::Switch(SurfaceId::Workspace)
+        ));
+    }
+
+    /// Typing at the card must be correctable and abandonable, or the buffer
+    /// becomes its own trap — a user who mistypes would be stuck with it, and
+    /// one who wanted the shortcuts back could never get them.
+    #[test]
+    fn the_buffer_can_be_corrected_and_discarded() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        type_str(&mut surface, &mut app, "helo");
+        surface.handle_key(key(KeyCode::Backspace), &mut app);
+        type_str(&mut surface, &mut app, "lo");
+        assert_eq!(surface.typeahead, "hello");
+        surface.handle_key(key(KeyCode::Esc), &mut app);
+        assert_eq!(
+            surface.take_typeahead(),
+            None,
+            "Esc must discard the buffer"
+        );
+        // …and the shortcuts are live again immediately.
+        surface.handle_key(char('s'), &mut app);
+        assert_eq!(surface.step, Step::Ready);
+    }
+
+    /// Keys aimed at a focused text field must never be siphoned off. An API
+    /// key typed into the key field is not type-ahead.
+    #[test]
+    fn the_key_field_is_not_intercepted() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        surface.handle_key(key(KeyCode::Enter), &mut app); // focus the key field
+        type_str(&mut surface, &mut app, "sk-ant-some-key");
+        assert_eq!(surface.key.value(), "sk-ant-some-key");
+        assert_eq!(
+            surface.take_typeahead(),
+            None,
+            "field input must not be diverted into the type-ahead buffer"
+        );
+    }
+
+    /// The buffering has to be visible. The original defect was silent, and a
+    /// silent fix leaves the user unable to tell what happened to their words.
+    #[test]
+    fn the_held_message_is_shown_on_the_card() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        type_str(&mut surface, &mut app, "Use the bash tool");
+        let text = render_text(&mut surface, 120, 40);
+        assert!(
+            text.contains("Type-ahead:"),
+            "the card must announce that it is holding text; got:\n{text}"
+        );
+        assert!(
+            text.contains("Use the bash tool"),
+            "the held text itself must be on screen; got:\n{text}"
+        );
+        // Known-negative for the same assertion: with nothing held, the
+        // readout must be absent. Without this the two `contains` above would
+        // pass on a card that printed the label unconditionally.
+        let mut empty = fresh();
+        let clean = render_text(&mut empty, 120, 40);
+        assert!(
+            !clean.contains("Type-ahead:"),
+            "the readout must not appear when nothing is held; got:\n{clean}"
+        );
+    }
+
+    /// Arrow-key navigation must keep working while a message is in flight —
+    /// it is the only way left to drive the path list once the letter
+    /// shortcuts have gone quiet.
+    #[test]
+    fn arrows_still_drive_the_path_list_while_a_message_is_held() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        type_str(&mut surface, &mut app, "Use the bash tool");
+        surface.handle_key(key(KeyCode::Down), &mut app);
+        surface.handle_key(key(KeyCode::Down), &mut app);
+        assert_eq!(surface.selected, Path::Skip);
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert_eq!(surface.step, Step::Ready);
+        let action = surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert!(matches!(
+            action,
+            SurfaceAction::Switch(SurfaceId::Workspace)
+        ));
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("Use the bash tool"),
+            "completing onboarding must deliver the message, not drop it"
+        );
+    }
+
+    /// A modifier chord is a command, not prose.
+    #[test]
+    fn modifier_chords_are_not_buffered() {
+        let mut surface = fresh();
+        let mut app = App::new();
+        surface.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        surface.handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
+            &mut app,
+        );
+        assert_eq!(surface.take_typeahead(), None);
     }
 }
