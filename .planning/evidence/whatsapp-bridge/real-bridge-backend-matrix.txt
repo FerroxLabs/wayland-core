@@ -1,0 +1,10 @@
+{"jsonrpc":"2.0","method":"connection.status","params":{"state":"starting","backend":"baileys"}}
+{"jsonrpc":"2.0","id":1,"result":{"backend":"baileys","connected":false,"uptime":0.019349726}}
+{"jsonrpc":"2.0","method":"connection.status","params":{"state":"starting","backend":"baileys"}}
+{"jsonrpc":"2.0","id":1,"result":{"backend":"baileys","connected":false,"uptime":0.017956385}}
+{"jsonrpc":"2.0","method":"connection.status","params":{"state":"starting","backend":"baileyz"}}
+{"jsonrpc":"2.0","id":1,"result":{"backend":"baileyz","connected":false,"uptime":0.018004367}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Failed to load backend baileyz: Unknown backend: baileyz"}}
+{"jsonrpc":"2.0","method":"connection.status","params":{"state":"starting","backend":"baileys"}}
+{"jsonrpc":"2.0","id":1,"result":{"backend":"baileys","connected":false,"uptime":0.019509316}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Failed to load backend baileys: Cannot find module '/root/wl-lane-whatsapp-bridge/realbridge/backends/baileys.js' imported from /root/wl-lane-whatsapp-bridge/realbridge/bridge.js"}}

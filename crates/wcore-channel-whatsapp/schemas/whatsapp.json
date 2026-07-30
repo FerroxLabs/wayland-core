@@ -11,6 +11,12 @@
     "credential_handle_app_secret"
   ],
   "properties": {
+    "backend": {
+      "type": "string",
+      "enum": ["meta-business"],
+      "description": "Which WhatsApp backend this instance drives. Defaults to meta-business (this schema's only value) — the official Cloud API, which needs no Node runtime. Setting backend to \"baileys\" or \"whatsapp-web\" selects the OPT-IN Node bridge instead and switches the config to WhatsappBridgeChannelConfig; see schemas/whatsapp-bridge.json and docs/whatsapp-bridge.md.",
+      "default": "meta-business"
+    },
     "workspace_name": {
       "type": "string",
       "description": "Human-readable workspace label (e.g. \"acme\"). Used for logging only."

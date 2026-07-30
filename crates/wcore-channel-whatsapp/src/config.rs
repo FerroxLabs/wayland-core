@@ -19,6 +19,16 @@ pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 5;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WhatsappConfig {
+    /// Which WhatsApp backend this instance drives.
+    ///
+    /// Defaults to [`WhatsappBackend::MetaBusiness`] — this struct configures
+    /// the Cloud API adapter and nothing else. The key exists so an operator
+    /// may state the default explicitly, and so `deny_unknown_fields` does not
+    /// reject a config that does. Selecting a bridged backend routes to
+    /// [`crate::bridge::WhatsappBridgeConfig`] instead; see [`crate::bridge`].
+    #[serde(default)]
+    pub backend: crate::bridge::WhatsappBackend,
+
     /// Human-readable workspace label — used in logs only.
     pub workspace_name: String,
 
@@ -75,6 +85,7 @@ impl WhatsappConfig {
     /// Convenience builder for tests.
     pub fn new_for_test(api_base: impl Into<String>) -> Self {
         Self {
+            backend: crate::bridge::WhatsappBackend::MetaBusiness,
             workspace_name: "test".to_string(),
             phone_number_id: "10000000000".to_string(),
             default_recipient: String::new(),
@@ -134,6 +145,40 @@ credential_handle_app_secret = "k2"
         assert_eq!(cfg.graph_version, DEFAULT_GRAPH_VERSION);
         assert_eq!(cfg.max_retry_attempts, DEFAULT_MAX_RETRY_ATTEMPTS);
         assert!(cfg.default_recipient.is_empty());
+    }
+
+    #[test]
+    fn an_existing_config_with_no_backend_key_stays_on_the_cloud_api() {
+        // The opt-in guarantee, as a test. Every config written before the
+        // bridge existed omits `backend`, and must keep resolving to the Cloud
+        // API adapter — which needs no Node and no bridge.
+        let body = r#"
+workspace_name = "acme"
+phone_number_id = "10987654321"
+credential_handle_access_token = "k1"
+credential_handle_app_secret = "k2"
+"#;
+        let cfg: WhatsappConfig = toml::from_str(body).unwrap();
+        assert_eq!(cfg.backend, crate::bridge::WhatsappBackend::MetaBusiness);
+        assert!(
+            !cfg.backend.is_bridged(),
+            "the default backend must never route through the Node bridge"
+        );
+    }
+
+    #[test]
+    fn the_default_backend_may_be_stated_explicitly() {
+        // Control for the test above: `deny_unknown_fields` must not reject a
+        // config that spells the default out.
+        let body = r#"
+backend = "meta-business"
+workspace_name = "acme"
+phone_number_id = "10987654321"
+credential_handle_access_token = "k1"
+credential_handle_app_secret = "k2"
+"#;
+        let cfg: WhatsappConfig = toml::from_str(body).unwrap();
+        assert_eq!(cfg.backend, crate::bridge::WhatsappBackend::MetaBusiness);
     }
 
     #[test]

@@ -1,0 +1,170 @@
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-channel-whatsapp)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-channels-registry)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_whatsapp-1dea29a0a4a2f11d)
+
+running 69 tests
+test api::reaction_tests::media_request_unknown_extension_defaults_to_document ... ok
+test api::reaction_tests::media_request_audio_drops_caption ... ok
+test api::reaction_tests::media_request_infers_kind_from_extension_ignoring_query ... ok
+test api::reaction_tests::media_request_image_shape_carries_link_and_caption ... ok
+test api::reaction_tests::reaction_request_shape ... ok
+test api::reaction_tests::send_text_omits_context_when_not_a_reply ... ok
+test api::reaction_tests::send_text_quotes_wamid_in_context_on_reply ... ok
+test api::reaction_tests::send_text_treats_empty_reply_id_as_no_reply ... ok
+test bridge::preflight::tests::pairing_marker_paths_match_the_layout_each_backend_actually_writes ... ok
+test bridge::preflight::tests::preflight_fails_closed_naming_a_missing_bridge_script ... ok
+test bridge::preflight::tests::preflight_names_every_missing_item_at_once ... ok
+test bridge::preflight::tests::resolve_node_finds_a_real_file_and_rejects_a_missing_one ... ok
+test bridge::preflight::tests::preflight_refuses_meta_business_because_it_is_not_a_bridged_backend ... ok
+test bridge::preflight::tests::a_hoisted_node_modules_above_the_bridge_counts_as_installed ... ok
+test bridge::preflight::tests::preflight_names_bridge_dependencies_when_the_backend_package_is_absent ... ok
+test bridge::rpc::tests::a_malformed_line_is_skipped_without_taking_the_reader_down ... ok
+test bridge::preflight::tests::preflight_fails_closed_naming_a_missing_node_runtime ... ok
+test bridge::preflight::tests::preflight_passes_when_node_the_script_and_the_backend_package_all_exist ... ok
+test bridge::rpc::tests::handshake_refuses_a_session_whose_backend_does_not_match ... ok
+test bridge::tests::a_bridged_channel_does_not_claim_outbound_idempotency ... ok
+test bridge::tests::backend_default_is_meta_business_not_baileys ... ok
+test bridge::tests::backend_selector_accepts_exactly_the_three_known_names ... ok
+test bridge::tests::backend_selector_rejects_an_unknown_name_rather_than_defaulting ... ok
+test bridge::tests::attachments_are_refused_rather_than_silently_dropped ... ok
+test bridge::tests::toml_accepts_a_known_backend_value ... ok
+test bridge::tests::wire_names_round_trip_through_serde_and_from_str ... ok
+test bridge::tests::toml_rejects_an_unknown_backend_value ... ok
+test config::tests::an_existing_config_with_no_backend_key_stays_on_the_cloud_api ... ok
+test config::tests::defaults_apply_when_omitted ... ok
+test config::tests::deny_unknown_fields_rejects_extras ... ok
+test config::tests::the_default_backend_may_be_stated_explicitly ... ok
+test config::tests::round_trip_toml ... ok
+test inbound::tests::expected_signature_shape_is_sha256_hex ... ok
+test inbound::tests::parse_webhook_empty_entry_is_ok ... ok
+test inbound::tests::parse_webhook_image_message_produces_attachment ... ok
+test inbound::tests::parse_webhook_extracts_single_text_message ... ok
+test inbound::tests::parse_webhook_malformed_json_errors ... ok
+test inbound::tests::parse_webhook_reply_context_sets_reply_to_message_id ... ok
+test inbound::tests::parse_webhook_unhandled_kind_surfaces_warning ... ok
+test inbound::tests::verify_signature_rejects_malformed_header ... ok
+test inbound::tests::verify_signature_accepts_valid ... ok
+test inbound::tests::verify_signature_rejects_tampered_body ... ok
+test inbound::tests::verify_signature_rejects_wrong_secret ... ok
+test tests::config_schema_is_valid_json ... ok
+test bridge::tests::probe_reports_incomplete_and_not_ready_when_the_bridge_is_absent ... ok
+test bridge::tests::construction_never_spawns_and_start_fails_closed_when_node_is_absent ... ok
+test bridge::rpc::tests::connected_status_promotes_the_connection_state ... ok
+test bridge::rpc::tests::qr_update_surfaces_a_pairing_instruction ... ok
+test bridge::preflight::tests::each_bridged_backend_checks_for_its_own_package ... ok
+test tests::max_message_len_is_whatsapp_cap ... ok
+test tests::start_missing_access_token_errors ... ok
+test tests::ingest_event_invalid_signature_errors ... ok
+test tests::ingest_event_valid_signature_enqueues_message ... ok
+test api::reaction_tests::download_media_rejects_non_meta_step2_host ... ok
+test api::reaction_tests::download_media_unauthorized_maps_to_auth ... ok
+test api::reaction_tests::send_reaction_succeeds_on_200 ... ok
+test api::reaction_tests::download_media_two_step_fetch ... ok
+test tests::send_message_with_attachment_sends_media_body ... ok
+test tests::send_message_hits_endpoint_with_bearer_and_json_body ... ok
+test bridge::rpc::tests::our_own_echo_is_not_surfaced_as_an_inbound_message ... ok
+test bridge::rpc::tests::logged_out_is_reported_as_a_warning_and_a_disconnect ... ok
+test bridge::rpc::tests::inbound_message_becomes_a_message_event ... ok
+test bridge::rpc::tests::the_handshake_actually_puts_health_on_the_wire ... ok
+test bridge::rpc::tests::handshake_succeeds_when_the_bridge_reports_the_requested_backend ... ok
+test api::reaction_tests::send_reaction_unauthorized_maps_to_auth ... ok
+test tests::send_message_401_is_auth_error ... ok
+test tests::send_message_4xx_other_than_429_is_permanent ... ok
+test tests::send_message_honours_retry_after_on_429 ... ok
+test tests::send_message_retries_on_5xx ... ok
+
+test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/live_bridge.rs (target/debug/deps/live_bridge-ee9c47452aa96d31)
+
+running 6 tests
+test live_a_dependency_free_bridge_copy_is_refused_before_it_can_lie ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+test live_a_missing_bridge_fails_closed_even_when_node_is_installed ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+test live_handshake_succeeds_and_the_verdict_stops_at_pairing ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+test live_preflight_clears_against_the_real_bridge ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+test live_the_backend_selector_selects_against_the_real_bridge ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+test live_the_ok_verdict_is_reachable_when_pairing_material_is_present ... ignored, needs WCORE_TEST_BRIDGE_PATH — wayland-core does not ship the bridge
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/wcore_channels_registry-dcebdf291282a3f3)
+
+running 13 tests
+test tests::factory_lookup_covers_all_seven_platforms ... ok
+test tests::factory_lookup_covers_w7m_platforms ... ok
+test tests::factory_lookup_returns_none_for_unknown ... ok
+test tests::auto_register_missing_dir_returns_zero ... ok
+test tests::whatsapp_bridge_config_requires_a_bridge_path ... ok
+test tests::disabled_channels_are_skipped ... ok
+test tests::whatsapp_backend_selector_routes_and_rejects ... ok
+test tests::auto_register_empty_dir_returns_zero ... ok
+test tests::malformed_toml_is_skipped_not_fatal ... ok
+test tests::auto_register_three_configs_registers_three ... ok
+test tests::non_toml_files_skipped ... ok
+test tests::unknown_platform_is_skipped_not_fatal ... ok
+test tests::scan_summaries_reports_status_and_never_leaks_secret_values ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/delivery_semantics_declaration.rs (target/debug/deps/delivery_semantics_declaration-9e2e2fd16f4fdec6)
+
+running 8 tests
+test the_prose_table_agrees_with_the_machine_readable_block ... ok
+test the_recurrence_section_keeps_its_measurement_and_its_correction ... ok
+test exactly_one_adapter_is_exactly_once ... ok
+test declaration_matches_every_adapter ... ok
+test comparator_rejects_a_downgraded_row ... ok
+test comparator_rejects_a_row_for_an_adapter_that_does_not_exist ... ok
+test comparator_rejects_a_missing_row ... ok
+test comparator_rejects_a_flipped_row ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_discord_actions.rs (target/debug/deps/live_discord_actions-47a81fb4f6a059c7)
+
+running 2 tests
+test live_edit_and_delete_against_real_discord ... ignored, contacts real Discord and posts real messages
+test live_edit_leaves_changed_content_for_an_external_observer ... ignored, contacts real Discord and leaves a message behind for external corroboration
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_slack_actions.rs (target/debug/deps/live_slack_actions-a9f7d371e29fcedd)
+
+running 1 test
+test five_message_actions_against_the_real_slack_api ... ignored, live: posts to and deletes from a real Slack workspace; run with --ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/matrix_live_room.rs (target/debug/deps/matrix_live_room-0bedd24d2ddf970b)
+
+running 3 tests
+test matrix_edit_and_delete_against_a_real_room ... ignored, live: drives a real Matrix homeserver; requires MATRIX_* configuration
+test matrix_inbound_reaches_the_product_from_a_real_room ... ignored, live: drives a real Matrix homeserver; requires MATRIX_* configuration
+test the_derived_transaction_id_is_a_pure_function_of_the_delivery_key ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_action_matrix.rs (target/debug/deps/native_action_matrix-135dac62a2060c0e)
+
+running 3 tests
+test the_matrix_assertion_can_itself_fail_in_both_directions ... ok
+test the_matrix_covers_every_platform_the_registry_knows ... ok
+test every_adapter_behaves_the_way_it_declares ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wcore_channel_whatsapp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wcore_channels_registry
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
