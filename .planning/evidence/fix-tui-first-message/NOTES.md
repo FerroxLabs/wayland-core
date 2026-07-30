@@ -86,3 +86,53 @@ before any fix is claimed.
 - Does workspace `handle_paste` route a flushed buffer through the paste-detect modal? Must check.
 - Quadrant 2 (credentials absent → modal appears) is served by the `main.rs:1858` MissingApiKey
   path, not by line 2447. Must prove that path still fires after fix (a).
+
+## T+45 — REPRODUCED at base SHA, at human typing speed, BEFORE any fix
+
+Binary: `/root/wayland-fix-tui-first-message/target/release/wayland-core` on hetzner-dsm,
+built by this lane `cargo build --release --locked -p wcore-cli`, WLRC=0.
+sha256 `02cdfde6d6f2d871fd0ff567a1a35a748d067ef6d9bac67d316219376586c1fb`.
+`--build-info` self-reports source **`bc90ee1c…`** = the lane base. Provenance measured, not
+assumed (UAT-TUI-UNIX hit a binary that predated its own checkout by 16 minutes).
+
+Real tmux pty, 120x40, one `send-keys -l` per character at 0.14 s/char = **7.1 chars/sec**.
+Participant-alive asserted before judging (pane not dead, >= 3 non-empty lines).
+
+| run | credentials | sent | landed | LOST | verdict |
+|---|---|---|---|---|---|
+| `BEFORE-q4-keys-present` | `FLUX_API_KEY` + `-p flux-router -m flux-auto` | `Use the bash tool to run echo SLOWTYPE_TOKEN` | `the bash tool to run echo SLOWTYPE_TOKEN` | **4** (`Use `) | PREFIX_LOSS |
+| `BEFORE-q4b-marker` | same | `MARKERSTART_what is two plus two_MARKEREND` | `two plus two_MARKEREND` | **20** (`MARKERSTART_what is `) | PREFIX_LOSS |
+| `BEFORE-q23-nokeys` | none | `Use the bash tool to run echo Q3TOKEN` | *(nothing)* | **37** | TOTAL_LOSS |
+
+Both keyed runs reproduce the UAT counts exactly, and `q4b` is the discriminating one: the
+uppercase `S` of `MARKERSTART` does not fire, the lowercase `s` of `is` does, giving 20 — a
+naive "any `s`" theory predicts 7. The derived mechanism is therefore confirmed against a
+running binary, not just read off the source.
+
+`SURFACE_BEFORE=ONBOARDING` on the keyed runs: **the modal appears with the key exported AND
+`-p`/`-m` on argv.** Brief claim (a) reproduced.
+
+### NEW finding the UAT did not have — with NO credentials the loss is 100% AND unrecoverable
+
+`BEFORE-q23-nokeys.after.txt` line 35-37: after the modal is dismissed the workspace has **no
+composer at all** —
+
+```
+  No model configured.
+  anthropic has no default model.
+  /model pick a model    / open palette    ⌃C quit
+```
+
+So on the unconfigured path there is nowhere for a keystroke to land even after the modal goes.
+Every one of the 37 characters is destroyed. The UAT recorded 100% losses only for inputs that
+never dismissed the modal; this is a different and broader route to the same total loss, and it
+is exactly the population the brief says fix (a) alone would abandon.
+
+### Two instrument defects in my own harness, both repaired in-lane
+
+1. The onboarding card's API-key field renders the same `›` prompt as the composer. Scraping the
+   first `›` line would have read the key-field placeholder as composer content on any run that
+   ended with the modal up — a TOTAL_LOSS graded as a bogus MISMATCH. Repaired: no composer is
+   claimed while the modal is up.
+2. `COMPOSER_PRESENT` was keyed off "surface is not onboarding", which the finding above proves
+   wrong. Repaired to key off the `›` prompt actually being on screen.

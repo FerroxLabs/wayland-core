@@ -220,18 +220,39 @@ done
 sleep "$POST_SETTLE"
 
 tmux -L "$SOCK" capture-pane -p -t s > "$OUT/${LABEL}.after.txt"
-if grep -qF 'Connect a provider' "$OUT/${LABEL}.after.txt"; then
-  say "SURFACE_FINAL=ONBOARDING"
-else
-  say "SURFACE_FINAL=CHAT"
-fi
+FINAL=CHAT
+grep -qF 'Connect a provider' "$OUT/${LABEL}.after.txt" && FINAL=ONBOARDING
+say "SURFACE_FINAL=${FINAL}"
 
 # ── extract what actually landed in the composer ─────────────────────────────
 # The composer renders as `  › <text>`. Take the FIRST such line and strip the
 # marker and the single space after it; trailing pad is right-trimmed.
-LANDED=$(awk '
-  /\xe2\x80\xba/ { sub(/^.*\xe2\x80\xba ?/, ""); sub(/ +$/, ""); print; exit }
-' "$OUT/${LABEL}.after.txt")
+#
+# INSTRUMENT DEFECT, found and repaired before first use rather than written up
+# and left (LANE-BRIEF §6b-ii): the ONBOARDING card's API-key field ALSO renders
+# a `›` prompt. A run that ends with the modal still up would have had the key
+# field's placeholder scraped as though it were composer content, turning a
+# TOTAL_LOSS into a bogus MISMATCH. There is no composer on the onboarding
+# surface, so nothing landed, and that is what gets recorded.
+#
+# SECOND instrument defect, same family, found on the first baseline run: the
+# workspace does NOT always have a composer. With no provider configured it
+# renders `No model configured.` in the composer's slot instead, so there is
+# nowhere for a keystroke to go at all. Keying COMPOSER_PRESENT off "the surface
+# is not onboarding" called that YES and would have misattributed a 100% loss.
+# Key it off the `›` prompt actually being on screen.
+if [ "$FINAL" = "ONBOARDING" ]; then
+  LANDED=""
+  say "COMPOSER_PRESENT=NO reason=onboarding-modal-still-up"
+elif ! grep -q "$(printf '\xe2\x80\xba')" "$OUT/${LABEL}.after.txt"; then
+  LANDED=""
+  say "COMPOSER_PRESENT=NO reason=no-composer-on-workspace"
+else
+  say "COMPOSER_PRESENT=YES"
+  LANDED=$(awk '
+    /\xe2\x80\xba/ { sub(/^.*\xe2\x80\xba ?/, ""); sub(/ +$/, ""); print; exit }
+  ' "$OUT/${LABEL}.after.txt")
+fi
 say "COMPOSER_TEXT=[${LANDED}]"
 say "COMPOSER_LEN=${#LANDED}"
 
