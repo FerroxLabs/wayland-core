@@ -210,6 +210,18 @@ so nothing looks wrong. Two classes measured:
 - **`ls`** — also rewritten: it alters the size column and reorders entries. Found 2026-07-29 by
   `lane/22-remaining`. Anything that counts or sizes files from a directory listing is affected.
 
+- **`git diff --numstat` — WRONG NUMBERS, and the absolute path did NOT save it.** Measured
+  2026-07-30 by `lane/cli-danger-tiers`: `--numstat` reported **`162 0`** for a diff that deletes
+  **40** lines, and `git show HEAD:<path> | grep -c <needle>` returned **0 for a string that is
+  present** — both invocations using `/usr/bin/git` and `/usr/bin/grep`. **This is the worst instance
+  so far**: everything previously recorded here was cosmetic re-rendering, but `--numstat` is a
+  *machine-readable count*, so a lane that trusts it reports fabricated figures with no visible
+  symptom.
+  **The absolute path is not sufficient protection — the rewrite reached the pipe and the tool's own
+  stdout render.** The repair that worked: **redirect to a file, then read the file with the Read
+  tool**, never through Bash. Do that for every number you will report, and put a known-positive AND
+  a known-negative in the same capture.
+
 - **`git status --porcelain`** — collapsed to the single word `ok` on a clean tree. Harmless
   when clean; the hazard is that a machine-readable format you are parsing is not the format you
   get back, so any script keying on porcelain output is reading something else. Note this one
