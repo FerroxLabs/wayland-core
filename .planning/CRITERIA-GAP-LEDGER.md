@@ -1431,7 +1431,196 @@ release trains rather than sessions.
 
 ## 3. What must close before a release candidate, and what can ship open
 
+> ### SUPERSEDING RE-RANK — 2026-07-30, `lane/release-rank`, measured at `4dc571c1`
+>
+> **Four items block a release candidate, down from seven — and only three of them are criteria at
+> all; the highest-ranked blocker is a security defect this section had no row for.**
+>
+> Everything from `### MUST CLOSE — 7 criteria` down to the end of `### CAN SHIP OPEN` below is
+> **SUPERSEDED and must not be read forward.** It is retained unedited per this file's convention.
+> Five of its seven MUST CLOSE entries are now closed or cleared, and **its number-one entry was
+> ranked on a sentence that is no longer true**. A reader acting on the old list would rebuild
+> `--skills-promote`, re-close a remediation string, and re-run tri-platform journeys that all exist.
+>
+> **Graded off code and tests at HEAD, never off a `SUMMARY.md`.** Where a summary and the source
+> disagreed, the source won and it is said so. Four load-bearing claims were **executed** rather
+> than read, on `hetzner-dsm` at an asserted SHA, with pass/ignore/filter counts read back
+> (LANE-BRIEF §3.2): `wcore-cron --test event_producer` **11 passed / 0 ignored / 0 filtered**;
+> `wcore-channel-matrix idempotency` **1 passed** (35 filtered — count asserted non-zero, the
+> flavour-(c) trap); `wcore-channel-discord idempotency` **1 passed** (57 filtered);
+> `wcore-agent --test f24_c3_h5_reload_policies_test` **1 passed / 0 ignored / 0 filtered**.
+> Full method, every capture and the panel record: `.planning/RELEASE-RANK-NOTES.md`.
+>
+> #### MUST CLOSE — 4 items, ≈2.75–4 lane-sessions + 2 owner decisions
+>
+> Same organising principle as the superseded list — **customer promise × reachability × failure
+> mode** — with one correction forced by the panel: **a "decision" blocker is still a blocker.**
+> Reclassifying an item as an owner decision changes *who acts* and *what the artifact is* (an ADR,
+> or a signed release-notes line), **not whether the RC waits.** Absent that discipline, "decision"
+> is where blockers go to die.
+>
+> **1. `EGRESS-01` — the egress master switch is switchable off by an untrusted project config.**
+> **No prior row in this ledger.** `wcore-config/src/config.rs:4431` is
+> `enabled: global.security.enabled && project.security.enabled`. `enabled = true` means the
+> boundary is ON, so `&&` lets **either** layer switch it off — including a project config the same
+> file twice calls *"untrusted (checked into a cloned repo)"* under GHSA-8r7g. Reinforced at
+> `:4546`, `restricted.security.enabled = project.security.enabled;`, inside
+> `restrict_untrusted_project_config` — whose own comment at `:4537` reads *"Preserve project
+> narrowing, never project grants"* and at `:4543` *"A repository may **tighten** egress"*.
+> **`false` loosens it. The code contradicts its own stated contract**, which is what makes this
+> worse than an ordinary bug: a future maintainer reading the comment will preserve the defect.
+> Reachability is maximal — clone a repo and run the agent is the canonical first user action — and
+> the failure is silent and in the privilege-loosening direction. **Both independent panel members
+> ranked this first on merit rather than novelty.** The fix exists on `lane/egress-merge-polarity`,
+> which has separately established that the naive `||` flip is itself defective (`security.enabled`
+> defaults to `true`, so `||` breaks the operator's own off switch); the shape needed is
+> presence-aware or operator-owned — and **that exact shape already exists 13 lines below at
+> `:4559`** for `skills_lifecycle` (*"Only an explicit `false` is carried forward"*).
+> **NOT YET MERGED to integration. ≈0.5 session to merge + pin with an executable test.**
+>
+> **2. `27-C5` (aarch64 leg) — two shipped targets have never been executed anywhere.**
+> `release.yml:64-80` still ships **6 targets across 3 OS families**; the envelope has NOT narrowed.
+> The two aarch64 targets are verified by **executable-header inspection only** (`:624`, `:660`),
+> which is honestly disclosed in-workflow but cannot catch a dynamic-linker failure, glibc skew or a
+> missing symbol. **I had this as a pure owner decision and the panel corrected me, using my own
+> rubric against me**: a binary on the download page that has never run anywhere is promised,
+> reachable, and fails at install time. A `qemu-user` smoke run — boot, `--version`, one canned
+> invocation — is **cheap engineering that converts an uninformed owner decision into an informed
+> one.** ≈1 session. **Then** the envelope choice is Sean's (accept, or narrow in the release notes).
+>
+> **3. `27-C2(c)` — three policy baselines with no live measurement.** Mechanism exists in source
+> for all three; two legs need a display-capable host, which no build host has, and the liveness
+> probe now correctly refuses to fake it. **Recorded as "blocked on a host we don't have" and both
+> independent panel members refused that framing**: `xvfb`/headless is what this exists for, and
+> two-thirds of the gap is a small CI task rather than an inherent impossibility. Blocking on a
+> **security** boundary whose only gap is proof. **≈1–1.5 sessions.** If headless genuinely fails,
+> it converts to a declared limitation — but that conversion must be *measured*, not assumed.
+>
+> **4. `24-C1` — the per-channel delivery semantics must be declared.** Exactly-once holds on
+> **3 of 10** adapters; on the other 7 an outcome-unknown delivery is abandoned, recorded, and
+> recoverable via the `acknowledge`/`resend` verbs. Those 7 platforms have **no idempotency
+> primitive at all**, so closing them is impossible in code. **Sean's decision** (declare
+> at-most-once vs at-least-once per channel), plus a **small engineering tail the panel is right
+> that I omitted**: "abandoned, resend available" should be distinguishable in the API result
+> taxonomy, not only in prose. **≈0.25 session + the decision.**
+>
+> #### What LEFT the blocking set, and why
+>
+> | Old rank | Criterion | Status at HEAD |
+> |---|---|---|
+> | 1 | `24-C2` | **Ranking basis dead.** Ships open — see conditions below |
+> | 2 | `27-C2(a)` | **CLOSED**, with a test forbidding regression |
+> | 3 | `24-C5` | **MET** — 17-step journeys on all three OS families |
+> | 3 | `24-C1` | Platform half **closed**; residual re-ranked to item 4 above |
+> | 4 | `23A-C1` | **CLOSED** — fully implemented, exceeding the accepted minimum |
+> | 5 | `27-C2(b)` | **CLOSED** — real liveness probes |
+> | 6 | `24-C3` | Still NOT MET, but **not a blocker** — ships open with conditions |
+>
+> **`24-C2` ships open — but the old text's reason for ranking it first is gone, not softened.**
+> `webhook:` and `poll:` are **refused at creation** and removed from `--help`
+> (`wcore-cli/src/cron.rs:52-54`, `refuse_without_producer` `:477` called at `:434` and `:449`);
+> persisted jobs print `WILL NEVER FIRE — {reason}` (`:350`); and `event:` **has a real producer and
+> a proven end-to-end fire** — `cron publish` (`:112/:235/:271`) plus
+> `wcore-cron/tests/event_producer.rs:90`, which carries its own known-negative in the same test
+> body and **passed 11/11 with 0 ignored and 0 filtered out** on hetzner. The silent-acceptance
+> failure mode — a customer registering automation that quietly never runs — **no longer exists.**
+> The *plane* was still not built, so the grade stays PARTIAL.
+> **Conditions for shipping it open, both from the panel and both accepted:** the release notes must
+> carry the refusal and the fact that `max_in_flight > 1` is serialized (a NOTE on stderr is not a
+> release note), and the missing kill-mid-delivery continuation proof must be **named accepted risk
+> rather than forgotten debt.**
+>
+> **`24-C3` ships open, conditionally.** Still NOT MET; `24-C3-FINISH.md:15` records that **five
+> consecutive lanes have declined to claim it**. Measured per-adapter at HEAD across all ten channel
+> crates: `edit_message` **0/10**, `delete_message` **0/10**, `react` **5/10**,
+> `fetch_media` **9/10** (all but MS Teams). Everything Linux-only. It is not a blocker because the
+> absent actions return a **named** `ChannelError::Unsupported`, never a silent success
+> (`wcore-channels/src/lib.rs:204, :220, :300`, pinned by `framework_matrix.rs:412`) — the same
+> "fails loudly and honestly" standard the superseded list itself accepted for `23A-C1`.
+> **Condition:** it ships as *documented current truth, per platform* — a published per-adapter
+> capability matrix. If it ships under its original name, the criterion was renamed, not met.
+>
+> #### Where the panel changed the ranking
+>
+> Panel per LANE-BRIEF §4. **2 independent DISAGREE, 1 vote discarded as contaminated** (codex
+> `cat`'d its peers' output files from the shared cwd — see `RELEASE-RANK-NOTES.md`; the duplicate
+> text reads as agreement, which is why it nearly became a fabricated 3/3). Both independent
+> members voted DISAGREE, so the ranking moved. **Every change they forced made it stricter:**
+>
+> - **"Decision" ≠ unblocked — 2 of 2.** Adopted as the framing rule above, with a named owner per item.
+> - **The aarch64 envelope is not a pure decision — 2 of 2**, argued from my own rubric. **Moved into
+>   the blocking set as engineering.** This is the change I was most wrong about.
+> - **"Needs a display" is not inherent — 2 of 2.** `27-C2(c)` **moved into the blocking set.**
+> - **`24-C1`'s residual has an engineering tail** (result taxonomy), not purely a decision. Adopted.
+> - **`24-C2` and `24-C3` ship open only with the named conditions above.** Adopted.
+> - **Five declinations of `24-C3` are signal about the criterion, not the lanes.** Adopted as a
+>   recommendation: 8 clauses × 10 adapters is *"a program of work wearing a criterion's clothes"* —
+>   decompose it per-clause and per-platform, or descope it to documented truth.
+>
+> **Held against the panel, with evidence.** Both members argued `24-C2` should stay blocking because
+> the surviving `event:` trigger has no kill-mid-delivery continuation proof. **The delivery spine's
+> continuation property IS proven** — the 17-step journey drives `hard-kill` → `platform-recover` →
+> `delivery-reconcile` on Linux, macOS and Windows (`24-C5-finish-evidence/`). Neither member had
+> that connection available. The gap is narrower than they scored it: it is an *event-trigger-specific*
+> continuation run over an already-proven spine, which is proof debt, not an unproven promise.
+>
+> **Recorded dissent, not taken.** Gemini argued the whole `Channel` trait is the wrong abstraction —
+> that forcing ten disparate protocols into one monolithic trait is what produces `0/10` on
+> edit/delete — and that it should be redesigned into opt-in capability traits. **A real argument and
+> plausibly correct, but it is a post-RC refactor**, not an RC blocker, and adopting it now would
+> reproduce the Phase 20 failure mode exactly. Logged for after the tag.
+> Gemini also argued `27-C2(c)` blocks because *"you cannot ship a desktop-interacting agent if you
+> cannot test its graphical security boundary … mock the Wayland compositor"* — it **conflated the
+> product's name with the Wayland display protocol.** The conclusion survives its bad premise for an
+> unrelated reason (the CUA leg does need a display), so the item moved, credited to the `xvfb` point.
+>
+> #### CAN SHIP OPEN — re-examined for adverse movement
+>
+> **Nothing moved the wrong way, and the one live product question closed in the good direction.**
+>
+> - **`27-C3`'s escalation caveat is DEAD.** §2's footnote reads *"flips to blocking if media
+>   generation is billable — media calls currently produce **no cost record**."* **A cost record now
+>   exists.** `wcore-tools/src/media_cost.rs` (27.0 KB) defines `MediaCostLedger`, `MediaRateCard`,
+>   `MediaCostRecord`, `MediaOutcome`, `MediaUnits`, `ReportedCost`; wired at `bootstrap.rs:1317`
+>   `.with_rate_card(..)`; consumed by `wcore-cli/src/image.rs:29` and
+>   `wcore-tools/src/image_generation_tool.rs:67`; reads `x-flux-cost-usd` / `x-cost-usd` /
+>   `openai-processing-cost-usd` headers and `/usage/cost_usd` body paths
+>   (`image_gen.rs:221-223, :246-251`). Guarded by `media_cost.rs:536
+>   unreported_cost_is_unpriced_not_zero` — unpriced is not zero, which is the honest-accounting
+>   control — and `:605 provider_reported_cost_outranks_rate_card`. **The caveat can no longer fire.**
+>   *Scope limit, measured:* the ledger covers **image** generation only —
+>   `video_analyze.rs`, `tts.rs` and `voice_mode.rs` carry zero cost sites.
+> - **`27-C4` (voice)** — still not in the shipped artifact. `wcore-cli/Cargo.toml:31`
+>   `default = ["remote-registry", "workflow", "monitor", "review_artifact"]`; `voice` is opt-in at
+>   `:58`. Classification holds.
+> - **`21-C3`, `22-C1`, `22-C3`, `22-C4`, `22-C5`, `24-C4`, `25-C2`, `25-C4`, `27-C1`** — unchanged
+>   in kind: proof-completeness, capability breadth, or architecture. No customer symptom. This is
+>   the bucket that must not be treated as blocking.
+>
+> #### Blocked on Sean
+>
+> **Two decisions and one credential — none of them engineering work he must wait on.**
+>
+> 1. **The aarch64 envelope**, *after* item 2's smoke run makes the choice informed: accept the
+>    targets, or narrow the declared envelope in the release notes.
+> 2. **Per-channel delivery semantics** (item 4): at-most-once vs at-least-once, declared per adapter.
+> 3. An Anthropic credential for `22-C5`'s `tool_execution_*` journal region — **non-blocking.**
+>
+> The Desktop half of the `27-C2(b)` readiness re-pin is **no longer pending**: that criterion closed
+> in Core without a wire change (`protocol_sink.rs:175-178` — same field, same type, same value
+> domain, `schema_digest` cannot observe it, so no contract bump and no manifest regeneration).
+>
+> #### Two lanes in flight, graded NOT YET MERGED
+>
+> `lane/egress-merge-polarity` (carries item 1's fix) and `lane/cli-danger-tiers` (renaming the
+> danger flags so the tier-1/tier-2 superset relationship is visible in the flag itself). Both are
+> expected before a tag; **neither is in integration at `4dc571c1`**, so neither is credited here.
+
 ### MUST CLOSE — 7 criteria, ≈13–17 lane-sessions + one Desktop co-release train
+
+> **SUPERSEDED 2026-07-30 by the re-rank block above (`lane/release-rank`, `4dc571c1`). Retained
+> unedited. Five of these seven are closed or cleared; item 1's ranking rests on a sentence that is
+> no longer true. Do not act on this list.**
 
 Ranked. The organising principle, sharpened by the panel: **customer promise × reachability ×
 failure mode.** A surface the product advertises and a customer can reach, which then does nothing,
