@@ -360,7 +360,7 @@ async fn leg_send(live: &Live, ch: &mut Box<dyn Channel>) -> LegResult {
     let neg = ch
         .send_message(OutgoingMessage::text(
             "C00000000000BOGUS",
-            &live.marker("send-negative-control"),
+            live.marker("send-negative-control"),
         ))
         .await;
     let err = match neg {
