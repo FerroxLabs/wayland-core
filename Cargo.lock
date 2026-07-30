@@ -9347,6 +9347,7 @@ dependencies = [
  "futures-util",
  "mockito",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -9535,6 +9536,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -9565,7 +9567,11 @@ name = "wcore-channels-registry"
 version = "0.12.25"
 dependencies = [
  "dirs",
+ "hex",
+ "hmac 0.12.1",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -9583,6 +9589,7 @@ dependencies = [
  "wcore-channel-whatsapp",
  "wcore-channels",
  "wcore-config",
+ "wcore-egress",
 ]
 
 [[package]]
