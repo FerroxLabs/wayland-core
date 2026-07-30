@@ -1,0 +1,11 @@
+REGRADED_FILE=/root/fixtui-ev/BEFORE-ok.after.txt
+CARD_HEADER=[● Bash({ "command": "echo HELLO_FROM_UAT" }) · done]
+CARD_BODY=[Ran `?` · exit 0 · 0 bytes]
+CARD_HEADER_STATUS=done
+FABRICATED_CMD_QUESTION_MARK=YES
+BODY_SHOWS_EXIT_0=YES
+BODY_SHOWS_A_ZERO_BYTE_COUNT=YES  # informational only: after the
+#   fix a zero here can be a real measurement (a command that printed nothing),
+#   so it is NOT a defect signature on its own.
+SELF_CONTRADICTION=NO
+VERDICT=DEFECT_PRESENT

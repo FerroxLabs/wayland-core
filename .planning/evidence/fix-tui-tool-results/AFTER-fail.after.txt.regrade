@@ -1,0 +1,11 @@
+REGRADED_FILE=/root/fixtui-ev/AFTER-fail.after.txt
+CARD_HEADER=[✗ Bash({ "command": "ls /no-such-dir-9F3A" }) · error]
+CARD_BODY=[exit 2 · 0 bytes stdout · 64 bytes stderr]
+CARD_HEADER_STATUS=error
+FABRICATED_CMD_QUESTION_MARK=NO
+BODY_SHOWS_EXIT_0=NO
+BODY_SHOWS_A_ZERO_BYTE_COUNT=YES  # informational only: after the
+#   fix a zero here can be a real measurement (a command that printed nothing),
+#   so it is NOT a defect signature on its own.
+SELF_CONTRADICTION=NO
+VERDICT=DEFECT_ABSENT
