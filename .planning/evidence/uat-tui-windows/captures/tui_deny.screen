@@ -1,0 +1,43 @@
+=== RENDERED SCREEN 120x40 ===
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ Use the Write tool to create a file named uat-deny.txt in the current         ┌ Activity ──────────────────────┐
+   directory containing exactly SHOULD_NOT_EXIST                                   │ Pricing unavailable for f…     │
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-standard; the call remains bounded   │                                │
+   by the token envelope and cost is unpriced, not $0.                             │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+     ⊘ Write({ "content": "SHOULD_NOT_EXIST", "file_path": "D:\\lane-uat…) ·       │                                │
+   rejected by user                                                                │                                │
+                                                                                   │                                │
+   ⚙ Pricing unavailable for flux-router/flux-standard; the call remains bounded   │                                │
+   by the token envelope and cost is unpriced, not $0.                             │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Press Ctrl+C again to exit
+
+=== CURSOR x=4 y=34 hidden=False ===
+=== BYTES 74205  MARKS [[8726, "send:type"], [10103, "send:submit"], [30471, "snapshot:dialog"], [31171, "send:DENY-n"], [72171, "snapshot:after"], [72178, "send:cc1"], [72496, "send:cc2"], [72548, "EOF"]] ===
