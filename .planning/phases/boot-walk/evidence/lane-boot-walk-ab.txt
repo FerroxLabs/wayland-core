@@ -1,0 +1,3 @@
+=== probe tree: 8000 ignored dirs, 2000 visible ===
+BEFORE: node_modules_dir_opens=16000 first=openat(AT_FDCWD, last=openat(AT_FDCWD,
+AFTER: node_modules_dir_opens=8000 first=openat(AT_FDCWD, last=openat(AT_FDCWD,
