@@ -254,29 +254,16 @@ pub struct OnboardingSurface {
     /// workspace (`Router::apply`'s `Switch` arm), is what makes the first
     /// message survive whichever surface it was aimed at.
     typeahead: String,
-    /// The most recent printable key, held for exactly one more keystroke
-    /// before it is classified. See [`OnboardingSurface::absorb_printable`].
-    provisional: Option<ProvisionalKey>,
-}
-
-/// One printable keystroke that has not yet been classified as a deliberate
-/// shortcut or as the first letter of a sentence.
-///
-/// Both readings are legitimate for the same byte: `s` on the Connect step is
-/// the documented shortcut for "Skip for now", and it is also how `summarize
-/// this repo` starts. A single keystroke cannot distinguish them, so the
-/// decision waits one key. A printable key next means prose (the character is
-/// promoted into the type-ahead buffer); Enter, Esc or an arrow next means the
-/// user was navigating, and a character that really did fire a shortcut is
-/// dropped rather than left as litter in the composer.
-#[derive(Debug, Clone, Copy)]
-struct ProvisionalKey {
-    /// The character as typed.
-    ch: char,
-    /// Whether it actually triggered an accelerator on the step it arrived on.
-    /// A character that triggered nothing was prose the surface ignored, so it
-    /// is kept even when the next key is navigation.
-    fired: bool,
+    /// The last keystroke that FIRED a shortcut, held for exactly one more key.
+    ///
+    /// Both readings of that byte are legitimate: `s` on the Connect step is
+    /// the documented shortcut for "Skip for now", and it is also how
+    /// `summarize this repo` begins. One keystroke cannot tell them apart, so
+    /// the shortcut runs immediately — shortcuts must stay instant — and the
+    /// character waits one key to learn what it was. A prose character next
+    /// promotes it into [`Self::typeahead`]; anything else discards it, so
+    /// pressing `s` to skip does not litter the composer with an `s`.
+    provisional: Option<char>,
 }
 
 impl Default for OnboardingSurface {
@@ -330,57 +317,59 @@ impl OnboardingSurface {
     /// Returns `true` when the character was taken as type-ahead, in which case
     /// the caller must NOT run the accelerator bound to it.
     ///
-    /// The rule is one keystroke of lookahead: the first printable key is held
-    /// provisionally and its accelerator still runs, so deliberate shortcuts
-    /// stay instant. The moment a second printable key arrives the user is
-    /// evidently writing a sentence, so the held character is promoted into the
-    /// buffer along with the new one and accelerators go quiet for the rest of
-    /// the card. Arrow keys and Enter are untouched by this and remain the way
-    /// to drive the flow — see the note on [`Self::settle_provisional`].
+    /// Three cases, in order of how much is known about the character:
+    ///
+    /// 1. **No step binds it** — unambiguous prose. Straight into the buffer;
+    ///    nothing is being pre-empted, because the alternative was a discard.
+    /// 2. **It binds a shortcut and nothing is buffered yet** — run the
+    ///    shortcut, so `s`, `o`, `j` and the digits stay instant, and hold the
+    ///    character for one key in case it turns out to be a first letter.
+    /// 3. **It binds a shortcut but prose is already in flight** — the shortcut
+    ///    goes quiet. Nothing should hijack a sentence the user is midway
+    ///    through, and this is the case that carried the defect: the `s` of
+    ///    `is` and the space after it.
+    ///
+    /// Arrow keys and Enter are outside this entirely and remain the way to
+    /// drive the card once the letter shortcuts have gone quiet.
+    ///
+    /// KNOWN COST, pinned by `a_message_beginning_with_two_shortcut_characters_
+    /// loses_them`: a message whose first TWO characters both bind shortcuts
+    /// (`1 …`, `s …`) fires both and loses both, because case 2 applies twice
+    /// before any prose establishes itself. The alternative — letting only one
+    /// shortcut ever fire — breaks pressing `s` then space, which is a thing
+    /// people do repeatedly, to save two characters in a case that is rare.
     fn absorb_printable(&mut self, ch: char, is_accelerator: bool) -> bool {
-        if self.typeahead.is_empty() && self.provisional.is_none() {
-            self.provisional = Some(ProvisionalKey {
-                ch,
-                fired: is_accelerator,
-            });
+        if is_accelerator && self.typeahead.is_empty() {
+            // Case 2. Any previously held character fired its own shortcut and
+            // no prose has arrived since, so it was navigation: drop it.
+            self.provisional = Some(ch);
             return false;
         }
+        // Cases 1 and 3.
         self.promote_provisional();
         self.typeahead.push(ch);
         true
     }
 
-    /// Fold a held character into the buffer: the next printable key proved it
-    /// was prose. Unconditional — even a character that fired an accelerator is
-    /// kept, because the user plainly meant to type it, and losing one letter
-    /// from the front of their sentence is the defect this exists to close.
+    /// Fold the held character into the buffer: a prose character arrived, which
+    /// proves the shortcut keystroke was the first letter of a sentence.
     fn promote_provisional(&mut self) {
-        if let Some(p) = self.provisional.take() {
-            self.typeahead.push(p.ch);
+        if let Some(ch) = self.provisional.take() {
+            self.typeahead.push(ch);
         }
     }
 
-    /// Resolve a held character on a NON-printable key (Enter, Esc, an arrow).
-    ///
-    /// Deliberate navigation means the preceding keystroke was a deliberate
-    /// shortcut, so a character that fired one is dropped — otherwise pressing
-    /// `s` to skip would leave a stray `s` sitting in the composer. A character
-    /// that fired nothing is kept: it was prose the surface had no use for, and
-    /// a one-character first word is still a first word.
-    fn settle_provisional(&mut self) {
-        if let Some(p) = self.provisional.take()
-            && !p.fired
-        {
-            self.typeahead.push(p.ch);
-        }
+    /// Discard the held character. Called on any NON-printable key (Enter, Esc,
+    /// an arrow): deliberate navigation means the shortcut was meant as a
+    /// shortcut, so it must not be left as litter in the composer.
+    fn discard_provisional(&mut self) {
+        self.provisional = None;
     }
 
     /// Erase the last buffered character, so a typo at the card is correctable
     /// rather than baked into the message that lands in the composer.
     fn backspace_typeahead(&mut self) {
-        if self.provisional.take().is_none() {
-            self.typeahead.pop();
-        }
+        self.typeahead.pop();
     }
 
     /// Drop everything buffered. Bound to Esc on the no-field steps: it is the
@@ -1870,7 +1859,7 @@ impl Surface for OnboardingSurface {
                         return SurfaceAction::None;
                     }
                 }
-                KeyCode::Backspace if self.typeahead_active() || self.provisional.is_some() => {
+                KeyCode::Backspace if self.typeahead_active() => {
                     self.backspace_typeahead();
                     return SurfaceAction::None;
                 }
@@ -1881,8 +1870,8 @@ impl Surface for OnboardingSurface {
                     return SurfaceAction::None;
                 }
                 // Enter, Esc and the arrows are deliberate navigation, which
-                // settles whatever character is currently being held.
-                _ => self.settle_provisional(),
+                // resolves whatever character is currently being held.
+                _ => self.discard_provisional(),
             }
         }
         match self.step {
@@ -1929,10 +1918,10 @@ impl Surface for OnboardingSurface {
     /// the composer, and forget it. Called by `Router::apply` on the handoff to
     /// the workspace.
     fn take_typeahead(&mut self) -> Option<String> {
-        // A character still held provisionally either fired a shortcut (it was
-        // navigation, drop it) or was ignored prose (keep it) — the same
-        // decision Enter makes, so reuse it.
-        self.settle_provisional();
+        // Any still-held character fired a shortcut and no prose followed it,
+        // so it was navigation — the same call Enter makes, and the handoff
+        // always arrives via Enter or a shortcut.
+        self.discard_provisional();
         if self.typeahead.is_empty() {
             return None;
         }
@@ -3146,26 +3135,36 @@ mod tests {
         ));
     }
 
-    /// The one case the lookahead resolves the "wrong" way, pinned so it is a
-    /// known cost rather than a surprise.
+    /// The residual hole, pinned so it is a measured cost and not a surprise.
     ///
-    /// Press `s` to skip and then immediately start typing, and the `s`
-    /// survives into the composer as a stray leading character. The rule
-    /// cannot tell that apart from `summarize this repo`, and it has to pick a
-    /// side: keeping the character costs a visible, editable `s` here; dropping
-    /// it costs a SILENT missing letter there. Silent loss is the defect this
-    /// whole change exists to end, so the buffer keeps the character.
+    /// A message whose first TWO characters both bind shortcuts fires both and
+    /// loses both — there is no prose yet to establish that a sentence is being
+    /// written, so each is read as the shortcut it is documented to be. Closing
+    /// it would mean letting only one shortcut ever fire per card, which breaks
+    /// `s` then space (and `j` then `j`) — things people do repeatedly — to
+    /// save two characters in a case that needs a first message beginning
+    /// `s `, `o `, `1 ` or the like.
+    ///
+    /// If this ever needs closing, the honest fix is to stop binding bare
+    /// letters as accelerators on a surface that also receives prose, not to
+    /// make the lookahead cleverer.
     #[test]
-    fn a_skip_followed_immediately_by_typing_keeps_the_s_by_design() {
+    fn a_message_beginning_with_two_shortcut_characters_loses_them() {
         let mut surface = fresh();
         let mut app = App::new();
-        surface.handle_key(char('s'), &mut app);
-        assert_eq!(surface.step, Step::Ready, "the skip still happened");
-        type_str(&mut surface, &mut app, "hello world");
+        type_str(&mut surface, &mut app, "s hello");
         assert_eq!(
             surface.take_typeahead().as_deref(),
-            Some("shello world"),
-            "documented trade: a visible stray character beats a silent missing one"
+            Some("hello"),
+            "known residual: a leading `s ` is read as skip-then-confirm"
+        );
+        // The far commoner shape — one shortcut letter then prose — is NOT
+        // affected, which is what keeps the residual narrow. Control:
+        let mut surface = fresh();
+        type_str(&mut surface, &mut app, "summarize this repo");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("summarize this repo")
         );
     }
 
