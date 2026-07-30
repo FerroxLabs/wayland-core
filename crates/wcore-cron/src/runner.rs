@@ -1151,7 +1151,10 @@ mod tests {
         // is the achievable pass state for the harness (LANE-BRIEF §3b-iii);
         // without it the test would pass on a hardcoded 60.
         let slow = Trigger::Interval { every_secs: 3600 };
-        let slow_next = slow.next_after(anchor, &slow.default_bound()).unwrap().unwrap();
+        let slow_next = slow
+            .next_after(anchor, &slow.default_bound())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             slow_next - anchor,
             ChronoDuration::seconds(3600),
@@ -1161,7 +1164,10 @@ mod tests {
         // (4) A REPLAY is the same identity twice — the thing that WOULD be a
         // violation — and it is distinguishable from (2) by construction.
         let replay = FireContext::scheduled("job-1", first).delivery_id();
-        assert_eq!(a, replay, "the same scheduled instant must reproduce the same id");
+        assert_eq!(
+            a, replay,
+            "the same scheduled instant must reproduce the same id"
+        );
     }
 
     #[tokio::test]
