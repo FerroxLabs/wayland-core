@@ -180,6 +180,49 @@ compositions). `SELFTEST=PASS assertions=15`, rc=0, and B3 reports
 **The self-test can fail:** two mutations (extractor always returns the text;
 extractor reverted to the original awk) both give rc=**91**, clean gives rc=**0**.
 
+## T+3h — collision check against `lane/fix-tui-noise` (coordinator flag)
+
+Their HEAD `2762a8ac`; common base with me is `e7bc6d88`. Their `main.rs` change
+is 262 lines (144+/118-).
+
+**No overlap, established two independent ways.**
+
+1. Hunk arithmetic. Their hunks sit in base lines **296-816** (the `Cli` struct
+   and `TopCmd` doc comments) and **1168-1675** (inside `run()`). Mine are at
+   **1102**, **2027**, **5891**. Closest approach is 60 lines.
+2. Empirical, non-destructive: `git merge-tree --write-tree abbca33a 2762a8ac`
+   → **rc=0, clean**, result tree `b421ebb0`. This writes no ref and touches no
+   branch.
+
+Verified in the merged tree itself, not merely asserted:
+
+| check | result |
+|---|---|
+| my `NON_TTY_NO_PROMPT_ADVICE` present | 3 occurrences (def, use, test) |
+| my test present | yes |
+| `-p` still bound to `provider` (my test's control depends on it) | yes, `main.rs:269` unchanged — they do **not** touch the provider arg |
+| their `F-089` help work survives (known-positive that THEIR side merged) | yes |
+| the const's VALUE still free of `-p` | yes, lines 1097-99 |
+
+**A near-miss worth recording.** My first grep for `pass a prompt with -p` in the
+merged tree returned **2**, which reads as "the fix did not land". Both hits are
+in **my own explanatory doc comments** (the const's history note and the test's
+docstring); the live string is clean. A grep for the old text is the obvious
+check here and it is *wrong* — the fix deliberately documents the string it
+replaced. Reported because "must be 0" would have been a false alarm, and the
+same shape could equally hide a real one.
+
+**Their finding corroborates mine from the other side:** that lane's first
+baseline reported `INFO_LINES=0` because it invoked `-p '<prompt>'` believing
+`-p` meant prompt, and the binary died in argv parsing. So the misdirect is
+confirmed by a second independent party and has already corrupted one
+measurement. My change does not touch their help-text surface: all three of my
+hunks are **outside** `struct Cli` (267-600) and `enum TopCmd` (651-827), the
+only two clap-visible spans, so my diff cannot alter `--help` output at all.
+
+Not duplicated: the `wcore-agent` `needless_borrow` clippy break is
+`lane/fix-clippy-gate`'s and I did not touch it.
+
 ## Status log
 
 - T+0 pushing this file to start the darwin build clock. Nothing else committed yet.
