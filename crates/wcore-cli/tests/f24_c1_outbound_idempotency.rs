@@ -16,6 +16,19 @@
 //! (`wcore-channel-matrix/src/lib.rs:294`) and Discord
 //! (`wcore-channel-discord/src/lib.rs:344`). Seven inherit `false`, not nine.
 //!
+//! **Corrected again the same day (`lane/slack-live`), and this one matters
+//! more.** Slack still overrides the method, but it now returns **`false`**. The
+//! 12-of-12 tally above, and every `true` this file used to assert, rested on
+//! `mockito` — which can show that our request carries an `Idempotency-Key`
+//! header and can show **nothing** about whether Slack honours it. Driven at the
+//! real API for the first time on 2026-07-30, a replayed key produced **two**
+//! messages. So two adapters claim exactly-once, not three, and Slack's
+//! outcome-unknown deliveries are now abandoned like the other eight.
+//!
+//! The lesson this file should carry forward: **a mock is evidence about the
+//! sender.** Every capability that describes what the DESTINATION does with a
+//! request needs a real destination before it may be declared.
+//!
 //! **This file measures a FOUR-adapter subset** (Slack, Telegram, Twilio SMS,
 //! WhatsApp) — the four that can be driven over real HTTP at a local fixture.
 //! It is deliberately not a census, and it would still pass if a fifth adapter
@@ -41,8 +54,11 @@
 //!    lands at the destination. Two arrivals carrying no dedupe token proves
 //!    the `false` is TRUTHFUL and the spine's abandon is preventing a genuine
 //!    duplicate.
-//! 3. `slack_*` — the known-positive. The same replay through Slack must put
-//!    the key on the wire both times, or the `true` is a lie.
+//! 3. `slack_*` — the known-positive **for key transmission only**. The same
+//!    replay through Slack must put the key on the wire both times, which is
+//!    what proves the other adapters' zero-key results are about those adapters
+//!    rather than about a key that never left the manager. It is NOT evidence
+//!    that anything deduplicates; that distinction is the 2026-07-30 correction.
 //! 4. `the_bool_the_delivery_spine_reads_*` — the value is measured through the
 //!    real `EngineJobHandler` + real `ChannelManager` composition, which is
 //!    what `wcore-gateway`'s `LedgeredHandler` consults at
@@ -461,7 +477,7 @@ async fn slack_is_the_known_positive_and_puts_the_same_key_on_the_wire_both_time
         Some(REPLAY_KEY),
     )
     .await
-    .expect("replay through the deduping adapter must also succeed");
+    .expect("the replay must also reach the fixture carrying the same key");
 
     // Both requests matched a mock that REQUIRES the exact key header, so this
     // asserting 2 is simultaneously an arrival count and a wire assertion.
@@ -473,12 +489,24 @@ async fn slack_is_the_known_positive_and_puts_the_same_key_on_the_wire_both_time
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-/// Renamed 2026-07-30: this asserted "by Slack ALONE" while checking four of
-/// ten adapters, so it would have passed unchanged after Matrix and Discord
-/// gained the capability — a name claiming a census the body does not perform.
-/// The census is
-/// `wcore-channels-registry::delivery_semantics_declaration::exactly_three_adapters_are_exactly_once`.
-async fn slack_declares_the_capability_and_the_three_http_fixture_adapters_do_not() {
+/// Renamed 2026-07-30 (twice). First because it asserted "by Slack ALONE" while
+/// checking four of ten adapters, so it would have passed unchanged after Matrix
+/// and Discord gained the capability — a name claiming a census the body does
+/// not perform. Then again because **Slack lost the capability**: a replayed key
+/// driven at the real API produced two messages, so the adapter now declares
+/// `false` and all four fixtures here are negative.
+///
+/// **That makes this an all-negative assertion, which is self-passing on a dead
+/// instrument** — a `supports_outbound_idempotency` that returned `false`
+/// unconditionally would satisfy every line below. The known-positive proving
+/// the instrument can still answer `true` is
+/// `wcore-channels-registry::delivery_semantics_declaration::exactly_two_adapters_are_exactly_once`,
+/// which builds all ten adapters through the same production factory and
+/// requires Discord and Matrix to come back `true`. Read this test as
+/// conditional on that one. An in-file positive fixture would be stronger and is
+/// filed in BACKLOG as `BL-SLACKLIVE-KNOWN-POSITIVE`; it needs an adapter whose
+/// `start()` does no network, which none of this file's four are.
+async fn no_http_fixture_adapter_declares_outbound_idempotency() {
     let mut server = mockito::Server::new_async().await;
     telegram_background_mocks(&mut server).await;
     let base = server.url();
@@ -491,16 +519,15 @@ async fn slack_declares_the_capability_and_the_three_http_fixture_adapters_do_no
     ])
     .await;
 
-    assert!(
-        mgr.supports_outbound_idempotency("f24c1slack").await,
-        "Slack is the one adapter that transmits the key; if this goes false the \
-         12-of-12 journey tally loses its only basis"
-    );
-    for name in ["f24c1tg", "f24c1sms", "f24c1wa"] {
+    for name in ["f24c1slack", "f24c1tg", "f24c1sms", "f24c1wa"] {
         assert!(
             !mgr.supports_outbound_idempotency(name).await,
             "{name} unexpectedly declares outbound idempotency — if an adapter \
-             gained the capability, this file's arrival counts must be re-derived"
+             gained the capability, this file's arrival counts must be re-derived, \
+             and the platform must be shown to honour a replayed key at a REAL \
+             destination first. Slack sat here declaring `true` on mockito \
+             evidence alone until 2026-07-30, when the real API produced two \
+             messages from one key."
         );
     }
 
@@ -521,7 +548,13 @@ async fn slack_declares_the_capability_and_the_three_http_fixture_adapters_do_no
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn the_bool_the_delivery_spine_reads_is_false_for_every_adapter_but_slack() {
+/// Renamed 2026-07-30: it was `…_is_false_for_every_adapter_but_slack`. Slack's
+/// `true` was the exception, and it was wrong — see
+/// `no_http_fixture_adapter_declares_outbound_idempotency` above and the
+/// correction note in `docs/delivery-semantics.md`. The spine is now told that
+/// an outcome-unknown Slack delivery must be ABANDONED rather than re-sent,
+/// which is the behaviour that stops the duplicate.
+async fn the_bool_the_delivery_spine_reads_is_false_for_every_http_fixture_adapter() {
     let mut server = mockito::Server::new_async().await;
     telegram_background_mocks(&mut server).await;
     let base = server.url();
@@ -542,11 +575,7 @@ async fn the_bool_the_delivery_spine_reads_is_false_for_every_adapter_but_slack(
         text: "f24c1".to_string(),
     };
 
-    assert!(
-        handler.dispatch_is_idempotent(&chan("f24c1slack")).await,
-        "the spine must be told Slack can absorb a replay"
-    );
-    for name in ["f24c1tg", "f24c1sms", "f24c1wa"] {
+    for name in ["f24c1slack", "f24c1tg", "f24c1sms", "f24c1wa"] {
         assert!(
             !handler.dispatch_is_idempotent(&chan(name)).await,
             "the spine is told {name} cannot absorb a replay — this is the value \

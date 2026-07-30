@@ -239,15 +239,49 @@ impl Channel for SlackChannel {
         self.post(msg, Some(key)).await
     }
 
-    /// This adapter DOES transmit the key (see [`Self::post`]), so the delivery
-    /// spine is allowed to retry an outcome-unknown delivery through it.
+    /// **`false` — Slack ignores the key, measured against the real API.**
     ///
-    /// Returning `true` here is a claim the wire has to back: if the header
-    /// stopped being sent, the spine would keep retrying and every retry would
-    /// duplicate. `slack_declares_idempotency_only_because_it_sends_the_header`
-    /// is the test that binds the two together.
+    /// This adapter transmits an `Idempotency-Key` header on a keyed send (see
+    /// [`Self::post`] and [`api::IDEMPOTENCY_HEADER`]) and continues to do so,
+    /// because a Slack-compatible destination configured through
+    /// `api_base_url` may honour it. But **`slack.com` does not**, and this
+    /// method is not a statement about our wire — it is the bit
+    /// `LedgeredHandler::dispatch_fire` reads to decide whether an `Attempted`,
+    /// outcome-unknown delivery may be **re-sent** on restart. Answering `true`
+    /// at a destination that cannot recognise the replay makes every such
+    /// restart a duplicate, and an invisible one, because our own ledger
+    /// records a single delivery.
+    ///
+    /// # The measurement
+    ///
+    /// 2026-07-30, live against `slack.com`, private channel `C0BLR1UKKU6`,
+    /// through this adapter as the production registry factory builds it. Two
+    /// `send_message_idempotent` calls with the **same** key and the same body:
+    ///
+    /// ```text
+    /// first  ts=1785385438.299299
+    /// replay ts=1785385438.564099   <- a different message, not the first one
+    /// arrivals read back from conversations.history: 2
+    /// ```
+    ///
+    /// Confirmed three ways in the same run: two distinct `ts` values returned,
+    /// two records present in `conversations.history`, and `chat.delete`
+    /// succeeding on both (a delete that succeeds proves the message existed).
+    /// A raw-`curl` probe outside the adapter reproduced it identically.
+    ///
+    /// This previously returned `true`. The evidence behind that was
+    /// `slack_declares_idempotency_only_because_it_sends_the_header`, a
+    /// `mockito` test — which proves the header leaves us and can prove nothing
+    /// about what Slack does with it. `docs/delivery-semantics.md` carried the
+    /// same gap in words: its Slack row cited *"the key was present on both
+    /// attempts"* as evidence for *"one message"*, which is a different claim.
+    ///
+    /// [`crates/wcore-channels-registry/tests/live_slack_actions.rs`] now binds
+    /// this bit to the platform in both directions: it asserts the arrival
+    /// count implied by whatever this method returns, so re-asserting the
+    /// guarantee reddens it, and so would Slack starting to honour the key.
     fn supports_outbound_idempotency(&self) -> bool {
-        true
+        false
     }
 
     fn config_schema(&self) -> &str {
@@ -544,17 +578,23 @@ mod tests {
         mock.assert_async().await;
     }
 
-    /// The capability declaration and the wire must agree.
+    /// A keyed send still puts the key on the wire — **and that is a different
+    /// claim from the capability bit.**
     ///
-    /// `supports_outbound_idempotency()` returning `true` is what permits the
-    /// gateway's delivery spine to retry a delivery whose outcome is unknown.
-    /// If that claim were true while the header was not actually sent, every
-    /// such retry would become a second message at the destination — the exact
-    /// duplicate measured on 2026-07-27 against an independent sink. This test
-    /// binds the two: the mock matches on the header, so dropping it from
-    /// `post_message_keyed` reddens here rather than only in a live run.
+    /// This test was named `slack_declares_idempotency_only_because_it_sends_
+    /// the_header` and asserted `supports_outbound_idempotency() == true` right
+    /// here, treating header-on-wire as evidence for destination-deduplicates.
+    /// A mock cannot tell those apart: it answers whatever it was told to
+    /// answer. Driving the real API on 2026-07-30 showed a replayed key
+    /// producing **two** messages, so the two claims are now separated — what a
+    /// mock can prove is asserted here, and what only the platform can answer
+    /// is asserted in `wcore-channels-registry/tests/live_slack_actions.rs`.
+    ///
+    /// The header is deliberately still sent: a Slack-compatible destination
+    /// reached through `api_base_url` may honour it, and this mock is what
+    /// stops it being dropped silently if it ever becomes load-bearing again.
     #[tokio::test]
-    async fn slack_declares_idempotency_only_because_it_sends_the_header() {
+    async fn a_keyed_send_puts_the_key_on_the_wire_though_slack_ignores_it() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/api/chat.postMessage")
@@ -567,8 +607,10 @@ mod tests {
 
         let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
         assert!(
-            ch.supports_outbound_idempotency(),
-            "slack claims it can deduplicate a replay"
+            !ch.supports_outbound_idempotency(),
+            "Slack ignores the Idempotency-Key header — measured live 2026-07-30, a replayed key \
+             produced two messages. The delivery spine reads this bit to decide whether to re-send \
+             an outcome-unknown delivery, so `true` here is a production duplicate."
         );
         ch.start().await.unwrap();
         let _ = ch.poll_events().await.unwrap();

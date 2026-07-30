@@ -290,7 +290,7 @@ fn declaration_matches_every_adapter() {
 /// Asserting it separately means a change to it fails with a message that says
 /// what actually changed, rather than as one line inside a diff.
 #[test]
-fn exactly_three_adapters_are_exactly_once() {
+fn exactly_two_adapters_are_exactly_once() {
     let measured = measured_capabilities();
     let mut idempotent: Vec<&str> = measured
         .iter()
@@ -301,10 +301,14 @@ fn exactly_three_adapters_are_exactly_once() {
 
     assert_eq!(
         idempotent,
-        vec!["discord", "matrix", "slack"],
+        vec!["discord", "matrix"],
         "the set of exactly-once adapters changed. This is a customer-facing guarantee: update \
          docs/delivery-semantics.md (both the table and the machine-readable block) in the same \
-         commit, and check that the platform really honours a replayed key before adding one."
+         commit, and check that the platform really honours a replayed key before adding one. \
+         Slack was in this list until 2026-07-30, when a replayed key was driven at the real API \
+         for the first time and produced TWO messages — see the correction note in that document, \
+         and note that the mockito evidence which had supported the claim could never have \
+         detected it."
     );
 }
 
@@ -347,12 +351,17 @@ fn comparator_rejects_a_downgraded_row() {
 
     // The other direction: the code gained a guarantee the document has not
     // caught up with. Less dangerous, still drift.
-    declared.insert("slack".into(), "at-most-once".into());
+    //
+    // Keyed on matrix since 2026-07-30 — this used slack, which was an
+    // exactly-once adapter until a live replay showed Slack ignoring the key.
+    // The mutation has to name an adapter that really does declare `true`, or
+    // the "document downgrades a real guarantee" case is not being exercised.
+    declared.insert("matrix".into(), "at-most-once".into());
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
-        problems[0].starts_with("slack:") && problems[0].contains("returns true"),
+        problems[0].starts_with("matrix:") && problems[0].contains("returns true"),
         "got: {problems:?}"
     );
 }
