@@ -1,0 +1,737 @@
+########## RUN2.log ##########
+test anvil::tests::altered_verdict_body_fails_closed ... ok
+test anvil::tests::legacy_receipt_shape_is_non_authoritative ... ok
+test anvil::tests::altered_invalidation_body_fails_closed ... ok
+test commands::tests::approval_resume_deserialize ... ok
+test commands::tests::add_mcp_server_sse_deserialize ... ok
+test commands::tests::add_mcp_server_stdio_deserialize ... ok
+test commands::tests::approval_resume_deserialize_with_modifications ... ok
+test commands::tests::approval_scope_wire_format_is_backward_compatible ... ok
+test anvil::tests::malformed_version_mismatch_and_nested_forgery_are_rejected_or_inert ... ok
+test anvil::tests::exact_replay_is_idempotent_and_conflicting_duplicate_fails_closed ... ok
+test commands::tests::continue_with_budget_accepts_cost_only_grants ... ok
+test anvil::tests::mutation_invalidates_and_replay_cannot_resurrect_receipt ... ok
+test commands::tests::continue_with_budget_is_typed_and_defaults_missing_axes_to_zero ... ok
+test anvil::tests::unknown_noncritical_fields_remain_forward_additive ... ok
+test commands::tests::continue_with_budget_rejects_structurally_invalid_grants ... ok
+test anvil::tests::sequence_gap_and_out_of_order_events_fail_closed ... ok
+test commands::tests::host_send_message_result_err_and_minimal_deserialize ... ok
+test commands::tests::ping_deserialize ... ok
+test commands::tests::host_send_message_result_ok_deserialize ... ok
+test commands::tests::remove_mcp_server_is_closed_and_versioned ... ok
+test commands::tests::set_config_all_none_fields ... ok
+test commands::tests::set_config_compaction_none_by_default ... ok
+test commands::tests::set_config_debug_format ... ok
+test commands::tests::set_config_equality ... ok
+test commands::tests::set_config_with_all_fields_equality ... ok
+test commands::tests::set_config_with_compaction ... ok
+test commands::tests::set_mode_force_alias_dangerously_skip_permissions ... ok
+test commands::tests::set_mode_force_alias_dangerously_skip_permissions_kebab ... ok
+test commands::tests::set_mode_force_alias_yolo ... ok
+test commands::tests::set_mode_force_canonical ... ok
+test commands::tests::set_mode_rejects_untrusted_sandbox_bypass_vocabulary ... ok
+test commands::tests::tool_approve_new_shape_deserializes ... ok
+test commands::tests::tool_approve_old_shape_backwards_compatible ... ok
+test commands::tests::workspace_capability_grant_deserializes_without_authority_claims ... ok
+test events::tests::capabilities_default_has_all_w0_flags_false_and_v0_1_21_baseline ... ok
+test diagnostics::tests::diagnostics_request_id_must_be_non_empty_and_bounded ... ok
+test contract::observation::tests::serialized_ready_must_match_the_pinned_descriptor ... ok
+test contract::observation::tests::unsupported_major_fails_before_negotiation ... ok
+test contract::observation::tests::unknown_events_require_explicit_noncritical_classification ... ok
+test contract::observation::tests::ready_malformed_required_shapes_fail_before_negotiation ... ok
+test events::tests::capabilities_default_off_serializes_without_new_flag_keys ... ok
+test events::tests::capabilities_default_off_serialization_deserializes_with_w0_flags_false ... ok
+test events::tests::capabilities_flag_on_serializes_with_key_present ... ok
+test contract::observation::tests::ready_inconsistent_capabilities_and_policy_fail_before_negotiation ... ok
+test events::tests::capabilities_round_trips_through_deserialize ... ok
+test events::tests::capabilities_memory_enabled_emits_when_on_and_omits_when_off ... ok
+test events::tests::capability_activation_requires_reason_only_when_unavailable ... ok
+test contract::observation::tests::ready_missing_each_required_field_fails_before_negotiation ... ok
+test events::tests::capability_activation_serializes_as_a_flat_additive_event ... ok
+test events::tests::capability_activation_transition_cycle_is_explicit ... ok
+test events::tests::legacy_turn_cost_defaults_to_unpriced ... ok
+test events::tests::execution_policy_event_is_typed_and_additive ... ok
+test events::tests::midflight_monitor_decision_serializes_typed_control_flow ... ok
+test events::tests::ready_can_expose_the_initial_effective_policy_snapshot ... ok
+test events::tests::test_config_changed_event_serialization ... ok
+test events::tests::provider_failover_receipt_preserves_opaque_replay_shape ... ok
+test events::tests::test_error_event_serialization ... ok
+test events::tests::test_host_send_message_request_full_serialization ... ok
+test events::tests::test_host_send_message_request_omits_absent_optionals ... ok
+test events::tests::test_mcp_ready_event_serialization ... ok
+test events::tests::test_pong_event_serialization ... ok
+test events::tests::test_ready_event_serialization ... ok
+test events::tests::test_stream_end_finish_reason_required_in_output ... ok
+test events::tests::test_ready_event_with_expanded_capabilities ... ok
+test events::tests::test_stream_end_finish_reason_serialization ... ok
+test events::tests::test_stream_end_usage_delta_is_sibling_with_same_field_names ... ok
+test events::tests::test_text_delta_event_serialization ... ok
+test events::tests::test_stream_end_with_usage ... ok
+test events::tests::test_thinking_event_with_subject_serializes_subject ... ok
+test events::tests::test_thinking_event_without_subject_omits_key ... ok
+test events::tests::test_tool_category_display ... ok
+test events::tests::test_tool_request_event_serialization ... ok
+test events::tests::test_tool_result_event_serialization ... ok
+test execution_policy::tests::duplicate_is_idempotent_but_conflict_fails_closed ... ok
+test events::tests::workspace_policy_receipt_serializes_as_output_only_effective_authority ... ok
+test execution_policy::tests::out_of_order_and_version_mismatch_fail_closed ... ok
+test execution_policy::tests::resume_snapshot_is_explicit_and_critical ... ok
+test execution_policy::tests::revisions_advance_only_for_effective_changes ... ok
+test goal::tests::a_manual_loop_renders_no_ceiling_rather_than_an_unbounded_one ... ok
+test goal::tests::every_kernel_goal_transition_has_exactly_one_wire_kind ... ok
+test goal::tests::the_authority_wire_round_trips_without_reconstructing_an_envelope ... ok
+test goal::tests::the_lifecycle_wire_discriminator_matches_the_journal_projection_exactly ... ok
+test goal::tests::the_task_status_set_keeps_undelivered_and_unresolved_distinct ... ok
+test output_pump::tests::close_and_drain_delivers_all_accepted_frames_in_order ... ok
+test output_pump::tests::close_and_drain_reports_late_write_failure ... ok
+test output_pump::tests::sequence_exhaustion_rejects_without_wrapping_or_admission ... ok
+test reader::tests::cancelled_reader_admits_no_commands ... ok
+test output_pump::tests::writer_failure_callback_runs_once ... ok
+test reader::tests::unsupported_runtime_diagnostics_version_reaches_correlated_dispatch ... ok
+test tests::always_prefix_denies_unprefixable_metachars_h4 ... ok
+test tests::always_prefix_still_works_w56_h2 ... ok
+test tests::always_scope_is_tool_name_scoped_w56_h2 ... ok
+test tests::always_prefix_scopes_auto_approve_to_the_command_head ... ok
+test tests::always_prefix_does_not_auto_approve_chained_commands_h4 ... ok
+test output_pump::tests::flush_ignores_frames_accepted_after_its_snapshot ... ok
+test tests::always_scope_on_send_message_downgrades_to_once ... ok
+test tests::auto_edit_mode_only_approves_builtin_write_and_edit ... ok
+test tests::auto_edit_mode_requires_approval_for_exec_and_mcp ... ok
+test tests::current_mode_strings_round_trip_through_session_mode ... ok
+test tests::default_mode_current_mode_string ... ok
+test tests::default_mode_does_not_auto_approve_any_category ... ok
+test tests::force_mode_approves_all_categories ... ok
+test tests::auto_edit_mode_current_mode_string ... ok
+test tests::force_mode_current_mode_string ... ok
+test tests::force_mode_deserializes_from_snake_case_string ... ok
+test tests::ghsa_local_set_mode_force_is_unrestricted ... ok
+test tests::has_unprefixable_metachars_classifies_correctly ... ok
+test tests::ghsa_wire_escalating_modes_allowed_after_local_opt_in ... ok
+test tests::ghsa_wire_force_refused_without_local_opt_in ... ok
+test tests::managed_floor_clamps_local_and_wire_mode_changes ... ok
+test tests::prefix_matches_is_literal_head_match ... ok
+test tests::send_message_never_name_auto_approved_even_if_set_poisoned ... ok
+test tests::switching_mode_changes_approval_behavior ... ok
+test tests::unknown_mode_string_is_an_error_not_a_silent_default ... ok
+test tests::user_always_approval_persists_across_mode_changes ... ok
+test writer::tests::test_writer_construction ... ok
+test writer::tests::writer_delivers_exact_json_lines_in_order ... ok
+test output_pump::tests::failure_callback_can_reenter_without_queue_deadlock ... ok
+test output_pump::tests::flush_completes_snapshot_despite_later_rejected_write ... ok
+test output_pump::tests::blocked_writer_saturates_without_blocking_producer ... ok
+test reader::tests::oversized_line_is_skipped_then_next_line_parses ... ok
+test output_pump::tests::close_and_drain_times_out_when_write_is_blocked ... ok
+test reader::tests::valid_line_before_and_after_oversized_line ... ok
+test contract::generate::tests::generated_negotiation_fixtures_replay_without_digest_recursion ... ok
+test reader::tests::line_at_cap_with_newline_is_not_treated_as_overflow ... ok
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test approve_resolves_request_and_updates_auto_approval::case_1 ... ok
+test resolve_host_approves_pending_and_reports_presence ... ok
+test resolve_host_unknown_call_id_reports_not_found_and_is_idempotent ... ok
+test resolve_host_always_scope_registers_tool_name ... ok
+test resolve_host_denies_pending_with_host_reason ... ok
+test resolve_preserves_denial_reason ... ok
+test approve_resolves_request_and_updates_auto_approval::case_2 ... ok
+test resolve_host_threads_answer_through ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test approval_required_event_serializes_correctly ... ok
+test approval_resume_command_accepted_with_token_from_event ... ok
+test approval_resume_command_denied_with_modifications ... ok
+test resume_token_round_trip_from_event_to_command ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test capabilities_serialize_with_all_fields ... ok
+test capabilities_with_effort_levels_roundtrip ... ok
+test config_changed_event_serializes_correctly ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test deserializes_protocol_commands::case_3 ... ok
+test deserializes_protocol_commands::case_1 ... ok
+test deserializes_protocol_commands::case_2 ... ok
+test deserializes_protocol_commands::case_5 ... ok
+test deserializes_protocol_commands::case_4 ... ok
+test deserializes_protocol_commands::case_7 ... ok
+test deserializes_protocol_commands::case_6 ... ok
+test deserializes_tool_approve_scope::case_1 ... ok
+test deserializes_tool_approve_scope::case_2 ... ok
+test deserializes_tool_deny_reason::case_1 ... ok
+test deserializes_tool_deny_reason::case_2 ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test malformed_and_unknown_commands_never_deserialize_for_dispatch ... ok
+test canonical_ready_advertises_the_embedded_generated_contract ... ok
+test remaining_deferrals_exclude_live_negotiation_guarantees ... ok
+test negotiated_host_drops_serialized_unknown_noncritical_event ... ok
+test negotiated_observer_accepts_authoritative_anvil_invalidation ... ok
+test serialized_recovery_reducer_accepts_pinned_cursor_replay ... ok
+test serialized_policy_reducer_fails_closed_on_conflict_gap_version_and_criticality ... ok
+test negotiated_host_rejects_unknown_critical_and_unclassified_events ... ok
+test serialized_recovery_reducer_fails_closed_on_version_cursor_and_state_drift ... ok
+test serialized_workflow_reducer_replays_correlated_node_and_child_lifecycle ... ok
+test runtime_diagnostics_is_closed_versioned_correlated_and_redacted ... ok
+test serialized_policy_reducer_accepts_valid_revisions_and_duplicate_replay ... ok
+test serialized_anvil_reducer_replays_invalidation_and_never_resurrects_trust ... ok
+test serialized_workflow_reducer_detects_conflict_gaps_and_absorbs_terminals ... ok
+test production_workflow_reducer_replays_the_checked_corpus ... ok
+test ready_replay_fails_closed_on_major_schema_and_fixture_mismatch ... ok
+test serialized_anvil_reducer_proves_duplicate_inert_and_fail_closed_vectors ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_twenty_three_commands_and_fifty_two_events ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (2728206) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+test protocol_event_source_parser_is_alive_in_both_directions ... FAILED
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... FAILED
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... FAILED
+thread 'protocol_event_source_parser_is_alive_in_both_directions' (2728679) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:328:25:
+thread 'every_desktop_manifest_event_has_a_real_protocol_event_variant' (2728676) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:328:25:
+thread 'every_protocol_event_variant_is_modelled_or_declared_deferred' (2728677) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:328:25:
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test golden_browser_event ... ok
+test golden_browser_event_omits_url_when_none ... ok
+test golden_browser_policy_denied ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test cua_event_serializes_with_expected_type_tag ... ok
+test golden_cua_event ... ok
+test golden_cua_event_omits_coords_when_none ... ok
+test golden_cua_policy_denied_omits_empty_app ... ok
+test golden_cua_policy_denied ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_config_changed_v0_1_21 ... ok
+test golden_error_v0_1_21 ... ok
+test golden_each_w0_capability_flag_locks_its_documented_name ... ok
+test golden_error_without_msg_id_v0_1_21 ... ok
+test golden_mcp_ready_v0_1_21 ... ok
+test golden_pong_v0_1_21 ... ok
+test golden_info_v0_1_21 ... ok
+test golden_ready_v0_1_21 ... ok
+test golden_ready_with_cost_attribution_advertised ... ok
+test golden_session_cost_empty_per_turn ... ok
+test golden_stream_end_error_v0_1_21 ... ok
+test golden_session_cost_v_w6 ... ok
+test golden_stream_end_length_v0_1_21 ... ok
+test golden_stream_end_every_finish_reason_serializes_snake_case ... ok
+test golden_stream_end_no_new_keys_when_unset_279 ... ok
+test golden_stream_end_with_new_keys_when_set_279 ... ok
+test golden_stream_end_stop_v0_1_21 ... ok
+test golden_text_delta_v0_1_21 ... ok
+test golden_stream_start_v0_1_21 ... ok
+test golden_thinking_v0_1_21 ... ok
+test golden_usage_with_full_cache_fields_v0_1_21 ... ok
+test golden_tool_cancelled_v0_1_21 ... ok
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_trace_event_w1 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_capabilities_default_omits_gepa_enabled ... ok
+test golden_capabilities_with_gepa_enabled_on_serializes_the_key ... ok
+test golden_evolution_event_w10b ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_approval_required_w7 ... ok
+test golden_approval_resume_approved_w7 ... ok
+test golden_approval_resume_rejected_w7 ... ok
+test golden_correlated_sub_agent_event ... ok
+test golden_provider_attempt ... ok
+test golden_provider_circuit_event_closed_w7 ... ok
+test golden_provider_circuit_event_open_w7 ... ok
+test golden_sub_agent_event_w7 ... ok
+test golden_correlated_workflow_lifecycle ... ok
+test golden_suspend_w7 ... ok
+test golden_tool_chunk_w7 ... ok
+test golden_workflow_finished ... ok
+test golden_workflow_started ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_budget_exceeded_max_cost_usd_w8a ... ok
+test golden_budget_exceeded_wall_time_w8a ... ok
+test golden_plugin_event_w8a ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test capability_aware_host_parses_compact_offload_279 ... ok
+test engine_emits_session_cost_in_v6_known_type_namespace ... ok
+test host_decoder_still_distinguishes_malformed_with_gepa_enabled_known_types ... ok
+test host_decoder_handles_noisy_stream_without_panic ... ok
+test engine_emits_anvil_receipt_with_correct_type ... ok
+test host_decoder_still_distinguishes_malformed_with_structured_traces_known_types ... ok
+test host_decoder_still_distinguishes_malformed_with_w7_known_types ... ok
+test forged_receipt_nested_in_plugin_event_is_not_top_level ... ok
+test forged_receipt_nested_in_sub_agent_event_is_not_top_level ... ok
+test host_decodes_evolution_event_under_gepa_enabled_opt_in ... ok
+test host_decodes_known_v0_1_21_variant ... ok
+test host_decodes_ready_with_default_capabilities ... ok
+test host_decodes_anvil_receipt_under_opt_in ... ok
+test host_decodes_trace_event_under_structured_traces_opt_in ... ok
+test host_decodes_w7_event_types_under_opted_in_decoder ... ok
+test host_distinguishes_malformed_from_unknown ... ok
+test host_drops_budget_exceeded_silently_per_w8a_a7 ... ok
+test host_drops_compact_offload_when_capability_unknown_279 ... ok
+test host_drops_evolution_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_anvil_receipt_silently_under_v0_1_21_decoder ... ok
+test host_drops_multiple_unknown_types_quietly ... ok
+test host_drops_plugin_event_silently_per_w8a_h1 ... ok
+test host_drops_session_cost_when_not_in_v0_1_21_known_types ... ok
+test host_drops_trace_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_unknown_event_type_silently ... ok
+test host_drops_w7_event_types_silently_under_v0_1_21_decoder ... ok
+test host_tolerates_unknown_fields_on_known_variants ... ok
+test host_tolerates_unknown_capabilities_flag_on_ready ... ok
+test host_tolerates_unknown_fields_on_stream_end_279 ... ok
+test structured_traces_and_gepa_enabled_are_independent_opt_ins ... ok
+test host_renders_chip_only_from_top_level_anvil_receipt ... ok
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test operator_resolution_rejects_noncanonical_cursor_digests ... ok
+test operator_resolution_rejects_every_stale_authority_dimension ... ok
+test operator_resolution_is_typed_cursor_bound_and_receipted ... ok
+test recovery_commands_reject_unversioned_uncorrelated_or_unknown_actions ... ok
+test recovery_commands_reject_unknown_top_level_authority_fields ... ok
+test recovery_refusal_and_lifecycle_use_fail_closed_reason_enums ... ok
+test resolve_interrupted_approval_is_versioned_request_cursor_and_approval_correlated ... ok
+test recovery_snapshot_serializes_only_sanitized_typed_state ... ok
+test operator_resolution_rejects_unknown_critical_and_malformed_claims ... ok
+test recovery_replay_is_ordered_and_content_free ... ok
+test resume_turn_command_binds_action_to_cursor ... ok
+test session_resync_command_is_versioned_correlated_and_genesis_safe ... ok
+test generated_contract_contains_versioned_operator_resolution_command_and_event ... ok
+test generated_recovery_command_contract_is_closed_raw_digest_and_correlated ... ok
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test parse_set_config_empty ... ok
+test parse_set_config_all_fields ... ok
+test existing_commands_still_parse ... ok
+test parse_set_config_null_model ... ok
+test parse_set_config_thinking_enabled_no_budget ... ok
+test parse_set_config_with_effort ... ok
+test parse_set_config_with_null_effort ... ok
+test parse_set_config_with_model ... ok
+test parse_set_config_unknown_fields_ignored ... ok
+test parse_set_config_with_null_thinking ... ok
+test parse_set_config_with_thinking_disabled ... ok
+test parse_set_config_with_thinking_enabled_and_budget ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test child_evidence_cannot_arrive_after_its_node_terminal ... ok
+test child_parent_lineage_is_nonempty_and_immutable ... ok
+test child_sequences_and_identity_are_strict ... ok
+test child_terminal_is_typed_conflict_checked_and_absorbing ... ok
+test child_parent_and_node_binding_are_strict ... ok
+test child_terminal_requires_complete_typed_inner_payload ... ok
+test conflicting_event_identity_and_sequence_gaps_fail_closed ... ok
+test fully_correlated_child_run_replays_to_completion ... ok
+test finish_requires_original_workflow_identity_and_exact_node_inventory ... ok
+test conflicting_node_terminal_and_active_finish_fail_closed ... ok
+test serialized_replay_accepts_canonical_duplicates_and_complete_run ... ok
+test successful_finish_allows_blocked_non_live_branches ... ok
+test node_and_run_terminals_are_absorbing ... ok
+test successful_finish_rejects_failed_nodes ... ok
+test unsupported_version_and_unreachable_states_are_rejected ... ok
+test successful_finish_rejects_failed_child_on_blocked_node ... ok
+test finish_requires_terminal_children_and_explicit_consistent_links ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+WLRC=101
+
+########## RUN3.log ##########
+test anvil::tests::altered_verdict_body_fails_closed ... ok
+test anvil::tests::legacy_receipt_shape_is_non_authoritative ... ok
+test anvil::tests::altered_invalidation_body_fails_closed ... ok
+test commands::tests::add_mcp_server_sse_deserialize ... ok
+test anvil::tests::malformed_version_mismatch_and_nested_forgery_are_rejected_or_inert ... ok
+test commands::tests::approval_resume_deserialize ... ok
+test commands::tests::add_mcp_server_stdio_deserialize ... ok
+test commands::tests::approval_resume_deserialize_with_modifications ... ok
+test anvil::tests::exact_replay_is_idempotent_and_conflicting_duplicate_fails_closed ... ok
+test commands::tests::approval_scope_wire_format_is_backward_compatible ... ok
+test commands::tests::continue_with_budget_accepts_cost_only_grants ... ok
+test commands::tests::continue_with_budget_is_typed_and_defaults_missing_axes_to_zero ... ok
+test anvil::tests::unknown_noncritical_fields_remain_forward_additive ... ok
+test commands::tests::host_send_message_result_err_and_minimal_deserialize ... ok
+test commands::tests::host_send_message_result_ok_deserialize ... ok
+test commands::tests::ping_deserialize ... ok
+test anvil::tests::mutation_invalidates_and_replay_cannot_resurrect_receipt ... ok
+test commands::tests::continue_with_budget_rejects_structurally_invalid_grants ... ok
+test commands::tests::remove_mcp_server_is_closed_and_versioned ... ok
+test commands::tests::set_config_all_none_fields ... ok
+test commands::tests::set_config_compaction_none_by_default ... ok
+test commands::tests::set_config_debug_format ... ok
+test commands::tests::set_config_equality ... ok
+test commands::tests::set_config_with_all_fields_equality ... ok
+test commands::tests::set_config_with_compaction ... ok
+test commands::tests::set_mode_force_alias_dangerously_skip_permissions ... ok
+test commands::tests::set_mode_force_alias_dangerously_skip_permissions_kebab ... ok
+test commands::tests::set_mode_force_alias_yolo ... ok
+test commands::tests::set_mode_force_canonical ... ok
+test commands::tests::set_mode_rejects_untrusted_sandbox_bypass_vocabulary ... ok
+test commands::tests::tool_approve_new_shape_deserializes ... ok
+test commands::tests::tool_approve_old_shape_backwards_compatible ... ok
+test commands::tests::workspace_capability_grant_deserializes_without_authority_claims ... ok
+test anvil::tests::sequence_gap_and_out_of_order_events_fail_closed ... ok
+test contract::observation::tests::serialized_ready_must_match_the_pinned_descriptor ... ok
+test diagnostics::tests::diagnostics_request_id_must_be_non_empty_and_bounded ... ok
+test events::tests::capabilities_default_has_all_w0_flags_false_and_v0_1_21_baseline ... ok
+test contract::observation::tests::unknown_events_require_explicit_noncritical_classification ... ok
+test events::tests::capabilities_default_off_serialization_deserializes_with_w0_flags_false ... ok
+test contract::observation::tests::ready_malformed_required_shapes_fail_before_negotiation ... ok
+test contract::observation::tests::ready_inconsistent_capabilities_and_policy_fail_before_negotiation ... ok
+test events::tests::capabilities_default_off_serializes_without_new_flag_keys ... ok
+test contract::observation::tests::ready_missing_each_required_field_fails_before_negotiation ... ok
+test events::tests::capabilities_flag_on_serializes_with_key_present ... ok
+test events::tests::capabilities_round_trips_through_deserialize ... ok
+test events::tests::capabilities_memory_enabled_emits_when_on_and_omits_when_off ... ok
+test contract::observation::tests::unsupported_major_fails_before_negotiation ... ok
+test events::tests::capability_activation_requires_reason_only_when_unavailable ... ok
+test events::tests::capability_activation_serializes_as_a_flat_additive_event ... ok
+test events::tests::capability_activation_transition_cycle_is_explicit ... ok
+test events::tests::execution_policy_event_is_typed_and_additive ... ok
+test events::tests::legacy_turn_cost_defaults_to_unpriced ... ok
+test events::tests::midflight_monitor_decision_serializes_typed_control_flow ... ok
+test events::tests::ready_can_expose_the_initial_effective_policy_snapshot ... ok
+test events::tests::test_config_changed_event_serialization ... ok
+test events::tests::provider_failover_receipt_preserves_opaque_replay_shape ... ok
+test events::tests::test_host_send_message_request_full_serialization ... ok
+test events::tests::test_error_event_serialization ... ok
+test events::tests::test_host_send_message_request_omits_absent_optionals ... ok
+test events::tests::test_mcp_ready_event_serialization ... ok
+test events::tests::test_pong_event_serialization ... ok
+test events::tests::test_ready_event_with_expanded_capabilities ... ok
+test events::tests::test_stream_end_finish_reason_required_in_output ... ok
+test events::tests::test_ready_event_serialization ... ok
+test events::tests::test_stream_end_finish_reason_serialization ... ok
+test events::tests::test_stream_end_usage_delta_is_sibling_with_same_field_names ... ok
+test events::tests::test_stream_end_with_usage ... ok
+test events::tests::test_text_delta_event_serialization ... ok
+test events::tests::test_thinking_event_with_subject_serializes_subject ... ok
+test events::tests::test_thinking_event_without_subject_omits_key ... ok
+test events::tests::test_tool_request_event_serialization ... ok
+test events::tests::test_tool_category_display ... ok
+test events::tests::test_tool_result_event_serialization ... ok
+test events::tests::workspace_policy_receipt_serializes_as_output_only_effective_authority ... ok
+test execution_policy::tests::duplicate_is_idempotent_but_conflict_fails_closed ... ok
+test execution_policy::tests::out_of_order_and_version_mismatch_fail_closed ... ok
+test execution_policy::tests::resume_snapshot_is_explicit_and_critical ... ok
+test execution_policy::tests::revisions_advance_only_for_effective_changes ... ok
+test goal::tests::a_manual_loop_renders_no_ceiling_rather_than_an_unbounded_one ... ok
+test goal::tests::every_kernel_goal_transition_has_exactly_one_wire_kind ... ok
+test goal::tests::the_lifecycle_wire_discriminator_matches_the_journal_projection_exactly ... ok
+test goal::tests::the_authority_wire_round_trips_without_reconstructing_an_envelope ... ok
+test goal::tests::the_task_status_set_keeps_undelivered_and_unresolved_distinct ... ok
+test output_pump::tests::close_and_drain_delivers_all_accepted_frames_in_order ... ok
+test output_pump::tests::close_and_drain_reports_late_write_failure ... ok
+test output_pump::tests::sequence_exhaustion_rejects_without_wrapping_or_admission ... ok
+test output_pump::tests::flush_ignores_frames_accepted_after_its_snapshot ... ok
+test reader::tests::cancelled_reader_admits_no_commands ... ok
+test output_pump::tests::writer_failure_callback_runs_once ... ok
+test reader::tests::unsupported_runtime_diagnostics_version_reaches_correlated_dispatch ... ok
+test tests::always_prefix_scopes_auto_approve_to_the_command_head ... ok
+test tests::always_prefix_does_not_auto_approve_chained_commands_h4 ... ok
+test tests::always_prefix_denies_unprefixable_metachars_h4 ... ok
+test tests::always_scope_is_tool_name_scoped_w56_h2 ... ok
+test tests::always_prefix_still_works_w56_h2 ... ok
+test tests::always_scope_on_send_message_downgrades_to_once ... ok
+test tests::auto_edit_mode_current_mode_string ... ok
+test tests::current_mode_strings_round_trip_through_session_mode ... ok
+test tests::default_mode_current_mode_string ... ok
+test tests::default_mode_does_not_auto_approve_any_category ... ok
+test tests::auto_edit_mode_requires_approval_for_exec_and_mcp ... ok
+test tests::force_mode_current_mode_string ... ok
+test tests::auto_edit_mode_only_approves_builtin_write_and_edit ... ok
+test tests::ghsa_local_set_mode_force_is_unrestricted ... ok
+test tests::ghsa_wire_force_refused_without_local_opt_in ... ok
+test tests::force_mode_approves_all_categories ... ok
+test tests::ghsa_wire_escalating_modes_allowed_after_local_opt_in ... ok
+test tests::switching_mode_changes_approval_behavior ... ok
+test tests::force_mode_deserializes_from_snake_case_string ... ok
+test tests::unknown_mode_string_is_an_error_not_a_silent_default ... ok
+test tests::prefix_matches_is_literal_head_match ... ok
+test tests::has_unprefixable_metachars_classifies_correctly ... ok
+test tests::send_message_never_name_auto_approved_even_if_set_poisoned ... ok
+test tests::user_always_approval_persists_across_mode_changes ... ok
+test tests::managed_floor_clamps_local_and_wire_mode_changes ... ok
+test writer::tests::writer_delivers_exact_json_lines_in_order ... ok
+test writer::tests::test_writer_construction ... ok
+test output_pump::tests::blocked_writer_saturates_without_blocking_producer ... ok
+test output_pump::tests::failure_callback_can_reenter_without_queue_deadlock ... ok
+test output_pump::tests::flush_completes_snapshot_despite_later_rejected_write ... ok
+test reader::tests::oversized_line_is_skipped_then_next_line_parses ... ok
+test output_pump::tests::close_and_drain_times_out_when_write_is_blocked ... ok
+test reader::tests::valid_line_before_and_after_oversized_line ... ok
+test contract::generate::tests::generated_negotiation_fixtures_replay_without_digest_recursion ... ok
+test reader::tests::line_at_cap_with_newline_is_not_treated_as_overflow ... ok
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test approve_resolves_request_and_updates_auto_approval::case_2 ... ok
+test approve_resolves_request_and_updates_auto_approval::case_1 ... ok
+test resolve_host_always_scope_registers_tool_name ... ok
+test resolve_host_denies_pending_with_host_reason ... ok
+test resolve_host_unknown_call_id_reports_not_found_and_is_idempotent ... ok
+test resolve_preserves_denial_reason ... ok
+test resolve_host_approves_pending_and_reports_presence ... ok
+test resolve_host_threads_answer_through ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test approval_required_event_serializes_correctly ... ok
+test approval_resume_command_accepted_with_token_from_event ... ok
+test approval_resume_command_denied_with_modifications ... ok
+test resume_token_round_trip_from_event_to_command ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test capabilities_with_effort_levels_roundtrip ... ok
+test capabilities_serialize_with_all_fields ... ok
+test config_changed_event_serializes_correctly ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test deserializes_protocol_commands::case_1 ... ok
+test deserializes_protocol_commands::case_3 ... ok
+test deserializes_protocol_commands::case_2 ... ok
+test deserializes_protocol_commands::case_5 ... ok
+test deserializes_protocol_commands::case_6 ... ok
+test deserializes_protocol_commands::case_4 ... ok
+test deserializes_protocol_commands::case_7 ... ok
+test deserializes_tool_approve_scope::case_1 ... ok
+test deserializes_tool_approve_scope::case_2 ... ok
+test deserializes_tool_deny_reason::case_1 ... ok
+test deserializes_tool_deny_reason::case_2 ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test malformed_and_unknown_commands_never_deserialize_for_dispatch ... ok
+test canonical_ready_advertises_the_embedded_generated_contract ... ok
+test negotiated_host_drops_serialized_unknown_noncritical_event ... ok
+test runtime_diagnostics_is_closed_versioned_correlated_and_redacted ... ok
+test remaining_deferrals_exclude_live_negotiation_guarantees ... ok
+test negotiated_observer_accepts_authoritative_anvil_invalidation ... ok
+test serialized_policy_reducer_accepts_valid_revisions_and_duplicate_replay ... ok
+test serialized_recovery_reducer_fails_closed_on_version_cursor_and_state_drift ... ok
+test serialized_policy_reducer_fails_closed_on_conflict_gap_version_and_criticality ... ok
+test negotiated_host_rejects_unknown_critical_and_unclassified_events ... ok
+test production_workflow_reducer_replays_the_checked_corpus ... ok
+test serialized_recovery_reducer_accepts_pinned_cursor_replay ... ok
+test serialized_workflow_reducer_detects_conflict_gaps_and_absorbs_terminals ... ok
+test serialized_workflow_reducer_replays_correlated_node_and_child_lifecycle ... ok
+test serialized_anvil_reducer_replays_invalidation_and_never_resurrects_trust ... ok
+test ready_replay_fails_closed_on_major_schema_and_fixture_mismatch ... ok
+test serialized_anvil_reducer_proves_duplicate_inert_and_fail_closed_vectors ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_twenty_three_commands_and_fifty_two_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (2794462) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test golden_browser_event ... ok
+test golden_browser_policy_denied ... ok
+test golden_browser_event_omits_url_when_none ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test cua_event_serializes_with_expected_type_tag ... ok
+test golden_cua_event ... ok
+test golden_cua_event_omits_coords_when_none ... ok
+test golden_cua_policy_denied_omits_empty_app ... ok
+test golden_cua_policy_denied ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_config_changed_v0_1_21 ... ok
+test golden_error_v0_1_21 ... ok
+test golden_each_w0_capability_flag_locks_its_documented_name ... ok
+test golden_error_without_msg_id_v0_1_21 ... ok
+test golden_info_v0_1_21 ... ok
+test golden_pong_v0_1_21 ... ok
+test golden_mcp_ready_v0_1_21 ... ok
+test golden_ready_with_cost_attribution_advertised ... ok
+test golden_ready_v0_1_21 ... ok
+test golden_session_cost_empty_per_turn ... ok
+test golden_stream_end_error_v0_1_21 ... ok
+test golden_session_cost_v_w6 ... ok
+test golden_stream_end_every_finish_reason_serializes_snake_case ... ok
+test golden_stream_end_length_v0_1_21 ... ok
+test golden_stream_end_no_new_keys_when_unset_279 ... ok
+test golden_stream_end_stop_v0_1_21 ... ok
+test golden_stream_end_with_new_keys_when_set_279 ... ok
+test golden_stream_start_v0_1_21 ... ok
+test golden_text_delta_v0_1_21 ... ok
+test golden_thinking_v0_1_21 ... ok
+test golden_tool_cancelled_v0_1_21 ... ok
+test golden_usage_with_full_cache_fields_v0_1_21 ... ok
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_trace_event_w1 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_capabilities_default_omits_gepa_enabled ... ok
+test golden_capabilities_with_gepa_enabled_on_serializes_the_key ... ok
+test golden_evolution_event_w10b ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_approval_required_w7 ... ok
+test golden_approval_resume_rejected_w7 ... ok
+test golden_correlated_sub_agent_event ... ok
+test golden_approval_resume_approved_w7 ... ok
+test golden_provider_attempt ... ok
+test golden_correlated_workflow_lifecycle ... ok
+test golden_provider_circuit_event_closed_w7 ... ok
+test golden_provider_circuit_event_open_w7 ... ok
+test golden_suspend_w7 ... ok
+test golden_tool_chunk_w7 ... ok
+test golden_sub_agent_event_w7 ... ok
+test golden_workflow_finished ... ok
+test golden_workflow_started ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test golden_budget_exceeded_max_cost_usd_w8a ... ok
+test golden_budget_exceeded_wall_time_w8a ... ok
+test golden_plugin_event_w8a ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test capability_aware_host_parses_compact_offload_279 ... ok
+test engine_emits_session_cost_in_v6_known_type_namespace ... ok
+test host_decoder_handles_noisy_stream_without_panic ... ok
+test engine_emits_anvil_receipt_with_correct_type ... ok
+test host_decoder_still_distinguishes_malformed_with_structured_traces_known_types ... ok
+test forged_receipt_nested_in_plugin_event_is_not_top_level ... ok
+test host_decoder_still_distinguishes_malformed_with_gepa_enabled_known_types ... ok
+test forged_receipt_nested_in_sub_agent_event_is_not_top_level ... ok
+test host_decoder_still_distinguishes_malformed_with_w7_known_types ... ok
+test host_decodes_evolution_event_under_gepa_enabled_opt_in ... ok
+test host_decodes_ready_with_default_capabilities ... ok
+test host_decodes_anvil_receipt_under_opt_in ... ok
+test host_decodes_trace_event_under_structured_traces_opt_in ... ok
+test host_decodes_w7_event_types_under_opted_in_decoder ... ok
+test host_distinguishes_malformed_from_unknown ... ok
+test host_decodes_known_v0_1_21_variant ... ok
+test host_drops_budget_exceeded_silently_per_w8a_a7 ... ok
+test host_drops_compact_offload_when_capability_unknown_279 ... ok
+test host_drops_evolution_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_anvil_receipt_silently_under_v0_1_21_decoder ... ok
+test host_drops_multiple_unknown_types_quietly ... ok
+test host_drops_plugin_event_silently_per_w8a_h1 ... ok
+test host_drops_session_cost_when_not_in_v0_1_21_known_types ... ok
+test host_drops_trace_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_unknown_event_type_silently ... ok
+test host_drops_w7_event_types_silently_under_v0_1_21_decoder ... ok
+test host_tolerates_unknown_capabilities_flag_on_ready ... ok
+test host_tolerates_unknown_fields_on_known_variants ... ok
+test host_tolerates_unknown_fields_on_stream_end_279 ... ok
+test structured_traces_and_gepa_enabled_are_independent_opt_ins ... ok
+test host_renders_chip_only_from_top_level_anvil_receipt ... ok
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test operator_resolution_rejects_noncanonical_cursor_digests ... ok
+test operator_resolution_rejects_every_stale_authority_dimension ... ok
+test operator_resolution_is_typed_cursor_bound_and_receipted ... ok
+test recovery_commands_reject_unversioned_uncorrelated_or_unknown_actions ... ok
+test recovery_refusal_and_lifecycle_use_fail_closed_reason_enums ... ok
+test recovery_commands_reject_unknown_top_level_authority_fields ... ok
+test resolve_interrupted_approval_is_versioned_request_cursor_and_approval_correlated ... ok
+test recovery_snapshot_serializes_only_sanitized_typed_state ... ok
+test recovery_replay_is_ordered_and_content_free ... ok
+test operator_resolution_rejects_unknown_critical_and_malformed_claims ... ok
+test session_resync_command_is_versioned_correlated_and_genesis_safe ... ok
+test resume_turn_command_binds_action_to_cursor ... ok
+test generated_contract_contains_versioned_operator_resolution_command_and_event ... ok
+test generated_recovery_command_contract_is_closed_raw_digest_and_correlated ... ok
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test parse_set_config_empty ... ok
+test parse_set_config_all_fields ... ok
+test parse_set_config_null_model ... ok
+test existing_commands_still_parse ... ok
+test parse_set_config_with_effort ... ok
+test parse_set_config_unknown_fields_ignored ... ok
+test parse_set_config_thinking_enabled_no_budget ... ok
+test parse_set_config_with_model ... ok
+test parse_set_config_with_null_effort ... ok
+test parse_set_config_with_null_thinking ... ok
+test parse_set_config_with_thinking_disabled ... ok
+test parse_set_config_with_thinking_enabled_and_budget ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test child_evidence_cannot_arrive_after_its_node_terminal ... ok
+test child_parent_lineage_is_nonempty_and_immutable ... ok
+test child_parent_and_node_binding_are_strict ... ok
+test child_sequences_and_identity_are_strict ... ok
+test child_terminal_requires_complete_typed_inner_payload ... ok
+test child_terminal_is_typed_conflict_checked_and_absorbing ... ok
+test finish_requires_original_workflow_identity_and_exact_node_inventory ... ok
+test fully_correlated_child_run_replays_to_completion ... ok
+test conflicting_node_terminal_and_active_finish_fail_closed ... ok
+test serialized_replay_accepts_canonical_duplicates_and_complete_run ... ok
+test successful_finish_allows_blocked_non_live_branches ... ok
+test conflicting_event_identity_and_sequence_gaps_fail_closed ... ok
+test finish_requires_terminal_children_and_explicit_consistent_links ... ok
+test successful_finish_rejects_failed_nodes ... ok
+test unsupported_version_and_unreachable_states_are_rejected ... ok
+test successful_finish_rejects_failed_child_on_blocked_node ... ok
+test node_and_run_terminals_are_absorbing ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+WLRC=101
+
+########## MUT1.log ##########
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... FAILED
+test published_schemas_accept_every_event_fixture_they_describe ... FAILED
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... ok
+thread 'no_published_one_of_is_unsatisfiable_by_construction' (2824939) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:292:5:
+2 published `oneOf` site(s) can never be satisfied by ANY instance, because more than one branch is an unconstrained object. Use `anyOf` for inferred (descriptive) unions; keep `oneOf` only where branches pin `required` and `additionalProperties: false`:
+  /oneOf/50/properties/goal/properties/tasks/items (2 branches)
+  /anyOf/73/properties/goal/properties/tasks/items (2 branches)
+thread 'published_schemas_accept_every_event_fixture_they_describe' (2824941) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:233:5:
+the published Desktop contract REJECTS 2 of its own 52 event fixtures, so a host validating against it rejects a valid Core frame:
+  events/goal_snapshot.json rejected by schema/core-event.schema.json
+  events/goal_snapshot.json rejected by schema/producer-complete.schema.json
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+########## MUT2C-green.log ##########
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+green WLRC=0
+
+########## MUT2C.log ##########
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... FAILED
+thread 'every_protocol_event_variant_is_modelled_or_declared_deferred' (2884967) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:553:5:
+  workspace_policy
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+WLRC=101
+
+########## MUT2C-restored.log ##########
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test published_schemas_accept_every_event_fixture_they_describe ... ok
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+restored WLRC=0
+
+########## MUT3B.log ##########
+test protocol_event_source_parser_is_alive_in_both_directions ... ok
+test no_published_one_of_is_unsatisfiable_by_construction ... ok
+test every_desktop_manifest_event_has_a_real_protocol_event_variant ... FAILED
+test published_schemas_accept_every_event_fixture_they_describe ... FAILED
+test every_protocol_event_variant_is_modelled_or_declared_deferred ... FAILED
+thread 'every_desktop_manifest_event_has_a_real_protocol_event_variant' (2914331) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:577:5:
+the Desktop manifest promises event(s) that no ProtocolEvent variant can ever emit: ["ready_orphaned_by_mutation"]
+thread 'published_schemas_accept_every_event_fixture_they_describe' (2914335) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:233:5:
+the published Desktop contract REJECTS 1 of its own 52 event fixtures, so a host validating against it rejects a valid Core frame:
+  events/ready.json rejected by schema/core-event.schema.json
+thread 'every_protocol_event_variant_is_modelled_or_declared_deferred' (2914332) panicked at crates/wcore-protocol/tests/desktop_contract_selfconsistency.rs:553:5:
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+WLRC=101
+
