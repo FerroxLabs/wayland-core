@@ -290,16 +290,19 @@ impl TranscriptionBackend for OpenAiCompatWhisperBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{HeaderMap, HeaderValue};
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use serde_json::json;
     use wcore_tools::media_cost::{MediaOutcome, PriceSource, UnpricedReason};
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
         for (k, v) in pairs {
+            // `HeaderName::from_bytes` rather than inserting the `&str`
+            // directly: the `&str` impl requires a `'static` key, which a
+            // borrowed test slice is not.
             h.insert(
-                *k,
-                HeaderValue::from_str(v).expect("test header must be valid"),
+                HeaderName::from_bytes(k.as_bytes()).expect("test header name must be valid"),
+                HeaderValue::from_str(v).expect("test header value must be valid"),
             );
         }
         h
