@@ -89,7 +89,7 @@ jobs:
               # though grep MATCHED — silently flipping a real dependency
               # change to needed=false. osv-scan.yml carries the same note for
               # the same reason.
-              if ! grep -Eq '(^|/)Cargo\.(lock|toml)$|^deny\.toml$|^\.github/workflows/supply-chain\.yml$' <<<"${changed}"; then
+              if ! grep -Eq '(^|/)Cargo\.(lock|toml)$|^deny\.toml$|^\.cargo/audit\.toml$|^\.github/osv-scanner\.toml$|^scripts/verify-suppression-traces\.py$|^\.github/workflows/supply-chain\.yml$' <<<"${changed}"; then
                 needed=false
                 echo "No policy-relevant change; skipping evaluation and reporting success."
               else
@@ -102,6 +102,24 @@ jobs:
             echo "Non-PR event (${EVENT_NAME}); evaluating."
           fi
           echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+
+      # DELIBERATELY UNCONDITIONAL — no `if:` guard, unlike the cargo-deny steps
+      # below. This checks the *justifications* attached to our own suppressions
+      # against the real lockfile, and a suppression's trace can be invalidated
+      # by a dependency change that the path-relevance guard above classifies as
+      # irrelevant. It needs no toolchain and runs in well under a second, so
+      # there is no cost argument for skipping it — and a skipped gate reports
+      # the same green as a passing one.
+      #
+      # Origin: F29-02-H1. `.cargo/audit.toml` silenced RUSTSEC-2026-0194/0195
+      # on a stated "sole path" when the graph had three, and the advisory was
+      # reachable from user-supplied spreadsheets through the two it omitted.
+      # Two further traces (paste, rustls-pemfile) were later found wrong the
+      # same way. Prose traces drift; this re-derives them every run.
+      - name: Verify suppression parent traces against the real graph
+        run: |
+          python3 scripts/verify-suppression-traces.py --self-test
+          python3 scripts/verify-suppression-traces.py
 
       - name: Install cargo-deny
         if: steps.relevance.outputs.needed == 'true'

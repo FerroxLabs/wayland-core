@@ -106,6 +106,28 @@
 # a tracking item — never as a bare id, and never a trace asserted from memory
 # rather than read out of the tool's output.
 #
+# THAT POLICY IS NOW ENFORCED, not merely stated (added 2026-07-30, lane
+# f29-h1-advisories). Everything above this line was already true on 2026-07-29
+# and it is prose: a comment cannot fail, so nothing stopped the next trace from
+# drifting — and two others (`paste`, `rustls-pemfile` in `deny.toml`) had
+# already drifted in exactly this way before anyone noticed by hand.
+#
+# `scripts/verify-suppression-traces.py` re-derives the parent set for every
+# suppression in this file, `deny.toml` and `.github/osv-scanner.toml` straight
+# out of `Cargo.lock` on every run, and FAILS on a mismatch in either direction —
+# an omitted parent (the F29-02-H1 defect) or a parent that is not really there
+# (the `paste`/ratatui defect). It also fails a mute whose crate has left the
+# lockfile, and one past its expiry.
+#
+# So any entry added here must carry a machine-checkable trace tag:
+#
+#     [trace crate=<name>@<version> parents=<a,b,...|NONE> expires=<YYYY-MM-DD>]
+#
+# An entry without one FAILS the gate — prose is not a bypass. Wired into
+# `just check-all` and into `.github/workflows/supply-chain.yml` with no `if:`
+# guard, because a skipped gate reports the same green as a passing one.
+# Derive the tag, do not type it: the parents come out of the lockfile.
+#
 # Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
 
 [advisories]
