@@ -222,6 +222,51 @@ image has OpenSSL 1.1.1. Re-running matched to CI. Recording the misstep because
 should not conclude the repo's cross setup is broken — it is not; my invocation deviated
 from CI.
 
+**Attempt 2 FAILED for a good reason worth recording as a positive.** With CI's `cross` the
+OpenSSL problem vanished, and the build then refused on purpose
+(`candidate-build-attempt2-source-sha-refusal.txt`):
+
+```
+panicked at crates/wcore-cli/build.rs:11:29:
+invalid WAYLAND_BUILD_SOURCE_SHA: no source identity is available for a RELEASE build ...
+A release binary must carry an attributable source identity.
+```
+
+A release build that cannot attribute itself refuses to exist. That is correct behaviour, it
+is not a defect, and its error message names its own remedy precisely enough to act on
+without reading the source.
+
+**Attempt 3 failed on a shell-quoting bug of mine** (`> \"$L\"` created a literally-quoted
+filename). Recording it so the two real failures above are not confused with it.
+
+**Attempt 4 SUCCEEDED** — `WLRC=0`, `Finished release profile in 5m 26s`,
+`CARGO_BUILD_JOBS=10` so as not to starve the nine concurrent lanes.
+
+### RESULT — candidate `aarch64-unknown-linux-gnu` at `b7560018` = **9 PASS / 0 FAIL / 0 NOT MEASURED**
+
+Run with **no `--expect-red` allowance whatsoever**, so nothing was permitted to be red.
+
+- Binary digest `0487de3b2df9e29f11556947211d56cd22a4913643f642a328c56dfa81d8cbde`, identical
+  on hetzner and after transfer to the Mac (`linux-aarch64-candidate-build-and-transfer.txt`).
+- `build_provenance` read the **full 40-character** `b756001836f2ab9698d0d947272e2b59c566482c`
+  out of the binary — so the artifact provably is this lane's HEAD, not a stale rebuild.
+- Status read back separately: `WLRC=0 PASS=9 FAIL=0 NOT_MEASURED=0`, `total=9`, `WLDONE`.
+
+**And this is the strongest form of the both-direction control**, because both directions now
+come from real binaries on the same aarch64 hardware and the same guest, not from a
+constructed environment:
+
+| Binary on aarch64 Linux | Falsifier `ollama_hint_is_honest` | Corpus |
+|---|---|---|
+| `v0.12.25` packaged release | **RED** | 8 PASS / 1 RED |
+| lane HEAD `b7560018` candidate | **GREEN** | **9 PASS / 0 RED** |
+
+The gate can fail on aarch64 and it can pass on aarch64. It is neither permanently red nor
+permanently green there.
+
+**So the aarch64-Linux half of C5's shipped-vs-candidate distinction is also closed**, which
+was more than this lane was asked for.
+
 ## 11. Log
 
 - Notes committed before any measurement, per §6b-i.

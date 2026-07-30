@@ -1,0 +1,9 @@
+   Compiling wcore-agent v0.12.25 (/root/wayland-27c5/crates/wcore-agent)
+    Finished `release` profile [optimized] target(s) in 5m 26s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+BUILD_RC=0
+-rwxr-xr-x 2 root root 89016448 Jul 30 02:21 /root/wayland-27c5/target-27c5/aarch64-unknown-linux-gnu/release/wayland-core
+0487de3b2df9e29f11556947211d56cd22a4913643f642a328c56dfa81d8cbde  /root/wayland-27c5/target-27c5/aarch64-unknown-linux-gnu/release/wayland-core
+scp_rc=0
+0487de3b2df9e29f11556947211d56cd22a4913643f642a328c56dfa81d8cbde  /tmp/lane-27c5-work/linux-arm64-candidate/wayland-core
