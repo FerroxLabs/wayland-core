@@ -21,6 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ADAPTERS,
   CANONICAL_STEPS,
   Journey,
   PLATFORMS,
@@ -274,6 +275,156 @@ test('a clean tally reports zero duplicates and zero losses', () => {
     duplicates: 0,
     losses: 0,
   });
+});
+
+// ── F24-GWP-M1 regression ───────────────────────────────────────────────────
+//
+// The receipt used to freeze `counts` at step 13 and recompute
+// `adapter_coverage` at receipt-write time, so a delivery arriving in between
+// was counted by the breakdown and invisible to the headline. The Windows run
+// of 2026-07-30 published `duplicates: 0` beside a breakdown summing to 24.
+//
+// Per LANE-BRIEF §6b-ii these tests carry THREE assertions, not two: the
+// duplicate is reported (positive), a clean run still reports zero (negative),
+// and the pre-fix code path is shown to have missed it.
+
+// Build a journey whose 17 steps are stubbed, so `receipt()` is reachable
+// without hardware. Deliveries are spread over the real adapter table so the
+// coverage breakdown is populated the way a live run populates it.
+function journeyReadyForReceipt(bodyCount) {
+  const j = journey();
+  for (let i = 0; i < CANONICAL_STEPS.length; i += 1) {
+    j.step(CANONICAL_STEPS[i], `cmd ${i}`, `output ${i}`);
+  }
+  j.candidateCommit = 'f'.repeat(40);
+  j.binaryVersion = 'wayland-core 0.0.0-test';
+  j.binarySha256 = '0'.repeat(64);
+  for (let i = 1; i <= bodyCount; i += 1) {
+    const body = `m1-body-${String(i).padStart(2, '0')}`;
+    j.bodies.push(body);
+    j.bodyAdapter.set(body, ADAPTERS[(i - 1) % ADAPTERS.length].adapter);
+  }
+  j.counts.submitted = bodyCount;
+  fs.mkdirSync(j.runDir, { recursive: true });
+  return j;
+}
+
+function arrivalLine(j, body) {
+  const adapter = j.bodyAdapter.get(body);
+  const spec = ADAPTERS.find((a) => a.adapter === adapter);
+  return JSON.stringify({ text: body, endpoint: spec.endpoint, suppressed: false });
+}
+
+function writeArrivals(j, bodies) {
+  fs.writeFileSync(j.journalPath, `${bodies.map((b) => arrivalLine(j, b)).join('\n')}\n`);
+}
+
+test('M1 positive: a duplicate arriving AFTER step 13 reaches the receipt headline', () => {
+  const j = journeyReadyForReceipt(12);
+
+  // The clean first pass, then step 13 freezes its reading — exactly as the
+  // live driver does at `delivery-reconcile`.
+  writeArrivals(j, j.bodies);
+  j.counts = j.tally();
+  assert.equal(j.counts.duplicates, 0, 'step 13 legitimately saw a clean run');
+  assert.equal(j.counts.arrived, 12);
+
+  // The PT1M burst: every delivery re-arrives, after step 13 and before the
+  // receipt is written.
+  writeArrivals(j, [...j.bodies, ...j.bodies]);
+
+  const receipt = j.receipt();
+
+  // 1. POSITIVE — the headline now reports the duplicate.
+  assert.equal(receipt.counts.arrived, 24);
+  assert.equal(receipt.counts.unique, 12);
+  assert.equal(receipt.counts.duplicates, 12);
+  assert.equal(receipt.counts.losses, 0);
+
+  // 2. The headline and the breakdown agree, which is the property the Rust
+  //    verifier's `AdapterCountsUnreconciled` check enforces.
+  const sum = (field) =>
+    receipt.adapter_coverage.exercised.reduce((acc, e) => acc + e[field], 0);
+  assert.equal(sum('arrived'), receipt.counts.arrived);
+  assert.equal(sum('unique'), receipt.counts.unique);
+  assert.equal(sum('submitted'), receipt.counts.submitted);
+
+  // 3. THE OLD CODE WOULD HAVE MISSED IT. `this.counts` is still the step-13
+  //    freeze, and it is still the exact false headline the Windows receipt
+  //    published. The test asserts the stale value EXISTS and that the receipt
+  //    is not made of it — without this, the two assertions above would pass on
+  //    the broken driver too, because the broken driver's breakdown was right.
+  assert.equal(j.counts.duplicates, 0, 'the pre-fix headline source still reads zero');
+  assert.equal(j.counts.arrived, 12);
+  assert.notEqual(receipt.counts.arrived, j.counts.arrived);
+
+  // And the journey refuses to call this complete.
+  assert.throws(
+    () => j.assertFinalReconciliation(receipt),
+    (error) =>
+      error instanceof StepFailure &&
+      /FINAL delivery reconciliation is not clean/.test(error.message) &&
+      /duplicates=12/.test(error.message) &&
+      /12 arrival\(s\) landed after it/.test(error.message),
+  );
+});
+
+test('M1 negative: with the duplicate removed the same receipt reports zero', () => {
+  // The other direction, per LANE-BRIEF §3b-iii: a gate that cannot pass is as
+  // useless as one that cannot fail. Identical journey, identical code path,
+  // one arrival per body.
+  const j = journeyReadyForReceipt(12);
+  writeArrivals(j, j.bodies);
+  j.counts = j.tally();
+  writeArrivals(j, j.bodies); // no burst this time
+
+  const receipt = j.receipt();
+  assert.equal(receipt.counts.arrived, 12);
+  assert.equal(receipt.counts.unique, 12);
+  assert.equal(receipt.counts.duplicates, 0);
+  assert.equal(receipt.counts.losses, 0);
+  const sum = (field) =>
+    receipt.adapter_coverage.exercised.reduce((acc, e) => acc + e[field], 0);
+  assert.equal(sum('arrived'), 12);
+  assert.doesNotThrow(() => j.assertFinalReconciliation(receipt));
+});
+
+test('M1 structural: the headline and the breakdown come from ONE journal read', () => {
+  // Equality today is not the property; incapability of disagreeing is. A
+  // single `snapshot()` is what provides it, so assert the projections are
+  // taken from the same read rather than re-reading the file.
+  const j = journeyReadyForReceipt(6);
+  writeArrivals(j, [...j.bodies, j.bodies[0]]);
+  const snap = j.snapshot();
+  assert.equal(snap.counts.arrived, 7);
+  assert.equal(snap.counts.duplicates, 1);
+  assert.equal(
+    snap.coverage.exercised.reduce((acc, e) => acc + e.arrived, 0),
+    snap.counts.arrived,
+  );
+  assert.equal(snap.unattributed, 0);
+
+  // `tally()` and `adapterCoverage()` are projections of the same function, so
+  // a caller cannot reintroduce the two-read split by accident.
+  assert.deepEqual(j.tally(), snap.counts);
+  assert.deepEqual(j.adapterCoverage(), snap.coverage);
+});
+
+test('M1: an arrival no adapter endpoint claims is refused, not silently split', () => {
+  // The remaining way the two sums could differ once they share a read: an
+  // arrival counted by the headline whose endpoint matches no adapter. That is
+  // a real disagreement and must be reported as one.
+  const j = journeyReadyForReceipt(3);
+  const lines = j.bodies.map((b) => arrivalLine(j, b));
+  lines.push(JSON.stringify({ text: j.bodies[0], endpoint: 'nobody.claims.this', suppressed: false }));
+  fs.writeFileSync(j.journalPath, `${lines.join('\n')}\n`);
+  const snap = j.snapshot();
+  assert.equal(snap.unattributed, 1);
+  const receipt = j.receipt();
+  assert.throws(
+    () => j.assertFinalReconciliation(receipt),
+    (error) => error instanceof StepFailure && /attributed to no adapter endpoint/.test(error.message),
+  );
 });
 
 test('windows aliveness is read from tasklist OUTPUT, never from its exit status', () => {
