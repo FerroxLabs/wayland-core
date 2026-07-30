@@ -231,8 +231,15 @@ function argOf(flag) { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1]
 
   if (argv.includes('--replacements')) {
     const id = argOf('--replacements');
-    const r = await req('GET', `/_matrix/client/v3/rooms/${ENC}/relations/${encodeURIComponent(id)}/m.replace`);
+    // `/relations/` is a **v1** route. The first draft of this file used v3 and
+    // got a flat 404 for an event that demonstrably HAD a replacement — a gate
+    // with no reachable pass state (LANE-BRIEF §3b-iii), which would have
+    // reported "no replacement" forever no matter what the product did. Caught
+    // only because the bundled `unsigned.m.relations` on the original said
+    // otherwise in the same capture.
+    const r = await req('GET', `/_matrix/client/v1/rooms/${ENC}/relations/${encodeURIComponent(id)}/m.replace`);
     console.log(`http_status=${r.status}`);
+    if (r.status !== 200) console.log(`RELATIONS_UNREADABLE raw=${r.raw}`);
     const chunk = (r.json && r.json.chunk) || [];
     console.log(`replacement_count=${chunk.length}`);
     for (const ev of chunk) {

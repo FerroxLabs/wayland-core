@@ -340,25 +340,54 @@ async fn matrix_edit_and_delete_against_a_real_room() {
         )
         .await;
     match &edit_ctl {
-        // Matrix accepts an `m.replace` naming an unknown event — the relation
-        // is just content. Recorded, not asserted, and the stray event's id is
-        // printed so cleanup can redact it.
         Ok(r) => println!(
             "MLR_CONTROL_EDIT_BOGUS_ok=true MLR_CONTROL_EDIT_EVENT={}",
             r.id
         ),
         Err(e) => println!("MLR_CONTROL_EDIT_BOGUS_ok=false MLR_CONTROL_EDIT_BOGUS_err={e}"),
     }
-    let del_err = mgr.delete_on("mxlive", &room, bogus).await;
-    println!("MLR_CONTROL_DELETE_BOGUS_ok={}", del_err.is_ok());
-    if let Err(e) = &del_err {
+    // The edit control DOES redden: matrix.org rejects a relation to an unknown
+    // event with `400 M_UNKNOWN "Can't send relation to unknown event"`
+    // (measured 2026-07-30). So `edit_on` returning Ok is informative.
+    assert!(
+        edit_ctl.is_err(),
+        "editing an event that does not exist must be an ERROR; a silent Ok would \
+         make the edit leg's positive result meaningless"
+    );
+
+    let del_ctl = mgr.delete_on("mxlive", &room, bogus).await;
+    println!("MLR_CONTROL_DELETE_BOGUS_ok={}", del_ctl.is_ok());
+    if let Err(e) = &del_ctl {
         println!("MLR_CONTROL_DELETE_BOGUS_err={e}");
     }
+    // ── F-ML-3, and this assertion is the measurement, not a prediction ──
+    //
+    // This started out as `assert!(del_ctl.is_err())` — the mirror of the edit
+    // control — and it FAILED. matrix.org answers `200 {"event_id": …}` to a
+    // redaction of an event id that never existed, corroborated independently
+    // by curl outside the product. So the delete path is NOT symmetric with the
+    // edit path: an `Ok(())` from `delete_message` is compatible with nothing
+    // whatsoever having been redacted.
+    //
+    // `rest.rs:342-349` says the operation "reports success when the homeserver
+    // accepted the redaction, which is the strongest guarantee the protocol
+    // offers". Acceptance turns out to guarantee nothing, so that sentence
+    // overstates what the caller gets.
+    //
+    // The assertion is therefore INVERTED to pin the measured platform
+    // behaviour, and it is still a live gate in both directions: if matrix.org
+    // ever starts rejecting these, this reddens and the note above must be
+    // revisited. What it must never become is absent — deleting it would leave
+    // the delete leg graded by a status code that carries no information.
     assert!(
-        del_err.is_err(),
-        "redacting an event id that does not exist must be an ERROR. A silent Ok \
-         here means the delete leg's positive result proves nothing, because the \
-         call succeeds regardless of whether anything was redacted."
+        del_ctl.is_ok(),
+        "measured 2026-07-30: matrix.org accepts a redaction of a nonexistent \
+         event with 200. If this now errors, the platform changed and F-ML-3 \
+         needs re-measuring."
+    );
+    println!(
+        "MLR_FINDING_F_ML_3=redaction-of-nonexistent-event-accepted \
+         delete_status_carries_no_information=true"
     );
 
     println!("MLR_DONE");
