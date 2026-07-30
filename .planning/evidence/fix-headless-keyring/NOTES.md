@@ -128,9 +128,69 @@ same binary, same host, same prompt — so the `rc=1` is the defect and not a de
 Sharp detail: `q2` **did** create `sessions/<id>.journal` before dying. The session opens;
 only the turn fails. That is the "accept the work, then fail invisibly" shape exactly.
 
-## Still to establish
+## Checklist — all closed
 
 - [x] Reproduce the bug on hetzner BEFORE the fix (quadrant 2).
-- [ ] Implement.
-- [ ] Quadrants 1/3/4 on hetzner.
-- [ ] fmt / clippy / check --workspace --all-targets / cargo metadata --locked.
+- [x] Implement (4 files; see below).
+- [x] Quadrants 1/3/4 on hetzner + the `gateway run` surface.
+- [x] fmt / check --workspace --all-targets / cargo metadata --locked / clippy.
+
+---
+
+# OUTCOME
+
+**Fixed and live-proven on a genuinely keyring-less host.** Final SHA
+`551d900127c03989061b44f170674c12419f6971`. Decision rationale, the cross-audit
+panel and the case against my own choice: `DECISION.md`.
+
+## Files changed (4)
+
+| file | change |
+|---|---|
+| `wcore-config/src/credentials.rs` | extract `confidential_backend_plan` (opener and probe cannot drift); add `confidential_backend_available` — a **read-only** twin of `open_confidential_store`: pins nothing, locks nothing, migrates nothing |
+| `wcore-config/src/config.rs` | `Config::confidential_recovery_storage_available()`; pure `durable_sessions_must_be_disabled` predicate; the startup notice; `durable_sessions_disabled_by_host()` reporting seam; call site in `resolve_inner_from_files` |
+| `wcore-agent/src/engine.rs` | `resume_with_provider_parts` drops an incoming journal when sessions are off (closes journal writer #2); test-only `has_durable_journal()` |
+| `wcore-agent/tests/headless_durable_session_test.rs` | new — the resume invariant plus its control |
+
+Neither fenced file (`wcore-cli/src/lib.rs`, `wcore-cli/src/main.rs`) is touched.
+
+## Four quadrants
+
+Each row's binary self-reports its own source SHA via `--build-info`. Exit codes
+written to a file on hetzner and read back by a **separate** ssh call.
+
+| # | run | vault | rc | notice | turn OK | old error | session files | source |
+|---|---|---|---|---|---|---|---|---|
+| **2** | `q2-prefix-novault` | no | **1** | 0 | 0 | **1** | 0 | `bc90ee1c` |
+| — | `q3-prefix-vault` | yes | 0 | 0 | 1 | 0 | 2 | `bc90ee1c` |
+| **1** | `f1-final-novault` | no | **0** | **1** | **1** | 0 | 0 | `551d9001` |
+| **3** | `f3-final-vault` | yes | **0** | **0** | **1** | 0 | **2** | `551d9001` |
+
+Quadrant 4 both ways: the notice appears in **1 of 4** runs and in none of the
+other three, including the post-fix vault run (the must-not-appear arm).
+Both instrument controls present in all four captures: a known-positive in every
+log (2 hits each) and a known-negative in none.
+
+Fifth run — `gateway run` on a keyring-less host: the notice prints **before the
+gateway's own first line**, the gateway starts and drains clean.
+
+## Gates at `551d9001` (hetzner)
+
+`cargo metadata --locked` 0 · `fmt --check` 0 · `check --workspace --all-targets` 0
+`test -p wcore-config --lib` **579 passed / 0 failed / 0 ignored / 0 filtered**
+`test -p wcore-agent` (2 targets) **2 + 3 passed**, 0 ignored, 0 filtered
+`test -p wcore-cli --test json_stream_startup_refusal` **6 passed**
+clippy scoped to all authored code: **0, 0, 0**
+clippy `--workspace --all-targets -D warnings`: **101 — PRE-EXISTING, proven**
+(three files byte-identical at base; see `clippy-preexisting-proof.txt`), plus a
+negative control showing `-D warnings` is armed.
+
+## Not done / not measurable
+
+1. **Channel inbound not driven live** — no platform credential in this lane.
+2. **`switch_active_session` (journal writer #3) still unguarded** — residual.
+3. **`--json-stream`/Desktop hosts are not told** — the notice is stderr and the
+   decision precedes any protocol writer.
+4. **Keyring-PRESENT arm proven via the vault, not a real OS keyring** — same
+   branch of `select_confidential_backend`; a real macOS Keychain run is UNRUN.
+5. **macOS at this SHA unrun entirely.**

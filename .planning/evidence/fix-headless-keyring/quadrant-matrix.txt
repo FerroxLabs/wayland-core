@@ -1,18 +1,18 @@
-================ QUADRANT-4 NOTICE PRESENCE MATRIX ================
-q2-prefix-novault | WLRC=1 | notice_lines=0 | turn_ok_lines=0 | old_error_lines=1 | SESSION_FILES=0
-q3-prefix-vault | WLRC=0 | notice_lines=0 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=2
-q1-postfix-novault | WLRC=0 | notice_lines=1 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=0
-q3-postfix-vault | WLRC=0 | notice_lines=0 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=2
-=== CONTROL: instrument alive — a string known to be in EVERY log ===
-q2-prefix-novault egress_lines=2
-q3-prefix-vault egress_lines=2
-q1-postfix-novault egress_lines=2
-q3-postfix-vault egress_lines=2
-=== CONTROL: a string known to be in NO log ===
-q2-prefix-novault impossible_lines=0
-q3-prefix-vault impossible_lines=0
-q1-postfix-novault impossible_lines=0
-q3-postfix-vault impossible_lines=0
-=== post-fix vault build identity ===
-BIN_SHA256=cad46008fb467d19ebaf90ab4f03b8636fde41acd0ad1b1b126c5d36ad924fc3
-  wayland-core 0.12.25 (source d51287b1b20de2c78334a2813d0b5c88541bec65)
+=========== FOUR-QUADRANT MATRIX (final SHA 551d9001 for post-fix rows) ===========
+run                    vault  WLRC   notice   turn_ok   old_err    sess_files
+q2-prefix-novault      no     1      0        0         1          0
+q3-prefix-vault        yes    0      0        1         0          2
+f1-final-novault       no     0      1        1         0          0
+f3-final-vault         yes    0      0        1         0          2
+
+=== build identity of each row ===
+q2-prefix-novault: source bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+q3-prefix-vault: source bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+f1-final-novault: source 551d900127c03989061b44f170674c12419f6971
+f3-final-vault: source 551d900127c03989061b44f170674c12419f6971
+
+=== INSTRUMENT CONTROLS (same greps, same files) ===
+q2-prefix-novault known_positive=2 known_negative=0
+q3-prefix-vault known_positive=2 known_negative=0
+f1-final-novault known_positive=2 known_negative=0
+f3-final-vault known_positive=2 known_negative=0
