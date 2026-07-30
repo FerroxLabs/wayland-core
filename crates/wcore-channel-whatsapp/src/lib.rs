@@ -319,6 +319,40 @@ impl Channel for WhatsappChannel {
         Some(4096)
     }
 
+    /// WhatsApp Cloud API: **edit and revoke are inbound-only concepts.**
+    ///
+    /// Meta documents both, and documents them as WEBHOOK EVENTS — a `type:
+    /// "edit"` message notification carrying `edit.original_message_id`, and a
+    /// `type: "revoke"` entry in `smb_message_echoes` describing *a business
+    /// customer deleting a previously sent message* from the SMB app. Neither
+    /// has an outbound counterpart: there is no Graph verb by which a Cloud
+    /// API sender alters or withdraws a message it has already sent. So this is
+    /// [`PlatformHasNoApi`](wcore_channels::ActionSupport::PlatformHasNoApi),
+    /// not a backlog item — no amount of work here closes it.
+    ///
+    /// `typing` is the opposite case and that is exactly why the two states are
+    /// separate. Cloud API **does** have a typing indicator, posted to
+    /// `/{phone_number_id}/messages` with `typing_indicator: {type: "text"}` —
+    /// but it is keyed to the `message_id` of a RECEIVED message, and
+    /// [`Channel::send_typing`] is handed only a `conversation_id`. The
+    /// capability is real and unreachable through the current trait signature,
+    /// which is a seam finding rather than an absence, so it is recorded as
+    /// `NotImplemented` with the reason.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::{Implemented, NotImplemented, PlatformHasNoApi};
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(Implemented)
+            .typing(NotImplemented)
+            .note(
+                "edit/delete: Cloud API models edit and revoke as INBOUND webhook events only \
+                 (messages/edit, smb_message_echoes revoke) — there is no outbound verb. \
+                 typing: the endpoint exists but is keyed to a received message_id, which \
+                 Channel::send_typing(conversation_id) cannot supply — trait-signature gap.",
+            )
+    }
+
     /// Send a reaction message — the ack signal. `conversation_id` is the
     /// recipient `wa_id`, `message_id` the inbound `wamid`. Unicode emoji
     /// are sent directly. Note: WhatsApp's typing indicator is tied to a

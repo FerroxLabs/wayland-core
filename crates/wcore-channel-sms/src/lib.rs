@@ -282,6 +282,41 @@ impl Channel for SmsChannel {
         Some(1600)
     }
 
+    /// SMS: **everything is permanently absent, and the tempting API is a
+    /// trap.**
+    ///
+    /// Twilio does expose `DELETE /2010-04-01/Accounts/{Sid}/Messages/{Sid}`
+    /// and a body-redaction feature. Neither is a message delete. Both operate
+    /// on **Twilio's own record** of the message — the docs say the deleted
+    /// resource cannot be retrieved, and the endpoint refuses with error 20009
+    /// until the message is *complete*, i.e. until after it has already gone to
+    /// the carrier. Redaction is documented as a privacy control that strips
+    /// bodies from Twilio's records.
+    ///
+    /// So wiring `delete_message` to that endpoint would return `Ok` while the
+    /// SMS sits on the recipient's handset forever. That is the precise failure
+    /// [`Channel::delete_message`]'s doc comment names as its worst outcome —
+    /// "a silent success here reads as 'the message is gone' when it is not" —
+    /// and an available endpoint is not a reason to commit it. SMS as a
+    /// protocol has no recall and no edit; the honest answer is the permanent
+    /// one.
+    ///
+    /// `typing` and `react` likewise do not exist in SMS.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::PlatformHasNoApi;
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(PlatformHasNoApi)
+            .typing(PlatformHasNoApi)
+            .note(
+                "SMS has no recall, edit, reaction or typing concept. Twilio's \
+                 DELETE /Messages/{Sid} and body redaction act on Twilio's OWN record, \
+                 not on the delivered message — wiring delete to it would report success \
+                 for a message still on the recipient's handset.",
+            )
+    }
+
     /// Verify a Twilio webhook POST and enqueue the inbound SMS.
     ///
     /// Twilio signs the full request URL plus the sorted form body, so the

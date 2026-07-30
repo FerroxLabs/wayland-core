@@ -410,6 +410,34 @@ impl Channel for EmailChannel {
         include_str!("schemas/email.json")
     }
 
+    /// SMTP: **all four are permanently absent, by the shape of the protocol.**
+    ///
+    /// Once a remote MTA has returned `250` for `DATA`, the message is that
+    /// MTA's property. SMTP defines no verb to alter or withdraw it, and there
+    /// is no addressable handle for the copy sitting in the recipient's
+    /// mailbox. ("Recall" in Exchange is an Exchange-internal courtesy between
+    /// mailboxes on the same organisation, not an SMTP capability, and it fails
+    /// silently the moment the recipient is elsewhere or has read the mail.)
+    ///
+    /// This adapter also runs an IMAP poll loop, and IMAP *can* delete — but
+    /// only from **our own** mailbox. Deleting our copy of a sent message is
+    /// not deleting the message; reporting it as
+    /// [`Channel::delete_message`] would be the silent lie that method's
+    /// documentation exists to forbid.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::PlatformHasNoApi;
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(PlatformHasNoApi)
+            .typing(PlatformHasNoApi)
+            .note(
+                "SMTP defines no verb to alter or recall a message a remote MTA has \
+                 accepted, and no handle for the recipient's copy. IMAP can delete only \
+                 OUR copy, which is not the same operation.",
+            )
+    }
+
     /// Setup and authentication probe — reference implementation for the
     /// POLLING half of the Phase 24 channel matrix.
     ///
