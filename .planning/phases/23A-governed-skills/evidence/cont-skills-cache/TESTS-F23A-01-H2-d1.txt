@@ -1,0 +1,25 @@
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-mcp v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-mcp)
+   Compiling wcore-cua v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-cua)
+   Compiling wcore-browser v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-browser)
+   Compiling wcore-skills v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-eval)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-cont-skills-cache/crates/wayland-ollama)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-evolve)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-plugin-wasm)
+   Compiling wcore-agent v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 04s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-c7faebec441ea8f0)
+
+running 5 tests
+test orchestration::d1_refusal_terminal_tests::approval_denial_control_leaves_turn_committable ... ok
+test orchestration::d1_refusal_terminal_tests::refused_read_leaves_turn_committable ... ok
+test orchestration::d1_refusal_terminal_tests::failed_grep_leaves_turn_committable ... ok
+test orchestration::d1_refusal_terminal_tests::failed_glob_leaves_turn_committable ... ok
+test orchestration::d1_refusal_terminal_tests::opaque_shell_error_leaves_turn_committable ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2232 filtered out; finished in 0.04s
+

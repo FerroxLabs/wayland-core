@@ -1,0 +1,114 @@
+== BUILD IDENTITY (asserted before any measurement) ==
+wayland-core 0.12.25
+
+== STEP 1: baseline --skills-govern (expect both status=installed) ==
+governance root: /root/cont-skills-cache-live/home/skills-governance
+
+INSTALLED (2)
+  wl-control  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-control  signature=sig-wl-control
+  wl-subject  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-subject  signature=sig-wl-subject
+
+REVOKED (0)
+  (none)
+
+HISTORY
+  (none)
+RC=0
+
+== STEP 2 (CAN-PASS direction): promote the subject ==
+promoted 'wl-subject'
+  artifact:     /root/cont-skills-cache-live/home/skills/wl-subject
+  digest:       sha256:768d4a9c86eb102f76b285dc879a5c0b37acb338345e70b0577dbf85bf681ede
+  authority:    cli:wayland-core --skills-promote
+  promotion id: 2fee3595-5dae-451e-b7d0-681e77261a48
+  covers:       2 file(s), 133 byte(s)
+
+The grant is bound to these exact bytes. Editing the skill returns it to
+quarantine until it is promoted again — promotion never covers unreviewed edits.
+RC=0
+
+== STEP 3: --skills-govern (expect subject status=promoted, control still installed) ==
+governance root: /root/cont-skills-cache-live/home/skills-governance
+
+INSTALLED (2)
+  wl-control  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-control  signature=sig-wl-control
+  wl-subject  status=promoted  path=/root/cont-skills-cache-live/home/skills/wl-subject  promotion_id=2fee3595-5dae-451e-b7d0-681e77261a48  digest=sha256:768d4a9c86eb102f76b285dc879a5c0b37acb338345e70b0577dbf85bf681ede  authority=cli:wayland-core --skills-promote  promoted_at=2026-07-30T02:05:23.522112936+00:00  signature=sig-wl-subject
+
+REVOKED (0)
+  (none)
+
+HISTORY
+  2026-07-30T02:05:23.522112936+00:00  PROMOTED     wl-subject  id=2fee3595-5dae-451e-b7d0-681e77261a48  digest=sha256:768d4a9c86eb102f76b285dc879a5c0b37acb338345e70b0577dbf85bf681ede  authority=cli:wayland-core --skills-promote
+RC=0
+
+== STEP 4 (CAN-FAIL direction): promote a name that does not exist ==
+RC=1
+
+== STEP 5: revoke the subject ==
+Error: no skill named 'wl-no-such-skill' is installed. Run --skills-govern.
+RC=0
+revoked 'wl-subject'
+  removed from: /root/cont-skills-cache-live/home/skills/wl-subject
+  retained:     2 file(s), 133 byte(s)
+  signature:    sig-wl-subject
+  revocation id: 31559bd2-4391-42da-a6c2-842d49702ab8
+
+It will not load, will not execute, and will not be re-drafted.
+To undo:  wayland-core --skills-rollback 31559bd2-4391-42da-a6c2-842d49702ab8
+PARSED_REVID=31559bd2-4391-42da-a6c2-842d49702ab8
+
+== STEP 6: --skills-govern (expect subject GONE from INSTALLED, present under REVOKED, control intact) ==
+governance root: /root/cont-skills-cache-live/home/skills-governance
+
+INSTALLED (1)
+  wl-control  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-control  signature=sig-wl-control
+
+REVOKED (1)
+  wl-subject  status=revoked  id=31559bd2-4391-42da-a6c2-842d49702ab8  revoked_at=2026-07-30T02:05:23.737378457+00:00  files=2  bytes=133  restores_to=/root/cont-skills-cache-live/home/skills/wl-subject  signature=sig-wl-subject
+
+HISTORY
+  2026-07-30T02:05:23.522112936+00:00  PROMOTED     wl-subject  id=2fee3595-5dae-451e-b7d0-681e77261a48  digest=sha256:768d4a9c86eb102f76b285dc879a5c0b37acb338345e70b0577dbf85bf681ede  authority=cli:wayland-core --skills-promote
+  2026-07-30T02:05:23.738473479+00:00  WITHDRAWN    wl-subject  id=2fee3595-5dae-451e-b7d0-681e77261a48  reason=artifact revoked
+  2026-07-30T02:05:23.737378457+00:00  REVOKED      wl-subject  id=31559bd2-4391-42da-a6c2-842d49702ab8
+RC=0
+
+== STEP 7 (CAN-FAIL direction): rollback a bogus id ==
+Error: no revocation with id 'not-a-real-revocation-id'
+RC=1
+
+== STEP 8: rollback the real id ==
+rolled back 31559bd2-4391-42da-a6c2-842d49702ab8
+  restored to: /root/cont-skills-cache-live/home/skills/wl-subject
+  the skill loads again and the drafter is no longer suppressed for it
+
+It is restored **quarantined**, not promoted: rollback returns the exact prior
+bytes, and the prior state of an auto-drafted skill is not model-facing.
+RC=0
+
+== STEP 9: --skills-govern (expect subject back, status=installed i.e. re-quarantined NOT promoted) ==
+governance root: /root/cont-skills-cache-live/home/skills-governance
+
+INSTALLED (2)
+  wl-control  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-control  signature=sig-wl-control
+  wl-subject  status=installed  path=/root/cont-skills-cache-live/home/skills/wl-subject  signature=sig-wl-subject
+
+REVOKED (0)
+  (none)
+
+HISTORY
+  2026-07-30T02:05:23.522112936+00:00  PROMOTED     wl-subject  id=2fee3595-5dae-451e-b7d0-681e77261a48  digest=sha256:768d4a9c86eb102f76b285dc879a5c0b37acb338345e70b0577dbf85bf681ede  authority=cli:wayland-core --skills-promote
+  2026-07-30T02:05:23.738473479+00:00  WITHDRAWN    wl-subject  id=2fee3595-5dae-451e-b7d0-681e77261a48  reason=artifact revoked
+  2026-07-30T02:05:23.737378457+00:00  REVOKED      wl-subject  id=31559bd2-4391-42da-a6c2-842d49702ab8
+  2026-07-30T02:05:23.952612582+00:00  ROLLED-BACK  wl-subject  id=31559bd2-4391-42da-a6c2-842d49702ab8
+RC=0
+
+== STEP 10: promote appears in --help (advertised) ==
+      --skills-promote <SKILL_OR_PROCEDURE_ID>
+          Accepts a skill NAME or a procedure UUID. The UUID form is what anyone who scripted the historical flag passes; the name form is what `--skills-govern` prints.
+      --skills-revoke <SKILL>
+          23A-C1: revoke an installed skill. Retains every byte first, then removes it, then suppresses re-drafting, so the auto-draft loop cannot silently recreate what you removed. Undo with `--skills-rollback`
+      --skills-rollback <REVOCATION_ID>
+          23A-C1: restore a revoked skill byte for byte and clear its suppression. The argument is the revocation id printed by `--skills-revoke` and listed by `--skills-govern`
+      --skills-govern
+GREP_RC=0
+== END ==
