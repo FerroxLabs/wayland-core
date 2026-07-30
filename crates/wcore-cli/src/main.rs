@@ -296,10 +296,10 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
 
-    /// #111 — the host's active assistant identity, for per-assistant MCP
-    /// scoping. A config MCP server marked `only_for_assistant` is injected
-    /// only when this matches its allow-list (fail-closed otherwise). Distinct
-    /// from `--agent` (persona/system-prompt); the desktop host sets this when
+    /// The host's active assistant identity, for per-assistant MCP scoping.
+    /// A config MCP server marked `only_for_assistant` is injected only when
+    /// this matches its allow-list (fail-closed otherwise). Distinct from
+    /// `--agent` (persona/system-prompt); the desktop host sets this when
     /// spawning the json-stream engine.
     #[arg(long, value_name = "NAME", env = "WAYLAND_ASSISTANT")]
     assistant: Option<String>,
@@ -447,23 +447,23 @@ struct Cli {
     #[arg(long)]
     skills_path: bool,
 
-    /// W5 (A.5): run the system-dependency doctor. Probes external
-    /// binaries (`wlrctl`, `grim`, `chromium`, `ollama`), environment
-    /// signals (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`,
+    /// Run the system-dependency doctor. Probes external binaries
+    /// (`wlrctl`, `grim`, `chromium`, `ollama`), environment signals
+    /// (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`,
     /// `OLLAMA_BASE_URL`), and surfaces missing dependencies with
     /// per-distro install hints. Exit code `1` if any required check
     /// fails on the current platform, otherwise `0`.
     #[arg(long)]
     doctor: bool,
 
-    /// A4b: when running --doctor, actually CONNECT-TEST each declared MCP
+    /// When running --doctor, actually CONNECT-TEST each declared MCP
     /// server (spawns stdio commands / dials URLs) instead of only listing
     /// them. Off by default so bare --doctor stays side-effect-free.
     #[arg(long, requires = "doctor")]
     probe_mcp: bool,
 
-    /// W4 F19: run the skills audit. Writes JSON to
-    /// .wayland-core/skills-audit.json and renders Markdown to stdout.
+    /// Run the skills audit. Writes JSON to .wayland-core/skills-audit.json
+    /// and renders Markdown to stdout.
     #[arg(long)]
     skills_audit: bool,
 
@@ -473,67 +473,53 @@ struct Cli {
     #[arg(long, default_value_t = 180, requires = "skills_audit")]
     skills_audit_stale_days: u64,
 
-    /// W9.1 T4 (T11): promote a P4 procedure (drafted skill) from
-    /// `Staged` → `Active`. The argument is the procedure's UUID as
-    /// emitted in `skill_drafted` TraceEvents (or as listed by
-    /// internal tooling). Reads + writes the project's
-    /// `.wayland-core/memory/memory.db`.
-    ///
-    /// 23A-C1: RE-ADVERTISED because governed promotion now exists.
-    ///
-    /// The flag was hidden while `run_skills_promote` was an unconditional
-    /// `bail!` — an advertised dead surface is the most-repeated defect
-    /// class on this program, so it stopped being advertised rather than
-    /// being left to lie. Un-hiding is gated on the capability being real,
-    /// which is what `wcore_cli::skill_govern` and
-    /// `wcore_skills::promote` now supply: a grant bound to a content
-    /// digest, a refusal for revoked artifacts, and a journal entry for
-    /// each outcome.
+    /// Promote a drafted skill from `Staged` to `Active`.
     ///
     /// Accepts a skill NAME or a procedure UUID. The UUID form is what
     /// anyone who scripted the historical flag passes; the name form is
-    /// what `--skills-govern` prints.
+    /// what `--skills-govern` prints. Reads and writes the project's
+    /// `.wayland-core/memory/memory.db`. Promotion is governed: the grant is
+    /// bound to a content digest, revoked artifacts are refused, and every
+    /// outcome is journalled.
     #[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]
     skills_promote: Option<String>,
 
-    /// W9.1 T4 (T11): archive a P4 procedure. Accepts either a
-    /// `Staged` or `Active` row (W9 T0.5 amendment to the
-    /// state-machine allows `Staged → Archived` directly so curators
-    /// can dismiss losing drafts without a detour through Active).
-    /// Pinned rows are NOT archivable from the CLI — promote → archive
-    /// or unpin them through the curator UI first.
+    /// Archive a drafted skill. Accepts either a `Staged` or an `Active`
+    /// row — `Staged → Archived` is allowed directly, so losing drafts can
+    /// be dismissed without a detour through Active. Pinned rows are NOT
+    /// archivable from the CLI: promote then archive, or unpin them through
+    /// the curator UI first.
     #[arg(long, value_name = "PROCEDURE_ID")]
     skills_archive: Option<String>,
 
-    // ---- 23A-C1 governed skill lifecycle (one contiguous additive block) ----
-    /// 23A-C1: revoke an installed skill. Retains every byte first, then
-    /// removes it, then suppresses re-drafting, so the auto-draft loop
-    /// cannot silently recreate what you removed. Undo with
-    /// `--skills-rollback`.
+    // ---- governed skill lifecycle (one contiguous additive block) ----
+    /// Revoke an installed skill. Retains every byte first, then removes it,
+    /// then suppresses re-drafting, so the auto-draft loop cannot silently
+    /// recreate what you removed. Undo with `--skills-rollback`.
     #[arg(long, value_name = "SKILL")]
     skills_revoke: Option<String>,
 
-    /// 23A-C1: restore a revoked skill byte for byte and clear its
-    /// suppression. The argument is the revocation id printed by
-    /// `--skills-revoke` and listed by `--skills-govern`.
+    /// Restore a revoked skill byte for byte and clear its suppression. The
+    /// argument is the revocation id printed by `--skills-revoke` and listed
+    /// by `--skills-govern`.
     #[arg(long, value_name = "REVOCATION_ID")]
     skills_rollback: Option<String>,
 
-    /// 23A-C1: list installed skills with their promotion status, every
-    /// revocation in force, and the append-only governance journal.
+    /// List installed skills with their promotion status, every revocation in
+    /// force, and the append-only governance journal.
     #[arg(long)]
     skills_govern: bool,
 
-    /// M3.4: dump the memory state for a given session id. Prints all
-    /// episodes scoped to that session at the session+project tiers,
-    /// plus all project-tier facts and procedures. Intended for human
-    /// inspection; the format is a plain text table (not JSON) and may
-    /// change between releases. Exits 0 even if the session has no
-    /// recorded data so scripts can probe state without try/catch.
+    /// Dump the memory state for a given session id. Prints all episodes
+    /// scoped to that session at the session+project tiers, plus all
+    /// project-tier facts and procedures. Intended for human inspection; the
+    /// format is a plain text table (not JSON) and may change between
+    /// releases. Exits 0 even if the session has no recorded data so scripts
+    /// can probe state without try/catch.
     #[arg(long, value_name = "SESSION_ID")]
     memory_show: Option<String>,
 
-    /// M5.2: replay a session trace JSON file. Validates schema + the
+    /// Replay a session trace JSON file. Validates the schema and the
     /// version-skew guard (refuses traces recorded by a different
     /// wcore-core build unless --replay-force-version-skew is set).
     /// Prints the event count for the session. Combine with
@@ -542,13 +528,13 @@ struct Cli {
     #[arg(long, value_name = "TRACE_PATH")]
     replay: Option<std::path::PathBuf>,
 
-    /// M5.2: compare the trace passed to --replay against this second
-    /// trace and print the changed/added/removed entries.
+    /// Compare the trace passed to --replay against this second trace and
+    /// print the changed/added/removed entries.
     #[arg(long, value_name = "OTHER_TRACE_PATH", requires = "replay")]
     replay_diff: Option<std::path::PathBuf>,
 
-    /// M5.2: skip the wcore-version guard in --replay (use only when
-    /// inspecting traces from another release on purpose).
+    /// Skip the wcore-version guard in --replay (use only when inspecting
+    /// traces from another release on purpose).
     #[arg(long, requires = "replay")]
     replay_force_version_skew: bool,
 
@@ -560,11 +546,11 @@ struct Cli {
     #[arg(long)]
     toon: bool,
 
-    /// F-092 (W7-N): enable live online evolution. At session-end the engine
-    /// emits one `evolution_event` and applies the Paraphrase mutator to
-    /// successful trajectories (≥50% of turns had tool calls). Evolved
-    /// system-prompt variants are persisted to `$WAYLAND_HOME/evolved/`.
-    /// Equivalent to `[observability] online_evolution = true` in config.
+    /// Enable live online evolution. At session-end the engine emits one
+    /// `evolution_event` and applies the Paraphrase mutator to successful
+    /// trajectories (≥50% of turns had tool calls). Evolved system-prompt
+    /// variants are persisted to `$WAYLAND_HOME/evolved/`. Equivalent to
+    /// `[observability] online_evolution = true` in config.
     #[arg(long)]
     online_evolution: bool,
 
@@ -578,7 +564,7 @@ struct Cli {
     #[arg(long)]
     no_memory: bool,
 
-    /// FluxRouter web_search grounding (contract §5): attach a server-side
+    /// FluxRouter web_search grounding: attach a server-side
     /// `web_search` tool to every turn so Flux grounds the answer via
     /// Perplexity Sonar and renders citations. Only fires when the active
     /// model is a Flux tier alias (`flux-auto` / `flux-fast` / `flux-standard`
@@ -590,11 +576,10 @@ struct Cli {
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
 
-    /// M5.4: optional subcommand (currently `plugin`). When present
-    /// this short-circuits the agent/REPL path and runs the subcommand
-    /// dispatcher instead. Kept optional so every existing flag-driven
-    /// invocation (`wayland-core --doctor`, `wayland-core "prompt"`,
-    /// REPL, json-stream) keeps working unchanged.
+    /// Optional subcommand. When present this short-circuits the agent/REPL
+    /// path and runs the subcommand dispatcher instead. Kept optional so every
+    /// existing flag-driven invocation (`wayland-core --doctor`,
+    /// `wayland-core "prompt"`, REPL, json-stream) keeps working unchanged.
     #[command(subcommand)]
     command: Option<TopCmd>,
 }
@@ -649,34 +634,33 @@ fn runtime_workspace_kind(
 /// grows.
 #[derive(Subcommand)]
 enum TopCmd {
-    /// F-089: model catalog commands.
+    /// Browse the bundled model catalog.
     Models {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
     /// Manage installed plugins (install / list / available / remove).
     Plugin(wcore_cli::plugin::PluginArgs),
-    /// v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server
-    /// (stdio or SSE transport). Used by external MCP clients like Claude
-    /// Desktop, mcp-cli, etc. to call wayland-core's tools.
+    /// Serve the engine's tool registry as an MCP server (stdio or SSE
+    /// transport), so external MCP clients such as Claude Desktop or mcp-cli
+    /// can call wayland-core's tools.
     McpServe(wcore_cli::mcp_serve::McpServeArgs),
-    /// v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm.
+    /// Dispatch a worktree-isolated worker swarm.
     Swarm(wcore_cli::swarm::SwarmArgs),
-    /// F23-02 (Phase 23B): operator verbs over saved sessions — list, search,
-    /// show, checkpoint, rewind, retry, fork, export, retain, reconcile and
-    /// cancel. Every operation prints a machine-observable `F23_SESSION=`
-    /// token to STDOUT and uses the exit-code map documented in `session_cmd`.
+    /// Operate on saved sessions — list, search, show, checkpoint, rewind,
+    /// retry, fork, export, retain, reconcile and cancel. Every operation
+    /// prints a machine-readable `F23_SESSION=` token to STDOUT and uses the
+    /// exit-code map documented in `session_cmd`.
     Session(wcore_cli::session_cmd::SessionArgs),
-    /// F23-06 (Phase 23B): the persistent repository index — `build`,
-    /// `status`, `search` and `verify`. Every verb prints greppable
-    /// `F23_INDEX=` lines to STDOUT; `verify` exits 6 when the store
-    /// disagrees with the working tree.
+    /// Manage the persistent repository index — `build`, `status`, `search`
+    /// and `verify`. Every verb prints greppable `F23_INDEX=` lines to STDOUT;
+    /// `verify` exits 6 when the store disagrees with the working tree.
     Index(wcore_cli::index_cmd::IndexArgs),
-    /// F23-04 (Phase 23B): the cache + compaction ledger — `report`, `list`,
-    /// `show` and `verify` over what the prompt cache and the compactor
-    /// actually did. Every verb prints greppable `F23_CACHE=` lines; `verify`
-    /// exits 7 when the session's cost is not fully priced (the USD figure is
-    /// then a floor, not spend) and 8 when there is no ledger to check.
+    /// Inspect the cache + compaction ledger — `report`, `list`, `show` and
+    /// `verify` over what the prompt cache and the compactor actually did.
+    /// Every verb prints greppable `F23_CACHE=` lines; `verify` exits 7 when
+    /// the session's cost is not fully priced (the USD figure is then a floor,
+    /// not spend) and 8 when there is no ledger to check.
     Cache(wcore_cli::cache_cmd::CacheArgs),
     /// ForgeFlows: validate / list / run saved `.ron` workflows from
     /// `.wayland/workflows/`.
@@ -729,33 +713,31 @@ enum TopCmd {
     /// gate (tests / build / lint), then stamp a verified receipt. Requires
     /// ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite.
     Forge(wcore_cli::anvil::ForgeArgs),
-    /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
-    /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
+    /// Print resolved project context from WAYLAND.md / AGENTS.md /
+    /// .wayland/context.md / CLAUDE.md, walking up from the current directory.
     ProjectContext,
-    /// v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd.
+    /// Scaffold .wayland/config.toml + WAYLAND.md in the current directory.
     Init(wcore_cli::init::InitArgs),
-    /// v0.7.0 1.A.10: ACP server + client surface. `acp serve`
-    /// binds the HTTP/SSE transport; `acp request` drives a one-shot
-    /// session/message round-trip.
+    /// ACP server + client surface. `acp serve` binds the HTTP/SSE transport;
+    /// `acp request` drives a one-shot session/message round-trip.
     Acp(wcore_cli::acp::AcpArgs),
-    /// v0.7.0 3.B.2: manage user-defined agents (create, list, show,
-    /// edit, delete). Built-ins from the bundled pack are read-only.
+    /// Manage user-defined agents (create, list, show, edit, delete).
+    /// Built-ins from the bundled pack are read-only.
     Agent {
         #[command(subcommand)]
         cmd: wcore_cli::agent_cmd::AgentCmd,
     },
-    /// v0.8.1 U7: manage scheduled cron jobs (add / list / remove /
-    /// enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`;
-    /// the background runner spawned at session boot picks up changes
-    /// on its next tick.
+    /// Manage scheduled cron jobs (add / list / remove / enable / disable).
+    /// Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner
+    /// spawned at session boot picks up changes on its next tick.
     Cron {
         #[command(subcommand)]
         cmd: wcore_cli::cron::CronCmd,
     },
-    /// v0.8.1 U9: update wayland-core to the latest signed release
-    /// from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact
-    /// against the pinned marketplace pubkey (ed25519) before atomic
-    /// swap. Use `--check-only` to print versions without installing.
+    /// Update wayland-core to the latest signed release from
+    /// `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the
+    /// pinned marketplace pubkey (ed25519) before atomic swap. Use
+    /// `--check-only` to print versions without installing.
     SelfUpdate {
         /// Print current vs. latest version and exit without installing.
         #[arg(long)]
@@ -784,22 +766,22 @@ enum TopCmd {
     /// free / paid-but-uncleared Flux key returns an `upgrade_required`
     /// message — web_fetch is a paid-only capability.
     Fetch(wcore_cli::fetch::FetchArgs),
-    /// F25-01: execution backends — list / probe / run / cancel / orphans /
+    /// Manage execution backends — list / probe / run / cancel / orphans /
     /// receipt verify / diff across local, container, ssh and cloud.
     Backend(wcore_cli::backend::BackendArgs),
-    /// F24-B: the persistent gateway runtime — install / uninstall / start /
+    /// Manage the persistent gateway runtime — install / uninstall / start /
     /// stop / restart / status / drain, plus the `run` verb every generated
     /// launchd, systemd and scheduled-task unit invokes.
     Gateway(wcore_cli::gateway::GatewayArgs),
-    /// F25-03: nodes — pair / list / show / probe / revoke / submit /
-    /// attribution across paired machines that host execution backends.
+    /// Manage paired nodes — pair / list / show / probe / revoke / submit /
+    /// attribution across machines that host execution backends.
     Node(wcore_cli::node::NodeArgs),
-    /// F22-04: durable Goals and their Fleet task ledger — open / task / run /
+    /// Manage durable Goals and their Fleet task ledger — open / task / run /
     /// status / exec-task. `run` recovers a killed Goal, revokes expired claim
     /// leases, drains completions the dead parent never observed, and drives the
     /// remaining tasks through the Fleet dispatcher.
     Goal(wcore_cli::goal_cmd::GoalArgs),
-    /// F24-03: channel adapters — list / probe / health / reload. `probe` asks
+    /// Manage channel adapters — list / probe / health / reload. `probe` asks
     /// the platform and needs no gateway; `health` reports only what a RUNNING
     /// gateway has observed and refuses otherwise.
     Channel(wcore_cli::channel::ChannelArgs),
@@ -814,19 +796,19 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::migrate::MigrateCmd,
     },
-    /// Archive, verify, restore and recover a Wayland home (F26-03).
+    /// Archive, verify, restore and recover a Wayland home.
     Backup {
         #[command(subcommand)]
         cmd: wcore_cli::backup::BackupCmd,
     },
-    /// F28: platform containment operator surface — `status` reports the
-    /// selected backend and its properties; `exec` runs a command through the
-    /// agent's own shell tool so an operator can observe, from the child's own
-    /// output, that the sandbox was ACTIVE rather than merely available.
+    /// Inspect platform containment — `status` reports the selected sandbox
+    /// backend and its properties; `exec` runs a command through the agent's
+    /// own shell tool so you can observe, from the child's own output, that
+    /// the sandbox was ACTIVE rather than merely available.
     Sandbox(wcore_cli::sandbox_cmd::SandboxArgs),
 }
 
-/// F-089: `models` sub-subcommands.
+/// `models` sub-subcommands.
 #[derive(Subcommand)]
 enum ModelsCmd {
     /// List known models from the bundled pricing catalog.
@@ -1168,7 +1150,28 @@ async fn run() -> anyhow::Result<ExitCode> {
     // so trace output never lands on the alt-screen-bound stdio. Failure
     // to open the file degrades silently to stderr — we'd rather have
     // visible traces than none.
-    let tui_log_file: Option<std::fs::File> = if will_enter_tui {
+    //
+    // ── lane fix-tui-noise: quiet by default, diagnostics never lost ────────
+    // UAT-TUI-UNIX F4 / UAT-TUI-WINDOWS F3: a single trivial headless turn
+    // printed 42 lines of engine internals to stderr before the answer
+    // (measured at e7bc6d88: 20 INFO + 19 WARN — capability advisories about
+    // Spotify, Postgres, TTS, ffmpeg and browser backends the user never
+    // invoked). TUI mode was already fixed by routing traces to a file; every
+    // other mode still wrote them to the terminal.
+    //
+    // The rule now is: `RUST_LOG` is authoritative and UNCHANGED when set —
+    // `RUST_LOG=info wayland-core "…"` reproduces the previous behaviour
+    // byte for byte, on stderr, in every mode. When `RUST_LOG` is UNSET the
+    // full INFO record goes to `$WAYLAND_HOME/logs/wayland-core.log` and only
+    // ERROR reaches stderr. That is strictly MORE diagnosable than before:
+    // headless runs previously kept no log at all, so the record was lost the
+    // moment the terminal scrolled.
+    //
+    // No new flag is introduced. `RUST_LOG` already existed, already worked and
+    // is already the documented lever.
+    let rust_log_set = std::env::var_os("RUST_LOG").is_some();
+    let log_to_file = will_enter_tui || !rust_log_set;
+    let tui_log_file: Option<std::fs::File> = if log_to_file {
         open_tui_log_file().ok()
     } else {
         None
@@ -1186,11 +1189,26 @@ async fn run() -> anyhow::Result<ExitCode> {
     if let Some(file) = tui_log_file {
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         _log_guard = Some(guard);
-        let _ = fmt()
-            .with_env_filter(env_filter)
-            .with_writer(non_blocking)
-            .with_target(false)
-            .try_init();
+        if will_enter_tui {
+            // Unchanged: the alt-screen owns the terminal, so NOTHING may reach
+            // stdio — not even an error.
+            let _ = fmt()
+                .with_env_filter(env_filter)
+                .with_writer(non_blocking)
+                .with_target(false)
+                .try_init();
+        } else {
+            // Headless / REPL / json-stream with RUST_LOG unset: tee. The file
+            // takes everything the filter admits; stderr takes ERROR only, so a
+            // genuine failure is still visible without opening a log.
+            use tracing_subscriber::fmt::writer::MakeWriterExt;
+            let writer = non_blocking.and(std::io::stderr.with_max_level(tracing::Level::ERROR));
+            let _ = fmt()
+                .with_env_filter(env_filter)
+                .with_writer(writer)
+                .with_target(false)
+                .try_init();
+        }
     } else {
         let _ = fmt()
             .with_env_filter(env_filter)
@@ -1669,7 +1687,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let terminal = Arc::new(TerminalSink::new(cli.no_color));
+    // lane fix-tui-noise: a prompt on argv means exactly one answer then exit,
+    // so the sink drops the `⏺ `/`* ` speaker marker and terminates stdout with
+    // a newline (UAT-TUI-WINDOWS F4/F5, UAT-TUI-UNIX F8). Interactive REPL runs
+    // — where the marker separates turns — are unaffected.
+    let terminal = Arc::new(if cli.prompt.is_empty() {
+        TerminalSink::new(cli.no_color)
+    } else {
+        TerminalSink::new(cli.no_color).one_shot()
+    });
     let output: Arc<dyn OutputSink> = terminal.clone();
 
     // v0.7.0 Task 3.A.1: resolve --agent overlay so the built-in's
