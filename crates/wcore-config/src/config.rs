@@ -4061,7 +4061,7 @@ fn merge_config_files_with_trust(
     let project = if project_trusted {
         project
     } else {
-        restrict_untrusted_project_config(project)
+        restrict_untrusted_project_config(project, &global)
     };
     // F07: execution policy is administrator/operator-owned. A repository may
     // request stricter ordinary tool settings elsewhere, but it cannot create,
@@ -4085,6 +4085,18 @@ fn merge_config_files_with_trust(
             global.default.provider
         },
         model: project.default.model.or(global.default.model),
+        // GHSA-8r7g: these two resolutions do NOT compare against global, and
+        // that is deliberate — the tighten-only comparison for the untrusted
+        // path happens upstream in `restrict_untrusted_project_config`, which
+        // has already replaced `project` by the time control reaches here. Do
+        // not "helpfully" add a `.min(global…)` at this site: it would also
+        // clamp the TRUSTED path, where `[budget]`/`[session_cap]` (a more
+        // powerful, dollar-denominated ceiling) are deliberately unclamped,
+        // and — because an absent `max_tokens` deserializes to the non-zero
+        // default 64000 — it would let a silent project file drag an
+        // operator's larger global ceiling down to that default. The full
+        // reasoning, and the measurement that killed the sticky-trust
+        // objection, are on the clamp itself.
         max_tokens: if project.default.max_tokens != default_max_tokens() {
             project.default.max_tokens
         } else {
@@ -4547,13 +4559,117 @@ fn merge_config_files_with_trust(
     }
 }
 
-fn restrict_untrusted_project_config(project: ConfigFile) -> ConfigFile {
+fn restrict_untrusted_project_config(project: ConfigFile, global: &ConfigFile) -> ConfigFile {
     let mut restricted = ConfigFile::default();
 
     // Prompt context is preserved but is defanged by the normal merge path.
-    // Resource limits and read-only/approval requests can only reduce power.
-    restricted.default.max_tokens = project.default.max_tokens;
-    restricted.default.max_turns = project.default.max_turns;
+    // Read-only and approval requests can only reduce power: `read_only`
+    // merges `global || project` on a default-FALSE field, and `approval_mode`
+    // is honoured by the merge only when it is at least as strict as global.
+    //
+    // The two RESOURCE limits below did not have that property, and the line
+    // that used to sit here claimed they did — "Resource limits and
+    // read-only/approval requests can only reduce power" covered all six
+    // fields and was FALSE for two of them. `merge_config_files_with_trust`
+    // resolves `max_tokens` as "project wins if non-default" and `max_turns`
+    // as `project.or(global)`, and NEITHER compares the two values, so an
+    // untrusted project — one that travels with a cloned repo, GHSA-8r7g —
+    // raised both past the operator's ceiling. Measured before the fix:
+    // 100 -> 999999 and 5 -> 100000. Same family as the `security.enabled`
+    // forward this function used to carry: a comment asserting a safety
+    // property the code did not implement.
+    //
+    // The comparison is done HERE rather than in the merge so it stays
+    // TRUST-GATED, matching how this codebase already treats a *resource*
+    // ceiling: `[budget]` (`max_cost_usd`, `max_wall_time_secs`) and
+    // `[session_cap]` are strictly more powerful — they are denominated in
+    // dollars — and they merge project-wins UNCLAMPED on the trusted path
+    // while being dropped entirely on the untrusted one. A trusted workspace
+    // can already register `[mcp.servers]` and `[providers]` (arbitrary tool
+    // execution), so clamping a token ceiling there would buy no security and
+    // would silently break a legitimate monorepo that asks for a larger
+    // window than the shipped default.
+    //
+    // The obvious objection is that trust might be STICKY while repo content
+    // is not — a workspace trusted today, then a hostile commit raises
+    // `max_turns` tomorrow. It is not sticky: `fingerprint_workspace` hashes
+    // the CONTENT of `.wayland-core.toml` into the trust digest, and
+    // `WorkspaceTrustStore::resolve` re-derives and compares it on every
+    // resolve. The edit that would exploit the trusted path is the same edit
+    // that invalidates the grant and routes the config back through this
+    // function. Locked by
+    // `raising_the_ceiling_in_a_trusted_repo_revokes_its_own_trust`.
+    //
+    // `max_tokens` mirrors the merge's `!= default_max_tokens()` PRESENCE gate
+    // rather than clamping bare. Being precise about why, because the obvious
+    // stronger claim is false: enumerated over 30 (project, global) pairs, the
+    // gate here is EQUIVALENT to an unclamped `min` at this site — 0 differing
+    // cases — because the merge's own presence gate downstream already rescues
+    // the absent case. It is kept for local legibility and defence in depth,
+    // not because it changes today's behaviour.
+    //
+    // What the gate really guards is the NEXT edit to this file, and that
+    // hazard is real. The field is `u32` with
+    // `#[serde(default = "default_max_tokens")]` = 64000, so an ABSENT project
+    // value is indistinguishable from an explicit 64000 — and 64000 is NOT the
+    // identity element for `min`. Moving the comparison to the merge site and
+    // dropping the presence gate there (`max_tokens: project.min(global)`) is
+    // the natural-looking simplification, and it REGRESSES: measured, a
+    // project file silent on `max_tokens` — or no project file at all, since a
+    // missing one loads as `ConfigFile::default()` and this merge runs
+    // unconditionally — would drag an operator's global 200000 down to 64000.
+    // That is the same absent-value trap that made `global || project` the
+    // measured-defective fix for `security.enabled`: a default-valued field is
+    // neutral only when its default is the operator's identity element, and
+    // here it is not. Locked by
+    // `a_project_silent_on_resource_limits_leaves_the_operator_ceiling_alone`.
+    //
+    // `max_turns` needs no such gate — `Option<usize>` models absence exactly —
+    // but it has a trap of its own, one deep enough that the first draft of
+    // this clamp left the defect half-open.
+    //
+    // A global `None` does NOT mean "unlimited". `Config::resolve` finishes the
+    // field as `cli.max_turns.or(merged.default.max_turns).unwrap_or(
+    // SMART_MAX_TURNS)`, so an operator who configures no cap gets an EFFECTIVE
+    // cap of `SMART_MAX_TURNS`. Comparing only `(Some, Some)` and passing
+    // `(Some(p), None)` straight through therefore still let an untrusted
+    // project raise the effective ceiling from 512 to anything it liked — the
+    // very defect being closed, surviving inside its own fix. The `None` arm
+    // clamps against the backstop for that reason.
+    //
+    // A project `Some(n)` below the effective ceiling remains a NARROWING and
+    // is honoured, which is the direction the untrusted path is supposed to
+    // allow.
+    restricted.default.max_tokens = if project.default.max_tokens != default_max_tokens() {
+        project.default.max_tokens.min(global.default.max_tokens)
+    } else {
+        project.default.max_tokens
+    };
+    restricted.default.max_turns = match (project.default.max_turns, global.default.max_turns) {
+        (Some(p), Some(g)) => Some(p.min(g)),
+        // Global unset ⇒ the effective ceiling is the SMART_MAX_TURNS backstop,
+        // not infinity. See the note above.
+        (Some(p), None) => Some(p.min(SMART_MAX_TURNS)),
+        (None, _) => None,
+    };
+    // Warn rather than clamp silently: a suppressed legitimate request should
+    // be discoverable, exactly like the dropped-hooks warning below.
+    if restricted.default.max_tokens != project.default.max_tokens {
+        tracing::warn!(
+            requested = project.default.max_tokens,
+            applied = restricted.default.max_tokens,
+            "clamped the project config's [default] max_tokens to the global ceiling — an \
+             untrusted workspace may lower a resource limit but never raise it (GHSA-8r7g)"
+        );
+    }
+    if restricted.default.max_turns != project.default.max_turns {
+        tracing::warn!(
+            requested = ?project.default.max_turns,
+            applied = ?restricted.default.max_turns,
+            "clamped the project config's [default] max_turns to the global ceiling — an \
+             untrusted workspace may lower a resource limit but never raise it (GHSA-8r7g)"
+        );
+    }
     restricted.default.approval_mode = project.default.approval_mode;
     restricted.default.system_prompt = project.default.system_prompt;
     restricted.default.user = project.default.user;

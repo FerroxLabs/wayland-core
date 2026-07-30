@@ -2126,7 +2126,13 @@ TRUNCATE result as network-filesystem coverage; it is the mode, not the filesyst
 
 ---
 
-### `BL-UNTRUSTED-RESOURCE-LIMITS` — an untrusted project config can RAISE max_tokens and max_turns (MEDIUM)
+### `BL-UNTRUSTED-RESOURCE-LIMITS` — an untrusted project config can RAISE max_tokens and max_turns (MEDIUM) — **CLOSED 2026-07-30 by `lane/resource-limits-clamp`**
+
+**Closed.** Clamped tighten-only in `restrict_untrusted_project_config` (trust-gated), pinned by six
+tests in `crates/wcore-agent/tests/egress_merge_polarity_test.rs`, and live-proven against the real
+`wayland-core` binary (`requested=999999 applied=100`, `requested=Some(100000) applied=Some(5)`).
+The test that had pinned the loosening is inverted. Two residual findings the same sweep produced
+are recorded below as `BL-OPERATOR-GLOBAL-DISCARDED`. Original text follows.
 
 Found by `lane/egress-merge-polarity` while sweeping for other mis-polarised fields, **measured not
 fixed** per the severity policy.
@@ -2142,6 +2148,52 @@ spend ceiling itself is unaffected — this is the per-turn/per-run limit only.
 
 Fix shape is the neighbouring GHSA-8r7g clamps: honour a project value only when it is **no more
 permissive** than global.
+
+### `BL-OPERATOR-GLOBAL-DISCARDED` — two operator globals are silently overridden with NO project config present (LOW)
+
+Found and **measured** (not fixed) by `lane/resource-limits-clamp` during the full field-by-field
+sweep of `merge_config_files_with_trust`. Both are the same root cause, and it is a root cause worth
+naming because it will keep producing this defect:
+
+> `merge_config_files_with_trust` runs **unconditionally**. A missing project config loads as
+> `ConfigFile::default()` (`config.rs:3617-3619`, disposition `Absent`), so **every merge expression
+> that is not identity-preserving on the project side silently overrides the operator's global — even
+> when the user has no project config file at all.** A field is only safe under this if its serde
+> default is the identity element of its merge operator.
+
+Both measured through the real `Config::resolve_with_provenance` with a known-positive
+(`max_tokens=4321` read back from the same global file) proving the instrument alive:
+
+| Field | Merge | Global set to | Project | Resolved | Verdict |
+|---|---|---|---|---|---|
+| `tools.verify_edits` | `project \|\| global` | `false` | **no file at all** | `true` | operator's off switch is dead |
+| `tools.verify_edits` | " | `false` | silent | `true` | " |
+| `tools.verify_edits` | " | `false` | explicit `false` | `false` | only a PROJECT can disable it |
+| `mcp.curation` | `project.mcp.curation` | `Off` | **no file at all** | `TopK { k: 15 }` | operator's value discarded |
+| `mcp.curation` | " | `Off` | silent | `TopK { k: 15 }` | " |
+
+1. **`tools.verify_edits`** — `#[serde(default = "default_true")]` merged with `||`, for which `true`
+   is ABSORBING. This is an **authority inversion**: the untrusted project layer can turn the flag
+   off and the trusted global layer cannot. Its doc comment also says *"Off by default"*, which is
+   false — the field defaults to `true`. Graded LOW, not MEDIUM: it fails SAFE (the effect is that a
+   verification hook the operator tried to disable stays enabled), so the blast radius is wasted work
+   and a confusing config, not a weakened boundary.
+2. **`mcp.curation`** — an unconditional `project.mcp.curation` assignment over a `#[serde(default)]`
+   field. Its comment claims *"Both default to TopK { k: 15 } when omitted, so a fresh project file
+   inherits sensibly"*; it does not inherit, it overwrites. Bidirectional: `Off` → `TopK{15}` narrows,
+   but a deliberate `TopK{5}` → `TopK{15}` **widens** the per-turn MCP tool list. Graded LOW rather
+   than MEDIUM because curation only trims which of the ALREADY-CONNECTED, already-trust-gated MCP
+   tools are offered — it grants no new capability.
+
+Not fixed here deliberately: both sit outside `lane/resource-limits-clamp`'s named scope, both are
+LOW (the severity policy routes MEDIUM-and-below to backlog, non-blocking), and `mcp.curation` in
+particular carries a W6 F17 design intent that should be confirmed before its semantics change.
+Fixing either well means deciding presence-vs-default representation, which is the same
+`Option<u32>`-style migration question `max_tokens` raises.
+
+**Third instance of the family** this programme has now found in this one function — `security.enabled`
+(HIGH, fixed), `max_tokens`/`max_turns` (MEDIUM, fixed), these two. Every one was a comment asserting a
+safety or inheritance property the code did not implement.
 
 ### `BL-EVAL-SCENARIOS-LOCKFILE-DRIFT` — `Cargo.lock` omits a declared dependency, so every build rewrites it
 
