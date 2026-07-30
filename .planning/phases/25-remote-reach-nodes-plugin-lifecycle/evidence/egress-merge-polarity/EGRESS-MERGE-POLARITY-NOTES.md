@@ -34,9 +34,41 @@ the defect is present on the **untrusted** path too, which is the default state 
 Note `restricted.security.egress_allow` is NOT forwarded → an **untrusted** project probably
 cannot append allowlist hosts. Bears on work-order item 4 (`egress_allow`). Must measure.
 
+## Pass 2 — consumer semantics (claim 4 confirmed at the consumer)
+
+`crates/wcore-agent/src/egress/install.rs:27-41`:
+
+```rust
+if config.security.enabled { .. AgentEgressPolicy::enforcing(allow) }
+else { .. AgentEgressPolicy::disabled() }
+```
+
+and `policy.rs:143` — `if self.posture == EgressPosture::Off { return EgressDecision::Allow; }`.
+So `enabled = false` is a literal allow-all. Claim 4 **HELD**.
+
+## Pass 2 — the brief's prescribed fix (`||`) is DEFECTIVE. Do not ship it.
+
+The brief says "fix it to match `read_only`'s polarity — either layer asking for the boundary
+wins", i.e. `global || project`. `read_only` can use `||` because its default is **`false`** —
+absence is the identity element for `||`. `security.enabled` defaults to **`true`**, which is the
+identity element for `&&`, **not** `||`. So under `||`:
+
+> global `enabled = false` (operator's deliberate off switch) + a project file that says
+> **nothing** about `[security]` → serde fills project `enabled = true` → `false || true = true`
+> → **the operator's off switch silently stops working** as soon as any project config exists.
+
+A naive polarity flip therefore trades an exfil hole for a different correctness bug. The fix must
+be **presence-aware or operator-owned**, not `||`. To be pinned by an executable test.
+
+## Pass 2 — the egress switch is ALREADY operator-owned in the product's own UI
+
+`crates/wcore-cli/src/tui/surfaces/config.rs:662,713,719` — the TUI's egress toggle and its
+`egress_allow` editor both persist through **`patch_global_config`**, i.e. to the GLOBAL file.
+There is no TUI surface that writes `[security]` into a project file. The product already treats
+this as an operator control; the merge is the only thing that says otherwise.
+
 ## Open / next
 
-- [ ] Confirm consumer semantics of `security.enabled` (find the egress gate).
-- [ ] Build the real-merge measurement (global ON + project `enabled = false`).
-- [ ] Measure `egress_allow` concat on the trusted path.
+- [ ] Build the real-merge measurement (global ON + project `enabled = false`), both trust states.
+- [ ] Measure `egress_allow` concat on the trusted path (untrusted path drops it — see pass 1).
 - [ ] Sweep other security-relevant fields for polarity.
