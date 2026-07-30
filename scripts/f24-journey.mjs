@@ -693,6 +693,7 @@ class Journey {
         losses: this.counts.submitted - unique,
       },
       coverage: { registered_total: REGISTERED_ADAPTER_TOTAL, exercised },
+      identity: classifyRepeats(seen),
       // Diagnostics, not receipt fields. `journal_lines` is every line the sink
       // wrote including the heartbeat; `unattributed` is arrivals the headline
       // counts that no adapter endpoint claimed, which would make the two sums
@@ -1036,6 +1037,10 @@ class Journey {
       finished_at: new Date().toISOString(),
       arrival_source: ARRIVAL_SOURCE,
       counts: final.counts,
+      // Additive. `counts.duplicates` keeps its message-level meaning and its
+      // `arrived - unique` identity, which the Rust verifier checks; this says
+      // WHICH KIND of repeat those were. See `classifyRepeats`.
+      delivery_identity: final.identity,
       adapter_coverage: final.coverage,
       steps: this.steps,
     };
@@ -1062,10 +1067,31 @@ class Journey {
       );
     }
     if (c.duplicates !== 0 || c.losses !== 0) {
+      const id = receipt.delivery_identity ?? {};
+      // Internal consistency: every repeat must land in exactly one bucket. If
+      // this ever disagrees the classifier is lying and the verdict below is
+      // worthless, so it is checked rather than assumed.
+      const classified = (id.replays ?? 0) + (id.recurrences ?? 0) + (id.indeterminate ?? 0);
+      if (classified !== c.duplicates) {
+        throw new StepFailure(
+          `repeat classification does not reconcile: duplicates=${c.duplicates} but ` +
+            `replays=${id.replays} + recurrences=${id.recurrences} + ` +
+            `indeterminate=${id.indeterminate} = ${classified}`,
+        );
+      }
       throw new StepFailure(
         `FINAL delivery reconciliation is not clean: submitted=${c.submitted} ` +
           `arrived=${c.arrived} unique=${c.unique} duplicates=${c.duplicates} ` +
           `losses=${c.losses}\n` +
+          `  replays=${id.replays} (same delivery identity twice — a real ` +
+          'exactly-once violation)\n' +
+          `  recurrences=${id.recurrences} (same body, DIFFERENT identity — the ` +
+          'trigger fired again; not a duplicate)\n' +
+          `  indeterminate=${id.indeterminate} (repeat with no identity to ` +
+          'judge by; counted against the run)\n' +
+          `  unidentified_arrivals=${id.unidentified} at endpoint(s) ` +
+          `${(id.unidentified_endpoints ?? []).join(',') || '(none)'}\n` +
+          `${verdictFor(id)}\n` +
           `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
           `duplicates=${stepThirteen.duplicates}; ` +
           `${c.arrived - stepThirteen.arrived} arrival(s) landed after it. ` +
@@ -1081,6 +1107,104 @@ class Journey {
       /* the sink is a child; a failure to signal it is not a journey result */
     }
   }
+}
+
+// ── F24-GWP-H1: a repeat is not automatically a duplicate ───────────────────
+//
+// `duplicates = arrived - unique` counts repeats of a message BODY. Exactly-once
+// is not a property of a body — it is scoped to a DELIVERY IDENTITY,
+// `cron:{job}:{scheduled_millis}`. Those are different claims, and conflating
+// them produced a HIGH finding against Windows that the evidence does not
+// support.
+//
+// Measured on `windows-arrivals.jsonl`, the run that was reported as
+// re-delivering: all five repeated bodies carry a DIFFERENT delivery id —
+// 5 of 5, zero replays. The journey submits every job with `--trigger every:15`,
+// and `every:15` is rate-floored to SIXTY seconds by
+// `TriggerBound::new(every_secs.max(60), 1)` (trigger.rs:238, applied to the
+// result at :366). The heartbeat measures that floor directly: scheduled deltas
+// of 60068 ms and 64940 ms. So the journey's deliveries are 60-second recurring
+// jobs, and any run that stays alive longer than one period sees every body
+// twice. Windows always crosses it because Task Scheduler's minimum repetition
+// is `PT1M`; launchd and systemd restart inside the window.
+//
+// The product delivered each OCCURRENCE exactly once. So the three outcomes are
+// distinguished here and never collapsed:
+//
+//   replay        the same delivery identity arrived twice. A real
+//                 exactly-once violation.
+//   recurrence    the same body under DIFFERENT identities. The trigger firing
+//                 again, which is what a recurring trigger is for.
+//   indeterminate a repeat that cannot be classified because at least one of
+//                 the arrivals carries NO identity.
+//
+// `indeterminate` exists because 16 of 24 delivery arrivals in that run reached
+// the sink with a null `idempotency_key` — two of the three adapters emit no
+// delivery identity at all, so a replay is not distinguishable from a recurrence
+// for them even in principle. Reporting those as zero duplicates would be the
+// M1 defect one level down: an unmeasurable property published as a measured
+// clean one. They are counted AGAINST the run, not for it.
+export function classifyRepeats(seen) {
+  const byText = new Map();
+  for (const a of seen) {
+    if (!byText.has(a.text)) byText.set(a.text, []);
+    byText.get(a.text).push(a);
+  }
+  let replays = 0;
+  let recurrences = 0;
+  let indeterminate = 0;
+  let unidentified = 0;
+  const unidentifiedEndpoints = new Set();
+
+  for (const arrivals of byText.values()) {
+    const keys = arrivals.map((a) =>
+      typeof a.idempotency_key === 'string' && a.idempotency_key.trim() ? a.idempotency_key : null,
+    );
+    const missing = keys.filter((k) => k === null).length;
+    unidentified += missing;
+    for (const a of arrivals) {
+      const k = a.idempotency_key;
+      if (!(typeof k === 'string' && k.trim())) unidentifiedEndpoints.add(a.endpoint ?? '(none)');
+    }
+    const repeats = arrivals.length - 1;
+    if (repeats <= 0) continue;
+    if (missing > 0) {
+      // Not classifiable. Fail closed: an unprovable repeat is not a clean one.
+      indeterminate += repeats;
+      continue;
+    }
+    const distinct = new Set(keys).size;
+    replays += arrivals.length - distinct;
+    recurrences += distinct - 1;
+  }
+
+  return {
+    replays,
+    recurrences,
+    indeterminate,
+    unidentified,
+    unidentified_endpoints: [...unidentifiedEndpoints].sort(),
+  };
+}
+
+// The one sentence a reader of a red journey needs, and the one this program
+// got wrong for a day: a recurrence is not the product misbehaving.
+export function verdictFor(id) {
+  if ((id.replays ?? 0) > 0) {
+    return 'VERDICT: EXACTLY-ONCE VIOLATED — a delivery identity arrived more than once.';
+  }
+  if ((id.indeterminate ?? 0) > 0) {
+    return (
+      'VERDICT: NOT PROVEN — zero replays observed, but repeats arrived with no delivery ' +
+      'identity, so exactly-once cannot be established for those adapters. This is a gap in ' +
+      'outbound idempotency, NOT evidence of a duplicate.'
+    );
+  }
+  return (
+    'VERDICT: NO DUPLICATE — every repeat carries a distinct delivery identity. The trigger ' +
+    'recurred inside the measurement window (`every:15` is rate-floored to 60s), so this run ' +
+    'is not a valid exactly-once measurement rather than a failed one.'
+  );
 }
 
 export function driverCommit() {

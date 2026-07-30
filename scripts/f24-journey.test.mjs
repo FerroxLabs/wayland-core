@@ -26,11 +26,13 @@ import {
   Journey,
   PLATFORMS,
   StepFailure,
+  classifyRepeats,
   hostPlatform,
   parseArgs,
   parseStatusJson,
   run,
   shellish,
+  verdictFor,
 } from './f24-journey.mjs';
 
 const DRIVER = fileURLToPath(new URL('./f24-journey.mjs', import.meta.url));
@@ -425,6 +427,138 @@ test('M1: an arrival no adapter endpoint claims is refused, not silently split',
     () => j.assertFinalReconciliation(receipt),
     (error) => error instanceof StepFailure && /attributed to no adapter endpoint/.test(error.message),
   );
+});
+
+// ── F24-GWP-H1: replay vs recurrence ────────────────────────────────────────
+
+const arr = (text, key, endpoint = 'chat.postMessage') => ({
+  text,
+  endpoint,
+  idempotency_key: key,
+  suppressed: false,
+});
+
+test('H1 positive: the SAME delivery identity twice is a replay — exactly-once violated', () => {
+  const id = classifyRepeats([arr('body-1', 'cron:j1:1000'), arr('body-1', 'cron:j1:1000')]);
+  assert.equal(id.replays, 1);
+  assert.equal(id.recurrences, 0);
+  assert.equal(id.indeterminate, 0);
+  assert.match(verdictFor(id), /EXACTLY-ONCE VIOLATED/);
+});
+
+test('H1 negative: the same body under DIFFERENT identities is a recurrence, not a duplicate', () => {
+  // The Windows shape. Two occurrences of a 60-second recurring job.
+  const id = classifyRepeats([arr('body-1', 'cron:j1:1000'), arr('body-1', 'cron:j1:61000')]);
+  assert.equal(id.replays, 0);
+  assert.equal(id.recurrences, 1);
+  assert.equal(id.indeterminate, 0);
+  assert.match(verdictFor(id), /NO DUPLICATE/);
+  // The distinction is the whole finding: the OLD body-only tally called this
+  // a duplicate, and that is how a false HIGH was raised against Windows.
+  assert.ok(!/VIOLATED/.test(verdictFor(id)), 'a recurrence must never read as a violation');
+});
+
+test('H1: a repeat with no delivery identity is NOT PROVEN, and is counted against the run', () => {
+  const id = classifyRepeats([
+    arr('body-1', null, 'whatsapp.messages'),
+    arr('body-1', null, 'whatsapp.messages'),
+  ]);
+  assert.equal(id.replays, 0);
+  assert.equal(id.recurrences, 0);
+  assert.equal(id.indeterminate, 1, 'an unprovable repeat must not read as clean');
+  assert.equal(id.unidentified, 2);
+  assert.deepEqual(id.unidentified_endpoints, ['whatsapp.messages']);
+  assert.match(verdictFor(id), /NOT PROVEN/);
+  assert.match(verdictFor(id), /NOT evidence of a duplicate/);
+});
+
+test('H1: a clean run classifies as nothing at all', () => {
+  const id = classifyRepeats([arr('body-1', 'cron:j1:1000'), arr('body-2', 'cron:j2:1000')]);
+  assert.deepEqual(
+    { r: id.replays, c: id.recurrences, i: id.indeterminate, u: id.unidentified },
+    { r: 0, c: 0, i: 0, u: 0 },
+  );
+});
+
+test('H1 on the REAL Windows arrivals: zero replays, and the buckets reconcile', () => {
+  // The actual journal from the run that produced F24-GWP-H1, committed at
+  // 24-gateway-platforms/windows-arrivals.jsonl. Real data, not a mutation.
+  const journal = fileURLToPath(
+    new URL(
+      '../.planning/phases/24-gateway-automation-channels-typed-api/evidence/' +
+        '24-gateway-platforms/windows-arrivals.jsonl',
+      import.meta.url,
+    ),
+  );
+  // Asserted, never skipped: a skip is not a pass.
+  assert.ok(fs.existsSync(journal), `the real Windows journal must be present at ${journal}`);
+  const rows = fs
+    .readFileSync(journal, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l))
+    .filter((r) => String(r.text ?? '').startsWith('f24j-delivery'));
+
+  assert.equal(rows.length, 24, 'known-positive: the fixture is the 24-arrival run');
+  const id = classifyRepeats(rows);
+
+  // THE FINDING: not one arrival in that run was a replay.
+  assert.equal(id.replays, 0, 'no delivery identity arrived twice');
+  assert.equal(id.recurrences, 4, 'the four adapters that emit an identity recurred once each');
+  assert.equal(id.indeterminate, 8, 'the eight bodies with no identity cannot be judged');
+  assert.equal(id.unidentified, 16);
+  assert.match(verdictFor(id), /NOT PROVEN/);
+
+  // And the buckets account for every repeat the old body-only tally saw. The
+  // headline `duplicates: 12` was arithmetically right and semantically wrong.
+  const arrived = rows.length;
+  const unique = new Set(rows.map((r) => r.text)).size;
+  assert.equal(arrived - unique, 12);
+  assert.equal(id.replays + id.recurrences + id.indeterminate, arrived - unique);
+});
+
+test('H1 both directions on the REAL journal: plant a replay, it is reported; remove it, zero', () => {
+  // LANE-BRIEF §3b-iii. A gate that cannot pass proves as little as one that
+  // cannot fail, so the classifier is driven to BOTH states on the same real
+  // data — the run that was reported as duplicating.
+  const journal = fileURLToPath(
+    new URL(
+      '../.planning/phases/24-gateway-automation-channels-typed-api/evidence/' +
+        '24-gateway-platforms/windows-arrivals.jsonl',
+      import.meta.url,
+    ),
+  );
+  assert.ok(fs.existsSync(journal));
+  const rows = fs
+    .readFileSync(journal, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l))
+    .filter((r) => String(r.text ?? '').startsWith('f24j-delivery'));
+
+  // BEFORE. Assert nothing already present could satisfy the positive — the
+  // planted state must not pre-exist, or the positive is free.
+  const before = classifyRepeats(rows);
+  assert.equal(before.replays, 0, 'precondition: the unmutated journal contains NO replay');
+  assert.ok(!/VIOLATED/.test(verdictFor(before)));
+
+  // PLANT: re-send an arrival that already exists, identity and all. This is a
+  // true replay — the same delivery identity on the wire twice.
+  const victim = rows.find((r) => r.idempotency_key);
+  assert.ok(victim, 'known-positive: at least one arrival carries an identity to replay');
+  const planted = [...rows, { ...victim }];
+  const after = classifyRepeats(planted);
+
+  assert.equal(after.replays, 1, 'the planted replay IS reported');
+  assert.match(verdictFor(after), /EXACTLY-ONCE VIOLATED/);
+  // And it is attributed as a replay, not absorbed into the recurrence bucket.
+  assert.equal(after.recurrences, before.recurrences);
+  assert.equal(after.indeterminate, before.indeterminate);
+
+  // REMOVE: back to the real data, and the report returns to zero.
+  const restored = classifyRepeats(planted.slice(0, -1));
+  assert.equal(restored.replays, 0, 'with the plant removed the report is zero again');
+  assert.deepEqual(restored, before);
 });
 
 test('windows aliveness is read from tasklist OUTPUT, never from its exit status', () => {
