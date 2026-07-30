@@ -1,0 +1,22 @@
+Operate on saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-readable `F23_SESSION=` token to STDOUT and uses the exit-code map documented in `session_cmd`
+
+Usage: wayland-core session [OPTIONS] <COMMAND>
+
+Commands:
+  list        List saved sessions (STDOUT, unlike the root `--list-sessions` flag)
+  search      Full-text search across saved sessions
+  show        Show one session's metadata, lineage, retention and reconcile state
+  checkpoint  Capture a workspace checkpoint over the named files
+  rewind      Restore a previously captured checkpoint
+  retry       Re-run one turn. Approval is re-derived; an expired one is refused
+  fork        Fork a session, leaving the parent byte-identical
+  export      Write the redacted export envelope
+  retain      Set a retain-until bound and report the resulting retention state
+  reconcile   List or resolve outstanding unknown-effect items
+  cancel      Cancel every interrupted turn so the session becomes resumable
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --dir <DIR>              Directory holding saved sessions. Defaults to the resolved config's session directory, or `$WAYLAND_HOME/sessions` when no config resolves
+      --workspace <WORKSPACE>  Workspace root that checkpoint capture and restore are confined to. Defaults to the current directory
+  -h, --help                   Print help

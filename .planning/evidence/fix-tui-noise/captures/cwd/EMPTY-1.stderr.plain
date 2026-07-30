@@ -1,0 +1,41 @@
+2026-07-30T13:52:20.053207Z  WARN egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+2026-07-30T13:52:20.053264Z  WARN egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+2026-07-30T13:52:20.054346Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+2026-07-30T13:52:20.054372Z  WARN not advertising computer_use: the plugin is loaded but no backend can start capability="computer_use" reason=neither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect remedy=run inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+2026-07-30T13:52:20.054539Z  INFO postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+2026-07-30T13:52:20.054621Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playback
+2026-07-30T13:52:20.054636Z  INFO skipping registration of tool whose backend is not configured tool=spotify_devices
+2026-07-30T13:52:20.054639Z  INFO skipping registration of tool whose backend is not configured tool=spotify_queue
+2026-07-30T13:52:20.054641Z  INFO skipping registration of tool whose backend is not configured tool=spotify_search
+2026-07-30T13:52:20.054643Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playlists
+2026-07-30T13:52:20.054646Z  INFO skipping registration of tool whose backend is not configured tool=spotify_albums
+2026-07-30T13:52:20.054648Z  INFO skipping registration of tool whose backend is not configured tool=spotify_library
+2026-07-30T13:52:20.054656Z  INFO skipping registration of tool whose backend is not configured tool=yuanbao
+2026-07-30T13:52:20.054669Z  WARN image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+2026-07-30T13:52:20.054678Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+2026-07-30T13:52:20.054694Z  INFO vision: using Anthropic (ANTHROPIC_API_KEY found)
+2026-07-30T13:52:20.054716Z  WARN transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+2026-07-30T13:52:20.054720Z  WARN tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY. Tool hidden.
+2026-07-30T13:52:20.054913Z  WARN video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+2026-07-30T13:52:20.054935Z  INFO cronjob: wiring WaylandCronScheduler over default FileCronStore
+2026-07-30T13:52:20.055048Z  WARN plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool plugin=wayland-browser tool=execute fq_name=Browser::execute
+2026-07-30T13:52:20.062292Z  WARN semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+2026-07-30T13:52:20.062369Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-30T13:52:20.062635Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-30T13:52:20.063731Z  WARN transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+2026-07-30T13:52:20.063737Z  INFO vision: using Anthropic (ANTHROPIC_API_KEY found)
+2026-07-30T13:52:20.064050Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-30T13:52:20.064085Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-30T13:52:20.064477Z  INFO F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home holder="session" pid=3233119 dir=/root/wayland-fix-tui-noise-home/.config/wayland-core/channels
+2026-07-30T13:52:20.064491Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+2026-07-30T13:52:20.108366Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:20.108378Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:20.108381Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.344364Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.344426Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.344435Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.344441Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.344714Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="anthropic" model="claude-sonnet-4-5-20250929"
+2026-07-30T13:52:22.360259Z  INFO auto-memorize skipped this session; no facts saved skip_reason=Some(BelowFactThreshold) candidates=0
+
+[turns: 1 | tokens: 3 in (2434 cached) / 5 out | cache: 987 created, 2434 read]

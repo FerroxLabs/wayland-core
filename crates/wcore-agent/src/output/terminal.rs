@@ -42,6 +42,29 @@ pub struct TerminalSink {
     /// Spec §3.4 explicitly authorises deferral ("Default to (a) — defer.
     /// Trait surface changes are a separate decision.").
     spinner: Mutex<Option<SpinnerHandle>>,
+    /// One-shot mode: a prompt was supplied on argv, so this process emits
+    /// exactly ONE assistant answer and exits. Set via [`TerminalSink::one_shot`].
+    ///
+    /// Two behaviours change, both measured against UAT-TUI-WINDOWS F4/F5 where
+    /// `wayland-core --no-tui '17 x 23'` wrote **five bytes** — `2a 20 33 39 31`,
+    /// i.e. `* 391` with no terminator:
+    ///
+    /// 1. The §3.2 assistant turn marker (`⏺ ` / `* `) is suppressed. The marker
+    ///    answers "which speaker is this?", which carries no information when
+    ///    there is exactly one speaker, no prompt echo and no following turn —
+    ///    and it makes the stream non-machine-consumable without stripping two
+    ///    bytes. The REPL and TUI paths are untouched, where the marker does
+    ///    separate turns.
+    /// 2. stdout is terminated with a newline if the answer did not already end
+    ///    in one, so the next shell prompt (or the next line of a log) does not
+    ///    run into the answer.
+    one_shot: bool,
+    /// Whether any assistant text has been written to stdout this turn, and
+    /// whether the last byte written was `\n`. Both are needed to decide the
+    /// one-shot terminator: an empty turn must not gain a stray blank line, and
+    /// an answer that already ends in a newline must not gain a second one.
+    wrote_text: AtomicBool,
+    last_byte_newline: AtomicBool,
 }
 
 struct SpinnerHandle {
@@ -63,7 +86,21 @@ impl TerminalSink {
             first_delta_pending: AtomicBool::new(false),
             in_tool_block: AtomicBool::new(false),
             spinner: Mutex::new(None),
+            one_shot: false,
+            wrote_text: AtomicBool::new(false),
+            last_byte_newline: AtomicBool::new(false),
         }
+    }
+
+    /// Mark this sink as serving a one-shot `wayland-core "<prompt>"` run.
+    ///
+    /// Consuming builder rather than a `new` parameter so the ~20 existing
+    /// `TerminalSink::new(bool)` call sites keep compiling unchanged and keep
+    /// the interactive behaviour they were written against.
+    #[must_use]
+    pub fn one_shot(mut self) -> Self {
+        self.one_shot = true;
+        self
     }
 
     /// Access the underlying formatter for terminal-specific operations (repl_prompt, session_info)
@@ -172,9 +209,16 @@ impl OutputSink for TerminalSink {
                 let _ = writeln!(stdout);
                 let _ = stdout.flush();
             }
-            self.formatter.assistant_marker();
+            // One-shot answers carry no speaker marker — see the `one_shot`
+            // field docs. Interactive REPL turns still get `⏺ ` / `* `.
+            if !self.one_shot {
+                self.formatter.assistant_marker();
+            }
         }
         self.formatter.text_delta(text);
+        self.wrote_text.store(true, Ordering::Release);
+        self.last_byte_newline
+            .store(text.ends_with('\n'), Ordering::Release);
     }
 
     fn emit_thinking(&self, text: &str, _msg_id: &str) {
@@ -210,6 +254,12 @@ impl OutputSink for TerminalSink {
         // Spec §3.3 (Task 4.3): new turn begins — reset tool-block flag so
         // a stale flag from a prior turn can't inject a phantom blank line.
         self.in_tool_block.store(false, Ordering::Release);
+        // Per-turn, not per-process: an agentic one-shot run streams several
+        // assistant blocks (text → tool → text). Each block is terminated on
+        // its own `emit_stream_end`, which is also what keeps consecutive
+        // blocks from running together now that the marker is suppressed.
+        self.wrote_text.store(false, Ordering::Release);
+        self.last_byte_newline.store(false, Ordering::Release);
         self.start_thinking_spinner();
     }
 
@@ -228,6 +278,23 @@ impl OutputSink for TerminalSink {
         self.stop_thinking_spinner();
         self.first_delta_pending.store(false, Ordering::Release);
         self.in_tool_block.store(false, Ordering::Release);
+        // One-shot: terminate stdout so the next writer starts on its own line.
+        // UAT-TUI-WINDOWS F4 measured `live1.stdout` at exactly 5 bytes with no
+        // terminator; UAT-TUI-UNIX F8 is the same defect seen from the other
+        // side, where a stderr log line rendered onto the answer's line. Guarded
+        // on `wrote_text` so a tool-only or errored turn gains no blank line,
+        // and on `last_byte_newline` so an answer that already ends in `\n`
+        // gains no second one. Emitted BEFORE `turn_stats` (which writes to
+        // stderr) so stdout is complete before anything else is printed.
+        if self.one_shot
+            && self.wrote_text.load(Ordering::Acquire)
+            && !self.last_byte_newline.load(Ordering::Acquire)
+        {
+            let mut stdout = io::stdout();
+            let _ = writeln!(stdout);
+            let _ = stdout.flush();
+            self.last_byte_newline.store(true, Ordering::Release);
+        }
         self.formatter.turn_stats(
             turns,
             input_tokens,

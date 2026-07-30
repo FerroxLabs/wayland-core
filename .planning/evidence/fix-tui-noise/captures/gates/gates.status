@@ -1,0 +1,16 @@
+WLHEAD=1e0a61d3bba55b83ec5650587e4bcd5b8c34ed94
+WLFMT=0
+WLMETA=0
+WLCHECK=0
+WLCLIPPYC=0
+WLCLIPPYA=101
+WLTHELP=0
+WLTAGENT=0
+WLTCLI=0
+THELP_RESULT_LINES=1
+THELP_COUNTS=test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s|
+TAGENT_RESULT_LINES=1
+TAGENT_COUNTS=test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 2206 filtered out; finished in 0.00s|
+TCLI_RESULT_LINES=2
+TCLI_COUNTS=test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s|test result: ok. 1917 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.91s|
+WLDONE

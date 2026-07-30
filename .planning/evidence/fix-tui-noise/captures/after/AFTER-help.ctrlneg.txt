@@ -1,0 +1,1 @@
+Print config file path and exit

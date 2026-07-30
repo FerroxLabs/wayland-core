@@ -1,0 +1,49 @@
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-574879049bbe0ff7)
+failures:
+---- engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop stdout ----
+thread 'engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop' (4184055) panicked at crates/wcore-agent/src/engine.rs:24123:60:
+---- engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch stdout ----
+thread 'engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch' (4183969) panicked at crates/wcore-agent/src/engine.rs:26350:61:
+---- engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch stdout ----
+thread 'engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch' (4184016) panicked at crates/wcore-agent/src/engine.rs:26240:61:
+---- engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once stdout ----
+thread 'engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once' (4184018) panicked at crates/wcore-agent/src/engine.rs:25842:61:
+---- engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state stdout ----
+thread 'engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state' (4183993) panicked at crates/wcore-agent/src/engine.rs:24214:60:
+---- engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call stdout ----
+thread 'engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call' (4184031) panicked at crates/wcore-agent/src/engine.rs:24444:56:
+---- engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches stdout ----
+thread 'engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches' (4183984) panicked at crates/wcore-agent/src/engine.rs:24645:56:
+---- engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay stdout ----
+thread 'engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay' (4184017) panicked at crates/wcore-agent/src/engine.rs:26016:61:
+---- orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary stdout ----
+thread 'orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary' (4184966) panicked at crates/wcore-agent/src/orchestration/mod.rs:156:13:
+thread 'orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary' (4184966) panicked at crates/wcore-agent/src/orchestration/f13_durability_tests.rs:1088:63:
+---- orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects stdout ----
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (4185101) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (4185101) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (4185101) panicked at crates/wcore-agent/src/orchestration/mod.rs:3917:67:
+---- session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority stdout ----
+thread 'session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority' (4185595) panicked at crates/wcore-agent/src/session.rs:1587:9:
+---- engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools stdout ----
+thread 'engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools' (4184012) panicked at crates/wcore-agent/src/engine.rs:24908:62:
+---- engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch stdout ----
+thread 'engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch' (4184072) panicked at crates/wcore-agent/src/engine.rs:24760:56:
+---- session_journal::fault_tests::session_retirement_removes_private_effect_checkpoints stdout ----
+thread 'session_journal::fault_tests::session_retirement_removes_private_effect_checkpoints' (4185695) panicked at crates/wcore-agent/src/session_journal.rs:3998:85:
+---- session::tests::active_session_holds_exclusive_lease_until_drop stdout ----
+thread 'session::tests::active_session_holds_exclusive_lease_until_drop' (4185594) panicked at crates/wcore-agent/src/session.rs:1164:60:
+---- session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror stdout ----
+thread 'session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror' (4185598) panicked at crates/wcore-agent/src/session.rs:1236:58:
+---- session::tests::test_f034_empty_session_gc stdout ----
+thread 'session::tests::test_f034_empty_session_gc' (4185627) panicked at crates/wcore-agent/src/session.rs:1506:9:
+---- engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay stdout ----
+thread 'engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay' (4183958) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+thread 'engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay' (4183958) panicked at crates/wcore-agent/src/engine.rs:26455:57:
+---- session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral stdout ----
+thread 'session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral' (4185693) panicked at crates/wcore-agent/src/session_journal.rs:4034:85:
+---- engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session stdout ----
+thread 'engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session' (4184228) panicked at crates/wcore-agent/src/engine.rs:28643:58:
+failures:
+test result: FAILED. 2232 passed; 20 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.51s
+error: test failed, to rerun pass `-p wcore-agent --lib`

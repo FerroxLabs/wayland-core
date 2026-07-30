@@ -1,0 +1,12 @@
+ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/`
+
+Usage: wayland-core workflow <COMMAND>
+
+Commands:
+  validate  Parse and validate a single workflow `.ron` file without executing it. Prints an OK summary on success or the typed parse error (with its field pointer) on failure
+  list      List the saved workflows discovered under `.wayland/workflows/*.ron`. Each line is `name  ~N agents  — description`. Unparseable files are skipped with a warning to stderr
+  run       Execute a saved workflow by name. Resolves `<NAME>` to `.wayland/workflows/<NAME>.ron`, parses it, and runs it through the workflow engine over a real provider
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

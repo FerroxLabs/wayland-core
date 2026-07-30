@@ -1,0 +1,2 @@
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-574879049bbe0ff7)
+test result: ok. 2252 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 38.75s

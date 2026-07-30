@@ -1,0 +1,79 @@
+    Checking tokio v1.52.3
+   Compiling crossbeam-utils v0.8.21
+    Checking crossbeam-epoch v0.9.20
+    Checking crossbeam-deque v0.8.6
+    Checking ignore v0.4.25
+    Checking wcore-repomap v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-repomap)
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking aws-smithy-async v1.2.14
+    Checking wcore-protocol v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-protocol)
+    Checking wasmtime-wasi v36.0.12
+    Checking wcore-user-model v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-user-model)
+    Checking wcore-cron v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cron)
+    Checking lettre v0.11.22
+    Checking tokio-tungstenite v0.24.0
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking aws-smithy-types v1.4.9
+    Checking wcore-sandbox v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-sandbox)
+    Checking tokio-postgres v0.7.18
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-smithy-http v0.63.6
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-observability v0.2.6
+    Checking tokio-postgres-rustls v0.13.0
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking wcore-plugin-api v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-api)
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-egress)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agents-pack)
+    Checking wayland-honcho v0.12.25 (/root/wayland-fix-tui-noise/crates/wayland-honcho)
+    Checking wcore-dispatch v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-dispatch)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-honcho-adapter)
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-wasm)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-sso v1.98.0
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-pricing)
+    Checking wcore-memory v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-providers)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-telegram)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-signal)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-sms)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-msteams)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-matrix)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-discord)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-email)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-slack)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-whatsapp)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-swarm)
+    Checking wcore-mcp v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-mcp)
+    Checking wcore-browser v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-browser)
+    Checking wcore-cua v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cua)
+    Checking wcore-skills v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 47.86s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
