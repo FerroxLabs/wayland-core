@@ -51,6 +51,61 @@ Verified at base `c9ab048b95`, by reading the files, not by grep summary.
 | `await_session_switch` is `for _ in 0..100 { yield_now() }` then panic | TO VERIFY |
 | `[memory] enabled = false` still creates memory.db — a defect | TO VERIFY (scoping agent says PREMISE-FALSE; documented intended behaviour) |
 
+## ID-2 — MY OWN harness was a permanently-green gate (repaired in-lane)
+
+First run, hetzner, commit `9c336a4c`, `BASELINE.log`:
+`test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+
+…while the raw event dump in the SAME run read:
+`[shape] chmod_on_watch_root surfaced: ["/tmp/.tmpbNcTnJ [Modify(Metadata(Any))]"]`
+
+The watch root HAD leaked and the gate could not see it. Cause: `tempfile`
+names its directory `.tmpXXXXXX`, and `path_should_surface_as_edit`
+(watch.rs:351) drops any path whose file name starts with `.tmp`. The watch
+root was being eaten by the atomic-write scratch filter — a filter with
+nothing to do with the property under test. Direction 1 could not fail.
+
+Repair: watch `<tmpdir>/project`. Self-test carries the three assertions
+LANE-BRIEF §6b-ii requires, the third being "the old matcher would have missed
+it". Committed `7c42063e`.
+
+## MEASUREMENT — the defect, reproduced (hetzner, Linux, commit 7c42063e)
+
+`RED.log`: `test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`
+
+```
+injected: Some("User edited `/tmp/.tmp5rMPaP/project` while I was thinking — re-read it before proceeding.")
+surfaced paths: ["/tmp/.tmp5rMPaP/project [Modify(Metadata(Any))]"]
+watch root:     /tmp/.tmp5rMPaP/project
+```
+
+The watch ROOT is surfaced as an ExternalEvent and rendered as an edited file.
+That is the production symptom exactly. **Confirmed on Linux — not
+Darwin-only**, which the scoping agent's FSEvents-centred mechanism did not
+predict.
+
+Refinement to the scoping agent's mechanism: on Linux the trigger is an
+`IN_ATTRIB`-class event on the watch descriptor itself (`Modify(Metadata(Any))`
+against the root path). `.wayland-core/` *creation* surfaced `[]` on Linux —
+inotify names the child, which the component filter already drops. So the
+root-path leak is real and reachable, but the specific writer that triggers it
+is platform-dependent.
+
+## ID-3 — `agent.watch_files` is a documented config knob that does not exist
+
+`file_watcher_notifier.rs:25` says the watcher is "Constructed once in
+bootstrap when `agent.watch_files` is enabled". It is not: `bootstrap.rs:3139`
+installs it unconditionally, and `watch_files` occurs **exactly once in the
+entire worktree — in that doc comment**.
+
+Absence proven with live controls in the same invocation (quoted globs, after
+zsh ate the first unquoted attempt):
+`install_file_watcher_eventually` = 3 hits, `is_wcore_internal_path` = 4 hits,
+`watch_files` = 1 hit (the doc comment). So there is **no way to switch the
+watcher off**, which is why the reporting lane still saw injections across
+"three configurations". Reported, not fixed — adding a config surface is a
+product decision, not a filter repair.
+
 ## Open questions to measure, not assume
 
 1. What path does `notify` ACTUALLY surface when `.wayland-core/` is created
