@@ -75,3 +75,67 @@ not exist; a nonce never sent) so a dead observer cannot produce a green.
 - **T+0** worktree created at `43c69ca7`; brief and `docs/delivery-semantics.md` read.
 - **T+10** source survey done; F-ML-1 and F-ML-2 recorded above **before** any run.
 - **T+14** hetzner reachable, 967G free, HTTPS to matrix.org = 200.
+
+---
+
+## 5. Live results (running)
+
+- **T+45** LEG 2 (edit) and LEG 3 (delete) **PASS** live against matrix.org, room
+  `!kntRqkQCkPjhPvMMvf`. Edit graded by the homeserver's own bundled
+  `unsigned.m.relations.m.replace` on the ORIGINAL event; delete graded by read-back
+  body (`state=REDACTED body_present=false`). Both have a working known-negative.
+- **T+50** LEG 4 (inbound) **PASS**. `text_len=47`, sender preserved, through the
+  production `/sync` loop and `ChannelManager::subscribe()`. Self-echo control:
+  `MLR_INBOUND_SELF_ECHO_ADMITTED=false`.
+- **T+58** LEG 1 (binary send) **FAILED — and it found a HIGH.** See F-ML-5.
+
+### F-ML-3 (MEDIUM) — a Matrix redaction of a nonexistent event returns 200
+
+`MLR_CONTROL_DELETE_BOGUS_ok=true`. Corroborated outside the product:
+`curl PUT …/redact/%24absolutely-no-such-event-mlact/… → 200 {"event_id": …}`.
+
+`rest.rs:342-349` states the operation "reports success when the homeserver accepted
+the redaction, which is the strongest guarantee the protocol offers". Acceptance
+guarantees nothing: it is returned for a target that never existed. An `Ok(())` from
+`delete_message` therefore carries no information about whether anything was deleted.
+The edit path is NOT symmetric — matrix.org rejects a relation to an unknown event
+with `400 M_UNKNOWN`.
+
+### F-ML-5 (HIGH) — every scheduled channel delivery addresses the CHANNEL NAME as the destination conversation
+
+`crates/wcore-agent/src/cron.rs:137`:
+
+```rust
+let msg = OutgoingMessage::text(channel_name.to_string(), text.to_string());
+```
+
+`OutgoingMessage::text(conversation_id, text)` — so `conversation_id == channel_name`.
+`Target::Channel` (`wcore-cron/src/job.rs:24`) carries only `{ channel_name, text }`:
+there is **no conversation field**, and `cron add` has **no flag** that could supply
+one (full flag census run; the only value-bearing flags are `--slash --channel --text
+--skill --args --trigger --describe`).
+
+Measured live, the shipped binary:
+
+```
+PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:bd8831fa-…:1785384138000
+403 M_FORBIDDEN "User @seandonahoe:matrix.org not in room mxlive"
+```
+
+`mxlive` is the channel's NAME. Ledger: `accepted → attempted → settled delivered:false`.
+
+**Why this is not Matrix-specific.** The per-adapter fallbacks (`slack lib.rs:416`,
+`whatsapp :238`, `sms :250`) fire only when `conversation_id.is_empty()`. Cron always
+supplies a non-empty string, so **no adapter's configured default destination is
+reachable from a cron delivery.** A scheduled channel message can only arrive if the
+operator happens to have named the channel exactly the destination's conversation id.
+
+**This is why the defect survived a live proof.** `24-C1-abandon-surface/f24c1-live3.sh`
+counted real arrivals for `--channel f24c1csink` — because the destination was a
+fixture sink that accepts any channel id. A real Slack would have answered
+`channel_not_found`.
+
+**Consequence for `docs/delivery-semantics.md`.** §4 scopes the exactly-once guarantee
+to the delivery id `cron:{job}:{scheduled_millis}`, and cron is the only production
+minter of those ids. So the exactly-once row for Matrix describes a path that, as
+shipped, cannot address a Matrix room at all.
