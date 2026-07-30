@@ -1,0 +1,33 @@
+MARKER_HEAD=2897db01d91945d2eecb7b53b62e7a774cabba50
+MARKER_MERGE_LINE=4456:        enabled: global.security.enabled,
+MARKER_POLARITY_BEGIN
+running 8 tests
+test trusted_project_config_must_not_disable_the_egress_gate ... ok
+test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
+test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test control_operator_global_off_switch_disables_the_gate ... ok
+test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
+test untrusted_project_config_must_not_disable_the_egress_gate ... ok
+test operator_off_switch_survives_a_project_silent_on_security ... ok
+test untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+MARKER_POLARITY_RC=0
+MARKER_FLAKE_1_BEGIN
+running 2 tests
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... ok
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_1_RC=0
+MARKER_FLAKE_2_BEGIN
+running 2 tests
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... ok
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_2_RC=0
+MARKER_FLAKE_3_BEGIN
+running 2 tests
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... ok
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2235 filtered out; finished in 0.08s
+MARKER_FLAKE_3_RC=0
+MARKER_ALLDONE

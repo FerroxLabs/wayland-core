@@ -1,0 +1,40 @@
+     Running tests/egress_merge_polarity_test.rs (target/debug/deps/egress_merge_polarity_test-65ba928632d3172b)
+
+running 7 tests
+test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
+test control_operator_global_off_switch_disables_the_gate ... ok
+test operator_off_switch_survives_a_project_silent_on_security ... ok
+test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
+test untrusted_project_config_must_not_disable_the_egress_gate ... FAILED
+test trusted_project_config_must_not_disable_the_egress_gate ... FAILED
+
+failures:
+
+---- untrusted_project_config_must_not_disable_the_egress_gate stdout ----
+warning: /tmp/.tmpgZ266o/config.toml has permissions 0o644; tightening to 0o600 on next write
+warning: /tmp/.tmpQZHC24/.wayland-core.toml has permissions 0o644; tightening to 0o600 on next write
+
+thread 'untrusted_project_config_must_not_disable_the_egress_gate' (3262628) panicked at crates/wcore-agent/tests/egress_merge_polarity_test.rs:274:5:
+assertion `left != right` failed: the merged `security.enabled` still equals the pre-fix `global && project` result, so the polarity fix is not in effect
+  left: false
+ right: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- trusted_project_config_must_not_disable_the_egress_gate stdout ----
+warning: /tmp/.tmpM2rg7F/config.toml has permissions 0o644; tightening to 0o600 on next write
+warning: /tmp/.tmpgspFsj/.wayland-core.toml has permissions 0o644; tightening to 0o600 on next write
+
+thread 'trusted_project_config_must_not_disable_the_egress_gate' (3262625) panicked at crates/wcore-agent/tests/egress_merge_polarity_test.rs:306:5:
+a project `[security] enabled = false` must not disable the operator's egress boundary even in a trusted workspace
+
+
+failures:
+    trusted_project_config_must_not_disable_the_egress_gate
+    untrusted_project_config_must_not_disable_the_egress_gate
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-agent --test egress_merge_polarity_test`
+WLRC=101
+WLDONE
