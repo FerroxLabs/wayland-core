@@ -1,0 +1,27 @@
+LABEL=BEFORE-ok
+BIN=/root/wayland-fixtui/target/release/wayland-core
+BIN_SHA256=6b9b14fdd9b870f315ea756fed162c5628ad92552da8e0232a930f85f144a825
+WAYLAND_HOME=/root/fixtui-home
+RUNCWD=/root/fixtui-b1
+CREDENTIALS=PRESENT len=108
+SETTLE=20
+PANE_NONEMPTY_LINES=18
+PANE_DEAD=0
+ASSERT_PTY=OK
+SENT_TEXT=[Use the bash tool to run exactly: echo HELLO_FROM_UAT]
+CARD_SEEN_AT_ITERATION=2 (~10s)
+APPROVALS_GIVEN=4
+ASSERT_TOOLCARD=OK
+TOOLCARD_LINE=[● Bash({ "command": "echo HELLO_FROM_UAT" }) · done                                                                                                           │                                │ || Ran `?` · exit 0 · 0 bytes                                                                                                                                  │                                │]
+EXTERNAL_EDIT_INJECTIONS=0
+0
+CARD_HEADER=[● Bash({ "command": "echo HELLO_FROM_UAT" }) · done                                                                                                           │                                │]
+CARD_BODY=[Ran `?` · exit 0 · 0 bytes                                                                                                                                  │                                │]
+CARD_HEADER_STATUS=done
+FABRICATED_CMD_QUESTION_MARK=YES
+BODY_SHOWS_EXIT_0=YES
+BODY_SHOWS_0_BYTES=YES
+SELF_CONTRADICTION=NO
+VERDICT=DEFECT_PRESENT
+WLRC=0
+WLDONE

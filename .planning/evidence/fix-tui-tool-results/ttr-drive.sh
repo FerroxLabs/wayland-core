@@ -70,16 +70,20 @@ done
 extract_card() {
   # $1 = pane capture file -> prints "<header> || <summary>", or nothing
   awk '
+    # The Activity rail is a right-hand pane on the SAME text rows, so a naive
+    # full-row scrape drags `│ … │` rail chrome into the extracted string. Cut
+    # each row at the first box-drawing vertical before trimming.
+    function clean(s) {
+      sub(/\xe2\x94\x82.*$/, "", s)
+      sub(/^[[:space:]]*/, "", s); sub(/[[:space:]]+$/, "", s)
+      return s
+    }
     hdr != "" {
-      line = $0
-      sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line)
+      line = clean($0)
       if (line != "") { print hdr " || " line; exit }
       next
     }
-    /Bash\(/ && /\xc2\xb7/ {
-      hdr = $0
-      sub(/^[[:space:]]*/, "", hdr); sub(/[[:space:]]+$/, "", hdr)
-    }
+    /Bash\(/ && /\xc2\xb7/ { hdr = clean($0) }
   ' "$1"
 }
 
@@ -161,8 +165,24 @@ else
 fi
 
 SOCK="ttr-$$-${LABEL}"
+STDERR_LOG="$OUT/${LABEL}.stderr"
+: > "$STDERR_LOG"
+# Redirect the product's stderr to a file: it is the ONLY place the per-turn
+# external-edit injection is observable (the engine deliberately suppresses it
+# from the transcript, engine.rs:5124). Without this the harness cannot tell
+# "the model ignored the prompt" from "the engine overwrote the prompt".
+# NOTE: deliberately WITHOUT --dangerously-skip-permissions.
+#
+# MEASURED, after five failed configurations: the tool card only appeared once
+# the run went through the real APPROVAL flow — which is also the exact
+# condition the original UAT describes ("After approving a shell command the
+# user is shown…"). Across four runs with `--dangerously-skip-permissions` the
+# model called Bash repeatedly (the status line read `running Bash`) and NOT ONE
+# tool card was ever painted, in any of ~90 captured frames. Whether that is a
+# second defect or a consequence of those turns never settling is NOT
+# established here and is reported as an open question, not as a finding.
 tmux -L "$SOCK" new-session -d -s s -x 200 -y 50 \
-  "cd $RUNCWD && env WAYLAND_HOME=$HOMEDIR $BIN --dangerously-skip-permissions" \
+  "cd $RUNCWD && env WAYLAND_HOME=$HOMEDIR $BIN 2>>$STDERR_LOG" \
   || { say "ASSERT_TMUX=FAIL"; exit 94; }
 
 say "SETTLE=${SETTLE}"
@@ -194,36 +214,39 @@ say "ASSERT_PTY=OK"
 # The drain is per-turn, so a throwaway first turn absorbs the backlog and the
 # real prompt lands on a clean turn. This is a HARNESS workaround for a product
 # defect that is NOT in this lane's scope — it is reported separately.
-say "WARMUP=sending"
-tmux -L "$SOCK" send-keys -t s -l "Reply with the single word READY and call no tools."
-sleep 1
-tmux -L "$SOCK" send-keys -t s Enter
-sleep 25
-tmux -L "$SOCK" capture-pane -p -t s > "$OUT/${LABEL}.warmup.txt"
-say "WARMUP=done"
-
 # ── send the prompt ──────────────────────────────────────────────────────────
 say "SENT_TEXT=[${TEXT}]"
 tmux -L "$SOCK" send-keys -t s -l "$TEXT"
 sleep 1
 tmux -L "$SOCK" send-keys -t s Enter
 
-# ── poll, emitting every iteration (LANE-BRIEF §6b: silence looks like a hang)
+# ── poll + approve, emitting every iteration (§6b: silence looks like a hang) ─
+# The run is gated on a real approval modal, so the loop must both WAIT and
+# ANSWER. The model typically makes several Bash calls; approve each one as it
+# appears and keep the FIRST card seen, which is the command under test.
 CARD=""
+APPROVALS=0
 for i in $(seq 1 "$POLL"); do
-  sleep 10
-  tmux -L "$SOCK" capture-pane -p -t s > "$OUT/${LABEL}.poll.txt"
-  CARD=$(extract_card "$OUT/${LABEL}.poll.txt")
-  if [ -n "$CARD" ]; then
-    say "CARD_SEEN_AT_ITERATION=${i} (~$((i*10))s)"
-    break
+  sleep 5
+  tmux -L "$SOCK" capture-pane -p -t s > "$OUT/${LABEL}.poll${i}.txt"
+  if [ -z "$CARD" ]; then
+    CARD=$(extract_card "$OUT/${LABEL}.poll${i}.txt")
+    [ -n "$CARD" ] && say "CARD_SEEN_AT_ITERATION=${i} (~$((i*5))s)"
   fi
-  echo "waiting: iteration $i, $(date +%H:%M:%S)"
+  if grep -qF '[enter/y] approve once' "$OUT/${LABEL}.poll${i}.txt"; then
+    tmux -L "$SOCK" send-keys -t s "y"
+    APPROVALS=$((APPROVALS+1))
+    echo "approving: iteration $i, approval #$APPROVALS, $(date +%H:%M:%S)"
+  else
+    echo "waiting: iteration $i, $(date +%H:%M:%S)"
+  fi
+  [ -n "$CARD" ] && [ "$i" -ge 4 ] && break
 done
+say "APPROVALS_GIVEN=${APPROVALS}"
 
 sleep 5
 tmux -L "$SOCK" capture-pane -p -t s   > "$OUT/${LABEL}.after.txt"
-CARD=$(extract_card "$OUT/${LABEL}.after.txt")
+[ -z "$CARD" ] && CARD=$(extract_card "$OUT/${LABEL}.after.txt")
 
 # The TUI runs on tmux's ALTERNATE screen, so `capture-pane -S -<n>` returns
 # nothing older than the visible pane — there is no tmux scrollback to read.
@@ -247,22 +270,45 @@ fi
 if [ -z "$CARD" ]; then
   say "ASSERT_TOOLCARD=FAIL reason=no-bash-tool-card-rendered"
   say "TOOLCARD_LINE=[]"
+  # See the note at the other removal site: the TUI does not route tracing to
+  # stderr, so this count is 0 on a build where the notice IS firing. Not
+  # asserted (LANE-BRIEF §3b-i).
   say "VERDICT=EXPERIMENT_DID_NOT_RUN"
   say "WLRC=96"; say "WLDONE"
   tmux -L "$SOCK" kill-server 2>/dev/null; exit 0
 fi
 say "ASSERT_TOOLCARD=OK"
 say "TOOLCARD_LINE=[${CARD}]"
+# NOT MEASURED: the TUI does not route tracing to stderr, so grepping the stderr
+# log for the external-edit notice returns 0 on a build where it IS firing. That
+# is a dead instrument, and reporting its 0 would be a self-passing absence
+# claim (LANE-BRIEF §3b-i). Deliberately not asserted.
 
 # ── grade ────────────────────────────────────────────────────────────────────
 # The defect signature is the formatter's fabricated triple. Report each
 # component separately so a PARTIAL fix cannot read as a full one.
-FAB_CMD=NO;  case "$CARD" in *'Ran `?`'*) FAB_CMD=YES ;; esac
-HAS_EXIT0=NO; case "$CARD" in *'exit 0'*)  HAS_EXIT0=YES ;; esac
-ZERO_BYTES=NO; case "$CARD" in *'0 bytes'*) ZERO_BYTES=YES ;; esac
+HDR="${CARD%% || *}"; BODY="${CARD#* || }"
+say "CARD_HEADER=[${HDR}]"
+say "CARD_BODY=[${BODY}]"
+# The header's status chip is the engine's own is_error verdict and is CORRECT.
+# The body is the formatter's. Recording both separately is what makes the
+# self-contradiction ("error" above, "exit 0" below) machine-visible instead of
+# a thing a human has to notice.
+HDR_STATUS=unknown
+case "$HDR" in *'· error'*) HDR_STATUS=error ;; *'· done'*) HDR_STATUS=done ;; esac
+say "CARD_HEADER_STATUS=${HDR_STATUS}"
+
+FAB_CMD=NO;  case "$BODY" in *'Ran `?`'*) FAB_CMD=YES ;; esac
+HAS_EXIT0=NO; case "$BODY" in *'exit 0'*)  HAS_EXIT0=YES ;; esac
+ZERO_BYTES=NO; case "$BODY" in *'0 bytes'*) ZERO_BYTES=YES ;; esac
 say "FABRICATED_CMD_QUESTION_MARK=${FAB_CMD}"
-say "SHOWS_EXIT_0=${HAS_EXIT0}"
-say "SHOWS_0_BYTES=${ZERO_BYTES}"
+say "BODY_SHOWS_EXIT_0=${HAS_EXIT0}"
+say "BODY_SHOWS_0_BYTES=${ZERO_BYTES}"
+if [ "$HDR_STATUS" = "error" ] && [ "$HAS_EXIT0" = "YES" ]; then
+  say "SELF_CONTRADICTION=YES header=error body=exit-0"
+else
+  say "SELF_CONTRADICTION=NO"
+fi
 
 if [ "$FAB_CMD" = "YES" ] && [ "$ZERO_BYTES" = "YES" ]; then
   say "VERDICT=DEFECT_PRESENT"
