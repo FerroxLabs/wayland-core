@@ -1104,6 +1104,66 @@ mod tests {
         Arc::new(FileCronStore::new(dir.join("jobs.json")))
     }
 
+    // F24-GWP-H1. A HIGH was raised claiming the Windows gateway re-delivers
+    // every cron job across a platform restart. It does not. The journey
+    // harness submits its deliveries with `--trigger every:15`, and the two
+    // facts below are the whole of the finding:
+    //
+    //   1. `every:15` is rate-floored to SIXTY seconds, so those jobs recur
+    //      once a minute — well inside a three-minute journey.
+    //   2. Each occurrence has its own `scheduled_for`, therefore its own
+    //      delivery id, therefore its own dedup key. The second arrival is a
+    //      NEW occurrence, not a replay of the first, and nothing downstream
+    //      should suppress it.
+    //
+    // Measured against the real Windows journal: all five repeated bodies
+    // carry different delivery ids, 5 of 5, zero replays.
+    #[test]
+    fn every_15_is_floored_to_60s_and_each_occurrence_has_its_own_delivery_id() {
+        use crate::trigger::Trigger;
+        let anchor = Utc::now();
+
+        // (1) the floor, on the journey's ACTUAL trigger — not a stand-in.
+        let t = Trigger::Interval { every_secs: 15 };
+        let bound = t.default_bound();
+        let first = t.next_after(anchor, &bound).unwrap().unwrap();
+        assert_eq!(
+            first - anchor,
+            ChronoDuration::seconds(60),
+            "every:15 must be floored to the 60s bound, not honoured at 15s"
+        );
+        let second = t.next_after(first, &bound).unwrap().unwrap();
+        assert_eq!(second - first, ChronoDuration::seconds(60));
+
+        // (2) two occurrences, two delivery identities. This is what makes the
+        // second arrival legitimate rather than a duplicate.
+        let a = FireContext::scheduled("job-1", first).delivery_id();
+        let b = FireContext::scheduled("job-1", second).delivery_id();
+        assert_ne!(
+            a, b,
+            "consecutive occurrences of one job must have distinct delivery ids"
+        );
+        assert_eq!(a, format!("cron:job-1:{}", first.timestamp_millis()));
+
+        // (3) THE OTHER DIRECTION — the floor is a floor, not a constant. A
+        // trigger above it is honoured at its own rate, so a journey whose
+        // recurrence exceeds its run length sees each body exactly once. This
+        // is the achievable pass state for the harness (LANE-BRIEF §3b-iii);
+        // without it the test would pass on a hardcoded 60.
+        let slow = Trigger::Interval { every_secs: 3600 };
+        let slow_next = slow.next_after(anchor, &slow.default_bound()).unwrap().unwrap();
+        assert_eq!(
+            slow_next - anchor,
+            ChronoDuration::seconds(3600),
+            "a trigger slower than the floor must not be pulled down to 60s"
+        );
+
+        // (4) A REPLAY is the same identity twice — the thing that WOULD be a
+        // violation — and it is distinguishable from (2) by construction.
+        let replay = FireContext::scheduled("job-1", first).delivery_id();
+        assert_eq!(a, replay, "the same scheduled instant must reproduce the same id");
+    }
+
     #[tokio::test]
     async fn fires_due_job_once_per_anchor() {
         let dir = tempdir().unwrap();
