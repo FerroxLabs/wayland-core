@@ -10,6 +10,20 @@ Binaries (debug):
 |---|---|---|
 | FIXED | `bc82f7f89ba7831d399daff4c415235eb004a3152435187a292c14d80e407ac1` | `41c53619` |
 | BASE  | `fd7c2d5bc9f5c5ce63698049628b0f1232a2a9a0ad5c39c1066b5c3822363c4f` | `e7bc6d88` |
+| FINAL | `299ffe9a427bf4ffc929457e510333faa507ac75a57a543e8f83237b6b8a5ab5` | `0dd5ebb4` |
+
+**Re-verified on the shipped code.** The eight arms below ran on `41c53619`.
+Two later commits changed behaviour (`bb592194` added the gateway test;
+`0dd5ebb4` bounded the Slack probe with a 10s budget), so evidence taken at
+`41c53619` no longer described the shipped binary. The three arms that could
+be affected were re-run on `299ffe9a` and are unchanged
+(`*-FINAL.log` in this directory):
+
+| arm | binary | health | `--require-healthy` |
+|---|---|---|---|
+| slack 1 rejected | FINAL `299ffe9a` | `unauthenticated` (`invalid_auth`=1) | rc=1 |
+| slack 3 real | FINAL `299ffe9a` | `healthy` | rc=0 |
+| discord 1 rejected | FINAL `299ffe9a` | `unauthenticated` (`4004`=1) | rc=1 |
 
 ## Credential premise, verified BEFORE any arm was built on it
 
