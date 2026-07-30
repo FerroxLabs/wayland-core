@@ -60,13 +60,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Linux targets build inside a PINNED container, and the runner
+          # image is now irrelevant to their glibc floor. `build_container`
+          # sets the floor; `glibc_floor` is what we promise and what
+          # check_glibc_floor.py enforces. See
+          # .github/scripts/build-linux-release.sh for why these two images and
+          # not an older pair (short version: `NEEDED libssl.so.3`).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: wayland-core
+            build_container: almalinux:9
+            glibc_floor: "2.34"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary_name: wayland-core
-            use_cross: true
+            build_container: ubuntu:22.04
+            glibc_floor: "2.35"
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: wayland-core
@@ -85,14 +94,8 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
 
-      # Linux: mirror the setup that ci.yml's build: job uses. Native
-      # x86_64-unknown-linux-gnu needs libdbus-1-dev for the keyring crate's
-      # transitive `libdbus-sys` dep; without it the build fails with
-      # `pkg_config failed: dbus-1 not found` (release run 25961407439 for
-      # tag v0.2.3-wayland-base). Cross-compile aarch64 is handled by the
-      # cross docker image (Cross.toml pre-build) so doesn't need host libs.
       - name: Free disk space (drop unused preinstalled toolchains)
-        if: runner.os == 'Linux' && matrix.use_cross != true
+        if: runner.os == 'Linux'
         run: |
           set -e
           echo "=== BEFORE ==="; df -h /
@@ -106,19 +109,21 @@ jobs:
           sudo rm -rf /home/linuxbrew
           echo "=== AFTER ==="; df -h /
 
-      - name: Install Linux system deps (libdbus + libseccomp + libasound + mold linker)
-        if: runner.os == 'Linux' && matrix.use_cross != true
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
-
+      # Linux builds no longer install system deps on the RUNNER: they happen
+      # inside the pinned container (build-linux-release.sh installs the same
+      # libdbus-1-dev / libseccomp-dev / libasound2-dev / libssl-dev set there).
+      # Installing them here would be inert, since the compiler never sees the
+      # runner's sysroot. `mold` is dropped with them — nothing in
+      # .cargo/config.toml ever selected it as the linker.
       - name: Setup vx (installs Rust from vx.toml)
+        if: runner.os != 'Linux'
         uses: loonghao/vx@v0.9.17
         with:
           setup: 'true'
           cache: 'true'
 
       - name: Add cross-compile target
+        if: runner.os != 'Linux'
         run: rustup target add ${{ matrix.target }}
 
       - name: Fix MSVC linker (remove Git's link.exe)
@@ -131,18 +136,41 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
 
-      - name: Install cross (Linux aarch64)
-        if: matrix.use_cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build release binary
+      # `cross` is gone from the RELEASE path. It was only ever used for
+      # aarch64-linux, and its default image had itself moved to Ubuntu 24.04
+      # with a glibc 2.39 aarch64 sysroot — so the cross leg had exactly the
+      # same 2.39 floor as the native one, for the same reason. Pinning our own
+      # container is what fixes both legs, and it makes the floor explicit
+      # rather than inherited. ci.yml still uses cross, so Cross.toml stays.
+      - name: Build release binary (Linux, pinned container)
+        if: runner.os == 'Linux'
         shell: bash
+        env:
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          TARGET: ${{ matrix.target }}
+        run: .github/scripts/build-linux-release.sh "$BUILD_CONTAINER" "$TARGET"
+
+      # THE GATE. Without it the floor silently tracks the base image again the
+      # next time someone bumps it, and the first symptom is a user on a
+      # supported distro getting `version GLIBC_2.39 not found`. The self-test
+      # runs first so the gate is proved able to fail BEFORE it is trusted.
+      - name: Verify the glibc floor of the built binary
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          GLIBC_FLOOR: ${{ matrix.glibc_floor }}
         run: |
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} -p wcore-cli
-          else
-            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
-          fi
+          set -euo pipefail
+          python3 .github/scripts/check_glibc_floor.py --self-test
+          python3 .github/scripts/check_glibc_floor.py \
+            --binary "target/${TARGET}/release/wayland-core" \
+            --max-glibc "${GLIBC_FLOOR}"
+
+      - name: Build release binary (macOS / Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
