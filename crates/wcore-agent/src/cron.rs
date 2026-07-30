@@ -179,13 +179,24 @@ impl JobHandler for EngineJobHandler {
     /// outcome-unknown delivery may be retried. Only a channel target is a
     /// delivery at all; for anything else the question does not arise and the
     /// conservative answer is the correct one.
+    ///
+    /// # Answered per MESSAGE, because the guarantee is conditional
+    ///
+    /// `ChannelManager::send_to_keyed` transmits the delivery key only while the
+    /// body fits in one platform message; above `max_message_len` it splits the
+    /// body and sends the pieces unkeyed. So the per-adapter capability bit is
+    /// `true` for a send that carried no key, and a spine that retried on it
+    /// would duplicate. `Target::Channel` already carries the body, so the
+    /// honest question is available here at no cost.
     async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
         match target {
-            Target::Channel { channel_name, .. } => match &self.channels {
+            Target::Channel {
+                channel_name, text, ..
+            } => match &self.channels {
                 Some(mgr) => {
                     mgr.read()
                         .await
-                        .supports_outbound_idempotency(channel_name)
+                        .supports_outbound_idempotency_for(channel_name, text)
                         .await
                 }
                 None => false,

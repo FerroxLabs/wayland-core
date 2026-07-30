@@ -955,7 +955,15 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
     // did land, the destination suppresses this one. On a destination that
     // cannot, it changes nothing — and that is precisely the case
     // `--confirm-not-delivered` exists to gate.
-    let dedupes = manager.supports_outbound_idempotency(&channel_name).await;
+    // PER-MESSAGE, not per-adapter. The cap-blind form answers about the
+    // adapter, and `send_to_keyed` drops the key when the body exceeds
+    // `max_message_len` — so on an over-cap body the old question returned
+    // `true` and this verb PRINTED "replay-safe: yes" about a send that had
+    // carried no key at all. That is the false guarantee reaching the operator,
+    // at the exact moment they are deciding whether a duplicate is possible.
+    let dedupes = manager
+        .supports_outbound_idempotency_for(&channel_name, &text)
+        .await;
     let msg = wcore_channels_registry::wcore_channels::OutgoingMessage::text(
         channel_name.clone(),
         text.clone(),
@@ -980,11 +988,21 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
 
     println!("Re-sent {id} to {channel_name}.");
     println!("  receipt:      {}", receipt.id);
+    // Two different reasons to print "no", and they call for different
+    // operator action, so they are not collapsed into one sentence: an adapter
+    // that cannot deduplicate at all is a permanent property of the platform,
+    // whereas an over-cap body is a property of THIS message that a shorter one
+    // would not have.
+    let adapter_dedupes = manager.supports_outbound_idempotency(&channel_name).await;
     println!(
         "  replay-safe:  {}",
         if dedupes {
             "yes — the destination honours the delivery key, so a landed first copy \
              suppressed this one"
+        } else if adapter_dedupes {
+            "no — this body exceeds the platform's single-message cap, so it was sent as \
+             several messages and NO delivery key rode with them. The destination would have \
+             honoured a key; it never received one. If the first copy did land, there are now two"
         } else {
             "no — this destination cannot recognise a replay; if the first copy did land, \
              there are now two"
