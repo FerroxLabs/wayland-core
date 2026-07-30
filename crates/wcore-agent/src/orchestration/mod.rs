@@ -3406,6 +3406,237 @@ fn partition<'a>(registry: &ToolRegistry, calls: &'a [ContentBlock]) -> Vec<Batc
     batches
 }
 
+/// Tests for [`partition`], the SOLE production consumer of
+/// `Tool::is_concurrency_safe`.
+///
+/// Before this module, `partition` had no test at all: it is private, so
+/// integration tests cannot reach it, and every other reference to
+/// `is_concurrency_safe` in the workspace is a tool asserting its own
+/// declaration back at itself. The one behavioural-looking test elsewhere
+/// drives two `MockTool`s — and a mock with no shared state cannot exhibit
+/// interference by construction, which is precisely what let
+/// `DocExtractTool`'s false "read-only" declaration survive.
+///
+/// So these tests use REAL registered tools and real declarations.
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use serde_json::json;
+    use wcore_tools::doc_tool::DocExtractTool;
+    use wcore_tools::git::GitTool;
+    use wcore_tools::glob::GlobTool;
+    use wcore_tools::grep::GrepTool;
+    use wcore_tools::write::WriteTool;
+
+    fn call(name: &str, input: serde_json::Value) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: format!("id-{name}-{input}"),
+            name: name.to_string(),
+            input,
+            extra: None,
+        }
+    }
+
+    fn real_registry() -> ToolRegistry {
+        let mut r = ToolRegistry::new();
+        r.register(Box::new(GlobTool));
+        r.register(Box::new(GrepTool));
+        r.register(Box::new(GitTool));
+        r.register(Box::new(DocExtractTool::new()));
+        r.register(Box::new(WriteTool::new(None)));
+        r
+    }
+
+    /// Shape helper: (is_concurrent, [tool names]) per batch.
+    fn shape(batches: &[Batch<'_>]) -> Vec<(bool, Vec<String>)> {
+        batches
+            .iter()
+            .map(|b| {
+                (
+                    b.is_concurrent,
+                    b.calls
+                        .iter()
+                        .map(|c| match c {
+                            ContentBlock::ToolUse { name, .. } => name.clone(),
+                            _ => "??".to_string(),
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// CONTROL, both directions (LANE-BRIEF 3b-iii). Before trusting any
+    /// batching assertion, prove the registry really disagrees about these
+    /// tools — otherwise every test below could be passing on a registry that
+    /// answers the same way for everything.
+    #[test]
+    fn registry_declarations_are_not_all_the_same() {
+        let r = real_registry();
+        let safe = r
+            .get("Glob")
+            .expect("glob registered")
+            .is_concurrency_safe(&json!({}));
+        let unsafe_ = r
+            .get("Write")
+            .expect("write registered")
+            .is_concurrency_safe(&json!({}));
+        assert!(safe, "known-positive: glob must declare concurrency-safe");
+        assert!(
+            !unsafe_,
+            "known-negative: write must declare NOT concurrency-safe"
+        );
+    }
+
+    #[test]
+    fn adjacent_safe_real_tools_share_one_concurrent_batch() {
+        let r = real_registry();
+        let calls = vec![
+            call("Glob", json!({"pattern": "**/*.rs"})),
+            call("Grep", json!({"pattern": "fn ", "path": "."})),
+        ];
+        let got = shape(&partition(&r, &calls));
+        assert_eq!(
+            got,
+            vec![(true, vec!["Glob".to_string(), "Grep".to_string()])],
+            "two real concurrency-safe tools must merge into ONE parallel batch"
+        );
+    }
+
+    #[test]
+    fn an_unsafe_real_tool_breaks_the_concurrent_run() {
+        let r = real_registry();
+        let calls = vec![
+            call("Glob", json!({"pattern": "*"})),
+            call("Write", json!({"path": "/x", "content": "y"})),
+            call("Grep", json!({"pattern": "z", "path": "."})),
+        ];
+        let got = shape(&partition(&r, &calls));
+        assert_eq!(
+            got,
+            vec![
+                (true, vec!["Glob".to_string()]),
+                (false, vec!["Write".to_string()]),
+                (true, vec!["Grep".to_string()]),
+            ],
+            "a NOT-safe tool must terminate the batch and start its own"
+        );
+    }
+
+    /// `partition` passes the call's INPUT to `is_concurrency_safe`, so a tool
+    /// whose safety is input-dependent must be batched per-invocation.
+    /// `GitTool` is real and genuinely input-dependent: read-only ops are safe,
+    /// mutating ops are not.
+    #[test]
+    fn input_dependent_real_tool_is_batched_per_invocation() {
+        let r = real_registry();
+        let calls = vec![
+            call("Git", json!({"op": "status"})),
+            call("Git", json!({"op": "log"})),
+            call("Git", json!({"op": "commit", "message": "m"})),
+            call("Git", json!({"op": "diff"})),
+        ];
+        let got = shape(&partition(&r, &calls));
+        assert_eq!(
+            got,
+            vec![
+                (true, vec!["Git".to_string(), "Git".to_string()]),
+                (false, vec!["Git".to_string()]),
+                (true, vec!["Git".to_string()]),
+            ],
+            "same tool NAME, different inputs -> different batching; partition \
+             must consult the input, not just the name"
+        );
+    }
+
+    /// An unknown tool defaults to NOT concurrency-safe (`unwrap_or(false)`).
+    #[test]
+    fn unknown_tool_is_not_batched_concurrently() {
+        let r = real_registry();
+        let calls = vec![
+            call("Glob", json!({"pattern": "*"})),
+            call("no_such_tool_exists", json!({})),
+        ];
+        let got = shape(&partition(&r, &calls));
+        assert_eq!(
+            got,
+            vec![
+                (true, vec!["Glob".to_string()]),
+                (false, vec!["no_such_tool_exists".to_string()]),
+            ],
+            "fail-closed: an unregistered name must not join a parallel batch"
+        );
+    }
+
+    /// Non-`ToolUse` blocks are skipped entirely rather than forming batches.
+    #[test]
+    fn non_tool_use_blocks_are_ignored() {
+        let r = real_registry();
+        let calls = vec![
+            ContentBlock::Text {
+                text: "thinking".to_string(),
+            },
+            call("Glob", json!({"pattern": "*"})),
+        ];
+        let got = shape(&partition(&r, &calls));
+        assert_eq!(got, vec![(true, vec!["Glob".to_string()])]);
+    }
+
+    /// THE REGRESSION GUARD tying this module to the defect that motivated it.
+    ///
+    /// `doc_extract` declares itself concurrency-safe AND writes a
+    /// full-document artifact to a shared, content-addressed path. That
+    /// combination is only sound because the write is atomic
+    /// (see `wcore_tools::doc_tool::write_doc_artifact`). This test pins the
+    /// consequence that makes the atomicity load-bearing: `partition` really
+    /// does place `doc_extract` into a PARALLEL batch with a sibling, so two
+    /// `doc_extract` calls in one assistant turn genuinely execute
+    /// concurrently.
+    ///
+    /// If anyone flips `doc_extract` to not-safe, this test fails and points at
+    /// the doc_tool comment explaining the two properties involved.
+    #[test]
+    fn doc_extract_really_is_placed_in_a_parallel_batch() {
+        let r = real_registry();
+        let calls = vec![
+            call("doc_extract", json!({"path": "/a.docx"})),
+            call("doc_extract", json!({"path": "/b.docx"})),
+        ];
+        let batches = partition(&r, &calls);
+        assert_eq!(batches.len(), 1, "must be a single batch");
+        assert!(
+            batches[0].is_concurrent,
+            "doc_extract is declared concurrency-safe, so partition batches it \
+             for PARALLEL execution -- its artifact write must therefore be \
+             atomic (see wcore_tools::doc_tool::write_doc_artifact)"
+        );
+        assert_eq!(batches[0].calls.len(), 2);
+    }
+
+    /// `durable_tool_call_ordinal` relies on `partition` retaining references
+    /// INTO the original slice (it uses `std::ptr::eq`); it panics otherwise.
+    /// That invariant was documented in an `expect` string and never tested.
+    #[test]
+    fn partition_retains_pointers_into_the_original_slice() {
+        let r = real_registry();
+        let calls = vec![
+            call("Glob", json!({"pattern": "*"})),
+            call("Write", json!({"path": "/x", "content": "y"})),
+        ];
+        let batches = partition(&r, &calls);
+        for batch in &batches {
+            for c in &batch.calls {
+                assert!(
+                    calls.iter().any(|orig| std::ptr::eq(orig, *c)),
+                    "batch must borrow from the original slice, not a copy"
+                );
+            }
+        }
+        // And the ordinal helper therefore resolves without panicking.
+        assert_eq!(durable_tool_call_ordinal(None, &calls, &calls[1]), 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

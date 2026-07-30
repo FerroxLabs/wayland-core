@@ -1,0 +1,5 @@
+glob.rs        name() -> "Glob"
+grep.rs        name() -> "Grep"
+git.rs         name() -> "Git"
+write.rs       name() -> "Write"
+doc_tool.rs    name() -> "doc_extract"

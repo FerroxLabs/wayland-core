@@ -1,0 +1,10 @@
+mod-decl: pub mod git;
+mod-decl: pub mod glob;
+mod-decl: pub mod write;
+mod-decl: pub mod doc_tool;
+mod-decl: pub mod read;
+mod-decl: pub mod grep;
+mod-decl: pub mod bash;
+--- pub use lines mentioning our tools ---
+--- does wcore-agent depend on wcore-tools? ---
+  wcore-tools.workspace     = true

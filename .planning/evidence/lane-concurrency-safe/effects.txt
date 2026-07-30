@@ -1,0 +1,101 @@
+TARGETS=34
+
+--- CONTROLS (known-positive, same invocation) ---
+CONTROL crates/wcore-tools/src/write.rs          hits=9 labels=['FS_CREATE_DIR', 'FS_REMOVE', 'FS_RENAME', 'FS_WRITE', 'SUSPECT_WRITE_HELPER']
+CONTROL crates/wcore-tools/src/edit.rs           hits=5 labels=['DELEGATED_ATOMIC_WRITE', 'SUSPECT_WRITE_HELPER']
+CONTROLS_ALIVE=YES
+
+
+FILE crates/wcore-agent/src/plan/tools.rs  decl_lines=[53, 133]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/ask_user_question.rs  decl_lines=[92]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/aws_cli_tool.rs  decl_lines=[355]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/clarify.rs  decl_lines=[87]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/doc_tool.rs  decl_lines=[215]
+  EFFECT FS_CREATE_DIR      lines=[399]
+  EFFECT FS_WRITE           lines=[401]
+  EFFECT SUSPECT_WRITE_HELPER lines=[363, 389]
+  EFFECT TEMP_DIR           lines=[398]
+
+FILE crates/wcore-tools/src/email_parse_tool.rs  decl_lines=[261]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/gcloud_tool.rs  decl_lines=[309]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/glob.rs  decl_lines=[48]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/google_meet_tool.rs  decl_lines=[733, 829]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/grep.rs  decl_lines=[56]
+  EFFECT PROC_SPAWN         lines=[168, 226, 237]
+
+FILE crates/wcore-tools/src/image_generation_tool.rs  decl_lines=[463]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/image_inspect_tool.rs  decl_lines=[250]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/jsonl_tool.rs  decl_lines=[143]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/kubectl_tool.rs  decl_lines=[296]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/linear_tool.rs  decl_lines=[427]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/markdown_tool.rs  decl_lines=[371]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/osv_check.rs  decl_lines=[442]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/pdf_tool.rs  decl_lines=[194]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/postgres_schema_tool.rs  decl_lines=[366]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/read.rs  decl_lines=[155]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/repomap.rs  decl_lines=[72]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/session_search.rs  decl_lines=[96]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/spotify_tool.rs  decl_lines=[988, 1267]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/sql_query_tool.rs  decl_lines=[297]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/tool_search.rs  decl_lines=[53]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/transcription_tools.rs  decl_lines=[457]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/video_analyze_tool.rs  decl_lines=[339]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/vision_tools.rs  decl_lines=[473]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/wayland_introspection.rs  decl_lines=[373, 435]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/web_tools.rs  decl_lines=[753]
+  EFFECTS none-detected
+rc=0
