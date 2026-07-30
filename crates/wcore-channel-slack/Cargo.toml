@@ -26,4 +26,4 @@ wcore-config = { workspace = true }
 [dev-dependencies]
 mockito = "1"
 toml = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "net"] }

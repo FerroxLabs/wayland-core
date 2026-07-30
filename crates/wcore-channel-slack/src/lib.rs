@@ -39,6 +39,15 @@ pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBound
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long `start()` will wait for Slack to answer the credential question
+/// before giving up and connecting WITHOUT a verdict.
+///
+/// Deliberately far below the egress client's 300s read timeout: this call sits
+/// on the gateway's startup path, so its worst case is startup latency for
+/// every channel behind it.
+const AUTH_TEST_BUDGET: Duration = Duration::from_secs(10);
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -197,7 +206,25 @@ impl Channel for SlackChannel {
         // the credential in front of the platform. Without this call, `start()`
         // proved only that a STRING was present in the credential store, and a
         // revoked token reported `Healthy` indefinitely (UAT-C2).
-        match api::auth_test(&self.http, &self.config.api_base_url, &bot_token).await {
+        // Bounded on purpose. This runs inside the gateway's channel-startup
+        // path, and the shared egress client's read timeout is 300s — long
+        // enough that one unresponsive slack.com would stall the whole boot.
+        // A timeout is explicitly NOT a credential verdict; it takes the same
+        // "could not be completed" branch as any other unreachability.
+        let probe = tokio::time::timeout(
+            AUTH_TEST_BUDGET,
+            api::auth_test(&self.http, &self.config.api_base_url, &bot_token),
+        )
+        .await;
+        let probe = match probe {
+            Ok(r) => r,
+            Err(_elapsed) => Err(SlackError::Http(format!(
+                "auth.test exceeded its {}s startup budget",
+                AUTH_TEST_BUDGET.as_secs()
+            ))),
+        };
+
+        match probe {
             Ok(identity) => {
                 tracing::info!(
                     target: "wcore_channel_slack",
@@ -733,6 +760,48 @@ mod tests {
             "a 5xx says nothing about the credential and must publish no AuthExpired"
         );
         assert_eq!(connected, 1);
+    }
+
+    /// A Slack that accepts the connection and never answers must not hang the
+    /// gateway's startup path, and must not be mistaken for a rejection.
+    ///
+    /// Without [`AUTH_TEST_BUDGET`] this inherits the egress client's 300s read
+    /// timeout, so one unresponsive workspace would stall the boot of every
+    /// channel behind it.
+    #[tokio::test]
+    async fn a_slack_that_never_answers_is_bounded_and_is_not_a_rejection() {
+        // Accept the TCP connection, then say nothing at all — the shape a
+        // 5xx mock cannot produce.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s); // hold the socket open, never reply
+            }
+        });
+
+        let mut ch = SlackChannel::new(
+            "test",
+            cfg_for(&format!("http://127.0.0.1:{port}")),
+            store_for_test(),
+        );
+        let began = std::time::Instant::now();
+        ch.start()
+            .await
+            .expect("a stalled probe must not fail start");
+        let took = began.elapsed();
+
+        assert!(
+            took < AUTH_TEST_BUDGET * 3,
+            "start() took {took:?}; the auth.test budget is not being enforced"
+        );
+        let (expired, connected) = auth_events_of(&ch).await;
+        assert_eq!(
+            expired, 0,
+            "a silent server says nothing about the credential"
+        );
+        assert_eq!(connected, 1, "the channel must still come up");
     }
 
     /// Mid-run revocation. A token that authenticated at start() and is later
