@@ -1,0 +1,830 @@
+﻿cargo :    Compiling proc-macro2 v1.0.106
+At line:1 char:64
++ ... target-c3"; cargo test -p wcore-cli --test child_authority_corpus --  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling windows-link v0.2.1
+   Compiling memchr v2.8.1
+   Compiling itoa v1.0.18
+   Compiling log v0.4.30
+   Compiling version_check v0.9.5
+   Compiling once_cell v1.21.4
+   Compiling typenum v1.20.1
+   Compiling libm v0.2.16
+   Compiling bytes v1.11.1
+   Compiling pin-project-lite v0.2.17
+   Compiling getrandom v0.3.4
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling equivalent v1.0.2
+   Compiling subtle v2.6.1
+   Compiling allocator-api2 v0.2.21
+   Compiling futures-core v0.3.32
+   Compiling autocfg v1.5.1
+   Compiling zeroize v1.8.2
+   Compiling shlex v2.0.1
+   Compiling foldhash v0.2.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling futures-sink v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling windows-sys v0.61.2
+   Compiling getrandom v0.2.17
+   Compiling lock_api v0.4.14
+   Compiling thiserror v2.0.18
+   Compiling tracing-core v0.1.36
+   Compiling ryu v1.0.23
+   Compiling zmij v1.0.21
+   Compiling rand_core v0.6.4
+   Compiling futures-channel v0.3.32
+   Compiling cpufeatures v0.2.17
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling fnv v1.0.7
+   Compiling ipnet v2.12.0
+   Compiling serde_json v1.0.150
+   Compiling either v1.16.0
+   Compiling rand_core v0.10.1
+   Compiling libc v0.2.186
+   Compiling base64 v0.22.1
+   Compiling getrandom v0.4.2
+   Compiling generic-array v0.14.7
+   Compiling percent-encoding v2.3.2
+   Compiling hashbrown v0.17.1
+   Compiling fs_extra v1.3.0
+   Compiling zerocopy v0.8.50
+   Compiling dunce v1.0.5
+   Compiling anyhow v1.0.103
+   Compiling aws-lc-rs v1.17.0
+   Compiling rustls-pki-types v1.14.1
+   Compiling http v1.4.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling untrusted v0.9.0
+   Compiling num-traits v0.2.19
+   Compiling untrusted v0.7.1
+   Compiling httparse v1.10.1
+   Compiling tower-service v0.3.3
+   Compiling regex-syntax v0.8.10
+   Compiling rustls v0.23.40
+   Compiling form_urlencoded v1.2.2
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling fastrand v2.4.1
+   Compiling httpdate v1.0.3
+   Compiling tower-layer v0.3.3
+   Compiling writeable v0.6.3
+   Compiling winnow v1.0.3
+   Compiling litemap v0.8.2
+   Compiling webpki-roots v1.0.7
+   Compiling aho-corasick v1.1.4
+   Compiling sync_wrapper v1.0.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling jobserver v0.1.34
+   Compiling http-body v1.0.1
+   Compiling want v0.3.1
+   Compiling utf8_iter v1.0.4
+   Compiling workspace-hack v0.1.0 (D:\wls\repo-cron\workspace-hack)
+   Compiling windows-targets v0.52.6
+   Compiling base64ct v1.8.3
+   Compiling option-ext v0.2.0
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling unicase v2.9.0
+   Compiling mime v0.3.17
+   Compiling byteorder v1.5.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling ahash v0.8.12
+   Compiling pkg-config v0.3.33
+   Compiling vcpkg v0.2.15
+   Compiling http-body-util v0.1.3
+   Compiling powerfmt v0.2.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling cc v1.2.63
+   Compiling windows-sys v0.59.0
+   Compiling fallible-iterator v0.3.0
+   Compiling time-core v0.1.8
+   Compiling unsafe-libyaml v0.2.11
+   Compiling syn v2.0.117
+   Compiling mime_guess v2.0.5
+   Compiling deranged v0.5.8
+   Compiling opaque-debug v0.3.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling block-padding v0.3.3
+   Compiling password-hash v0.5.0
+   Compiling glob v0.3.3
+   Compiling io-lifetimes v2.0.4
+   Compiling sha1_smol v1.0.1
+   Compiling io-extras v0.18.4
+   Compiling ambient-authority v0.0.2
+   Compiling crc32fast v1.5.0
+   Compiling time-macros v0.2.27
+   Compiling universal-hash v0.5.1
+   Compiling digest v0.10.7
+   Compiling inout v0.1.4
+   Compiling aead v0.5.2
+   Compiling cap-primitives v3.4.5
+   Compiling maybe-owned v0.3.4
+   Compiling heck v0.5.0
+   Compiling cap-std v3.4.5
+   Compiling semver v1.0.28
+   Compiling windows-targets v0.53.5
+   Compiling cipher v0.4.4
+   Compiling poly1305 v0.8.0
+   Compiling windows-sys v0.60.2
+   Compiling sha2 v0.10.9
+   Compiling blake2 v0.10.6
+   Compiling cpufeatures v0.3.0
+   Compiling rustversion v1.0.22
+   Compiling bumpalo v3.20.3
+   Compiling filetime v0.2.29
+   Compiling winsafe v0.0.19
+   Compiling http v0.2.12
+   Compiling regex-automata v0.4.14
+   Compiling outref v0.5.2
+   Compiling simd-adler32 v0.3.9
+   Compiling cmake v0.1.58
+   Compiling chacha20 v0.9.1
+   Compiling vsimd v0.8.0
+   Compiling tar v0.4.46
+   Compiling argon2 v0.5.3
+   Compiling num-integer v0.1.46
+   Compiling bytes-utils v0.1.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling bitflags v2.11.1
+   Compiling indexmap v2.14.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling chacha20poly1305 v0.10.1
+   Compiling serde_ignored v0.1.14
+   Compiling uuid v1.23.2
+   Compiling pin-utils v0.1.0
+   Compiling const-oid v0.9.6
+   Compiling hybrid-array v0.4.12
+   Compiling encoding_rs v0.8.35
+   Compiling base64-simd v0.8.0
+   Compiling adler2 v2.0.1
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling cmov v0.5.4
+   Compiling zlib-rs v0.6.6
+   Compiling rustc_version v0.4.1
+   Compiling schemars v0.8.22
+   Compiling tinyvec_macros v0.1.1
+   Compiling miniz_oxide v0.8.9
+   Compiling http-body v0.4.6
+   Compiling crossbeam-epoch v0.9.20
+   Compiling const-oid v0.10.2
+   Compiling time v0.3.47
+   Compiling ctutils v0.4.2
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.0
+   Compiling tinyvec v1.11.0
+   Compiling aws-lc-sys v0.41.0
+   Compiling ring v0.17.14
+   Compiling libsqlite3-sys v0.30.1
+   Compiling hmac v0.12.1
+   Compiling cranelift-srcgen v0.123.12
+   Compiling dyn-clone v1.0.20
+   Compiling der v0.6.1
+   Compiling chacha20 v0.10.0
+   Compiling rand_core v0.9.5
+   Compiling inventory v0.3.24
+   Compiling strsim v0.11.1
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling cranelift-assembler-x64-meta v0.123.12
+   Compiling static_assertions v1.1.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling unicode-normalization v0.1.25
+   Compiling keyring v3.6.3
+   Compiling unicode-width v0.2.2
+   Compiling digest v0.11.3
+   Compiling rand v0.10.1
+   Compiling spki v0.6.0
+   Compiling crypto-bigint v0.4.9
+   Compiling itertools v0.14.0
+   Compiling nom v8.0.0
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling fd-lock v4.0.4
+   Compiling rtoolbox v0.0.5
+   Compiling fs-set-times v0.20.3
+   Compiling winx v0.36.4
+   Compiling stringprep v0.1.5
+   Compiling crossbeam-deque v0.8.6
+   Compiling pkcs8 v0.9.0
+   Compiling ff v0.12.1
+   Compiling winapi v0.3.9
+   Compiling foldhash v0.1.5
+   Compiling cranelift-isle v0.123.12
+   Compiling base16ct v0.1.1
+   Compiling weezl v0.1.12
+   Compiling cranelift-bitset v0.123.12
+   Compiling windows-link v0.1.3
+   Compiling hex v0.4.3
+   Compiling group v0.12.1
+   Compiling sqlite-vec v0.1.9
+   Compiling target-lexicon v0.13.5
+   Compiling cranelift-codegen-shared v0.123.12
+   Compiling rfc6979 v0.3.1
+   Compiling flate2 v1.1.9
+   Compiling hashbrown v0.15.5
+   Compiling sec1 v0.3.0
+   Compiling quick-xml v0.41.0
+   Compiling zopfli v0.8.3
+   Compiling signature v1.6.4
+   Compiling bstr v1.12.1
+   Compiling zune-core v0.5.1
+   Compiling quick-error v2.0.1
+   Compiling humantime v2.3.0
+   Compiling lazy_static v1.5.0
+   Compiling pom v1.1.0
+   Compiling elliptic-curve v0.12.3
+   Compiling bytemuck v1.25.0
+   Compiling zune-jpeg v0.5.15
+   Compiling windows-result v0.3.4
+   Compiling windows-strings v0.4.2
+   Compiling aws-types v1.3.16
+   Compiling gimli v0.32.3
+   Compiling fdeflate v0.3.7
+   Compiling ecb v0.1.2
+   Compiling ecdsa v0.14.8
+   Compiling cbc v0.1.2
+   Compiling aes v0.8.4
+   Compiling md-5 v0.10.6
+   Compiling sha1 v0.10.6
+   Compiling wasmtime-internal-math v36.0.12
+   Compiling arbitrary v1.4.2
+   Compiling debug_unsafe v0.1.4
+   Compiling typed-path v0.12.3
+   Compiling regex v1.12.3
+   Compiling globset v0.4.18
+   Compiling pxfm v0.1.29
+   Compiling rustc-hash v2.1.2
+   Compiling color_quant v1.1.0
+   Compiling signature v2.2.0
+   Compiling rangemap v1.7.1
+   Compiling zip v2.4.2
+   Compiling ttf-parser v0.25.1
+   Compiling thiserror v1.0.69
+   Compiling byteorder-lite v0.1.0
+   Compiling fax v0.2.7
+   Compiling gif v0.14.2
+   Compiling p256 v0.11.1
+   Compiling png v0.18.1
+   Compiling atoi_simd v0.18.1
+   Compiling type1-encoding-parser v0.1.1
+   Compiling wcore-plugin-api v0.12.25 (D:\wls\repo-cron\crates\wcore-plugin-api)
+   Compiling image-webp v0.2.4
+   Compiling adobe-cmap-parser v0.4.1
+   Compiling codepage v0.1.2
+   Compiling euclid v0.20.14
+   Compiling csv-core v0.1.13
+   Compiling crypto-bigint v0.5.5
+   Compiling wasmparser v0.236.1
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling cranelift-control v0.123.12
+   Compiling ident_case v1.0.1
+   Compiling mutate_once v0.1.2
+   Compiling cranelift-assembler-x64 v0.123.12
+   Compiling zip v8.6.0
+   Compiling postscript v0.14.1
+   Compiling fast-float2 v0.2.3
+   Compiling utf8parse v0.2.2
+   Compiling object v0.37.3
+   Compiling cff-parser v0.2.0
+   Compiling darling_core v0.23.0
+   Compiling kamadak-exif v0.6.1
+   Compiling csv v1.4.0
+   Compiling lru v0.18.0
+   Compiling hashbrown v0.16.1
+   Compiling wasm-encoder v0.236.1
+   Compiling bitflags v1.3.2
+   Compiling cap-fs-ext v3.4.5
+   Compiling castaway v0.2.4
+   Compiling num-bigint v0.4.6
+   Compiling regex-lite v0.1.9
+   Compiling unicode-xid v0.2.6
+   Compiling instability v0.3.12
+   Compiling lexical-core v0.7.6
+   Compiling indoc v2.0.7
+   Compiling wasmtime-internal-component-util v36.0.12
+   Compiling anstyle v1.0.14
+   Compiling moxcms v0.8.1
+   Compiling once_cell_polyfill v1.70.2
+   Compiling leb128fmt v0.1.0
+   Compiling id-arena v2.3.0
+   Compiling compact_str v0.9.1
+   Compiling lru v0.16.4
+   Compiling anstyle-parse v1.0.0
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling pem v3.0.6
+   Compiling nom v5.1.3
+   Compiling colorchoice v1.0.5
+   Compiling xmlparser v0.13.6
+   Compiling urlencoding v2.1.3
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling wasmtime-internal-component-macro v36.0.12
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling arrayvec v0.5.2
+   Compiling curve25519-dalek v4.1.3
+   Compiling wasmtime-internal-asm-macros v36.0.12
+   Compiling data-encoding v2.11.0
+   Compiling litrs v1.0.0
+   Compiling arrayvec v0.7.6
+   Compiling aws-smithy-xml v0.60.15
+   Compiling rustix v1.1.4
+   Compiling utf-8 v0.7.6
+   Compiling native-tls v0.2.18
+   Compiling clap_lex v1.1.0
+   Compiling crossterm_winapi v0.9.1
+   Compiling md-5 v0.11.0
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling notify-types v2.1.0
+   Compiling line-clipping v0.3.7
+   Compiling webpki-roots v0.26.11
+   Compiling minimal-lexical v0.2.1
+   Compiling wasmtime-internal-slab v36.0.12
+   Compiling rayon-core v1.13.0
+   Compiling flagset v0.4.7
+   Compiling fallible-iterator v0.2.0
+   Compiling document-features v0.2.12
+   Compiling siphasher v1.0.3
+   Compiling system-interface v0.27.3
+   Compiling ed25519 v2.2.3
+   Compiling windows-threading v0.1.0
+   Compiling blake3 v1.8.5
+   Compiling serde_path_to_error v0.1.20
+   Compiling email-encoding v0.4.1
+   Compiling matchit v0.7.3
+   Compiling nom v7.1.3
+   Compiling phf_shared v0.13.1
+   Compiling base64 v0.13.1
+   Compiling bufstream v0.1.4
+   Compiling postgres-protocol v0.6.12
+   Compiling email_address v0.2.9
+   Compiling quoted_printable v0.5.2
+   Compiling windows-result v0.1.2
+   Compiling ntapi v0.4.3
+   Compiling bit-vec v0.8.0
+   Compiling arrayref v0.3.9
+   Compiling cfg_aliases v0.1.1
+   Compiling phf v0.13.1
+   Compiling constant_time_eq v0.4.2
+   Compiling whoami v2.1.2
+   Compiling matchers v0.2.0
+   Compiling nix v0.28.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-log v0.2.0
+   Compiling bit-set v0.8.0
+   Compiling thread_local v1.1.9
+   Compiling pulldown-cmark v0.13.4
+   Compiling base64 v0.21.7
+   Compiling psl-types v2.0.11
+   Compiling winreg v0.10.1
+   Compiling nucleo-matcher v0.3.1
+   Compiling getopts v0.2.24
+   Compiling rayon v1.12.0
+   Compiling psl v2.1.212
+   Compiling fancy-regex v0.16.2
+   Compiling crossbeam-channel v0.5.15
+   Compiling tower-http v0.5.2
+   Compiling vte_generate_state_changes v0.1.2
+   Compiling windows-sys v0.52.0
+   Compiling smawk v0.3.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling open v5.3.5
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling pulldown-cmark-escape v0.11.0
+   Compiling wcore-cli v0.12.25 (D:\wls\repo-cron\crates\wcore-cli)
+   Compiling symlink v0.1.0
+   Compiling shared_library v0.1.9
+   Compiling vte v0.11.1
+   Compiling itertools v0.10.5
+   Compiling textwrap v0.16.2
+   Compiling plotters-svg v0.3.7
+   Compiling deadpool-runtime v0.1.4
+   Compiling shell-words v1.1.1
+   Compiling downcast-rs v1.2.1
+   Compiling cast v0.3.0
+   Compiling num_cpus v1.17.0
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling zerocopy-derive v0.8.50
+   Compiling async-trait v0.1.89
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling displaydoc v0.2.6
+   Compiling zerovec-derive v0.11.3
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling schemars_derive v0.8.22
+   Compiling pulley-macros v36.0.12
+   Compiling windows-implement v0.60.2
+   Compiling wasmtime-internal-versioned-export-macros v36.0.12
+   Compiling windows-interface v0.59.3
+   Compiling hashify v0.2.9
+   Compiling thiserror-impl v1.0.69
+   Compiling strum_macros v0.27.2
+   Compiling derive_more-impl v2.1.1
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling pulley-interpreter v36.0.12
+   Compiling der_derive v0.7.3
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling wasmtime v36.0.12
+   Compiling clap_derive v4.6.1
+   Compiling imap-proto v0.10.2
+   Compiling axum-macros v0.4.2
+   Compiling tracing v0.1.44
+   Compiling zerofrom v0.1.8
+   Compiling windows-core v0.61.2
+   Compiling windows-interface v0.57.0
+   Compiling derive_more v2.1.1
+   Compiling mail-parser v0.11.3
+   Compiling futures-util v0.3.32
+   Compiling windows-implement v0.57.0
+   Compiling unicode-width v0.1.14
+   Compiling der v0.7.10
+   Compiling criterion-plot v0.5.0
+   Compiling cranelift-codegen-meta v0.123.12
+   Compiling serial_test_derive v3.5.0
+   Compiling plotters v0.3.7
+   Compiling yoke v0.8.2
+   Compiling iana-time-zone v0.1.65
+   Compiling windows-future v0.2.1
+   Compiling windows-numerics v0.2.0
+   Compiling windows-collections v0.2.0
+   Compiling oorandom v11.1.5
+   Compiling darling_macro v0.23.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling cap-time-ext v3.4.5
+   Compiling filedescriptor v0.8.3
+   Compiling windows v0.61.3
+   Compiling lopdf v0.42.0
+   Compiling cobs v0.3.0
+   Compiling simple_asn1 v0.6.4
+   Compiling strum v0.27.2
+   Compiling kasuari v0.4.12
+   Compiling ed25519-dalek v2.2.0
+   Compiling vt100 v0.15.2
+   Compiling similar v2.7.0
+   Compiling anes v0.1.6
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling spki v0.7.3
+   Compiling darling v0.23.0
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling windows-core v0.57.0
+   Compiling x509-cert v0.2.5
+   Compiling ratatui-core v0.1.0
+   Compiling cranelift-codegen v0.123.12
+   Compiling icu_provider v2.2.0
+   Compiling utoipa-gen v5.5.0
+   Compiling icu_properties v2.2.0
+   Compiling futures-executor v0.3.32
+   Compiling axum-core v0.4.5
+   Compiling windows v0.57.0
+   Compiling ratatui-widgets v0.3.0
+   Compiling smallvec v1.15.1
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling wcore-compact v0.12.25 (D:\wls\repo-cron\crates\wcore-compact)
+   Compiling wcore-safety v0.12.25 (D:\wls\repo-cron\crates\wcore-safety)
+   Compiling humantime-serde v1.1.1
+   Compiling calamine v0.36.1
+   Compiling icu_normalizer v2.2.0
+   Compiling futures v0.3.32
+   Compiling cranelift-entity v0.123.12
+   Compiling regalloc2 v0.12.2
+   Compiling postcard v1.1.3
+   Compiling ron v0.8.1
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling cranelift-bforest v0.123.12
+   Compiling wcore-types v0.12.25 (D:\wls\repo-cron\crates\wcore-types)
+   Compiling idna v1.1.0
+   Compiling wcore-budget v0.12.25 (D:\wls\repo-cron\crates\wcore-budget)
+   Compiling crossterm v0.29.0
+   Compiling postgres-types v0.2.14
+   Compiling url v2.5.8
+   Compiling cron v0.12.1
+   Compiling plist v1.10.0
+   Compiling bincode v1.3.3
+   Compiling ratatui-crossterm v0.1.0
+   Compiling nucleo v0.5.0
+   Compiling assert-json-diff v2.0.2
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling schannel v0.1.29
+   Compiling dirs-sys v0.5.0
+   Compiling tempfile v3.27.0
+   Compiling rpassword v7.5.2
+   Compiling winapi-util v0.1.11
+   Compiling home v0.5.12
+   Compiling pdf-extract v0.12.0
+   Compiling anstyle-query v1.1.5
+   Compiling dirs v6.0.0
+   Compiling which v6.0.3
+   Compiling same-file v1.0.6
+   Compiling termcolor v1.4.1
+   Compiling anstyle-wincon v3.0.11
+   Compiling tokio v1.52.3
+   Compiling rustls-native-certs v0.8.4
+   Compiling errno v0.3.14
+   Compiling ratatui-macros v0.7.0
+   Compiling walkdir v2.5.0
+   Compiling anstream v1.0.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling is-terminal v0.4.17
+   Compiling ignore v0.4.25
+   Compiling notify v8.2.0
+   Compiling imap v2.4.1
+   Compiling ratatui v0.30.0
+   Compiling syntect v5.3.0
+   Compiling self-replace v1.5.0
+   Compiling tui-tree-widget v0.24.0
+   Compiling clap_builder v4.6.0
+   Compiling tui-input v0.15.3
+   Compiling serial2 v0.2.37
+   Compiling colored v3.1.1
+   Compiling cap-net-ext v3.4.5
+   Compiling tracing-subscriber v0.3.23
+   Compiling tinytemplate v1.2.1
+   Compiling serial_test v3.5.0
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.1
+   Compiling tracing-appender v0.2.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling rand_chacha v0.3.1
+   Compiling hashbrown v0.14.5
+   Compiling wcore-protocol v0.12.25 (D:\wls\repo-cron\crates\wcore-protocol)
+   Compiling aws-smithy-async v1.2.14
+   Compiling rand_chacha v0.9.0
+   Compiling tiff v0.11.3
+   Compiling wcore-cron v0.12.25 (D:\wls\repo-cron\crates\wcore-cron)
+   Compiling wcore-user-model v0.12.25 (D:\wls\repo-cron\crates\wcore-user-model)
+   Compiling ciborium-ll v0.2.2
+   Compiling deadpool v0.12.3
+   Compiling h2 v0.4.14
+   Compiling tower-http v0.6.11
+   Compiling rand v0.8.6
+   Compiling hashlink v0.9.1
+   Compiling wcore-sandbox v0.12.25 (D:\wls\repo-cron\crates\wcore-sandbox)
+   Compiling aws-smithy-types v1.4.9
+   Compiling rand v0.9.4
+   Compiling tokio-postgres v0.7.18
+   Compiling utoipa v5.5.0
+   Compiling ciborium v0.2.2
+   Compiling rusqlite v0.32.1
+   Compiling image v0.25.10
+   Compiling cap-rand v3.4.5
+   Compiling rand_distr v0.5.1
+   Compiling criterion v0.5.1
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling wcore-repomap v0.12.25 (D:\wls\repo-cron\crates\wcore-repomap)
+   Compiling aws-smithy-query v0.60.15
+   Compiling wcore-permissions v0.12.25 (D:\wls\repo-cron\crates\wcore-permissions)
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-sigv4 v1.4.3
+   Compiling aws-smithy-json v0.62.7
+   Compiling wit-parser v0.236.1
+   Compiling wasmtime-internal-wit-bindgen v36.0.12
+   Compiling hyper v1.10.1
+   Compiling wasmprinter v0.236.1
+   Compiling hyper-util v0.1.20
+   Compiling wasmtime-environ v36.0.12
+   Compiling axum v0.7.9
+   Compiling mockito v1.7.2
+   Compiling wiremock v0.6.5
+   Compiling rustls-webpki v0.103.13
+   Compiling jsonwebtoken v10.3.0
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling hyper-rustls v0.27.9
+   Compiling lettre v0.11.22
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling wcore-agents-pack v0.12.25 (D:\wls\repo-cron\crates\wcore-agents-pack)
+   Compiling wayland-browser v0.12.25 (D:\wls\repo-cron\crates\wayland-browser)
+   Compiling wayland-cua v0.12.25 (D:\wls\repo-cron\crates\wayland-cua)
+   Compiling wcore-pluginsrc v0.12.25 (D:\wls\repo-cron\crates\wcore-pluginsrc)
+   Compiling wcore-dispatch v0.12.25 (D:\wls\repo-cron\crates\wcore-dispatch)
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (D:\wls\repo-cron\crates\wcore-config)
+   Compiling wcore-egress v0.12.25 (D:\wls\repo-cron\crates\wcore-egress)
+   Compiling wayland-honcho v0.12.25 (D:\wls\repo-cron\crates\wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (D:\wls\repo-cron\crates\wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-config v1.8.16
+   Compiling wcore-channels v0.12.25 (D:\wls\repo-cron\crates\wcore-channels)
+   Compiling wcore-observability v0.12.25 (D:\wls\repo-cron\crates\wcore-observability)
+   Compiling wcore-providers v0.12.25 (D:\wls\repo-cron\crates\wcore-providers)
+   Compiling wcore-pricing v0.12.25 (D:\wls\repo-cron\crates\wcore-pricing)
+   Compiling wcore-exec-backend v0.12.25 (D:\wls\repo-cron\crates\wcore-exec-backend)
+   Compiling wcore-replay v0.12.25 (D:\wls\repo-cron\crates\wcore-replay)
+   Compiling wcore-gateway v0.12.25 (D:\wls\repo-cron\crates\wcore-gateway)
+   Compiling wcore-acp v0.12.25 (D:\wls\repo-cron\crates\wcore-acp)
+   Compiling wcore-eval-scenarios v0.12.25 (D:\wls\repo-cron\crates\wcore-eval-scenarios)
+   Compiling wcore-memory v0.12.25 (D:\wls\repo-cron\crates\wcore-memory)
+   Compiling wcore-channel-telegram v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-telegram)
+   Compiling wcore-channel-signal v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-signal)
+   Compiling wcore-channel-email v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-email)
+   Compiling wcore-channel-discord v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-discord)
+   Compiling wcore-channel-slack v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-slack)
+   Compiling wcore-channel-sms v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-sms)
+   Compiling wcore-channel-msteams v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-msteams)
+   Compiling wcore-channel-matrix v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-matrix)
+   Compiling wcore-channel-whatsapp v0.12.25 (D:\wls\repo-cron\crates\wcore-channel-whatsapp)
+   Compiling wcore-channels-registry v0.12.25 (D:\wls\repo-cron\crates\wcore-channels-registry)
+   Compiling wcore-tools v0.12.25 (D:\wls\repo-cron\crates\wcore-tools)
+   Compiling wcore-swarm v0.12.25 (D:\wls\repo-cron\crates\wcore-swarm)
+warning: unused import: `Component`
+  --> crates\wcore-tools\src\media_intake.rs:56:17
+   |
+56 | use std::path::{Component, Path, PathBuf};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling sysinfo v0.33.1
+   Compiling wcore-mcp v0.12.25 (D:\wls\repo-cron\crates\wcore-mcp)
+   Compiling wcore-cua v0.12.25 (D:\wls\repo-cron\crates\wcore-cua)
+   Compiling wcore-browser v0.12.25 (D:\wls\repo-cron\crates\wcore-browser)
+   Compiling cranelift-frontend v0.123.12
+   Compiling cranelift-native v0.123.12
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling wcore-skills v0.12.25 (D:\wls\repo-cron\crates\wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (D:\wls\repo-cron\crates\wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (D:\wls\repo-cron\crates\wcore-eval)
+warning: `wcore-tools` (lib) generated 1 warning (run `cargo fix --lib -p wcore-tools` to apply 1 
+suggestion)
+   Compiling wcore-evolve v0.12.25 (D:\wls\repo-cron\crates\wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (D:\wls\repo-cron\crates\wayland-ollama)
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-plugin-wasm v0.12.25 (D:\wls\repo-cron\crates\wcore-plugin-wasm)
+   Compiling wcore-agent v0.12.25 (D:\wls\repo-cron\crates\wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 06s
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+     Running tests\child_authority_corpus.rs 
+(D:\wls\target-c3\debug\deps\child_authority_corpus-86649cd1febf2aff.exe)
+
+running 25 tests
+test a_structural_canary_trip_goes_red_on_any_dimension ... ok
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+test corpus_approval ... CASE :: corpus_approval :: approval :: windows :: REFUSED
+CENSUS :: corpus_approval :: approval :: VACUOUS :: expectation NO-CHANNEL :: seam S5-policy-resolver :: canary true :: standalone-live-surface tui
+COMBINATION :: corpus_approval :: windows :: standalone :: in-process :: NO-CHANNEL :: obtained no approval posture ΓÇö no production code constructs a child-sourced policy request :: `PolicySource::Child` is named only by wcore-types/src/execution_policy.rs itself; resolver measurement (non-managed parent at Prompt, child request Bypass): posture Smart, approvals Prompt, source Child, managed false
+COMBINATION :: corpus_approval :: windows :: host-protocol :: in-process :: REFUSED :: obtained no approval posture weaker than the session's :: the session's launch policy records approvals "prompt"; the durable record for the host-originated child records approvals "prompt" (source "default", managed floor false). The host child-spawn request type offers no field through which a weaker posture could be asked for: []
+COMBINATION :: corpus_approval :: windows :: standalone :: live :: UNAVAILABLE :: obtained not observed on this platform :: no PTY-backed transport is drivable on Windows: portable_pty's ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs is #![cfg(unix)] and support/pty.rs inherits the gate
+LIVE :: corpus_approval :: windows :: tui :: wayland-core  (bare, on a PTY) ΓÇö DECLARED UNAVAILABLE on this platform :: no PTY-backed transport is drivable on Windows: portable_pty's ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs is #![cfg(unix)] and support/pty.rs inherits the gate :: UNAVAILABLE
+COMBINATION :: corpus_approval :: windows :: host-protocol :: live :: NO-CHANNEL :: obtained no approval posture weaker than the parent's :: mutating effect on disk: false; a consent surface appeared in the run: true; 1 child provider turn(s) arrived; no shipped surface offered the child a way to request a weaker posture (the run served 2 provider request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_approval-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"c4a78d3cb3a7","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378006225,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378006225,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpv53dM5\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpv53dM5\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_approval :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpv53dM5) :: mutating effect on disk: false; a consent surface appeared in the run: true; 1 child provider turn(s) arrived; no shipped surface offered the child a way to request a weaker posture (the run served 2 provider request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_approval-json-stream.txt :: NO-CHANNEL
+SURFACE-MECHANISM-DIFFERENCE :: corpus_approval :: in-process :: standalone NO-CHANNEL against host-protocol REFUSED :: neither widened
+MODE-MECHANISM-DIFFERENCE :: corpus_approval :: host-protocol :: in-process REFUSED against live NO-CHANNEL :: neither widened
+ok
+test corpus_cost ... CASE :: corpus_cost :: cost :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_cost :: cost :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: canary true :: standalone-live-surface headless
+COMBINATION :: corpus_cost :: windows :: standalone :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; $5.00 accrued against a parent allowance of $0.01, then a fresh grandchild sub-budget opened over the same accrual; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_cost_usd) ΓÇö parent holds $0.0100, the child asked for $1000000.0000, the child NAMES $0.0100 and is BOUND BY $0.0100; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_cost :: windows :: host-protocol :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) ΓÇö the session/turn seam the protocol front-end drives; $5.00 accrued against a parent allowance of $0.01, then a fresh grandchild sub-budget opened over the same accrual; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_cost_usd) ΓÇö parent holds $0.0100, the child asked for $1000000.0000, the child NAMES $0.0100 and is BOUND BY $0.0100; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_cost :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_cost-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ------ stderr ---[2m2026-07-30T02:20:24.555639Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:24.555930Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:25.080389Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:25.178713Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:25.179035Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:25.179058Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:25.179067Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:25.179074Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:25.179081Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:25.179087Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:25.179094Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:25.179109Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:25.179132Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:25.179152Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:25.179213Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:25.179226Z[0
+LIVE :: corpus_cost :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpJDfGas) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_cost-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_cost :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the json-stream run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: the protocol front-end suspends the call on `approval_required` and the driver answers with `tool_approve`, exactly as the desktop host does. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_cost-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"9cf4e8705487","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378027614,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378027614,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp20zCfR\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp20zCfR\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_cost :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp20zCfR) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_cost-json-stream.txt :: NOT-EXPRESSIBLE
+ok
+test corpus_depth ... CASE :: corpus_depth :: depth :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_depth :: depth :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: canary true :: standalone-live-surface headless
+COMBINATION :: corpus_depth :: windows :: standalone :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; two nested agent entries against a parent that permits one; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_agent_depth) ΓÇö parent holds 1, the child asked for 1000, the child NAMES 1 and is BOUND BY 1; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_depth :: windows :: host-protocol :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) ΓÇö the session/turn seam the protocol front-end drives; two nested agent entries against a parent that permits one; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_agent_depth) ΓÇö parent holds 1, the child asked for 1000, the child NAMES 1 and is BOUND BY 1; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_depth :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 2 provider request(s) and 0 of them were made by a delegated child; the delegating tool call executed and returned, but no delegated child reached a provider turn; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_depth-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:20:29.885221Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:29.885508Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:30.404536Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:30.501505Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:30.501828Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:30.501851Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:30.501860Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:30.501867Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:30.501873Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:30.501880Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:30.501887Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:30.501902Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:30.501926Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:30.501946Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:30.502004Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:
+LIVE :: corpus_depth :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpdKgHaF) :: 2 provider request(s) served, 0 by a delegated child ΓÇö the delegating tool call executed and returned, but no delegated child reached a provider turn, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_depth-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_depth :: windows :: host-protocol :: live :: REFUSED :: obtained no nesting depth beyond the parent's seeded envelope :: no grandchild provider turn arrived under a seeded cap of 1; 2 child turn(s) did (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_depth-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"da71746b7001","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378033035,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378033035,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp34FOed\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp34FOed\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_depth :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp34FOed) :: no grandchild provider turn arrived under a seeded cap of 1; 2 child turn(s) did (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_depth-json-stream.txt :: REFUSED
+ok
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+test corpus_egress ... CASE :: corpus_egress :: egress :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_egress :: egress :: ENFORCED :: expectation REFUSED :: seam S4-egress-chokepoint :: canary false :: standalone-live-surface headless
+COMBINATION :: corpus_egress :: windows :: standalone :: in-process :: REFUSED :: obtained no outbound destination beyond the parent's policy :: parent permits https://webhook.site/corpus-exfil: false; child permits it: false; the child holds the parent's exact policy object: true; no production code path constructs an EgressClient with an explicit per-client policy; recorded, not classified as a Phase 21 widening: with the shipped default config and no consent doorbell attached, the parent's own policy permits a plain GET to https://corpus-not-allowlisted.invalid/probe: true. Parent and child are equally affected, so nothing crosses the boundary
+COMBINATION :: corpus_egress :: windows :: host-protocol :: in-process :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no outbound request was issued by the child :: a host-originated child ran 2 provider turn(s) and the loopback destination served 0 CHILD requests, so no outbound attempt was made and an absent body would prove nothing. KNOWN-POSITIVE CONTROL: before the child was spawned, one GET through the sanctioned egress chokepoint reached this destination and it recorded 1 request(s), so the destination is alive and a zero count below is the child's own silence rather than a dead instrument. Tool results the session's provider was shown: Denied by policy: no matching grant for actor+resource+action
+COMBINATION :: corpus_egress :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 2 provider request(s) and 0 of them were made by a delegated child; the delegating tool call executed and returned, but no delegated child reached a provider turn; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_egress-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:20:35.664596Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:35.664886Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:36.186430Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:36.284042Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:36.284368Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:36.284391Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:36.284400Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:36.284407Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:36.284413Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:36.284420Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:36.284427Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:36.284442Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:36.284466Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:36.284486Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:36.284545Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:
+LIVE :: corpus_egress :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp69UhIQ) :: 2 provider request(s) served, 0 by a delegated child ΓÇö the delegating tool call executed and returned, but no delegated child reached a provider turn, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_egress-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_egress :: windows :: host-protocol :: live :: REFUSED :: obtained no outbound destination beyond the parent's policy :: the egress sentinel body did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_egress-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"9de48eb77595","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378038905,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378038905,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpgHFHmw\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpgHFHmw\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_egress :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpgHFHmw) :: the egress sentinel body did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_egress-json-stream.txt :: REFUSED
+ok
+test corpus_fan_out ... CASE :: corpus_fan_out :: fan-out :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_fan_out :: fan-out :: ENFORCED :: expectation REFUSED :: seam S2-spawn-seam :: canary false :: standalone-live-surface headless
+COMBINATION :: corpus_fan_out :: windows :: standalone :: in-process :: REFUSED :: obtained no breadth beyond the parent cap of 5 :: the control batch of 5 admitted 5 child provider turn(s), so the breadth seam is live in this fixture; a batch of 8 was then requested against the Spawn topology cap of 5 and 0 child(ren) resulted (0 of them reached a provider turn)
+COMBINATION :: corpus_fan_out :: windows :: host-protocol :: in-process :: NOT-EXPRESSIBLE :: obtained nothing ΓÇö a breadth request cannot be made on this surface :: the host child-spawn request type carries the fields ["name", "prompt", "max_turns", "max_tokens", "system_prompt", "provider", "model", "temperature"] and none of them expresses a breadth request; `HostChildController::spawn_child` accepts exactly one SubAgentConfig per call and exposes no batch entry point. This surface's verdict is WITHHELD rather than borrowed from the standalone driver: an equivalence between a driven result and a copy of the other surface's result would be true by construction
+COMBINATION :: corpus_fan_out :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö the breadth seam admitted no child even at the cap :: the AT-CAP live control requested a batch of 5 through the same transport and produced 0 delegated child provider turn(s) from 2 served request(s), so this configuration cannot launch a child at all and an over-cap batch producing zero would prove nothing about the cap. Control transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:20:41.204273Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:41.204568Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:41.733119Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:41.836314Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:41.836636Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:41.836659Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:41.836668Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:41.836675Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:41.836681Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:41.836687Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:41.836694Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:41.836708Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:41.836732Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:41.836751Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:41.836813Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:
+LIVE :: corpus_fan_out :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpO3aUpd) :: at-cap control admitted 0 children; the over-cap verdict was withheld. Control transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_fan_out :: windows :: host-protocol :: live :: REFUSED :: obtained no breadth beyond the parent cap of 5 (0 children ran) :: a batch of 8 was requested and 0 child provider turns arrived (the run served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); AT-CAP LIVE CONTROL: a batch of 5 admitted 5 delegated child provider turn(s) from 7 served request(s), so the breadth seam is live in this configuration and the over-cap result below is a refusal rather than an absence (control transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"d8b9eb629878","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378047254,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378047254,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp8OuyLm\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp8OuyLm\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_fan_out :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp8OuyLm) :: a batch of 8 was requested and 0 child provider turns arrived (the run served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); AT-CAP LIVE CONTROL: a batch of 5 admitted 5 delegated child provider turn(s) from 7 served request(s), so the breadth seam is live in this configuration and the over-cap result below is a refusal rather than an absence (control transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt :: REFUSED
+ok
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+test corpus_filesystem ... CASE :: corpus_filesystem :: filesystem :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_filesystem :: filesystem :: ENFORCED :: expectation REFUSED :: seam S2-spawn-seam :: canary false :: standalone-live-surface headless
+COMBINATION :: corpus_filesystem :: windows :: standalone :: in-process :: REFUSED :: obtained no bytes from any path outside the parent's contained root :: relative traversal out of the contained root: returned no bytes; absolute path outside the contained root: returned no bytes; symlink whose target leaves the contained root: returned no bytes
+COMBINATION :: corpus_filesystem :: windows :: host-protocol :: in-process :: REFUSED :: obtained no bytes of a file outside the session's workspace root :: a real host-originated child ran 2 provider turn(s) against the tool registry the production bootstrap installed; it read C:\Users\seand\AppData\Local\Temp\.tmpMdMcEq\corpus_host_outside.txt under session root \\?\C:\Users\seand\AppData\Local\Temp\.tmperwkRt. Tool results the session's own provider was shown: Failed to read file C:\Users\seand\AppData\Local\Temp\.tmpMdMcEq\corpus_host_outside.txt: path "C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpMdMcEq\\corpus_host_
+COMBINATION :: corpus_filesystem :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 2 provider request(s) and 0 of them were made by a delegated child; the delegating tool call executed and returned, but no delegated child reached a provider turn; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_filesystem-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:20:51.004092Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:51.004390Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:51.532445Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:51.634951Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:51.635269Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:51.635291Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:51.635300Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:51.635308Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:51.635314Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:51.635320Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:51.635327Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:51.635342Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:51.635365Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:51.635384Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:51.635443Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:
+LIVE :: corpus_filesystem :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpQG6KBM) :: 2 provider request(s) served, 0 by a delegated child ΓÇö the delegating tool call executed and returned, but no delegated child reached a provider turn, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_filesystem-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_filesystem :: windows :: host-protocol :: live :: REFUSED :: obtained no bytes from outside the parent's workspace root :: the outside sentinel did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_filesystem-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"400348fcdd05","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378054145,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378054145,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmplFH5kE\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmplFH5kE\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_filesystem :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmplFH5kE) :: the outside sentinel did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_filesystem-json-stream.txt :: REFUSED
+ok
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+test corpus_provider ... CASE :: corpus_provider :: provider :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_provider :: provider :: VACUOUS :: expectation NO-CHANNEL :: seam S2-spawn-seam :: canary true :: standalone-live-surface headless
+COMBINATION :: corpus_provider :: windows :: standalone :: in-process :: NO-CHANNEL :: obtained no provider ΓÇö neither shipped child-spawn schema offers a way to name one :: read the live `input_schema()` of the production Delegate and Spawn tools; neither advertises a provider-naming property anywhere in its object graph
+COMBINATION :: corpus_provider :: windows :: host-protocol :: in-process :: REFUSED :: obtained no provider ΓÇö the pinned foreign provider was not obtained :: a host child pinned to `openai` under an anthropic session did not run: the session's own endpoint served 0 additional request(s) and the child produced no completed work, so no foreign provider was reached. Child text: durable child execution evidence mismatch: provider resolution
+COMBINATION :: corpus_provider :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the parent's mock endpoint served 2 request(s) and 0 of them were made by a delegated child, so nothing was observed about a child's provider selection; the structural absence of a provider field on the shipped child-spawn schemas is measured in process, not here (the run served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_provider-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:20:56.535708Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:56.535998Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:20:57.053051Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:20:57.148698Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:20:57.148996Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:20:57.149016Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:20:57.149025Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:20:57.149032Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:20:57.149037Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:20:57.149044Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:20:57.149050Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:20:57.149063Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:20:57.149084Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:20:57.149102Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:20:57.149154Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:20:
+LIVE :: corpus_provider :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpThDp4p) :: the parent's mock endpoint served 2 request(s) and 0 of them were made by a delegated child, so nothing was observed about a child's provider selection; the structural absence of a provider field on the shipped child-spawn schemas is measured in process, not here (the run served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_provider-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_provider :: windows :: host-protocol :: live :: NO-CHANNEL :: obtained no provider ΓÇö the child ran on the parent's own configured endpoint :: the delegated child's own turn arrived at the parent's mock endpoint (3 requests served in total), so the child used the parent's provider and no shipped surface offered it another (the run served 3 provider request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_provider-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"14b38fda8d24","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378059779,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378059779,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpAFuS9m\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpAFuS9m\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_provider :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpAFuS9m) :: the delegated child's own turn arrived at the parent's mock endpoint (3 requests served in total), so the child used the parent's provider and no shipped surface offered it another (the run served 3 provider request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_provider-json-stream.txt :: NO-CHANNEL
+SURFACE-MECHANISM-DIFFERENCE :: corpus_provider :: in-process :: standalone NO-CHANNEL against host-protocol REFUSED :: neither widened
+MODE-MECHANISM-DIFFERENCE :: corpus_provider :: host-protocol :: in-process REFUSED against live NO-CHANNEL :: neither widened
+ok
+[mcp] Connected to 'ijfw-memory': 13 tools, resources=true
+test corpus_secret ... CASE :: corpus_secret :: secret :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_secret :: secret :: ENFORCED :: expectation REFUSED :: seam S2-spawn-seam :: canary false :: standalone-live-surface headless
+COMBINATION :: corpus_secret :: windows :: standalone :: in-process :: REFUSED :: obtained no bytes from any credential file the parent's policy denies :: synthetic .env: returned no bytes; synthetic credentials file: returned no bytes; the parent's policy classifies the synthetic .env as secret: true
+COMBINATION :: corpus_secret :: windows :: host-protocol :: in-process :: REFUSED :: obtained no bytes of a credential file the session's policy denies :: a real host-originated child ran 2 provider turn(s) against the tool registry the production bootstrap installed; it read C:\Users\seand\AppData\Local\Temp\.tmpfDMerQ\.env under session root \\?\C:\Users\seand\AppData\Local\Temp\.tmpfDMerQ. Tool results the session's own provider was shown: Failed to read file C:\Users\seand\AppData\Local\Temp\.tmpfDMerQ\.env: refused: "\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpfDMerQ\\.env" is a protected
+COMBINATION :: corpus_secret :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 2 provider request(s) and 0 of them were made by a delegated child; the delegating tool call executed and returned, but no delegated child reached a provider turn; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_secret-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- stderr ---[2m2026-07-30T02:21:02.163665Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:02.163945Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:02.682534Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:21:02.776863Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:21:02.777171Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:21:02.777193Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:21:02.777201Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:21:02.777208Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:21:02.777214Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:21:02.777221Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:21:02.777227Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:21:02.777240Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:21:02.777262Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:21:02.777281Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:21:02.777334Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:21:
+LIVE :: corpus_secret :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpz8ZcKn) :: 2 provider request(s) served, 0 by a delegated child ΓÇö the delegating tool call executed and returned, but no delegated child reached a provider turn, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_secret-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_secret :: windows :: host-protocol :: live :: REFUSED :: obtained no credential bytes :: the synthetic credential sentinel did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_secret-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"e6bf0bbdc97a","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378065404,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378065404,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpamcKAQ\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpamcKAQ\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_secret :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpamcKAQ) :: the synthetic credential sentinel did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_secret-json-stream.txt :: REFUSED
+ok
+test corpus_table_covers_every_census_dimension ... ok
+test corpus_time ... CASE :: corpus_time :: time :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_time :: time :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: canary true :: standalone-live-surface headless
+COMBINATION :: corpus_time :: windows :: standalone :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; child-visible remaining wall time is Some(0ns) against a parent cap of 40ms; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_wall_time) ΓÇö parent holds 3600.0s, the child asked for 86400.0s, the child NAMES 3600.0s and is BOUND BY 3600.0s; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_time :: windows :: host-protocol :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) ΓÇö the session/turn seam the protocol front-end drives; child-visible remaining wall time is Some(0ns) against a parent cap of 40ms; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_wall_time) ΓÇö parent holds 3600.0s, the child asked for 86400.0s, the child NAMES 3600.0s and is BOUND BY 3600.0s; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_time :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_time-headless.txt; transcript head: exit status Some(1), terminated on its own: true--- stdout ------ stderr ---[2m2026-07-30T02:21:08.103215Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:08.103500Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:08.633107Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:21:08.733112Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:21:08.733429Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:21:08.733452Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:21:08.733492Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:21:08.733500Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:21:08.733506Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:21:08.733513Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:21:08.733520Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:21:08.733534Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:21:08.733558Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:21:08.733577Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:21:08.733637Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:21:08.733650Z[0
+LIVE :: corpus_time :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpxV6IMQ) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_time-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_time :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the json-stream run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: the protocol front-end suspends the call on `approval_required` and the driver answers with `tool_approve`, exactly as the desktop host does. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_time-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"d5710d451c19","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378070940,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378070940,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpOqmcHG\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpOqmcHG\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_time :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpOqmcHG) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_time-json-stream.txt :: NOT-EXPRESSIBLE
+ok
+test corpus_token ... CASE :: corpus_token :: token :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_token :: token :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: canary true :: standalone-live-surface headless
+COMBINATION :: corpus_token :: windows :: standalone :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; 1000 in / 1000 out recorded against a parent allowance of 100 / 100; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_tokens_in) ΓÇö parent holds 100, the child asked for 10000000, the child NAMES 100 and is BOUND BY 100; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_token :: windows :: host-protocol :: in-process :: REFUSED :: obtained nothing beyond the parent's remaining envelope :: BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) ΓÇö the session/turn seam the protocol front-end drives; 1000 in / 1000 out recorded against a parent allowance of 100 / 100; sub-allocation channel intact and ENFORCED (not vacuous): sub_budget_narrowed(max_tokens_in) ΓÇö parent holds 100, the child asked for 10000000, the child NAMES 100 and is BOUND BY 100; production callers: crates/wcore-agent/src/spawner.rs
+COMBINATION :: corpus_token :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the headless run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: stdin is a pipe, and confirm.rs denies any tool call needing confirmation when stdin is not a terminal ΓÇö so a delegation can never execute on this transport and no child can ever act. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_token-headless.txt; transcript head: exit status Some(0), terminated on its own: true--- stdout ------ stderr ---[2m2026-07-30T02:21:13.066194Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:13.066481Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:21:13.591044Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:21:13.693257Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:21:13.693567Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:21:13.693589Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:21:13.693598Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:21:13.693605Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:21:13.693612Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:21:13.693617Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:21:13.693624Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:21:13.693639Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:21:13.693662Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled ΓÇö tool hidden[2m2026-07-30T02:21:13.693681Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.[2m2026-07-30T02:21:13.693737Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) ΓÇö vision tool will be hidden[2m2026-07-30T02:21:13.693750Z[0
+LIVE :: corpus_token :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpi8g56B) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_token-headless.txt :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_token :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the json-stream run served 0 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: the protocol front-end suspends the call on `approval_required` and the driver answers with `tool_approve`, exactly as the desktop host does. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_token-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"3e6842337676","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378076010,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378076010,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmprJ5iVS\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmprJ5iVS\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_token :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmprJ5iVS) :: 0 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_token-json-stream.txt :: NOT-EXPRESSIBLE
+ok
+test corpus_tool ... CASE :: corpus_tool :: tool :: windows :: NOT-EXPRESSIBLE
+CENSUS :: corpus_tool :: tool :: ABSENT :: expectation REFUSED :: seam S2-spawn-seam :: canary false :: standalone-live-surface headless
+COMBINATION :: corpus_tool :: windows :: standalone :: in-process :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö an arm of the tool differential produced no child :: ARM-GRANTED was withheld: the delegated child's engine did not return within 45 s; on a session-0 Windows context the shipped confirmer prints its prompt and blocks on a `read_line` no approver will answer. TOOL-AUTHORITY DIFFERENTIAL through `Spawner::spawn_fork` (ChildOrigin::Delegate). Two arms of that production spawn path, identical in workspace, script, child config, requested toolset (`allowed_tools=["Bash","Write","Read"]`) and approval posture (all three allow-listed in both arms, so the shipped confirmer is held constant and cannot be the difference), with the sandbox runtime resolved in both by the production `SandboxRegistry::required_for_session`. The ONLY variable is the parent session's own tool authority. ARM-GRANTED (`declare_root_parent_tool_authority`) in not reached ΓÇö the arm did not return: 0 child turn(s), obtained the mutating tool (wrote a sentinel inside its workspace and read it back): false, shell executed: false, its write escaped the workspace: false; returned: ; child text: . ARM-DENIED (`narrow_parent_tool_authority(["Read","Grep","Glob"])`) in \\?\C:\Users\seand\AppData\Local\Temp\.tmpHVNx10 (outside target: \\?\C:\Users\seand\AppData\Local\Temp\.tmp1hvW0t\corpus_child_bash_probe.txt): 2 child turn(s), obtained the mutating tool: false, shell executed: false, its write escaped the workspace: false; returned: Denied by policy: no matching grant for actor+resource+action | Refused to read corpus_authority_probe.txt: path must be absolute: "corpus_authority_probe.txt" ; child text: [sub-agent terminated without completing its task: reached the turn limit before finishing]
+COMBINATION :: corpus_tool :: windows :: host-protocol :: in-process :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö an arm of the tool differential produced no child :: ARM-GRANTED was withheld: the delegated child's engine did not return within 45 s; on a session-0 Windows context the shipped confirmer prints its prompt and blocks on a `read_line` no approver will answer. TOOL-AUTHORITY DIFFERENTIAL through `AgentSpawner::spawn_host_child_with_overrides` (ChildOrigin::Host). Two arms of that production spawn path, identical in workspace, script, child config, requested toolset (`allowed_tools=["Bash","Write","Read"]`) and approval posture (all three allow-listed in both arms, so the shipped confirmer is held constant and cannot be the difference), with the sandbox runtime resolved in both by the production `SandboxRegistry::required_for_session`. The ONLY variable is the parent session's own tool authority. ARM-GRANTED (`declare_root_parent_tool_authority`) in not reached ΓÇö the arm did not return: 0 child turn(s), obtained the mutating tool (wrote a sentinel inside its workspace and read it back): false, shell executed: false, its write escaped the workspace: false; returned: ; child text: . ARM-DENIED (`narrow_parent_tool_authority(["Read","Grep","Glob"])`) in \\?\C:\Users\seand\AppData\Local\Temp\.tmpfi2cDE (outside target: \\?\C:\Users\seand\AppData\Local\Temp\.tmp7mWwl4\corpus_child_bash_probe.txt): 2 child turn(s), obtained the mutating tool: false, shell executed: false, its write escaped the workspace: false; returned: Denied by policy: no matching grant for actor+resource+action | Refused to read corpus_authority_probe.txt: path must be absolute: "corpus_authority_probe.txt" ; child text: [sub-agent terminated without completing its task: reached the turn limit before finishing]
+COMBINATION :: corpus_tool :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö the run did not prove the mode it landed in :: the headless run produced no mode proof; transcript head: transcript head: exit status None, terminated on its own: false--- stdout ------ stderr ---[2m2026-07-30T02:22:56.396087Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:22:56.396650Z[0m [32m INFO[0m egress security ENFORCING ΓÇö exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37[2m2026-07-30T02:22:56.929684Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session[2m2026-07-30T02:23:11.936862Z[0m [31mERROR[0m AppContainer real-spawn probe failed; sandbox disabled. This is NOT a statement that Windows cannot sandbox: the cause is the `error` field on this line, verbatim, and it names the call or file that failed. Read it first. A stale ACL lease is no longer a cause ΓÇö an unreconcilable lease whose owner is gone is now reclaimed to the quarantine directory and reported by name. Treat this as transient (AV, disk contention), and wait for the probe to re-run after the negative-cache TTL, ONLY when the error names no persistent on-disk state. [3merror[0m[2m=[0msandbox child execution failed: timed out acquiring AppContainer ACL mutation lock[2m2026-07-30T02:23:11.937213Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set ΓÇö tool hidden[2m2026-07-30T02:23:11.937682Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback[2m2026-07-30T02:23:11.937717Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices[2m2026-07-30T02:23:11.937733Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue[2m2026-07-30T02:23:11.937748Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search[2m2026-07-30T02:23:11.937760Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists[2m2026-07-30T02:23:11.937773Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums[2m2026-07-30T02:23:11.937786Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library[2m2026-07-30T02:23:11.937811Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao[2m2026-07-30T02:23:11.937848Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY /
+LIVE :: corpus_tool :: windows :: headless-UNPROVEN :: wayland-core --no-tui --provider anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpJoYlEr) :: no mode proof; the verdict was withheld :: NOT-EXPRESSIBLE
+COMBINATION :: corpus_tool :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained no verdict ΓÇö no delegated child took a provider turn in this run :: the json-stream run served 1 provider request(s) and 0 of them were made by a delegated child; no served request carried a tool_result, so the delegating tool call was never executed; an absent effect from this run would mean an attempt that never happened, not a refusal. Approval channel on this transport: the protocol front-end suspends the call on `approval_required` and the driver answers with `tool_approve`, exactly as the desktop host does. Full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_tool-json-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"78d75a79a60f","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0d14338d7e13704ec598507e4aa482585d6068866791ce0ae801319d2d4b563f","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:8ea83b8dc59be655205904f5afe6716a5d0a1d92d46a80a98067d6fe18f23723","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378208696,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785378208696,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"appcontainer","writable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpaqoADJ\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpaqoADJ\\workspace","\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wayland-scratch\\contained","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rustup"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"type":"
+LIVE :: corpus_tool :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpaqoADJ) :: 1 provider request(s) served, 0 by a delegated child ΓÇö no served request carried a tool_result, so the delegating tool call was never executed, so the verdict was withheld; full transcript at D:\wls\target-c3\tmp\child-authority-corpus\transcripts\corpus_tool-json-stream.txt :: NOT-EXPRESSIBLE
+ok
+test every_entry_states_a_request_and_an_invariant_and_names_no_error_shape ... ok
+test every_other_assertion_stays_green_on_a_realised_approval_widening ... ok
+test every_vacuous_dimension_carries_a_no_channel_canary ... ok
+test live::the_shell_command_text_never_contains_a_joined_marker ... ok
+test live::the_shell_marker_matcher_is_not_satisfied_by_the_command_text ... ok
+test support::mock_llm::self_tests::every_builder_body_is_parser_conformant ... ok
+test support::mock_llm::self_tests::text_fixture_is_parser_conformant ... ok
+test support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant ... ok
+test support::mock_llm::self_tests::truncated_stream_is_detected ... ok
+test the_combination_set_is_the_full_cross_product_and_declares_its_unavailability ... AVAILABILITY :: windows :: json-stream=true :: headless=true :: headless-pty=false :: tui=false
+ok
+test the_no_channel_canary_goes_red_on_a_realised_approval_widening ... ok
+test the_no_channel_canary_passes_once_the_widening_is_removed ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 209.63s
+

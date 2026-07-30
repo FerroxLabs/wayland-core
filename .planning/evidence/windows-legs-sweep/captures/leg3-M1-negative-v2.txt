@@ -1,0 +1,18 @@
+LEG=phase22-M1-negative-control-v2
+HOST=SEANDESKTOP
+UTC=2026-07-30T02:20:05.8218203Z
+SHA=8495f7d776d6f52898bb1e92a488b61365051d03
+CORPUS_ABS=D:\wls\repo\.planning\phases\22-supervision-durable-goals-fleet-loops\22-01-EVIDENCE\linux\session-journal.bin
+CORPUS_EXISTS=True
+CORPUS_BYTES_DOTNET=84327
+M1_PRISTINE=verdict=ok passed=2 failed=0 ignored=0 filtered_out=0
+FLIPPED_INDEX=42163
+BYTE_BEFORE=53
+BYTE_AFTER=52
+CORPUS_DIRTY_AFTER_FLIP=1
+M1_CORRUPTED=verdict=FAILED passed=0 failed=2 ignored=0 filtered_out=0
+CORPUS_DIRTY_AFTER_RESTORE=0
+BYTE_AFTER_RESTORE=53
+M1_RESTORED=verdict=ok passed=2 failed=0 ignored=0 filtered_out=0
+TREE_DIRTY_AT_END=0
+WLDONE

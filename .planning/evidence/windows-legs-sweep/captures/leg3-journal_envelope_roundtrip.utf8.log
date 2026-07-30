@@ -1,0 +1,35 @@
+﻿cargo : warning: unused import: `Component`
+At line:1 char:409
++ ... n_test")) { cargo test -p wcore-agent --test $t -- --nocapture *> "D: ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused import: `Component`:String) [], Remo 
+   teException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> crates\wcore-tools\src\media_intake.rs:56:17
+   |
+56 | use std::path::{Component, Path, PathBuf};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-tools` (lib) generated 1 warning (run `cargo fix --lib -p wcore-tools` to apply 1 
+suggestion)
+   Compiling wcore-agent v0.12.25 (D:\wls\repo\crates\wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.32s
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+     Running tests\journal_envelope_roundtrip.rs 
+(D:\wls\target\debug\deps\journal_envelope_roundtrip-8d6aea2b9631337f.exe)
+
+running 5 tests
+test nested_object_key_order_is_stable_across_a_round_trip ... ok
+test float_bearing_values_are_stable_across_a_round_trip ... ok
+test plain_events_are_stable_across_a_round_trip ... ok
+test option_value_null_is_stable_across_a_round_trip ... ok
+test a_null_receipt_survives_a_real_journal_write_and_read ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

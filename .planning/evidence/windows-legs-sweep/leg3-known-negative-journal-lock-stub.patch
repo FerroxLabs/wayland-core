@@ -1,0 +1,17 @@
+diff --git a/crates/wcore-agent/src/session_journal/lease.rs b/crates/wcore-agent/src/session_journal/lease.rs
+index ccba6866..744a86b1 100644
+--- a/crates/wcore-agent/src/session_journal/lease.rs
++++ b/crates/wcore-agent/src/session_journal/lease.rs
+@@ -66,6 +66,12 @@ fn authority_lock_overlapped() -> windows_sys::Win32::System::IO::OVERLAPPED {
+ 
+ #[cfg(windows)]
+ fn try_lock_authority(file: &File) -> std::io::Result<AuthorityLock> {
++    // KNOWN-NEGATIVE MUTATION. A writer lease that always acquires guarantees
++    // nothing. If the cross-process restart case still passes with this in
++    // place, it is not measuring the exclusion. Never commit this.
++    if std::env::var_os("WL_JOURNAL_LOCK_STUB").is_some() {
++        return Ok(AuthorityLock::Acquired);
++    }
+     use std::os::windows::io::AsRawHandle as _;
+ 
+     use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;

@@ -1,0 +1,26 @@
+﻿cargo :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At line:1 char:460
++ ... YS_ACQUIRE; cargo test -p wcore-cron --test single_owner -- --nocaptu ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\single_owner.rs 
+(D:\wls\target-cron-neg\debug\deps\single_owner-8258b1b825c008a7.exe)
+
+running 11 tests
+test a_dead_holders_schedule_is_reclaimable_because_the_os_released_the_lock ... ok
+test a_lease_lost_mid_tick_abandons_the_selected_fire_and_records_it ... ok
+test a_live_holders_schedule_is_not_reclaimable_however_old_the_record_looks ... ok
+test a_second_process_is_refused_while_the_first_holds_it ... ok
+test a_slash_target_still_stages_honestly_when_no_dispatcher_is_live ... ok
+test a_slash_target_stops_staging_once_a_live_dispatcher_is_wired ... ok
+test a_stale_record_alone_never_grants_ownership ... ok
+test an_observer_leaves_the_store_untouched ... ok
+test cross_process_lease_worker ... ok
+test the_owner_record_is_readable_from_another_process_while_the_lock_is_held ... ok
+test two_runners_against_one_store_fire_a_due_job_exactly_once ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+

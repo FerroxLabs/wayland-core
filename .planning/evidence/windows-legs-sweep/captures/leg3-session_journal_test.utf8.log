@@ -1,0 +1,76 @@
+﻿cargo : warning: unused import: `Component`
+At line:1 char:409
++ ... n_test")) { cargo test -p wcore-agent --test $t -- --nocapture *> "D: ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused import: `Component`:String) [], Remo 
+   teException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> crates\wcore-tools\src\media_intake.rs:56:17
+   |
+56 | use std::path::{Component, Path, PathBuf};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-tools` (lib) generated 1 warning (run `cargo fix --lib -p wcore-tools` to apply 1 
+suggestion)
+   Compiling wcore-agent v0.12.25 (D:\wls\repo\crates\wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.26s
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+     Running tests\session_journal_test.rs 
+(D:\wls\target\debug\deps\session_journal_test-3d004d5da8954ebb.exe)
+
+running 44 tests
+test lease_holder_process_exits_without_drop ... ok
+test provider_request_digest_changes_when_wire_relevant_input_changes ... ok
+test prepared_provider_request_snapshot_rejects_version_and_malformed_fields ... ok
+test provider_request_digest_is_stable_for_the_exact_request ... ok
+test prepared_provider_request_snapshot_rejects_unknown_structural_fields ... ok
+test prepared_provider_request_snapshot_round_trips_every_request_field ... ok
+test complete_frame_digest_corruption_is_a_hard_error ... ok
+test complete_corrupt_final_frame_is_a_hard_error ... ok
+
+running 1 test
+test budget_authority_rejects_malformed_typed_snapshots ... ok
+test budget_authority_active_turn_must_be_active_and_keep_root_ancestry ... ok
+test checksum_sequence_previous_and_schema_tampering_fail_closed ... ok
+test budget_authority_epoch_identity_time_and_deadline_cannot_regress ... ok
+test invalid_transition_is_not_written_or_assigned_a_sequence ... ok
+test legacy_tool_intent_remains_replayable_as_conservative_opaque_state ... ok
+test public_replay_boundary_enforces_forward_only_schema_history ... ok
+test invalid_message_commit_never_advances_conversation_or_journal ... ok
+test only_one_turn_can_be_active_at_a_time ... ok
+test budget_authority_rejects_stale_cursor_and_context_digest ... ok
+test session_import_seeds_exact_structured_conversation ... ok
+test invalid_conversation_state_commit_never_writes ... ok
+test append_is_contiguous_checksummed_and_exclusively_owned ... ok
+test legacy_budget_authority_replays_but_cannot_replace_current_schema ... ok
+test unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode ... ok
+test conversation_state_commit_replaces_exactly_for_compaction_and_rebase ... ok
+test structured_message_commit_preserves_tool_and_thinking_json ... ok
+test budget_authority_with_live_provider_reservation_reopens ... ok
+test operating_system_releases_writer_lease_after_process_exit ... ok
+test budget_authority_round_trips_as_latest_reduced_enforcement_state ... ok
+test budgets_have_typed_amounts_owners_and_globally_stable_event_ids ... ok
+test tool_execution_identity_digests_and_collisions_are_enforced ... ok
+test invalid_or_nonfirst_session_import_never_writes ... ok
+test budget_authority_retains_active_turn_until_that_turn_is_terminal ... ok
+test hard_link_alias_cannot_acquire_a_second_writer_authority ... ok
+test terminal_effects_are_singular_and_checkpoint_digest_is_verified ... ok
+test torn_tail_is_ignored_healed_and_replaced ... ok
+test provider_stream_requires_started_attempt_and_preserves_ordered_structured_batches ... ok
+test children_and_deliveries_distinguish_prepared_from_started_unknown ... ok
+test delivery_origins_and_terminal_unknown_evidence_remain_truthful ... ok
+test full_replay_equals_snapshot_plus_suffix ... ok
+test started_tool_is_running_while_other_unresolved_effects_remain_unknown ... ok
+test compacted_replacement_keeps_the_data_inode_lock ... ok
+test approval_linkage_and_terminal_resolution_are_enforced ... ok
+test prepared_provider_tool_and_child_can_finish_without_a_fabricated_start ... ok
+test snapshot_is_atomic_owner_only_and_detects_tampering ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+

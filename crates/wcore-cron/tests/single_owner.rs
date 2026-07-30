@@ -429,3 +429,217 @@ async fn a_slash_target_stops_staging_once_a_live_dispatcher_is_wired() {
         recs[0].outcome
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. Cross-PROCESS single ownership — measured, not inferred
+//
+// Every case above drives two attempts inside ONE test process. That is the
+// right shape for catching a primitive owned by the PROCESS (`fcntl`), and
+// this file's own header says so. It is NOT the production shape: the thing
+// this lease exists to prevent is a second `wayland-core` PROCESS.
+//
+// The gap matters most on Windows. There the exclusion is `LockFileEx`, whose
+// byte-range locks are MANDATORY rather than advisory, and until this case
+// nothing in this workspace had taken the lease across a real process
+// boundary on that platform.
+//
+// The child is this same test binary re-executed with `--exact`, so no new
+// crate and no `Cargo.lock` edit is required.
+// ---------------------------------------------------------------------------
+
+/// Env var naming the schedule directory a child worker should claim.
+const CHILD_DIR_ENV: &str = "WL_CRON_LEASE_CHILD_DIR";
+/// Env var naming the file the child writes its verdict to.
+const CHILD_OUT_ENV: &str = "WL_CRON_LEASE_CHILD_OUT";
+
+/// The child half of [`a_second_process_is_refused_while_the_first_holds_it`].
+///
+/// In CHILD mode it attempts the lease, publishes its verdict, and holds until
+/// released. In ORDINARY mode it is not a no-op: it asserts the take/release
+/// round trip. An env-gated early `return` that reports `ok` for zero work is a
+/// measured self-passing shape in this repo (`LANE-BRIEF.md` §3.2 flavour (b)),
+/// so this arm deliberately does real work instead.
+#[test]
+fn cross_process_lease_worker() {
+    let Ok(dir) = std::env::var(CHILD_DIR_ENV) else {
+        // ORDINARY mode. Real assertions, so this can never be a silent pass.
+        let tmp = tempfile::tempdir().unwrap();
+        let held = ScheduleLease::attempt(tmp.path(), "worker-selftest").unwrap();
+        assert!(held.is_owner(), "an uncontended schedule must be claimable");
+        drop(held);
+        let again = ScheduleLease::attempt(tmp.path(), "worker-selftest-2").unwrap();
+        assert!(again.is_owner(), "a released schedule must be reclaimable");
+        return;
+    };
+
+    let out = PathBuf::from(std::env::var(CHILD_OUT_ENV).expect("child needs an output path"));
+    let attempt =
+        ScheduleLease::attempt(&dir, "child").expect("child lease attempt must not error");
+    let verdict = match &attempt {
+        LeaseAttempt::Owner(_) => format!("ROLE=OWNER\nPID={}\n", std::process::id()),
+        LeaseAttempt::Observer { holder_pid } => format!(
+            "ROLE=OBSERVER\nPID={}\nHOLDER={}\n",
+            std::process::id(),
+            holder_pid.map_or_else(|| "none".to_owned(), |p| p.to_string())
+        ),
+    };
+    // START marker first: a participant that never launched is a dead
+    // instrument, and the parent asserts on this before drawing any conclusion.
+    std::fs::write(&out, format!("STARTED\n{verdict}")).unwrap();
+
+    // Hold until the parent says stop, so the parent can contend against a
+    // genuinely live holder rather than against a race with our own exit.
+    let release = PathBuf::from(format!("{}.release", out.display()));
+    for _ in 0..600 {
+        if release.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(attempt);
+    std::fs::write(format!("{}.exited", out.display()), b"1").unwrap();
+}
+
+/// Spawn a child worker against `dir`, and wait for it to publish a verdict.
+fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cross_process_lease_worker", "--nocapture"])
+        .env(CHILD_DIR_ENV, dir)
+        .env(CHILD_OUT_ENV, out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("re-executing the test binary as a child must succeed");
+    for _ in 0..300 {
+        if let Ok(text) = std::fs::read_to_string(out) {
+            if text.starts_with("STARTED") {
+                return child;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "child never reached its START marker at {} — the participant did not launch, \
+         so nothing was contended",
+        out.display()
+    );
+}
+
+fn child_field(out: &std::path::Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(out).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_owned))
+}
+
+/// Two real processes, one schedule directory.
+///
+/// This case runs its control in BOTH directions inside one execution:
+///
+/// - **can it fail** — while A holds the lease, B must be refused. A primitive
+///   that never actually locked (an always-`Ok(true)` stub, a lock taken on the
+///   wrong handle, a path the two children did not share) makes B an OWNER and
+///   reddens this assertion.
+/// - **can it pass** — after A releases, C must win. A primitive that is stuck
+///   locked, or a lease that leaks its lock past the holder's death, makes C an
+///   OBSERVER and reddens that assertion.
+///
+/// A permanently-red gate proves as little as a permanently-green one
+/// (`LANE-BRIEF.md` §3b-iii), so both arms are asserted, not just the refusal.
+#[test]
+fn a_second_process_is_refused_while_the_first_holds_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sched = tmp.path().join("schedule");
+    std::fs::create_dir_all(&sched).unwrap();
+
+    let out_a = tmp.path().join("a.txt");
+    let out_b = tmp.path().join("b.txt");
+    let out_c = tmp.path().join("c.txt");
+
+    // --- A takes the lease in its own process.
+    let mut a = spawn_child(&sched, &out_a);
+    assert_eq!(
+        child_field(&out_a, "ROLE").as_deref(),
+        Some("OWNER"),
+        "the first process must own an uncontended schedule"
+    );
+    let a_pid: u32 = child_field(&out_a, "PID").unwrap().parse().unwrap();
+    assert_ne!(
+        a_pid,
+        std::process::id(),
+        "the child must be a genuinely separate process, otherwise this case \
+         measures the same in-process exclusion the rest of the file already does"
+    );
+
+    // --- KNOWN-NEGATIVE DIRECTION: B contends against a live holder.
+    let mut b = spawn_child(&sched, &out_b);
+    assert_eq!(
+        child_field(&out_b, "ROLE").as_deref(),
+        Some("OBSERVER"),
+        "a second PROCESS must be refused while the first holds the OS lock"
+    );
+    assert_eq!(
+        child_field(&out_b, "HOLDER").as_deref(),
+        Some(a_pid.to_string().as_str()),
+        "the refusal must name the live owner, read from the unlocked record"
+    );
+    std::fs::write(format!("{}.release", out_b.display()), b"1").unwrap();
+    b.wait().unwrap();
+
+    // --- KNOWN-POSITIVE DIRECTION: A goes away, so C must win.
+    std::fs::write(format!("{}.release", out_a.display()), b"1").unwrap();
+    a.wait().unwrap();
+    let mut c = spawn_child(&sched, &out_c);
+    assert_eq!(
+        child_field(&out_c, "ROLE").as_deref(),
+        Some("OWNER"),
+        "a schedule whose owning PROCESS has exited must be reclaimable — a gate \
+         with no reachable pass state measures nothing"
+    );
+    std::fs::write(format!("{}.release", out_c.display()), b"1").unwrap();
+    c.wait().unwrap();
+}
+
+/// The mandatory-locking hazard, asserted across a process boundary.
+///
+/// On Windows `LockFileEx` is MANDATORY: bytes covered by the lock cannot be
+/// read by anybody, including this crate. That is why the lease splits the
+/// one-byte `schedule.lock` sentinel from the freely readable `schedule.owner`
+/// record. If the lock were ever moved onto the record, this read would fail
+/// with `ERROR_LOCK_VIOLATION` (33) on Windows while continuing to pass on
+/// Unix, where `flock` is advisory — a platform-only defect that no Linux run
+/// can see.
+#[test]
+fn the_owner_record_is_readable_from_another_process_while_the_lock_is_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sched = tmp.path().join("schedule");
+    std::fs::create_dir_all(&sched).unwrap();
+    let out_a = tmp.path().join("holder.txt");
+
+    let mut a = spawn_child(&sched, &out_a);
+    assert_eq!(child_field(&out_a, "ROLE").as_deref(), Some("OWNER"));
+
+    // This process is NOT the holder, so the read crosses a real handle
+    // boundary rather than reusing the holder's own descriptor.
+    let raw = std::fs::read(ScheduleLease::record_path(&sched)).expect(
+        "the owner record must be readable by another process while the lease is held; \
+         a failure here is the mandatory-lock defect the split sentinel exists to avoid",
+    );
+    assert!(!raw.is_empty(), "the owner record must not be empty");
+    let rec = ScheduleLease::read_record(&sched).expect("the owner record must parse");
+    assert_eq!(rec.holder, "child");
+    assert_ne!(
+        rec.pid,
+        std::process::id(),
+        "the record must name the child, not this process"
+    );
+
+    // The sentinel stays one byte, so the mandatory range covers nothing a
+    // reader wants.
+    let len = std::fs::metadata(ScheduleLease::lock_path(&sched))
+        .unwrap()
+        .len();
+    assert_eq!(len, 1, "lock sentinel must stay exactly one byte");
+
+    std::fs::write(format!("{}.release", out_a.display()), b"1").unwrap();
+    a.wait().unwrap();
+}
