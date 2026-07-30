@@ -56,6 +56,7 @@ use wcore_browser::policy::{BrowserPolicy, PolicyAction};
 use wcore_browser::provider::{BrowserOpError, BrowserProvider, BrowserSession, OpResult, SessionCtx};
 use wcore_browser::supervisor::BrowserSupervisor;
 use wcore_browser::tool::BrowserTool;
+use wcore_tools::Tool;
 
 /// Provider that (a) records every op it is handed and (b) for `Download`
 /// actually writes bytes to `dest_path` — the effect a real backend would have.
