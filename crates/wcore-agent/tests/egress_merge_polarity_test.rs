@@ -28,6 +28,18 @@
 //!   destroying the operator's documented off switch.
 //! - [`operator_off_switch_survives_a_project_silent_on_security`] pins the
 //!   *shape* of the fix, not just its direction — see its doc comment.
+//!
+//! ## The resource ceiling (`BL-UNTRUSTED-RESOURCE-LIMITS`)
+//!
+//! The second half of this file covers `[default] max_tokens` / `max_turns`,
+//! found by the same sweep and closed later. It is the same defect family — a
+//! comment asserting a safety property the code did not implement — and it
+//! carries controls in both directions for the same reason: a clamp that cannot
+//! deny a raise is absent, and one that cannot honour a lowering is a deletion.
+//! Unlike `[security] enabled`, that clamp is deliberately TRUST-GATED; the
+//! carve-out and the measurement justifying it are on
+//! `a_trusted_project_may_still_raise_the_resource_ceiling_by_design` and
+//! `raising_the_ceiling_in_a_trusted_repo_revokes_its_own_trust`.
 
 use std::ffi::{OsStr, OsString};
 
@@ -419,28 +431,29 @@ fn trusted_project_egress_allow_widens_the_boundary_by_design() {
     );
 }
 
-// ── Sweep result: the one other loosening on the untrusted path ──────────────
+// ── The resource ceiling: BL-UNTRUSTED-RESOURCE-LIMITS, now closed ───────────
+//
+// `restrict_untrusted_project_config` forwarded six `[default]` fields under the
+// comment *"Resource limits and read-only/approval requests can only reduce
+// power"*. That claim was FALSE for two of them: `max_tokens` merges "project
+// wins if non-default" and `max_turns` merges `project.or(global)`, and neither
+// compares the two values — so an untrusted project raised both ABOVE the
+// operator's global ceiling.
+//
+// **The test that used to sit here asserted `max_tokens == 999_999` and
+// `max_turns == Some(100_000)` as the measured behaviour.** It was written as an
+// honest measurement of a defect deliberately left open, not as a "narrowing to
+// preserve" the way the `security.enabled` test in this same file had been — but
+// it pinned the loosening all the same, and it is now inverted. The clamp lives
+// in `restrict_untrusted_project_config`, is TRUST-GATED, and the four tests
+// below run the control in both directions: it can deny a raise, and it can
+// still honour a lowering.
 
-/// **A separate, lower-severity finding this lane MEASURED but did not fix.**
-///
-/// `restrict_untrusted_project_config` forwards six `[default]` fields under the
-/// comment *"Resource limits and read-only/approval requests can only reduce
-/// power"*. That claim is false for two of them: `max_tokens` merges
-/// "project wins if non-default" and `max_turns` merges `project.or(global)`,
-/// neither of which compares the two values — so an untrusted project can raise
-/// both ABOVE the operator's global ceiling.
-///
-/// It is recorded here rather than fixed because it is a cost/resource ceiling,
-/// not a trust boundary: the blast radius is spend and wall-clock, both of which
-/// have their own separate enforcement (`[budget]` / `[session_cap]`, which the
-/// untrusted path does NOT forward). Per the phase's severity policy that makes
-/// it a non-blocking backlog item, and unpicking it means deciding whether
-/// "stricter" is comparable for an `Option<usize>` — a design call, not a
-/// polarity typo. The test exists so the next reader finds a measurement instead
-/// of the false comment.
+/// FAIL direction — the defect itself. An untrusted project asking for more than
+/// the operator allowed gets the operator's value.
 #[test]
 #[serial(egress_merge_polarity_env)]
-fn untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary() {
+fn untrusted_project_cannot_raise_the_resource_ceiling() {
     let loaded = load_with_global(
         "[default]\nmax_tokens = 100\nmax_turns = 5\n\n[security]\nenabled = true\n",
         "[default]\nmax_tokens = 999999\nmax_turns = 100000\n",
@@ -454,18 +467,283 @@ fn untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary() {
     );
 
     assert_eq!(
-        loaded.config.max_tokens, 999_999,
-        "measured: an untrusted project RAISES max_tokens past the global 100"
+        loaded.config.max_tokens, 100,
+        "an untrusted project must not raise max_tokens past the operator's 100 \
+         (this asserted 999_999 before the clamp)"
     );
     assert_eq!(
         loaded.config.max_turns,
-        Some(100_000),
-        "measured: an untrusted project RAISES max_turns past the global 5"
+        Some(5),
+        "an untrusted project must not raise max_turns past the operator's 5 \
+         (this asserted Some(100_000) before the clamp)"
     );
 
     // The boundary that matters is unaffected — this is a ceiling, not a gate.
     assert!(
         loaded.config.security.enabled,
         "the egress boundary still holds; the resource ceiling is a separate axis"
+    );
+}
+
+/// PASS direction — the control §3b-iii demands. Without this, a "fix" that
+/// simply hard-wired both fields to global would pass the test above while
+/// destroying the whole point of forwarding them: a repo tightening its own
+/// limits. A clamp that cannot honour a lowering is not a clamp, it is a
+/// deletion.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn untrusted_project_may_still_lower_the_resource_ceiling() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 100000\nmax_turns = 500\n\n[security]\nenabled = true\n",
+        "[default]\nmax_tokens = 4096\nmax_turns = 3\n",
+        Trust::Untrusted,
+        false,
+    );
+    assert!(loaded.project_restricted, "untrusted path under test");
+
+    assert_eq!(
+        loaded.config.max_tokens, 4096,
+        "a project LOWERING max_tokens is a narrowing and must survive the clamp"
+    );
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(3),
+        "a project LOWERING max_turns is a narrowing and must survive the clamp"
+    );
+}
+
+/// The ABSENT-value case, and the reason the clamp keeps a presence gate instead
+/// of a bare `min`.
+///
+/// `max_tokens` is `u32` with `#[serde(default = "default_max_tokens")]` =
+/// 64000, so a project silent on the field is indistinguishable from one that
+/// wrote `64000` — and 64000 is not the identity element for `min`. This test
+/// reddens for the natural-looking simplification of moving the comparison to
+/// the merge site as `max_tokens: project.min(global)` and dropping the presence
+/// gate: that variant returns 64000 here instead of the operator's 200000.
+/// Enumerated, it is the *only* shape of the two that differs — which is why the
+/// assertion is on a global ABOVE the default, not below it.
+///
+/// Same family as `operator_off_switch_survives_a_project_silent_on_security`
+/// earlier in this file: for a field whose serde default is not neutral, absence
+/// is where a merge fix goes wrong.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn a_project_silent_on_resource_limits_leaves_the_operator_ceiling_alone() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 200000\nmax_turns = 7\n\n[security]\nenabled = true\n",
+        // A real project file that is SILENT on both resource limits.
+        "[default]\nmodel = \"some-project-model\"\n",
+        Trust::Untrusted,
+        false,
+    );
+    assert!(loaded.project_restricted, "untrusted path under test");
+
+    // Instrument-alive check: prove the project file was actually read, so the
+    // two assertions below are not passing because nothing loaded at all.
+    assert_eq!(
+        loaded.config.model, "some-project-model",
+        "the project config was not read — the ceiling assertions below would be \
+         vacuous"
+    );
+
+    assert_eq!(
+        loaded.config.max_tokens, 200_000,
+        "a project silent on max_tokens must not drag the operator's ceiling down \
+         to the 64000 serde default"
+    );
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(7),
+        "a project silent on max_turns must leave the operator's cap in place"
+    );
+}
+
+/// A project `Some(n)` against a global `None` is a NARROWING and must be
+/// honoured; a clamp that naively required both sides to be `Some` in order to
+/// compare would silently drop it.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn untrusted_project_may_add_a_turn_cap_when_the_operator_has_none() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 100000\n\n[security]\nenabled = true\n",
+        "[default]\nmax_turns = 12\n",
+        Trust::Untrusted,
+        false,
+    );
+    assert!(loaded.project_restricted, "untrusted path under test");
+
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(12),
+        "global has no cap, so the project's cap is strictly narrowing and stands"
+    );
+}
+
+/// The residual hole the first draft of this clamp left open, and the reason the
+/// `(Some, None)` arm is not a pass-through.
+///
+/// An absent global `max_turns` does NOT mean "unlimited": `Config::resolve`
+/// finishes the field as
+/// `cli.max_turns.or(merged.default.max_turns).unwrap_or(SMART_MAX_TURNS)`, so
+/// an operator who configures no cap still has an EFFECTIVE ceiling of 512. A
+/// clamp that compared only `(Some, Some)` and passed `(Some(p), None)` through
+/// therefore still let an untrusted project raise the effective ceiling from 512
+/// to 100000 — the defect surviving inside its own fix.
+///
+/// This is the sharper of the two `max_turns` controls: the test above proves the
+/// clamp can be permissive, this one proves it is not permissive by accident.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn untrusted_project_cannot_raise_past_the_backstop_when_the_operator_has_no_cap() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 100000\n\n[security]\nenabled = true\n",
+        "[default]\nmax_turns = 100000\n",
+        Trust::Untrusted,
+        false,
+    );
+    assert!(loaded.project_restricted, "untrusted path under test");
+
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(512),
+        "with no operator cap the effective ceiling is the SMART_MAX_TURNS \
+         backstop (512); an untrusted project must not raise past it"
+    );
+}
+
+/// The clamp is deliberately TRUST-GATED, and this test says so out loud so the
+/// carve-out is a recorded decision rather than an oversight someone later
+/// "fixes" without knowing why it was chosen.
+///
+/// Rationale (panel 3/3 — codex `gpt-5.6-sol`, gemini `3.1-pro-preview`, kimi
+/// K3): `[budget]` (`max_cost_usd`, `max_wall_time_secs`) and `[session_cap]`
+/// are strictly MORE powerful resource ceilings — they are denominated in
+/// dollars — and both merge project-wins unclamped on the trusted path while
+/// being dropped entirely on the untrusted one. A trusted workspace can also
+/// already register `[mcp.servers]` and `[providers]`, i.e. arbitrary tool
+/// execution. Clamping a token count there buys no security and breaks the
+/// legitimate monorepo that needs a larger window than the shipped default.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn a_trusted_project_may_still_raise_the_resource_ceiling_by_design() {
+    let loaded = load_with_global(
+        "[default]\nmax_tokens = 100\nmax_turns = 5\n\n[security]\nenabled = true\n",
+        "[default]\nmax_tokens = 200000\nmax_turns = 900\n",
+        Trust::Granted,
+        false,
+    );
+    assert!(
+        !loaded.project_restricted,
+        "the TRUSTED path is the one under test"
+    );
+
+    assert_eq!(
+        loaded.config.max_tokens, 200_000,
+        "a trusted project's window request is honoured — see this test's doc for why"
+    );
+    assert_eq!(
+        loaded.config.max_turns,
+        Some(900),
+        "a trusted project's turn budget is honoured — see this test's doc for why"
+    );
+}
+
+/// The measurement that kills the objection to trust-gating.
+///
+/// All three panel members, unprompted, raised the same counter-argument: trust
+/// is STICKY while repo content is not, so the trusted path is a post-trust
+/// escalation channel — a workspace trusted today, then a hostile commit raises
+/// `max_turns` tomorrow.
+///
+/// **That premise is false in this codebase, and this test is the proof.**
+/// `fingerprint_workspace` hashes the CONTENT of `.wayland-core.toml` into the
+/// trust digest, and `WorkspaceTrustStore::resolve` re-derives and compares it on
+/// every resolve. So the edit that would exploit the trusted path is the very
+/// edit that invalidates the grant: the workspace reverts to UNTRUSTED and the
+/// clamp applies. The escalation channel does not exist.
+///
+/// Note this asserts BOTH halves — that trust was really granted and effective
+/// on the original content, and that it lapsed after the edit. Asserting only
+/// the second half would pass if the grant had never worked at all.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn raising_the_ceiling_in_a_trusted_repo_revokes_its_own_trust() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let project_config = project.path().join(".wayland-core.toml");
+
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[default]\nmax_tokens = 100\nmax_turns = 5\n",
+    )
+    .unwrap();
+    // The content the operator inspected and trusted.
+    std::fs::write(&project_config, "[default]\nmodel = \"reviewed-model\"\n").unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("WAYLAND_HOME", Some(home.path().as_os_str())),
+        ("WAYLAND_CONFIG_PATH", None),
+        ("XDG_DATA_HOME", None),
+    ]);
+
+    let store = WorkspaceTrustStore::for_current_home();
+    store.grant(project.path()).expect("granting trust");
+
+    let cli = CliArgs {
+        provider: Some("anthropic".to_string()),
+        api_key: Some("test-key-not-a-real-credential".to_string()),
+        project_dir: Some(project.path().to_path_buf()),
+        ..CliArgs::default()
+    };
+    let restricted_of = |cli: &CliArgs| -> (bool, u32, Option<usize>) {
+        let resolved = Config::resolve_with_provenance(cli).expect("resolving config");
+        let restricted = resolved
+            .provenance
+            .sources
+            .iter()
+            .filter(|source| source.role == ConfigSourceRole::Project)
+            .any(|source| {
+                source
+                    .dispositions
+                    .contains(&ConfigSourceDisposition::Restricted)
+            });
+        (
+            restricted,
+            resolved.value.max_tokens,
+            resolved.value.max_turns,
+        )
+    };
+
+    // Half one: the grant really took effect on the reviewed content. Without
+    // this, the assertion below would pass even if `grant` had done nothing.
+    let (restricted_before, _, _) = restricted_of(&cli);
+    assert!(
+        !restricted_before,
+        "the grant did not take effect on the reviewed content, so this test \
+         cannot say anything about what happens when that content changes"
+    );
+
+    // The hostile commit: raise the ceiling past the operator's.
+    std::fs::write(
+        &project_config,
+        "[default]\nmodel = \"reviewed-model\"\nmax_tokens = 999999\nmax_turns = 100000\n",
+    )
+    .unwrap();
+
+    let (restricted_after, max_tokens_after, max_turns_after) = restricted_of(&cli);
+    assert!(
+        restricted_after,
+        "editing .wayland-core.toml must invalidate the content-bound trust digest \
+         and route the config back through restrict_untrusted_project_config"
+    );
+    assert_eq!(
+        max_tokens_after, 100,
+        "and the clamp then applies, so the raise does not land"
+    );
+    assert_eq!(
+        max_turns_after,
+        Some(5),
+        "and the clamp then applies, so the raise does not land"
     );
 }
