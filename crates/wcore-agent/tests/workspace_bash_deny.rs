@@ -95,7 +95,7 @@ fn workspace_bash_dropped_when_deny_not_enforced() {
 
 // ===========================================================================
 // 3. WorkspacePolicy::contained over a workspace with .env →
-//    secret_deny_paths() non-empty and contains .env.
+//    secret_deny_paths_dynamic() non-empty and contains .env.
 // ===========================================================================
 
 #[test]
@@ -103,21 +103,24 @@ fn contained_policy_secret_deny_paths_include_env() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize root");
 
-    // Write a .env so compute_secret_deny finds a workspace secret.
+    // Write a .env so the secret walk finds a workspace secret.
     let env_file = root.join(".env");
     std::fs::write(&env_file, b"SECRET=hunter2").expect("write .env");
 
     let policy = WorkspacePolicy::contained(&root);
-    let deny_paths = policy.secret_deny_paths();
+    // `secret_deny_paths_dynamic()` is what `bash.rs` feeds to the OS
+    // sandbox's `fs_read_deny`; the frozen construction-time list it replaced
+    // has been deleted.
+    let deny_paths = policy.secret_deny_paths_dynamic();
 
     assert!(
         !deny_paths.is_empty(),
-        "Contained workspace with .env must have non-empty secret_deny_paths()"
+        "Contained workspace with .env must have non-empty secret_deny_paths_dynamic()"
     );
 
     let canon_env = std::fs::canonicalize(&env_file).expect("canonicalize .env");
     assert!(
         deny_paths.contains(&canon_env),
-        ".env must appear in secret_deny_paths(); paths: {deny_paths:?}",
+        ".env must appear in secret_deny_paths_dynamic(); paths: {deny_paths:?}",
     );
 }

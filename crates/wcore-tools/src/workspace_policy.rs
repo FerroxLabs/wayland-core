@@ -106,10 +106,6 @@ pub struct WorkspacePolicy {
     readable_extra: Vec<PathBuf>,
     network: NetworkPolicy,
     cache_env: Vec<(String, String)>,
-    /// Cached at construction time (once per session). Absolute, canonicalized
-    /// paths that the OS-sandbox backend must deny for reads. See
-    /// `secret_deny_paths()` / `compute_secret_deny()`.
-    secret_deny: Vec<PathBuf>,
     /// Additional authority roots that must be unreadable to Bash even when a
     /// platform backend would otherwise expose them through a system mount.
     authority_read_deny: Vec<PathBuf>,
@@ -189,10 +185,6 @@ impl WorkspacePolicy {
         readable_extra.sort();
         readable_extra.dedup();
 
-        // Compute readable_canon from the same locals readable_roots() uses.
-        let readable_canon = readable_canon_roots(&root, &writable_extra, &readable_extra);
-        let secret_deny = compute_secret_deny(WorkspaceTrust::Trusted, &root, &readable_canon);
-
         Self {
             root,
             trust: WorkspaceTrust::Trusted,
@@ -208,7 +200,6 @@ impl WorkspacePolicy {
             // shell by default (Overwatch ruling on #657, Sean-confirmed).
             network: crate::bash::default_bash_network_policy(),
             cache_env: Vec::new(),
-            secret_deny,
             authority_read_deny: Vec::new(),
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
@@ -238,12 +229,7 @@ impl WorkspacePolicy {
             })
             .collect();
         let readable_extra = minimal_toolchain_read_dirs();
-        // Hoist writable_extra so we can borrow it for readable_canon.
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
-
-        // Compute readable_canon from the same locals readable_roots() uses.
-        let readable_canon = readable_canon_roots(&root, &writable_extra, &readable_extra);
-        let secret_deny = compute_secret_deny(WorkspaceTrust::Contained, &root, &readable_canon);
 
         Self {
             root,
@@ -257,7 +243,6 @@ impl WorkspacePolicy {
             // `default_bash_network_policy`).
             network: crate::bash::default_bash_network_policy(),
             cache_env,
-            secret_deny,
             authority_read_deny: Vec::new(),
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
@@ -302,9 +287,6 @@ impl WorkspacePolicy {
 
         let readable_extra = minimal_toolchain_read_dirs();
         let writable_extra = vec![scratch.clone()];
-        let readable_canon = readable_canon_roots(&checkout, &writable_extra, &readable_extra);
-        let secret_deny =
-            compute_secret_deny(WorkspaceTrust::Contained, &checkout, &readable_canon);
         let mut cache_env = CACHE_ENV_DIRS
             .iter()
             .map(|(var, sub)| {
@@ -353,7 +335,6 @@ impl WorkspacePolicy {
             readable_extra,
             network: crate::bash::default_bash_network_policy(),
             cache_env,
-            secret_deny,
             authority_read_deny: protected.clone(),
             authority_write_deny: protected,
             deny_git_authority_env: true,
@@ -409,14 +390,6 @@ impl WorkspacePolicy {
         &self.cache_env
     }
 
-    /// Absolute, canonicalized paths that the OS-sandbox backend must deny
-    /// for reads. Computed once at construction (cached). Empty when no deny
-    /// applies (no `$HOME`, no workspace root, etc.) — empty = today's
-    /// behavior for callers that don't set `manifest.fs_read_deny`.
-    pub fn secret_deny_paths(&self) -> &[PathBuf] {
-        &self.secret_deny
-    }
-
     /// True if `path` is a secret that must stay denied even inside a
     /// writable root. Lexical; the VFS adapter calls this with the
     /// already-canonicalized path (see `SecretDenyFs`), so symlinks that
@@ -453,19 +426,17 @@ impl WorkspacePolicy {
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
-    /// denial (`secret_deny_paths()`) that `Contained` applies, so a
+    /// denial (`secret_deny_paths_dynamic()`) that `Contained` applies, so a
     /// `Full`-posture channel / remote session's `Bash` OS-sandbox refuses to
     /// read the workspace's own secrets. A GENUINELY-LOCAL keyboard session
     /// (no channel posture) does NOT call this — the operator may read their
     /// own `.env`. Complements the `SecretDenyFs` read-path guard installed for
-    /// the same sessions at bootstrap. Idempotent (sort + dedup).
+    /// the same sessions at bootstrap.
+    ///
+    /// Setting the flag IS the whole opt-in: `secret_deny_paths_dynamic()` —
+    /// the only thing `bash.rs` feeds to the OS sandbox — keys the project
+    /// walk off `secret_read_deny_required`. Idempotent because it is a bool.
     pub fn with_project_secret_deny(mut self) -> Self {
-        let readable_canon =
-            readable_canon_roots(&self.root, &self.writable_extra, &self.readable_extra);
-        self.secret_deny
-            .extend(project_committed_secrets(&self.root, &readable_canon));
-        self.secret_deny.sort();
-        self.secret_deny.dedup();
         // #667 F2: this Trusted policy now denies project secrets, so its `Bash`
         // must also be refused when the backend can't enforce read-deny.
         self.secret_read_deny_required = true;
@@ -528,14 +499,18 @@ impl WorkspacePolicy {
 
     /// #234: the OS-sandbox read-deny list AS OF NOW, recomputed per Bash exec.
     ///
-    /// Identical to [`secret_deny_paths`](Self::secret_deny_paths) EXCEPT it
-    /// re-walks the workspace for project-committed secrets, so a secret CREATED
-    /// AFTER bootstrap (a pulled `*.pem`, a generated `terraform.tfstate`) is
-    /// denied on the very next Bash command. This closes the TOCTOU gap between
-    /// the frozen construction-time list — which `bash.rs` fed to the OS sandbox
-    /// — and the dynamic [`is_project_secret`](Self::is_project_secret) guard the
-    /// in-process file tools (`SecretDenyFs`) already enforce per-access. Before
-    /// this, `Bash cat terraform.tfstate` could read a secret that `Read` refused.
+    /// This is the SOLE source of `manifest.fs_read_deny` (`bash.rs`). It
+    /// re-walks the workspace for project-committed secrets on every exec, so a
+    /// secret CREATED AFTER bootstrap (a pulled `*.pem`, a generated
+    /// `terraform.tfstate`) is denied on the very next Bash command. That closed
+    /// the TOCTOU gap against the frozen construction-time list `bash.rs` used
+    /// before #234; the frozen list has since been DELETED, because it had no
+    /// remaining production reader and a stale `pub` deny-list accessor sitting
+    /// next to this one is a trap for the next caller. Its removal also took a
+    /// full recursive no-prune walk of the workspace off the TUI boot path,
+    /// where it blocked first paint inside `splash_while` (see
+    /// `project_committed_secrets`). The in-process file tools enforce
+    /// separately and per-access via [`is_project_secret`](Self::is_project_secret).
     ///
     /// Scope: this closes the CROSS-command window (a secret created by an earlier
     /// command, read by a later one). The INTRA-command window is inherent to a
@@ -891,24 +866,6 @@ fn git_content_stores(root: &Path) -> Vec<PathBuf> {
         }
     }
     out
-}
-
-/// Canonicalized readable roots (workspace + writable + readable extras), the
-/// same set `readable_roots()` exposes. Both sides of the under-mounted check
-/// must be canonicalized so macOS `/var` → `/private/var` matches.
-fn readable_canon_roots(
-    root: &Path,
-    writable_extra: &[PathBuf],
-    readable_extra: &[PathBuf],
-) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::iter::once(root.to_path_buf())
-        .chain(writable_extra.iter().cloned())
-        .chain(readable_extra.iter().cloned())
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        .collect();
-    v.sort();
-    v.dedup();
-    v
 }
 
 /// Best-effort canonicalization for the under-root scope check. Falls back to

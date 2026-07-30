@@ -1,0 +1,12 @@
+=== MUTATION B1: gitignore honored (require_git(false)) ===
+B1_RC=101
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1023 filtered out; finished in 0.00s
+=== MUTATION B2: node_modules pruned ===
+B2_RC=101
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1023 filtered out; finished in 0.00s
+=== RESTORED ===
+R4_RC=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1023 filtered out; finished in 0.00s
+R5_RC=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1023 filtered out; finished in 0.00s
+WORKTREE_DIRTY_BYTES=0

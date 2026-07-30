@@ -1,0 +1,4 @@
+BEFORE: workspace_openat_count=20031  first_syscall=18:48:07.110178  last_workspace_openat=18:48:12.997046  span_from_start_s=5.887
+AFTER: workspace_openat_count=10017  first_syscall=18:49:09.154660  last_workspace_openat=18:49:12.840605  span_from_start_s=3.686
+BEFORE2: workspace_openat_count=20031  first_syscall=18:50:11.193455  last_workspace_openat=18:50:16.918387  span_from_start_s=5.725
+AFTER2: workspace_openat_count=10017  first_syscall=18:51:13.241128  last_workspace_openat=18:51:17.960469  span_from_start_s=4.719
