@@ -1,0 +1,97 @@
+=== doc_tool.rs 370-420 ===
+            ToolResult {
+                content,
+                is_error: false,
+            }
+        }
+        Err(e) => ToolResult {
+            content: format!("Failed to extract text from {display}: {e}"),
+            is_error: true,
+        },
+    }
+}
+
+/// Write the FULL extracted markdown to a workspace artifact and return its
+/// path (#650 Part-2). Mirrors [`crate::tool_result_storage`]'s spill posture —
+/// a real file under the OS temp dir the model can `read` — but keyed on a
+/// content hash and given a `.md` extension so the desktop full-document reader
+/// (#655) can consume it directly. Returns `None` (degrade to the paged window
+/// only) if the write fails.
+#[cfg(feature = "doc-extract")]
+fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    display.hash(&mut hasher);
+    full_markdown.len().hash(&mut hasher);
+    full_markdown.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let dir = std::env::temp_dir().join("wayland-doc-extract");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{hash:016x}.md"));
+    std::fs::write(&path, full_markdown).ok()?;
+    Some(path)
+}
+
+#[cfg(feature = "doc-extract")]
+fn extract_inner(
+    admitted: AdmittedHandle,
+    sheet: Option<&str>,
+    max_bytes: usize,
+) -> Result<String, String> {
+    // The handle, the length and the container class all came from the SAME
+    // descriptor the shared intake opened and validated. Nothing here reopens
+    // a name, and nothing here re-decides a bound the intake already enforced.
+    let AdmittedHandle { kind, file, .. } = admitted;
+
+    // OOXML (docx/xlsx/pptx) is a ZIP container (`PK\x03\x04`), proved by the
+    // intake rather than re-sniffed here.
+    if kind == MediaKind::Ooxml {
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("not a valid zip archive: {e}"))?;
+
+=== is line 401 inside cfg(test)? show all cfg(test) lines ===
+911:#[cfg(test)]
+
+=== callers of that fn ===
+88:fn doc_intake_policy() -> IntakePolicy {
+102:    pub fn new() -> Self {
+118:fn window_text(text: &str, offset: usize, max_bytes: usize, budget: usize) -> String {
+170:    fn name(&self) -> &str {
+174:    fn description(&self) -> &str {
+187:    fn input_schema(&self) -> JsonSchema {
+215:    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+220:    async fn execute(&self, input: Value) -> ToolResult {
+274:    fn max_result_size(&self) -> usize {
+281:    fn category(&self) -> ToolCategory {
+286:    fn describe(&self, input: &Value) -> String {
+323:fn extract(
+389:fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::PathBuf> {
+406:fn extract_inner(
+444:fn check_zip_declared_limits(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<(), String> {
+476:fn read_zip_text_part(
+499:fn select_sheets(names: &[String], sheet: Option<&str>) -> Result<Vec<String>, String> {
+524:fn extract_xlsx<R: std::io::Read + std::io::Seek>(
+586:fn dataref_to_string(d: &calamine::DataRef) -> String {
+607:fn render_sparse_cells(cells: &[(u32, u32, String)], out: &mut String, max_bytes: usize) {
+646:fn local_name(qname: &[u8]) -> &[u8] {
+659:fn docx_xml_to_text(xml: &str, max_bytes: usize) -> String {
+747:fn extract_pptx(
+778:fn slide_number(name: &str) -> usize {
+790:fn pptx_slide_text(xml: &str) -> String {
+821:fn extract_csv(file: std::fs::File, max_bytes: usize) -> Result<String, String> {
+855:fn render_markdown_table<I: Iterator<Item = Vec<String>>>(
+893:fn extract(
+920:    fn window_text_passes_short_text_through() {
+927:    fn window_text_truncation_marks_size_and_continuation() {
+946:    fn window_text_offset_reads_next_chunk_and_reports_end() {
+956:    fn window_text_offset_past_end_is_honest() {
+964:    fn schema_and_metadata_are_well_formed() {
+983:    async fn missing_path_param_returns_error() {
+991:    async fn relative_path_is_refused() {
+999:    async fn missing_file_returns_error() {
+1017:        fn zip_bytes(parts: &[(&str, &str)]) -> Vec<u8> {
+1031:        fn write_tmp(name: &str, bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+1040:        fn make_xlsx(cells: &[(&str, &str)], dimension: &str) -> Vec<u8> {
+1069:        fn render_markdown_table_shapes_header_and_rows() {
