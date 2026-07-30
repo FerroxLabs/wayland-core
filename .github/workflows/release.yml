@@ -75,7 +75,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
             binary_name: wayland-core
             build_container: ubuntu:22.04
-            glibc_floor: "2.35"
+            # ubuntu:22.04's sysroot is 2.35, but the binary references no 2.35
+            # symbol, so the achieved floor is 2.34 — measured, not assumed. The
+            # promise is set to what is achieved rather than to what the sysroot
+            # permits: if a future change does pull in a 2.35 symbol, the gate
+            # reddens and we get to decide, instead of silently dropping RHEL 9.
+            glibc_floor: "2.34"
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: wayland-core

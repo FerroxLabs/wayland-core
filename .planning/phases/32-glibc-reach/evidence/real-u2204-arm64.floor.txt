@@ -1,0 +1,35 @@
+LABEL=real-u2204-arm64
+BINARY=/root/wayland-glibc-reach/target/aarch64-unknown-linux-gnu/release/wayland-core
+SIZE=89109312
+SHA256=a17cb384bf405084f4649b296e5ec0159ff701eca5ed74a62041b790307e54c2
+--- ELF header ---
+  Class:                             ELF64
+  Machine:                           AArch64
+--- NEEDED (dynamic ABI set) ---
+ 0x0000000000000001 (NEEDED)             Shared library: [libssl.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libcrypto.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libseccomp.so.2]
+ 0x0000000000000001 (NEEDED)             Shared library: [libdbus-1.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-aarch64.so.1]
+--- all GLIBC_ refs ---
+GLIBC_2.0
+GLIBC_2.17
+GLIBC_2.18
+GLIBC_2.25
+GLIBC_2.27
+GLIBC_2.28
+GLIBC_2.29
+GLIBC_2.30
+GLIBC_2.32
+GLIBC_2.33
+GLIBC_2.34
+--- MAX (version sort) ---
+MAX_GLIBC=GLIBC_2.34
+--- what a LEXICOGRAPHIC sort would have said (the classic bug) ---
+LEX_MAX=GLIBC_2.34
+--- instrument controls ---
+known_positive_count=104
+known_negative_count=0

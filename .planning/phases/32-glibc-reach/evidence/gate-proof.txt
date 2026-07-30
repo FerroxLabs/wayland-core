@@ -1,0 +1,52 @@
+########## GATE BOTH-DIRECTIONS PROOF ##########
+### 0. self-test
+check_glibc_floor self-test: 4/4 assertions passed
+  known-positive (2.39 set vs 2.39 floor) -> pass
+  known-negative (2.39 set vs 2.34 floor) -> fail, as required
+  lexicographic 'sort -u' bug picks 2.9 and would WRONGLY pass 2.34
+  zero-symbol input yields zero versions (treated as a failure at runtime)
+rc=0
+
+### 1. CAN IT PASS? new x86_64 (2.34) vs floor 2.34 -- expect rc=0
+binary        : /root/wayland-glibc-reach/target/x86_64-unknown-linux-gnu/release/wayland-core
+symbols found : 23
+declared floor: GLIBC_2.34
+actual max    : GLIBC_2.34
+OK: within the declared floor GLIBC_2.34
+rc=0
+
+### 2. CAN IT PASS? new aarch64 (2.34) vs floor 2.34 -- expect rc=0
+binary        : /root/wayland-glibc-reach/target/aarch64-unknown-linux-gnu/release/wayland-core
+symbols found : 11
+declared floor: GLIBC_2.34
+actual max    : GLIBC_2.34
+OK: within the declared floor GLIBC_2.34
+rc=0
+
+### 3. CAN IT FAIL? PLANTED REGRESSION: real ubuntu:24.04 x86_64 binary (2.39) vs floor 2.34 -- expect rc=1
+binary        : /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core
+symbols found : 25
+declared floor: GLIBC_2.34
+actual max    : GLIBC_2.39
+::error::/root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core requires GLIBC_2.39 but the declared floor is GLIBC_2.34. Offending: GLIBC_2.38, GLIBC_2.39
+rc=1
+
+### 4. CAN IT FAIL? planted regression aarch64 (2.39) vs floor 2.34 -- expect rc=1
+binary        : /root/glibc-reach-target/baseline-u2404-arm64/aarch64-unknown-linux-gnu/release/wayland-core
+symbols found : 13
+declared floor: GLIBC_2.34
+actual max    : GLIBC_2.39
+::error::/root/glibc-reach-target/baseline-u2404-arm64/aarch64-unknown-linux-gnu/release/wayland-core requires GLIBC_2.39 but the declared floor is GLIBC_2.34. Offending: GLIBC_2.38, GLIBC_2.39
+rc=1
+
+### 5. VACUITY: non-ELF file must FAIL, not pass
+::error::readelf failed on /etc/hostname: readelf: Error: /etc/hostname: Failed to read file header
+rc=1
+
+### 6. CONTROL: the SAME 2.39 binary passes a 2.39 floor (so rule 3 failed on the FLOOR, not on the file)
+binary        : /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core
+symbols found : 25
+declared floor: GLIBC_2.39
+actual max    : GLIBC_2.39
+OK: within the declared floor GLIBC_2.39
+rc=0
