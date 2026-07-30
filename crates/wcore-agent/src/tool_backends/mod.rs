@@ -40,6 +40,7 @@ use wcore_tools::url_safety::{SsrfSafeResolver, ssrf_safe_redirect_policy};
 use wcore_tools::github_tool::GitHubBackend;
 use wcore_tools::gitlab_tool::GitLabBackend;
 use wcore_tools::linear_tool::LinearBackend;
+use wcore_tools::media_cost::MediaAccounting;
 use wcore_tools::notion_tool::NotionBackend;
 use wcore_tools::transcription_tools::{AudioFetcher, TranscriptionBackend};
 use wcore_tools::vision_tools::{ImageFetcher, VisionBackend};
@@ -353,17 +354,37 @@ pub const OPENAI_VISION_MODEL: &str = "gpt-4o";
 /// possibly billed) arm. **Arms 4 and 5 are strictly additive — no
 /// previously-resolving configuration changes backend.**
 pub fn build_vision_backend(config: &Config) -> Option<Arc<dyn VisionBackend>> {
+    build_vision_backend_with_accounting(config, &MediaAccounting::default())
+}
+
+/// [`build_vision_backend`], with the session cost ledger and the operator's
+/// rate card bound to whichever arm resolves.
+///
+/// Separate entry point rather than a changed signature because the resolver
+/// has several callers and only the ones that own a session have anything to
+/// bind; the rest get [`MediaAccounting::default`], which records units and
+/// `unpriced` exactly as before.
+pub fn build_vision_backend_with_accounting(
+    config: &Config,
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn VisionBackend>> {
     if let Some(key) = read_env_key("ANTHROPIC_API_KEY") {
         tracing::info!("vision: using Anthropic (ANTHROPIC_API_KEY found)");
-        return Some(Arc::new(AnthropicVisionBackend::new(key)));
+        return Some(Arc::new(
+            AnthropicVisionBackend::new(key).with_accounting(accounting.clone()),
+        ));
     }
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
         tracing::info!("vision: using OpenAI (OPENAI_API_KEY found)");
-        return Some(Arc::new(OpenAiVisionBackend::new(key)));
+        return Some(Arc::new(
+            OpenAiVisionBackend::new(key).with_accounting(accounting.clone()),
+        ));
     }
     if let Some(key) = read_env_key("GEMINI_API_KEY") {
         tracing::info!("vision: using Gemini (GEMINI_API_KEY found)");
-        return Some(Arc::new(GeminiVisionBackend::new(key)));
+        return Some(Arc::new(
+            GeminiVisionBackend::new(key).with_accounting(accounting.clone()),
+        ));
     }
     // 4. Active OpenAI-wire provider (native OpenAI or FluxRouter).
     if let Some(backend) = vision_backend_from_config(config) {
@@ -372,20 +393,23 @@ pub fn build_vision_backend(config: &Config) -> Option<Arc<dyn VisionBackend>> {
             backend.model(),
             backend.endpoint()
         );
-        return Some(Arc::new(backend));
+        return Some(Arc::new(backend.with_accounting(accounting.clone())));
     }
     // 5. FLUX_API_KEY in the environment without FluxRouter being active.
     if let Some(key) = read_env_key("FLUX_API_KEY") {
         tracing::info!("vision: using FluxRouter {FLUX_ROUTER_VISION_MODEL} (FLUX_API_KEY found)");
-        return Some(Arc::new(OpenAiVisionBackend::with_endpoint(
-            key,
-            shared::join_openai_endpoint(
-                wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
-                "chat/completions",
-            ),
-            FLUX_ROUTER_VISION_MODEL.to_string(),
-            "flux-router",
-        )));
+        return Some(Arc::new(
+            OpenAiVisionBackend::with_endpoint(
+                key,
+                shared::join_openai_endpoint(
+                    wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
+                    "chat/completions",
+                ),
+                FLUX_ROUTER_VISION_MODEL.to_string(),
+                "flux-router",
+            )
+            .with_accounting(accounting.clone()),
+        ));
     }
     tracing::warn!(
         "vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / \
@@ -454,7 +478,21 @@ pub const OPENAI_STT_MODEL: &str = "whisper-1";
 /// are therefore strictly additive — no previously-resolving configuration
 /// changes backend.
 pub fn build_transcription_backend(config: &Config) -> Option<Arc<dyn TranscriptionBackend>> {
-    if let Some(backend) = transcription_backend_from_env() {
+    build_transcription_backend_with_accounting(config, &MediaAccounting::default())
+}
+
+/// [`build_transcription_backend`], with the session cost ledger and the
+/// operator's rate card bound to whichever arm resolves.
+///
+/// The rate card matters here specifically: before this existed, `bootstrap.rs`
+/// bound one to image generation and to nothing else, so an operator who had
+/// filled in `[tools.media_pricing]` had it silently ignored for every
+/// transcription they paid for.
+pub fn build_transcription_backend_with_accounting(
+    config: &Config,
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn TranscriptionBackend>> {
+    if let Some(backend) = transcription_backend_from_env(accounting) {
         return Some(backend);
     }
     // 3. Active OpenAI-wire provider (native OpenAI or FluxRouter).
@@ -464,22 +502,25 @@ pub fn build_transcription_backend(config: &Config) -> Option<Arc<dyn Transcript
             backend.model(),
             backend.endpoint()
         );
-        return Some(Arc::new(backend));
+        return Some(Arc::new(backend.with_accounting(accounting.clone())));
     }
     // 4. FLUX_API_KEY in the environment without FluxRouter being active.
     if let Some(key) = read_env_key("FLUX_API_KEY") {
         tracing::info!(
             "transcription: using FluxRouter {FLUX_ROUTER_STT_MODEL} (FLUX_API_KEY found)"
         );
-        return Some(Arc::new(OpenAiCompatWhisperBackend::new(
-            key,
-            shared::join_openai_endpoint(
-                wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
-                "audio/transcriptions",
-            ),
-            FLUX_ROUTER_STT_MODEL.to_string(),
-            "flux-router",
-        )));
+        return Some(Arc::new(
+            OpenAiCompatWhisperBackend::new(
+                key,
+                shared::join_openai_endpoint(
+                    wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL,
+                    "audio/transcriptions",
+                ),
+                FLUX_ROUTER_STT_MODEL.to_string(),
+                "flux-router",
+            )
+            .with_accounting(accounting.clone()),
+        ));
     }
     tracing::warn!(
         "transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no \
@@ -515,24 +556,32 @@ pub(crate) fn transcription_backend_from_config(
 
 /// Arms 1-2 of [`build_transcription_backend`] — the env-only chain. Split out
 /// so the config-aware resolver can try it first without duplicating it.
-fn transcription_backend_from_env() -> Option<Arc<dyn TranscriptionBackend>> {
+fn transcription_backend_from_env(
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn TranscriptionBackend>> {
     if let Some(key) = read_env_key("GROQ_API_KEY") {
         tracing::info!("transcription: using Groq Whisper (GROQ_API_KEY found, free tier)");
-        return Some(Arc::new(OpenAiCompatWhisperBackend::new(
-            key,
-            "https://api.groq.com/openai/v1/audio/transcriptions".to_string(),
-            "whisper-large-v3-turbo".to_string(),
-            "groq",
-        )));
+        return Some(Arc::new(
+            OpenAiCompatWhisperBackend::new(
+                key,
+                "https://api.groq.com/openai/v1/audio/transcriptions".to_string(),
+                "whisper-large-v3-turbo".to_string(),
+                "groq",
+            )
+            .with_accounting(accounting.clone()),
+        ));
     }
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
         tracing::info!("transcription: using OpenAI Whisper (OPENAI_API_KEY found)");
-        return Some(Arc::new(OpenAiCompatWhisperBackend::new(
-            key,
-            "https://api.openai.com/v1/audio/transcriptions".to_string(),
-            OPENAI_STT_MODEL.to_string(),
-            "openai",
-        )));
+        return Some(Arc::new(
+            OpenAiCompatWhisperBackend::new(
+                key,
+                "https://api.openai.com/v1/audio/transcriptions".to_string(),
+                OPENAI_STT_MODEL.to_string(),
+                "openai",
+            )
+            .with_accounting(accounting.clone()),
+        ));
     }
     None
 }

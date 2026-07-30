@@ -6,6 +6,75 @@
 
 use wcore_config::config::{Config, ProviderType};
 use wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL;
+use wcore_tools::media_cost::ReportedCost;
+
+/// Response headers that carry a per-call dollar figure.
+///
+/// Phase 27 captured `x-flux-cost-usd` on a live FluxRouter transcription and
+/// on a live chat call, while the same account's image call returned no figure
+/// in any channel. Vision is a chat call, so the header is expected there too.
+///
+/// Lives here rather than in `openai_compat_whisper.rs`, where it started: five
+/// billable backends need it and three of them were dropping `resp.headers()`
+/// on the floor entirely.
+pub const COST_HEADERS: &[&str] = &["x-flux-cost-usd", "x-cost-usd", "x-openai-cost-usd"];
+
+/// JSON pointers at which an OpenAI-wire provider may report a per-call cost.
+/// FluxRouter returns `usage.cost_usd` on chat completions.
+const COST_BODY_POINTERS: &[&str] = &["/usage/cost_usd", "/usage/total_cost_usd", "/cost_usd"];
+
+/// Read a provider-reported cost out of the response headers.
+///
+/// Returns `None` when no header is present or the value does not parse —
+/// **never a zero**. An unparseable header means we do not know the cost, and
+/// "unknown" and "free" are not the same claim.
+pub fn cost_from_headers(headers: &reqwest::header::HeaderMap) -> Option<ReportedCost> {
+    for name in COST_HEADERS {
+        if let Some(usd) = headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+        {
+            return Some(ReportedCost::from_header(*name, usd));
+        }
+    }
+    None
+}
+
+/// Read a provider-reported cost out of a parsed JSON response body.
+///
+/// Used for the chat-wire shapes (vision), where FluxRouter reports the figure
+/// in `usage.cost_usd` as well as in the header. Same discipline as
+/// [`cost_from_headers`]: a missing or non-numeric field yields `None`, never
+/// a zero.
+pub fn cost_from_body(parsed: &serde_json::Value) -> Option<ReportedCost> {
+    for pointer in COST_BODY_POINTERS {
+        if let Some(usd) = parsed
+            .pointer(pointer)
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+        {
+            // Strip the leading '/' and render as a dotted path, which is how
+            // an operator reading the record would name the field.
+            let field = pointer.trim_start_matches('/').replace('/', ".");
+            return Some(ReportedCost::from_body(field, usd));
+        }
+    }
+    None
+}
+
+/// Resolve a provider-reported cost from a response, header first then body.
+///
+/// The header wins because it is present on every FluxRouter shape measured so
+/// far, including ones whose body is not JSON at all (speech synthesis returns
+/// raw audio bytes).
+pub fn reported_cost(
+    headers: &reqwest::header::HeaderMap,
+    body: Option<&serde_json::Value>,
+) -> Option<ReportedCost> {
+    cost_from_headers(headers).or_else(|| body.and_then(cost_from_body))
+}
 
 /// Canonical env-var resolver. Returns `Some(key)` only when the env
 /// var is set **and** its value is non-empty (closes R-H2: empty-string
