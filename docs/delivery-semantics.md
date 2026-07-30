@@ -119,11 +119,6 @@ about our fixture. What changed is the strength of the evidence claimed for it.
 Until this date the Slack row read **exactly-once**, "On restart, expect: **one message**",
 live-proven. Its evidence column said *"real HTTP; the key was present on both attempts."*
 
-### Correction, 2026-07-30 — the Slack row was wrong, and how
-
-Until this date the Slack row read **exactly-once**, "On restart, expect: **one message**",
-live-proven. Its evidence column said *"real HTTP; the key was present on both attempts."*
-
 **That is evidence for a different claim.** Key-on-wire is a fact about our request. Arrival
 count is a fact about Slack. The row asserted the second and cited the first, and the three rows
 beneath it show what the missing measurement looks like when it is actually taken — they say
