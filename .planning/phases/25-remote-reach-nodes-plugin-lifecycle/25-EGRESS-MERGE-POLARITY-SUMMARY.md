@@ -331,4 +331,67 @@ contention family §6 documents, under five concurrent lanes. Full data:
 |------|--------|
 | `crates/wcore-config/src/config.rs` | the fix (`enabled: global.security.enabled`), removal of the untrusted-path forward, correction of the assertion that had pinned the defect, and the reasoning for all three |
 | `crates/wcore-agent/tests/egress_merge_polarity_test.rs` | new, 8 tests: 2 controls, 2 for the defect, 1 pinning the fix's shape against `\|\|`, 2 for `egress_allow`, 1 for the resource-ceiling sweep result |
-| `.planning/phases/25-*/evidence/egress-merge-polarity/` | NOTES + 5 evidence logs |
+| `.planning/phases/25-*/evidence/egress-merge-polarity/` | NOTES + 6 evidence logs |
+
+---
+
+## 9. Post-interruption re-proof, and a falsifier on the workspace gate itself
+
+This lane was interrupted twice: once by a Claude Code reload, and once because **another lane
+deleted my hetzner worktree and its `hz/` branch mid-run** (`/root/wayland-egress-merge-polarity`
+and `hz/egress-merge-polarity` both vanished; `git worktree list` no longer listed them). Nothing
+was lost because every commit was pushed as it was made. The tree was recreated at
+`/root/wayland-emp-lane` from `origin/lane/egress-merge-polarity`, SHA asserted `8ed5757f` against
+the Mac before anything was measured.
+
+**All three gates re-proven from a cold worktree at `8ed5757f`** —
+`evidence/.../08-GATE-FALSIFIER-8ed5757f.log`:
+
+| Gate | Result |
+|------|--------|
+| `cargo test -p wcore-agent --test egress_merge_polarity_test` | `8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`, rc=0 |
+| `cargo test -p wcore-config --lib` | `574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`, rc=0 |
+| `cargo check --workspace --all-targets` | rc=0 |
+
+**New: the workspace gate now has a control in both directions (§3b-iii), not just a green.**
+`cargo check --workspace --all-targets` returning rc=0 proves nothing on its own unless it can also
+go red. Probed by appending one deliberate type error to the crate this lane changed:
+
+```
+EMP_PHASE_POISON
+error[E0308]: mismatched types
+    --> crates/wcore-config/src/config.rs:8616:25
+8616 | const EMP_POISON: u32 = "not-a-u32";
+     |                         ^^^^^^^^^^^ expected `u32`, found `&str`
+error: could not compile `wcore-config` (lib) due to 1 previous error
+EMP_RC_POISON=101
+EMP_PHASE_RESTORE
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.88s
+EMP_RC_RESTORE=0
+```
+
+So the gate reaches **101 on a real defect** and **0 once restored** — it can fail and it can pass.
+The restore pass is also the evidence that the probe left nothing behind: `git checkout --` on that
+one path, then a clean workspace check that compiled through `wcore-cli`.
+
+### Two defects in my own instruments, both repaired rather than noted (§6b-ii)
+
+1. **A poll loop that could never succeed.** It tested `[ "$R" = "1" ]` against a marker count, so a
+   log holding the marker twice never satisfied it — and a log holding it twice is exactly what a
+   shared `/tmp` produces. It ran to the 600s watchdog against an *already-finished* build. Repaired
+   to `-ge 1`, with `grep -c`'s exit-1-on-zero handled so the `|| echo 0` fallback cannot append a
+   second line and corrupt the comparison.
+2. **`${PIPESTATUS[0]}` in a `sh` script.** hetzner's `/bin/sh` is dash; `PIPESTATUS` is a bashism.
+   The remote script died with `sh: 6: Bad substitution` **immediately after the workspace check had
+   already succeeded**, so the completion marker was never written and I waited ~30 minutes on a
+   marker that could not arrive — a permanently-red instrument in the §3b-iii sense, self-inflicted.
+   Repaired by running the script under `bash` with `setsid`, capturing `$?` directly instead of
+   through a pipe. This is the same family the brief warns about (`EXIT=$?` after a pipe); worth
+   recording that the failure mode also shows up as a *hang*, not only as a wrong number.
+
+### First green was discarded, not reported
+
+The first post-fix run was written to a shared `/tmp` path and came back carrying a foreign
+`WLRC_B` marker plus a duplicated 574-test result block — another lane's writer (§6a-ii). Those
+numbers were thrown away and the run repeated to `/tmp/lane-emp-gates.log`, with every phase start
+marker asserted present before any count was read.

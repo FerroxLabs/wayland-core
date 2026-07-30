@@ -1,0 +1,49 @@
+running 8 tests
+test operator_off_switch_survives_a_project_silent_on_security ... ok
+test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
+test control_operator_global_off_switch_disables_the_gate ... ok
+test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test untrusted_project_can_raise_the_resource_ceiling_backlog_not_a_boundary ... ok
+test trusted_project_config_must_not_disable_the_egress_gate ... ok
+test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
+test untrusted_project_config_must_not_disable_the_egress_gate ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EMP_RC_TESTS=0
+test credentials::tests::open_store_encrypted_file_migrates_plaintext_once ... ok
+test credentials::tests::passphrase_fd_authority_survives_provider_then_confidential_store_open ... ok
+
+test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.28s
+
+EMP_RC_CONFIGLIB=0
+EMP_PHASE_CHECK
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-emp-lane/crates/wcore-plugin-wasm)
+    Checking wcore-agent v0.12.25 (/root/wayland-emp-lane/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 24s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+EMP_RC_CHECK=0
+EMP_PHASE_POISON
+    Checking wcore-config v0.12.25 (/root/wayland-emp-lane/crates/wcore-config)
+error[E0308]: mismatched types
+    --> crates/wcore-config/src/config.rs:8616:25
+     |
+8616 | const EMP_POISON: u32 = "not-a-u32";
+     |                         ^^^^^^^^^^^ expected `u32`, found `&str`
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `wcore-config` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `wcore-config` (lib test) due to 1 previous error
+EMP_RC_POISON=101
+EMP_PHASE_RESTORE
+    Checking wcore-config v0.12.25 (/root/wayland-emp-lane/crates/wcore-config)
+    Checking wcore-evolve v0.12.25 (/root/wayland-emp-lane/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-emp-lane/crates/wcore-agent)
+    Checking wcore-cli v0.12.25 (/root/wayland-emp-lane/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.88s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+EMP_RC_RESTORE=0
+EMP_ALLDONE
