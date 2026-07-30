@@ -113,6 +113,7 @@ send)
   T=$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=25)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
   echo "scheduled_for=$T nonce=$N1"
   $BIN cron add --trigger "once:$T" --channel mxlive \
+    --conversation "$MATRIX_ROOM_ID" \
     --text "wayland-core live probe $N1 cron-send" 2>&1 | tail -3
   $BIN cron list 2>&1 | tail -5
 
@@ -143,6 +144,7 @@ restart)
   T=$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
   echo "scheduled_for=$T nonce=$N5"
   $BIN cron add --trigger "once:$T" --channel mxlive \
+    --conversation "$MATRIX_ROOM_ID" \
     --text "wayland-core live probe $N5 restart" 2>&1 | tail -2
   JOB=$($BIN cron list --json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])' 2>/dev/null || echo "?")
   echo "job_id=$JOB"
@@ -195,9 +197,34 @@ restart)
   done
   sleep 3
   echo "--- gateway life2 log tail ---"; tail -25 "$EV/gateway-life2.log"
-  echo "--- ledger FINAL ---"; cat "$WAYLAND_HOME/deliveries.jsonl" 2>/dev/null
+  echo "--- ledger AFTER the replay ---"; cat "$WAYLAND_HOME/deliveries.jsonl" 2>/dev/null
   echo "--- abandoned surface ---"; $BIN gateway abandoned --profile $PROFILE 2>&1 | head -20
   echo "--- THE WIRE: every send route, both process lives ---"
+  grep '"route":"send"' "$EV/wire-restart.jsonl" 2>/dev/null
+  echo "REPLAY_PHASE_DONE nonce=$N5"
+
+  # ── CONTROL — can this experiment produce TWO? ───────────────────────────
+  # A count of one is equally explained by exactly-once working and by the
+  # second attempt never happening. So the SAME body is now sent again under a
+  # DIFFERENT delivery id: a new `once:` job at a new scheduled instant, which
+  # `runner.rs:324-338` mints as `cron:{other-job}:{other-millis}`. The room
+  # must go from one to two. This is also the live demonstration of
+  # `docs/delivery-semantics.md` §4 — the guarantee is scoped to a delivery id,
+  # not to a message.
+  T2=$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=15)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+  echo "--- CONTROL: same body, DIFFERENT delivery id, scheduled_for=$T2 ---"
+  $BIN cron add --trigger "once:$T2" --channel mxlive \
+    --conversation "$MATRIX_ROOM_ID" \
+    --text "wayland-core live probe $N5 restart" 2>&1 | tail -2
+  nohup $BIN gateway run --profile $PROFILE > "$EV/gateway-control.log" 2>&1 &
+  GW3=$!
+  for i in $(seq 1 20); do
+    n=$(grep -c '"route":"send"' "$EV/wire-restart.jsonl" 2>/dev/null || true)
+    echo "  control t=$((i*3))s wire_send_requests=$n"
+    sleep 3
+  done
+  echo "--- ledger FINAL (both delivery ids) ---"; cat "$WAYLAND_HOME/deliveries.jsonl" 2>/dev/null
+  echo "--- THE WIRE, FINAL: every send route across all three process lives ---"
   grep '"route":"send"' "$EV/wire-restart.jsonl" 2>/dev/null
   stop_all
   echo "MATRIX_LIVE_RESTART_DONE"
