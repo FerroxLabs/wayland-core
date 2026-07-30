@@ -58,8 +58,75 @@ Blast radius, stated honestly: filename is `{hash:016x}.md` over
 two IDENTICAL extractions racing one path while the model is told to `read` it — a torn
 read. Not a general data race.
 
-## Still to establish
+## Still to establish — ALL DONE
 
-- [ ] Audit all 34 production unconditional-trues against what each tool actually touches.
-- [ ] Give `partition()` a test with REAL shared state (a mock cannot exhibit interference).
-- [ ] Verify the honest-negative family (kubectl/aws/gcloud/sql) and do NOT touch it.
+- [x] Audit all 34 production unconditional-trues against what each tool actually touches.
+- [x] Give `partition()` a test with REAL registered tools (a mock cannot exhibit interference).
+- [x] Verify the honest-negative family (kubectl/aws/gcloud/sql) and do NOT touch it.
+
+---
+
+# RESULTS
+
+## Magnitude of the defect (measured, by reverting the fix)
+
+**15,392 torn (partial) reads out of 15,581 successful reads = 98.8%.** With the atomic
+fix: **0**. The brief's "torn read, not a general data race" framing is correct and kept;
+the magnitude was understated.
+
+## Both-directions proof
+
+| mutation | expected red | observed |
+|---|---|---|
+| revert atomic write -> in-place `fs::write` | torn-read test | FAILED 15392/15581; 7 others passed |
+| flip `doc_extract` safe -> false | `doc_extract_really_is_placed_in_a_parallel_batch` | FAILED (2 batches vs 1); 7 passed |
+| make `partition` ignore call input | `input_dependent_real_tool_is_batched_per_invocation` | FAILED; 7 passed |
+
+Each reddened exactly its target, then restored via `git checkout -- <path>` and re-verified.
+
+## Gates (all read from files, unproxied)
+
+- `cargo fmt --all -- --check` = 0
+- `cargo metadata --locked` = 0
+- `cargo check -p wcore-tools -p wcore-agent --all-targets` = 0
+- `cargo clippy -p wcore-tools --all-targets -D warnings` = 0
+- `cargo clippy -p wcore-agent --lib -D warnings` = 0
+- `cargo clippy -p wcore-agent --all-targets -D warnings` = **101, PRE-EXISTING**
+  (`needless_update` at `tests/cache_ledger_engine_test.rs:82:11`; base control at
+  `c9ab048b` gives the identical error, `BASE_RC=101`). Not my file, left alone.
+- `cargo test -p wcore-tools` = **1240 passed / 0 failed / 5 ignored / 0 filtered**
+- new doc_tool tests = **3 passed / 0 failed / 0 ignored**
+- new partition tests = **8 passed / 0 failed / 0 ignored**
+- `cargo test -p wcore-agent --lib -- --test-threads=1` =
+  **2260 passed / 0 failed / 3 ignored / 0 filtered**, `DONE_RC=0`
+
+## wcore-agent parallel-run failures were CONTENTION, not regression
+
+Parallel full-lib at my HEAD: 2246 passed / 14 failed. Base control at `c9ab048b`:
+2231 passed / **21 failed** — base is worse. Same modules fail each time with different
+members. Host: load 6.87, 4 concurrent cargo/rustc from other lanes. Isolated re-run of
+all 7 affected clusters: **215 tests, 0 failed**. Single-threaded full lib: **0 failed**.
+My only wcore-agent change is an additive `#[cfg(test)]` module.
+
+## Unrun cells (counted, not hidden)
+
+- 5 `#[ignore]` in wcore-tools, 3 in wcore-agent lib. Not run; not claimed.
+- `cargo clippy -p wcore-agent --all-targets` aborts at the pre-existing
+  `cache_ledger_engine_test` error, so integration-test targets after it in the build
+  order were **not linted**. Pre-existing condition, not introduced here.
+- wcore-agent integration-test binaries were not run to completion in the full suite
+  (cargo stops after the lib target failed under contention). The lib itself is green
+  single-threaded.
+
+## Instrument defects found and REPAIRED in-lane (4 + 2 in my own tests)
+
+1. Line-number shift from length-collapsing blanking. Control: OLD=[5] vs REPAIRED=[11].
+2. **Glob-pattern phantom comment** — `"**/*.rs"` read as a block-comment opener, blanking
+   ~130 lines of real code. Could hide a real production write => false absence.
+   Replaced regex with a real Rust lexer. Control: OLD=[] vs REPAIRED=[2].
+3. `#[cfg(all(test, feature=".."))]` not suppressed => test writes reported as production.
+4. Delegated writers invisible (`wcore_config::atomic_write`) — caught by the live
+   known-positive control on `edit.rs` returning hits=0.
+Plus, in my own tests: lowercase tool names (caught by the both-directions registry
+control) and a fixed reader round-count that finished before any write landed
+(`successful_reads=0`).
