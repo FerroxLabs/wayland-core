@@ -188,4 +188,68 @@ tested in ARM E rather than asserted.
 ==========================================================================
 ARM E -- remap + `-Cstrip=symbols` at link time.  Source commit 5fa47abd.
 ==========================================================================
-See ARM-E-RESULT below (appended after the run).
+RUSTFLAGS, per tree:
+  -Cstrip=symbols
+  --remap-path-prefix=<tree>=/build
+  --remap-path-prefix=/root/.cargo/registry=/cargo/registry
+  --remap-path-prefix=/root/.cargo/git=/cargo/git
+
+alpha 406860899137222a437a27d69b9ee042e6782e5ac20b860c8676441f207bbecf
+beta  406860899137222a437a27d69b9ee042e6782e5ac20b860c8676441f207bbecf
+                                                    -> BYTE-IDENTICAL
+
+  sizes            84265216 / 84265216
+  cmp              BYTE-IDENTICAL
+  build rc         0 / 0
+  embedded paths   0 occurrences of "wl-s2934"
+  known-positive   24 hits for "/build" in the same invocation
+  known-negative   the ARM-A pair STILL differs -- the experiment has not
+                   lost its ability to detect non-reproducibility
+
+TWO CLEAN RELEASE BUILDS OF THE SHIPPED BINARY, FROM IDENTICAL SOURCE AT
+DIFFERENT ABSOLUTE PATHS, ARE NOW BYTE-IDENTICAL. The predicted last 20
+bytes (the GNU build-id) closed exactly as predicted once the symbols never
+existed at link time.
+
+==========================================================================
+THE RECIPE, AND WHAT OF IT IS LANDED
+==========================================================================
+Three ingredients, and all three are required -- each was measured
+individually and none is sufficient alone:
+
+  1. Gate BOTH env!("CARGO_MANIFEST_DIR") sites in
+     crates/wcore-cli/src/plugin/scaffold.rs behind #[cfg(debug_assertions)].
+     LANDED on this lane branch (5fa47abd). No behavioural cost: both
+     branches are already no-ops for an installed binary, and the debug
+     unit tests are unchanged at 5 passed / 0 failed.
+
+  2. --remap-path-prefix for the tree, the registry and the cargo git dir.
+     NOT LANDED -- see below.
+
+  3. -Cstrip=symbols. NOT LANDED, and NOT RECOMMENDED WITHOUT A DECISION.
+
+ON (2). Free of behavioural cost and worth having on its own merits: it
+removes 7 cranelift paths, 1619 registry paths and the builder's directory
+layout from the shipped artifact. It is NOT wired into release.yml here for
+one concrete, unresolved reason: release.yml builds the linux-aarch64 target
+through `cross`, which compiles inside a container where the source is
+mounted at a DIFFERENT path (/project), so a
+`--remap-path-prefix=$GITHUB_WORKSPACE=...` would silently fail to match on
+exactly that leg while appearing correct on the others. That is precisely the
+shape of a gate that passes without measuring anything, and it is not
+testable from this lane. Wiring it requires a per-leg prefix and a
+cross-container check.
+
+ON (3). `-Cstrip=symbols` removes .symtab, so production panic backtraces
+lose function names. The profile deliberately ships `strip = "debuginfo"`
+(Cargo.toml:566), which is a considered choice to keep them. Trading
+diagnosability for the final 48 bytes of reproducibility is a PRODUCT
+decision with a real cost on both sides, and this lane does not make it
+unilaterally on a shared profile that every other lane builds against.
+
+WHAT THE VERDICT SHOULD SAY. Not "REPRODUCED". The honest grade is:
+reproducibility is now DEMONSTRABLY ACHIEVABLE with a named, measured,
+three-part recipe, and one third of that recipe is landed. The variance is
+no longer "documented" in the sense of merely explained -- it is closed
+under a recipe that was executed and produced identical bytes. What remains
+is a wiring task with a known obstacle (cross) and one product decision.
