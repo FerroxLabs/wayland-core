@@ -198,6 +198,31 @@ Serialise against `lane/twilio-whatsapp-identity`, which is in the same crate:
 
 No `wcore-cli` edit, no protocol seam, no contract request, no `Cargo.lock` change.
 
+**Merge status:** integration has moved `4caaa31c` → `12b0c18d` under me. `git merge-tree`
+against it reports **0 conflict markers** over 3490 lines of output (instrument alive:
+`wcore-channel-whatsapp` appears 17 times in the same capture). Two files are *changed in both*
+and auto-merge — `wcore-channel-whatsapp/src/lib.rs` (twilio added ~100 lines at :149, my edit
+is 2 lines at the top) and `docs/delivery-semantics.md`.
+
+### 8a. Pre-existing defect the orchestrator should know about: `Cargo.lock` is stale on integration
+
+**`cargo metadata --locked` exits 101 on a pristine, clean checkout of both `4caaa31c` and
+current integration head `12b0c18d`** — measured in a throwaway detached worktree, tree verified
+empty by `git status --porcelain` in the same breath, since removed. This is **not mine**:
+`crates/wcore-channels-registry/Cargo.toml` declares `serde_json`, `wcore-egress`, `hmac`, `sha2`
+and `hex`, none of which the committed lock lists, and `git diff 4caaa31c -- <that Cargo.toml>`
+is empty. A `rustls` entry is missing from another crate for the same reason.
+
+It matters because `--locked` gates real jobs: `supply-chain.yml:165,168,180`,
+`release.yml:343`, `ci.yml:301,691`. **Those are red on integration today, before any lane
+merges.**
+
+I deliberately did **not** commit a regenerated lock. Doing so would have attributed five other
+crates' entries to this lane and guaranteed a conflict with every other lane that regenerated
+it. My own change needs exactly one line — `tempfile` under `wcore-channel-whatsapp` — which a
+single `cargo update -w`-style refresh by whoever fixes the pre-existing drift will pick up. I
+restored the file with `git checkout -- Cargo.lock` (permitted; moves no ref).
+
 ---
 
 ## 9. Premises I measured false
