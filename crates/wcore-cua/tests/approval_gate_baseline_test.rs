@@ -210,28 +210,100 @@ async fn baseline_approval_gate_blocks_dispatch() {
 // BASELINE 2b — the same gate, observed on a REAL X11 server.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Read the real pointer position from the X server. This is the observable —
-/// independent of anything the Rust code under test returns.
+/// An independent X client that records the input events the X server actually
+/// DELIVERS. This is the observable — it is what a real application on the
+/// desktop would receive, and it is independent of anything the code under test
+/// returns.
+///
+/// **Why event delivery and not `QueryPointer`.** The first version of this test
+/// read the pointer coordinate back with `QueryPointer`. On this headless Xvfb
+/// that observable is dead: the pointer reads `(640,512)` forever. Confirmed with
+/// a second, independent instrument — `xdotool mousemove --sync`,
+/// `mousemove_relative --sync` and `click` all return rc=0 and all leave the
+/// coordinate pinned (`raw-xtest-probe2.txt`). Event delivery, by contrast, works
+/// perfectly on the same display: `xev -root -event mouse -event button` recorded
+/// 2 MotionNotify + 2 ButtonPress + 2 ButtonRelease at the exact requested
+/// coordinates (`raw-xev-probe2.txt`). So the input path is live and it was the
+/// *readback* that was broken. Using the dead observable would have produced a
+/// permanently-red gate — LANE-BRIEF §3b-iii.
 #[cfg(all(target_os = "linux", feature = "x11-test"))]
-fn real_pointer_position() -> (i16, i16) {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::ConnectionExt;
-    let (conn, screen_idx) = x11rb::rust_connection::RustConnection::connect(None)
-        .expect("x11-test: could not connect to $DISPLAY — run under xvfb-run");
-    let root = conn.setup().roots[screen_idx].root;
-    let reply = conn
-        .query_pointer(root)
-        .expect("QueryPointer request failed")
-        .reply()
-        .expect("QueryPointer reply failed");
-    (reply.root_x, reply.root_y)
+struct EventRecorder {
+    conn: x11rb::rust_connection::RustConnection,
 }
 
-/// BASELINE 2b — approval gate measured against real desktop state.
+#[cfg(all(target_os = "linux", feature = "x11-test"))]
+#[derive(Debug, PartialEq)]
+struct SeenEvent {
+    kind: &'static str,
+    x: i16,
+    y: i16,
+}
+
+#[cfg(all(target_os = "linux", feature = "x11-test"))]
+impl EventRecorder {
+    /// Select pointer + button events on the root window, exactly as `xev -root`
+    /// does. Must be constructed BEFORE the ops under test are dispatched.
+    fn attach() -> Self {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, EventMask};
+        let (conn, screen_idx) = x11rb::rust_connection::RustConnection::connect(None)
+            .expect("x11-test: could not connect to $DISPLAY — run under xvfb-run");
+        let root = conn.setup().roots[screen_idx].root;
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(
+                EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+            ),
+        )
+        .expect("select root input events")
+        .check()
+        .expect("root event selection rejected — is another client holding it?");
+        conn.flush().unwrap();
+        Self { conn }
+    }
+
+    /// Drain everything delivered so far. Polls briefly because delivery is
+    /// asynchronous; the bound keeps a silent hang impossible.
+    fn drain(&self) -> Vec<SeenEvent> {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::Event;
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            while let Some(ev) = self.conn.poll_for_event().expect("poll_for_event") {
+                match ev {
+                    Event::MotionNotify(e) => out.push(SeenEvent {
+                        kind: "MotionNotify",
+                        x: e.root_x,
+                        y: e.root_y,
+                    }),
+                    Event::ButtonPress(e) => out.push(SeenEvent {
+                        kind: "ButtonPress",
+                        x: e.root_x,
+                        y: e.root_y,
+                    }),
+                    Event::ButtonRelease(e) => out.push(SeenEvent {
+                        kind: "ButtonRelease",
+                        x: e.root_x,
+                        y: e.root_y,
+                    }),
+                    _ => {}
+                }
+            }
+            if !out.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        out
+    }
+}
+
+/// BASELINE 2b — the approval gate measured against REAL DESKTOP EVENT DELIVERY.
 ///
-/// Gated on the crate's `x11-test` feature (its documented purpose). Serial because
-/// it mutates global desktop state — two concurrent tests moving one pointer would
-/// make every assertion meaningless.
+/// Gated on the crate's `x11-test` feature (its documented purpose: "X11
+/// positive-invariance test gate"). `#[serial]` because it selects the root
+/// window's exclusive button-event mask and drives global desktop input — two of
+/// these running concurrently would make every assertion meaningless.
 #[cfg(all(target_os = "linux", feature = "x11-test"))]
 #[serial_test::serial]
 #[tokio::test]
@@ -242,18 +314,25 @@ async fn baseline_approval_gate_observed_on_real_x11() {
     assert!(
         std::env::var_os("DISPLAY").is_some(),
         "x11-test is enabled but DISPLAY is unset. This test must not be skipped — \
-         run it under `xvfb-run -s '-screen 0 1280x1024x24'`. A skip is not a pass."
+         run it under `xvfb-run -a -s '-screen 0 1280x1024x24'`. A skip is not a pass."
     );
     const APP: &str = "BaselineApp";
+    let rec = EventRecorder::attach();
+    // Clear anything queued from server start-up so step 1 measures only its own op.
+    let _ = rec.drain();
 
     // ── STEP 1 — INSTRUMENT LIVENESS (known-positive) ────────────────────
-    // A permissive policy must actually move the real pointer. If this fails,
-    // every "pointer did not move" assertion below would have been free.
+    // A permissive policy MUST land real input on the desktop. If this fails,
+    // every "no events were delivered" assertion below would have been free —
+    // a dead X connection, a wrong event mask and an op that was never sent all
+    // produce an empty event list (LANE-BRIEF §3b-i).
     let backend = Arc::new(LinuxX11Backend::new());
     backend.set_frontmost_for_test(Some(APP.to_string()));
     let (_d0, seen0) = seen_apps_tmp();
-    let permissive = CuaPolicy::permissive().with_seen_apps_path(seen0);
-    let tool_live = CuaTool::new(backend.clone(), permissive);
+    let tool_live = CuaTool::new(
+        backend.clone(),
+        CuaPolicy::permissive().with_seen_apps_path(seen0),
+    );
 
     let r = tool_live
         .dispatch(
@@ -263,16 +342,23 @@ async fn baseline_approval_gate_observed_on_real_x11() {
         )
         .await;
     assert!(r.is_ok(), "STEP 1: permissive MouseMove must succeed: {r:?}");
-    let anchor = real_pointer_position();
-    assert_eq!(
-        anchor,
-        (100, 100),
-        "STEP 1 (instrument liveness): XTest+QueryPointer must observe the pointer at \
-         the requested coordinate. Got {anchor:?}. Without this the test proves nothing."
+    let live_events = rec.drain();
+    assert!(
+        live_events.contains(&SeenEvent {
+            kind: "MotionNotify",
+            x: 100,
+            y: 100
+        }),
+        "STEP 1 (instrument liveness): the X server must DELIVER a MotionNotify at \
+         (100,100). Observed {live_events:?}. Without this the test proves nothing."
     );
-    println!("EV2B: step=1-instrument-liveness requested=(100,100) observed={anchor:?} PASS");
+    println!(
+        "EV2B: step=1-instrument-liveness requested=(100,100) delivered_events={} \
+         motion_at_target=true PASS",
+        live_events.len()
+    );
 
-    // ── STEP 2 — APPROVAL WITHHELD ⇒ no input reaches the X server ───────
+    // ── STEP 2 — APPROVAL WITHHELD ⇒ NOTHING reaches the desktop ─────────
     let backend_w = Arc::new(LinuxX11Backend::new());
     backend_w.set_frontmost_for_test(Some(APP.to_string()));
     let (_d1, seen1) = seen_apps_tmp();
@@ -280,7 +366,12 @@ async fn baseline_approval_gate_observed_on_real_x11() {
     policy_w.require_approval_for_app = vec![APP.to_string()];
     let tool_w = CuaTool::new(backend_w, policy_w);
 
-    let target = CuaOp::MouseMove { x: 700, y: 500 };
+    let target = CuaOp::LeftClick {
+        x: 700,
+        y: 500,
+        button: Default::default(),
+        mods: Default::default(),
+    };
     let r = tool_w
         .dispatch(
             CuaSession::for_test("withheld"),
@@ -292,27 +383,26 @@ async fn baseline_approval_gate_observed_on_real_x11() {
         matches!(r, Err(CuaError::PolicySuspended { .. })),
         "STEP 2: expected PolicySuspended, got {r:?}"
     );
-    let after_withheld = real_pointer_position();
-    assert_eq!(
-        after_withheld,
-        (100, 100),
-        "STEP 2: approval was WITHHELD, so NO synthesized input may have reached the X \
-         server — the pointer must still be at the anchor. Observed {after_withheld:?}."
+    let withheld_events = rec.drain();
+    assert!(
+        withheld_events.is_empty(),
+        "STEP 2: approval was WITHHELD, so the X server must have received NO \
+         synthesized input. Delivered: {withheld_events:?}"
     );
     println!(
-        "EV2B: step=2-approval-withheld outcome=PolicySuspended requested=(700,500) \
-         observed={after_withheld:?} pointer_moved=false PASS"
+        "EV2B: step=2-approval-withheld outcome=PolicySuspended requested=click(700,500) \
+         delivered_events=0 PASS"
     );
 
-    // ── STEP 3 — APPROVAL GRANTED ⇒ the SAME op does reach the X server ──
-    // Identical op, identical coordinate, identical backend type. The only
-    // difference is the approval state. This is the discrimination.
+    // ── STEP 3 — APPROVAL GRANTED ⇒ the SAME op DOES reach the desktop ───
+    // Identical op, identical coordinate. Only the approval state differs.
     let backend_g = Arc::new(LinuxX11Backend::new());
     backend_g.set_frontmost_for_test(Some(APP.to_string()));
     let (_d2, seen2) = seen_apps_tmp();
-    let policy_g = CuaPolicy::permissive().with_seen_apps_path(seen2);
-    let tool_g = CuaTool::new(backend_g, policy_g);
-
+    let tool_g = CuaTool::new(
+        backend_g,
+        CuaPolicy::permissive().with_seen_apps_path(seen2),
+    );
     let r = tool_g
         .dispatch(
             CuaSession::for_test("granted"),
@@ -321,16 +411,20 @@ async fn baseline_approval_gate_observed_on_real_x11() {
         )
         .await;
     assert!(r.is_ok(), "STEP 3: expected Ok after approval, got {r:?}");
-    let after_granted = real_pointer_position();
-    assert_eq!(
-        after_granted,
-        (700, 500),
-        "STEP 3: approval GRANTED, so the op must have reached the X server and moved \
-         the pointer to (700,500). Observed {after_granted:?}."
+    let granted_events = rec.drain();
+    assert!(
+        granted_events.contains(&SeenEvent {
+            kind: "ButtonPress",
+            x: 700,
+            y: 500
+        }),
+        "STEP 3: approval GRANTED, so a real ButtonPress must have been delivered at \
+         (700,500). Observed {granted_events:?}"
     );
     println!(
-        "EV2B: step=3-approval-granted outcome=Ok requested=(700,500) \
-         observed={after_granted:?} pointer_moved=true PASS"
+        "EV2B: step=3-approval-granted outcome=Ok requested=click(700,500) \
+         delivered_events={} buttonpress_at_target=true PASS",
+        granted_events.len()
     );
 
     // ── STEP 4/5 — the first-time-per-app gate, same physical observable ──
@@ -341,7 +435,12 @@ async fn baseline_approval_gate_observed_on_real_x11() {
     policy_f.first_time_per_app_approval = true;
     let tool_f = CuaTool::new(backend_f, policy_f);
 
-    let ft_target = CuaOp::MouseMove { x: 300, y: 250 };
+    let ft_target = CuaOp::LeftClick {
+        x: 300,
+        y: 250,
+        button: Default::default(),
+        mods: Default::default(),
+    };
     let r = tool_f
         .dispatch(
             CuaSession::for_test("ft-1"),
@@ -353,14 +452,14 @@ async fn baseline_approval_gate_observed_on_real_x11() {
         matches!(r, Err(CuaError::PolicySuspended { .. })),
         "STEP 4: first sight of FreshApp must Suspend, got {r:?}"
     );
-    let after_ft_withheld = real_pointer_position();
-    assert_eq!(
-        after_ft_withheld,
-        (700, 500),
-        "STEP 4: the first-time gate must have stopped the input — pointer must still \
-         be where STEP 3 left it. Observed {after_ft_withheld:?}."
+    let ft_withheld_events = rec.drain();
+    assert!(
+        ft_withheld_events.is_empty(),
+        "STEP 4: the first-time gate must have stopped the input before the desktop. \
+         Delivered: {ft_withheld_events:?}"
     );
 
+    // The host's post-approval bookkeeping — what "the operator said yes" means here.
     tool_f.policy().mark_app_seen("FreshApp");
     let r = tool_f
         .dispatch(
@@ -370,22 +469,26 @@ async fn baseline_approval_gate_observed_on_real_x11() {
         )
         .await;
     assert!(r.is_ok(), "STEP 5: after approval the op must succeed, got {r:?}");
-    let after_ft_granted = real_pointer_position();
-    assert_eq!(
-        after_ft_granted,
-        (300, 250),
-        "STEP 5: after approval the input must reach the X server. Observed \
-         {after_ft_granted:?}."
+    let ft_granted_events = rec.drain();
+    assert!(
+        ft_granted_events.contains(&SeenEvent {
+            kind: "ButtonPress",
+            x: 300,
+            y: 250
+        }),
+        "STEP 5: after approval a real ButtonPress must be delivered at (300,250). \
+         Observed {ft_granted_events:?}"
     );
     println!(
-        "EV2B: step=4-first-time-withheld observed={after_ft_withheld:?} pointer_moved=false \
-         step=5-first-time-granted observed={after_ft_granted:?} pointer_moved=true PASS"
+        "EV2B: step=4-first-time-withheld delivered_events=0 \
+         step=5-first-time-granted delivered_events={} buttonpress_at_target=true PASS",
+        ft_granted_events.len()
     );
 
     println!(
         "EV2B-SUMMARY: display={} steps=5 instrument_liveness=PASS \
-         withheld_arms=2 withheld_pointer_moved=0 granted_arms=2 granted_pointer_moved=2 \
-         discrimination=PASS",
+         withheld_arms=2 withheld_delivered_events=0 granted_arms=2 \
+         granted_delivered_events_nonzero=2 discrimination=PASS",
         std::env::var("DISPLAY").unwrap_or_default()
     );
 }
