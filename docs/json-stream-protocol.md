@@ -1103,7 +1103,7 @@ wayland-core --json-stream \
   --max-turns <N> \
   --base-url <URL> \
   --system-prompt <TEXT> \
-  --auto-approve          # Start in yolo mode
+  --auto-approve          # Approvals bypassed; the OS sandbox stays on
   --allow-host-workspace-grants # Optional local read-only runtime approvals
   --workspace <PATH>      # Working directory for file operations
 ```
@@ -1800,12 +1800,14 @@ would drop it silently per W0).
 > `Once` — every send gets its own confirmation card.
 >
 > The approval gate IS the delegation contract: a host that spawns the
-> engine with `--auto-approve` / `--force` (or grants wire-force via
-> `WAYLAND_ALLOW_WIRE_FORCE=1`) is opting out of that gate and MUST
-> supply its own confirmation UX before fulfilling these requests. These
-> approval controls do not disable the OS sandbox. Full Dangerous posture can
-> only be selected at a local process launch and cannot be requested over the
-> JSON stream.
+> engine with `--auto-approve` or tier 1
+> (`--dangerously-skip-permissions`, aliases `--force` / `--yolo`), or grants
+> wire-force via `WAYLAND_ALLOW_WIRE_FORCE=1`, is opting out of that gate and
+> MUST supply its own confirmation UX before fulfilling these requests. These
+> approval controls do not disable the OS sandbox. The tier-2 Dangerous posture
+> (`--dangerously-skip-permissions-and-sandbox`, deprecated alias
+> `--dangerous`) can only be selected at a local process launch and cannot be
+> requested over the JSON stream.
 
 ```json
 {
