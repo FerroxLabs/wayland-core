@@ -97,3 +97,123 @@ docs/design/2026-07-13-wayland-core-f00-characterization.md:1
 ## Status log
 
 - [t0] Worktree created at base SHA, baseline measured, NOTES committed.
+- [t1] Providers cluster scrubbed (`a59bc82a`).
+- [t2] Compact/channel/agent/tool/TUI cluster scrubbed (`dbfad22f`).
+- [t3] Migrate competitive aside + 2 user docs scrubbed (`52b25137`).
+- [t4] All gates run. Evidence below.
+
+## After measurement
+
+Same query as the baseline, same method (redirect to file, read with Read tool):
+
+| Scope | Before | After | Removed |
+|---|---:|---:|---:|
+| `crates/**/*.rs` | 393 | **351** | **42** |
+| `docs/**/*.md` | 41 | **39** | **2** |
+| Total | 434 | **390** | **44** |
+
+Files with >=1 hit: 44 -> 25 (19 files went to zero).
+
+### Kept 390, by group
+
+- **309** — migration subsystem (`migrate/*`, `tests/migrate_*`, `wcore-config/src/portability/*`,
+  `portability_hostile_corpus.rs`, `config.rs` test cross-ref, `cli/src/{lib,main}.rs`).
+  Identifiers, string literals, config keys, path constants, on-disk format descriptions,
+  CLI help, test fixtures. Functional — the product imports these tools' data.
+- **41** — `wcore-eval-scenarios` (`Cargo.toml:9` = `publish = false`, so NOT shipped).
+  `ToolV1::Hermes`/`ToolV1::Openclaw` serde enum variants; `PRODUCT_TOKENS` lists both as
+  *forbidden* tokens in a guard; the prose is measurement record, not attribution.
+- **38** — `docs/design/2026-07-13-*` competitive-evaluation documents (see AMBIGUOUS).
+- **1** — `wcore-acp/src/a2a/types.rs:8`, legal values of the `agent_kind` interop field.
+- **1** — `docs/providers.md:380`, ToS disclosure (see AMBIGUOUS).
+
+## Gate results
+
+**The diff is comment-only.** 169 changed `.rs` lines, **0** non-comment. Matcher self-tested
+three ways: flags `+    let x = 1;`, flags `-        body["store"] = json!(false);`, passes
+`//!` / `//` / `///`. No executable line changed anywhere.
+
+**Shared-file fence:** `git diff <BASE> -- crates/wcore-cli/src/{lib,main}.rs` is EMPTY,
+captured with a known-positive control (whole tree = 22 files) in the same invocation.
+
+| Gate | Result | Control |
+|---|---|---|
+| `cargo fmt --all -- --check` (Mac) | rc=0 | `rustfmt --check`: bad fmt -> 1, parse fail -> 1, good -> 0 |
+| `cargo check --workspace --all-targets` (hetzner) | rc=0, 0 `error` lines, 1m43s | 707 log lines, 4.5G target; all 11 edited crates named in log |
+| `--test migrate_hermes` | **7 passed; 0 failed; 0 ignored; 0 filtered out** | non-zero executed count |
+| `--test migrate_quarantine` | **34 passed; 0 failed; 0 ignored; 0 filtered out** | non-zero executed count |
+| `--test migrate_typed_dryrun` | **14 passed; 0 failed; 0 ignored; 0 filtered out** | non-zero executed count |
+| `cargo clippy` over the 10 edited crates `--all-targets` | rc=0, 0 errors, 8 warnings | 0 warnings name any edited file |
+
+Test log was `scp`'d to the Mac and read with the Read tool so `0 ignored; 0 filtered out`
+survive — the `rtk` cargo proxy strips exactly those two fields. Binary selectors
+(`--test <name>`) used, not a name filter (the flavour-(c) zero-test trap).
+
+### Live proof — `migrate --help` still names both peers
+
+From the built `target/debug/wayland-core`:
+
+```
+Commands:
+  hermes       Import Hermes profiles (`~/.hermes/profiles/*`) into wayland-core
+  openclaw     Import an OpenClaw setup (`~/.openclaw`) into wayland-core
+  grok         Import a grok setup (`$GROK_HOME` or `~/.grok`) into wayland-core
+  gemini       Import a gemini-cli setup (`~/.gemini`) into wayland-core
+  quarantined  List imported content held in quarantine
+  imported     Show the provenance of content this machine imported ...
+  promote      Promote quarantined content out of containment ...
+```
+
+`migrate hermes --help` / `migrate openclaw --help` both render, incl.
+`--home <HOME>  Source home to import from (default: ~/.hermes or ~/.openclaw)`.
+Counts over the capture: hermes **6**, openclaw **5**, known-negative `cursorbot` **0`.
+
+## Pre-existing finding — NOT from this lane, not fixed
+
+`cargo clippy -- -D warnings` fails at
+`crates/wcore-agent/tests/cache_ledger_engine_test.rs:82` (`clippy::needless_update`), plus 4
+`needless_borrow` warnings in `tests/user_model_identity_wire.rs`. That file is NOT in this
+lane's diff — asserted with a known-negative (`cache_ledger_engine_test` -> 0 in
+`git diff --name-only`) beside a known-positive (`classify.rs` -> 1) in one capture. Left
+alone per no-drive-by-fixes. Without `-D warnings`, clippy is rc=0.
+
+## AMBIGUOUS — kept, needs Sean's decision
+
+1. **`docs/design/2026-07-13-*` (38 hits)** — public competitive gap-audit / evaluation-program
+   / build-plan. Doc-side analogue of the out-of-scope `COMPETITIVE-LEDGER.md`. Kept: scrubbing
+   names would make them incoherent, and they describe measurement not derivation. BUT
+   gap-audit line 456 reads *"Hermes and OpenClaw should be copied where they are operationally
+   better"* — "copied" is likely what the audit caught. Real question is whether an internal gap
+   audit belongs in public `docs/` at all: keep / move to `.planning/` / delete.
+2. **`docs/providers.md:380`** — ToS note; naming the other clients IS the evidence for
+   "tolerated in practice". Deleting weakens a user-facing disclosure.
+3. **`migrate/openclaw.rs:12-27`** — "GROUNDED in the peer's own source (`src/config/paths.ts`)"
+   + two commit SHAs. Functional (justifies the four path constants, and why no platform branch
+   is invented) but it is the one functional passage that reads like source access.
+4. **`wcore-eval-scenarios`** — kept whole; `publish = false`.
+5. **`wcore-acp/src/a2a/types.rs:8`**, **`migrate/quarantine.rs:700-702`** — interop field
+   values, and the rule excluding 179 `SKILL.md` files under git checkouts of the peer product
+   inside a real `~/.hermes`. Functional.
+
+## Highest-consequence REMOVALS — please eyeball
+
+These carried an actual licence attribution, not a design aside:
+
+- `wcore-channel-imessage/src/lib.rs` — "(OpenClaw MIT, adapted under Apache-2.0)"
+- `wcore-channel-msteams/src/lib.rs` — "(OpenClaw MIT + Apache-2.0)"
+- `wcore-channels-registry/src/lib.rs` — "ported from desktop OpenClaw fork"
+- six `ported from openclaw MIT (c) Peter Steinberger 2025` headers in
+  `wcore-providers/{failover,key_rotation,cache_observation,classify,retry}.rs` and
+  `wcore-pricing/src/refresh.rs`
+
+Removed on Sean's explicit direction ("stop crediting them — there is nothing to credit").
+Flagged because removing a licence attribution cannot be judged from the code alone, and
+"desktop OpenClaw fork" asserts a lineage a reader could take literally. Each is a one-line
+revert.
+
+## Not done
+
+No renames (files, modules, structs, fns, config keys, CLI verbs). `.planning/` untouched
+except this lane's NOTES. `CHANGELOG.md` untouched. No PR, tag, merge to `main`, or issue
+close. No full-workspace *test* run — the diff is comment-only, so that would measure other
+lanes' contention rather than this change.
