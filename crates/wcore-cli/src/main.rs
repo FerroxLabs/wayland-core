@@ -7669,6 +7669,40 @@ mod tests {
         assert!(view.tools_auto_approve);
     }
 
+    /// RETAINED FROM BEFORE THE RENAME, deliberately unmodified.
+    ///
+    /// This is the pre-rename guard. It is kept for two reasons: deleting a
+    /// passing test to install a replacement is not a trade this lane is
+    /// allowed to make, and it serves as the live demonstration of WHY the
+    /// replacement below was needed. It hardcodes the two tier arguments
+    /// (`resolve_local_execution(&cfg, /*approval_bypass*/ true,
+    /// /*dangerous*/ false, ..)`) instead of deriving them from the parsed
+    /// `Cli`, so it stays GREEN through a rewiring that moves `--force` into
+    /// tier 2 — the exact privilege escalation this lane exists to prevent.
+    /// Measured, not asserted: see the lane summary's known-negative run.
+    #[test]
+    fn foreign_dangerous_alias_is_approval_only() {
+        use clap::Parser as _;
+        use wcore_types::execution_policy::SandboxPolicy;
+
+        let cli = Cli::try_parse_from(["wayland-core", "--dangerously-skip-permissions"])
+            .expect("compatibility alias must remain accepted");
+        assert!(cli.dangerously_skip_permissions);
+        assert!(!cli.dangerous);
+
+        let selection = resolve_local_execution(
+            &Config::default(),
+            true,
+            false,
+            DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.approvals(), ApprovalPolicy::Bypass);
+        assert_eq!(selection.baseline().sandbox(), SandboxPolicy::Required);
+        assert!(selection.dangerous_grant().is_none());
+    }
+
     /// TIER REGRESSION GUARD — the artifact that makes the danger-flag rename
     /// safe forever.
     ///
