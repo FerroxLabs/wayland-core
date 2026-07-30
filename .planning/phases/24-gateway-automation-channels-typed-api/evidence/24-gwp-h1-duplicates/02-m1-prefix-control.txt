@@ -1,0 +1,13 @@
+=== PRE-FIX PATCH APPLIED (headline back to the step-13 freeze) ===
+1038:      counts: this.counts,
+=== KNOWN-POSITIVE: the control copy CAN read its driver commit ===
+driverCommit ok: exported
+=== PRE-FIX TEST RESULT ===
+211:not ok 19 - M1 positive: a duplicate arriving AFTER step 13 reaches the receipt headline
+237:ok 20 - M1 negative: with the duplicate removed the same receipt reports zero
+243:ok 21 - M1 structural: the headline and the breakdown come from ONE journal read
+249:ok 22 - M1: an arrival no adapter endpoint claims is refused, not silently split
+267:# tests 24
+269:# pass 23
+270:# fail 1
+275:NODE_RC=1

@@ -284,6 +284,12 @@ class Journey {
     this.botToken = `xoxb-f24j-${this.canary}`;
     this.signingSecret = `f24j-signing-${crypto.randomBytes(12).toString('hex')}`;
     this.counts = { submitted: 0, arrived: 0, unique: 0, duplicates: 0, losses: 0 };
+    // Initialised here, not lazily at step 9. `snapshot()` reads both, and a
+    // field that only exists after a given step makes the reconciliation
+    // depend on step ordering — which is the class of bug this file is about.
+    this.bodies = [];
+    this.bodyAdapter = new Map();
+    this.finalSnapshot = null;
     this.candidateCommit = null;
     this.binaryVersion = null;
     this.sink = null;
@@ -628,19 +634,47 @@ class Journey {
     );
   }
 
-  // Per-adapter coverage, keyed on the endpoint the SINK recorded rather than
-  // on the channel this driver configured. Those two agreeing is the finding;
-  // asserting the second and reporting it as the first would be exactly the
-  // restatement this receipt exists to refuse.
-  adapterCoverage() {
+  // ── the ONE journal read ────────────────────────────────────────────────
+  //
+  // F24-GWP-M1. The headline counts and the per-adapter breakdown used to be
+  // read from the journal at DIFFERENT TIMES: `counts` was frozen at step 13
+  // (`delivery-reconcile`) and `adapter_coverage` was recomputed when the
+  // receipt was written, four steps later. Anything arriving in between was
+  // counted by the breakdown and structurally invisible to the headline.
+  //
+  // That is not hypothetical. `windows-receipt-attempt3.json` published
+  // `counts.arrived = 12, duplicates: 0` beside a breakdown summing to 24,
+  // because twelve deliveries re-arrived at 02:19:03 — after step 13, before
+  // `finished_at` at 02:19:04. `duplicates = arrived - unique` was a correct
+  // formula applied to a stale `arrived`. A criterion graded on the headline
+  // would have called that run exactly-once.
+  //
+  // So the two are no longer two reads. `snapshot()` reads the journal ONCE
+  // and projects the same `seen` array into both the headline and the
+  // breakdown, which makes them incapable of disagreeing rather than merely
+  // equal today. Nothing else may compute either number.
+  snapshot() {
     const wanted = new Set(this.bodies);
-    const seen = this.arrivals().filter((a) => !a.suppressed && wanted.has(a.text));
+    const lines = this.arrivals();
+    const seen = lines.filter((a) => !a.suppressed && wanted.has(a.text));
+
+    const perBody = new Map();
+    for (const a of seen) perBody.set(a.text, (perBody.get(a.text) ?? 0) + 1);
+    const arrived = seen.length;
+    const unique = perBody.size;
+
+    // Per-adapter coverage, keyed on the endpoint the SINK recorded rather than
+    // on the channel this driver configured. Those two agreeing is the finding;
+    // asserting the second and reporting it as the first would be exactly the
+    // restatement this receipt exists to refuse.
     const exercised = [];
+    let attributed = 0;
     for (const spec of ADAPTERS) {
       const mine = seen.filter((a) => a.endpoint === spec.endpoint);
       const submitted = [...this.bodyAdapter.entries()].filter(
         ([, adapter]) => adapter === spec.adapter,
       ).length;
+      attributed += mine.length;
       exercised.push({
         adapter: spec.adapter,
         endpoint: spec.endpoint,
@@ -649,7 +683,24 @@ class Journey {
         unique: new Set(mine.map((a) => a.text)).size,
       });
     }
-    return { registered_total: REGISTERED_ADAPTER_TOTAL, exercised };
+
+    return {
+      counts: {
+        submitted: this.counts.submitted,
+        arrived,
+        unique,
+        duplicates: arrived - unique,
+        losses: this.counts.submitted - unique,
+      },
+      coverage: { registered_total: REGISTERED_ADAPTER_TOTAL, exercised },
+      identity: classifyRepeats(seen),
+      // Diagnostics, not receipt fields. `journal_lines` is every line the sink
+      // wrote including the heartbeat; `unattributed` is arrivals the headline
+      // counts that no adapter endpoint claimed, which would make the two sums
+      // differ for a reason that is NOT a stale read.
+      journal_lines: lines.length,
+      unattributed: arrived - attributed,
+    };
   }
 
   arrivals() {
@@ -671,20 +722,17 @@ class Journey {
   // Count only the bodies this journey submitted. The heartbeat job also
   // delivers, and folding it into the reconciliation would make `submitted`
   // and `arrived` disagree for a reason that has nothing to do with recovery.
+  //
+  // Kept as the headline projection of `snapshot()` so there is exactly one
+  // place the numbers come from — see the F24-GWP-M1 note above `snapshot()`.
   tally() {
-    const wanted = new Set(this.bodies);
-    const seen = this.arrivals().filter((a) => !a.suppressed && wanted.has(a.text));
-    const counts = new Map();
-    for (const a of seen) counts.set(a.text, (counts.get(a.text) ?? 0) + 1);
-    const arrived = seen.length;
-    const unique = counts.size;
-    return {
-      submitted: this.counts.submitted,
-      arrived,
-      unique,
-      duplicates: arrived - unique,
-      losses: this.counts.submitted - unique,
-    };
+    return this.snapshot().counts;
+  }
+
+  // Retained for readability at the two call sites that want only the
+  // breakdown. Same single read.
+  adapterCoverage() {
+    return this.snapshot().coverage;
   }
 
   // ── step 10 ──────────────────────────────────────────────────────────────
@@ -774,10 +822,12 @@ class Journey {
   // ── step 13 ──────────────────────────────────────────────────────────────
   deliveryReconcile() {
     const deadline = Date.now() + ARRIVAL_BUDGET_MS;
-    let t = this.tally();
+    let snap = this.snapshot();
+    let t = snap.counts;
     while (Date.now() < deadline && (t.losses > 0 || t.duplicates > 0)) {
       sleep(3000);
-      t = this.tally();
+      snap = this.snapshot();
+      t = snap.counts;
     }
     this.counts = t;
     if (t.duplicates !== 0 || t.losses !== 0) {
@@ -787,10 +837,12 @@ class Journey {
           `duplicates=${t.duplicates} losses=${t.losses}`,
       );
     }
-    // Per-adapter, from the endpoint the SINK observed. A headline of
-    // `12/12/12/0/0` is the number that was published three times over a
-    // one-adapter run; the breakdown is what makes it interpretable.
-    const coverage = this.adapterCoverage();
+    // Per-adapter, from the endpoint the SINK observed, out of the SAME
+    // snapshot as `t`. A headline of `12/12/12/0/0` is the number that was
+    // published three times over a one-adapter run; the breakdown is what makes
+    // it interpretable — and it is only interpretable against that headline if
+    // both were read at the same instant.
+    const coverage = snap.coverage;
     const idle = coverage.exercised.filter((e) => e.arrived === 0);
     if (idle.length > 0) {
       // §6a-i: a participant that never started makes the run a different
@@ -960,12 +1012,19 @@ class Journey {
     );
   }
 
+  // F24-GWP-M1: the receipt's headline is taken from the SAME snapshot as its
+  // breakdown, at receipt-write time — NOT from `this.counts`, which is the
+  // step-13 freeze and is stale by four steps. `this.counts` survives only as
+  // the step-13 record inside `steps[]`, where being a point-in-time reading is
+  // what it is for.
   receipt() {
     if (this.steps.length !== CANONICAL_STEPS.length) {
       throw new StepFailure(
         `journey recorded ${this.steps.length} steps, the canonical list has ${CANONICAL_STEPS.length}`,
       );
     }
+    const final = this.snapshot();
+    this.finalSnapshot = final;
     return {
       schema: RECEIPT_SCHEMA,
       platform: this.args.platform,
@@ -977,10 +1036,68 @@ class Journey {
       started_at: this.startedAt,
       finished_at: new Date().toISOString(),
       arrival_source: ARRIVAL_SOURCE,
-      counts: this.counts,
-      adapter_coverage: this.adapterCoverage(),
+      counts: final.counts,
+      // Additive. `counts.duplicates` keeps its message-level meaning and its
+      // `arrived - unique` identity, which the Rust verifier checks; this says
+      // WHICH KIND of repeat those were. See `classifyRepeats`.
+      delivery_identity: final.identity,
+      adapter_coverage: final.coverage,
       steps: this.steps,
     };
+  }
+
+  // The receipt is written before this runs, because a run that duplicated is
+  // exactly the run whose evidence must survive. What this refuses is the
+  // CLAIM, not the record: a dirty final snapshot means the journey does not
+  // get to print `JOURNEY COMPLETE`, and the receipt it left behind is one the
+  // Rust verifier rejects as `DirtyReconciliation`.
+  //
+  // Deliveries that land after step 13 are the F24-GWP-H1 shape — a restarted
+  // Windows runtime re-firing already-fired cron jobs at the Task Scheduler
+  // `PT1M` repetition boundary. Before this gate existed the journey exited 0
+  // on such a run.
+  assertFinalReconciliation(receipt) {
+    const c = receipt.counts;
+    const snap = this.finalSnapshot;
+    const stepThirteen = this.counts;
+    if (snap && snap.unattributed !== 0) {
+      throw new StepFailure(
+        `${snap.unattributed} arrival(s) in the headline are attributed to no adapter endpoint; ` +
+          'the headline and the breakdown cannot be reconciled',
+      );
+    }
+    if (c.duplicates !== 0 || c.losses !== 0) {
+      const id = receipt.delivery_identity ?? {};
+      // Internal consistency: every repeat must land in exactly one bucket. If
+      // this ever disagrees the classifier is lying and the verdict below is
+      // worthless, so it is checked rather than assumed.
+      const classified = (id.replays ?? 0) + (id.recurrences ?? 0) + (id.indeterminate ?? 0);
+      if (classified !== c.duplicates) {
+        throw new StepFailure(
+          `repeat classification does not reconcile: duplicates=${c.duplicates} but ` +
+            `replays=${id.replays} + recurrences=${id.recurrences} + ` +
+            `indeterminate=${id.indeterminate} = ${classified}`,
+        );
+      }
+      throw new StepFailure(
+        `FINAL delivery reconciliation is not clean: submitted=${c.submitted} ` +
+          `arrived=${c.arrived} unique=${c.unique} duplicates=${c.duplicates} ` +
+          `losses=${c.losses}\n` +
+          `  replays=${id.replays} (same delivery identity twice — a real ` +
+          'exactly-once violation)\n' +
+          `  recurrences=${id.recurrences} (same body, DIFFERENT identity — the ` +
+          'trigger fired again; not a duplicate)\n' +
+          `  indeterminate=${id.indeterminate} (repeat with no identity to ` +
+          'judge by; counted against the run)\n' +
+          `  unidentified_arrivals=${id.unidentified} at endpoint(s) ` +
+          `${(id.unidentified_endpoints ?? []).join(',') || '(none)'}\n` +
+          `${verdictFor(id)}\n` +
+          `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
+          `duplicates=${stepThirteen.duplicates}; ` +
+          `${c.arrived - stepThirteen.arrived} arrival(s) landed after it. ` +
+          'The receipt was written and records the true final counts.',
+      );
+    }
   }
 
   cleanup() {
@@ -990,6 +1107,104 @@ class Journey {
       /* the sink is a child; a failure to signal it is not a journey result */
     }
   }
+}
+
+// ── F24-GWP-H1: a repeat is not automatically a duplicate ───────────────────
+//
+// `duplicates = arrived - unique` counts repeats of a message BODY. Exactly-once
+// is not a property of a body — it is scoped to a DELIVERY IDENTITY,
+// `cron:{job}:{scheduled_millis}`. Those are different claims, and conflating
+// them produced a HIGH finding against Windows that the evidence does not
+// support.
+//
+// Measured on `windows-arrivals.jsonl`, the run that was reported as
+// re-delivering: all five repeated bodies carry a DIFFERENT delivery id —
+// 5 of 5, zero replays. The journey submits every job with `--trigger every:15`,
+// and `every:15` is rate-floored to SIXTY seconds by
+// `TriggerBound::new(every_secs.max(60), 1)` (trigger.rs:238, applied to the
+// result at :366). The heartbeat measures that floor directly: scheduled deltas
+// of 60068 ms and 64940 ms. So the journey's deliveries are 60-second recurring
+// jobs, and any run that stays alive longer than one period sees every body
+// twice. Windows always crosses it because Task Scheduler's minimum repetition
+// is `PT1M`; launchd and systemd restart inside the window.
+//
+// The product delivered each OCCURRENCE exactly once. So the three outcomes are
+// distinguished here and never collapsed:
+//
+//   replay        the same delivery identity arrived twice. A real
+//                 exactly-once violation.
+//   recurrence    the same body under DIFFERENT identities. The trigger firing
+//                 again, which is what a recurring trigger is for.
+//   indeterminate a repeat that cannot be classified because at least one of
+//                 the arrivals carries NO identity.
+//
+// `indeterminate` exists because 16 of 24 delivery arrivals in that run reached
+// the sink with a null `idempotency_key` — two of the three adapters emit no
+// delivery identity at all, so a replay is not distinguishable from a recurrence
+// for them even in principle. Reporting those as zero duplicates would be the
+// M1 defect one level down: an unmeasurable property published as a measured
+// clean one. They are counted AGAINST the run, not for it.
+export function classifyRepeats(seen) {
+  const byText = new Map();
+  for (const a of seen) {
+    if (!byText.has(a.text)) byText.set(a.text, []);
+    byText.get(a.text).push(a);
+  }
+  let replays = 0;
+  let recurrences = 0;
+  let indeterminate = 0;
+  let unidentified = 0;
+  const unidentifiedEndpoints = new Set();
+
+  for (const arrivals of byText.values()) {
+    const keys = arrivals.map((a) =>
+      typeof a.idempotency_key === 'string' && a.idempotency_key.trim() ? a.idempotency_key : null,
+    );
+    const missing = keys.filter((k) => k === null).length;
+    unidentified += missing;
+    for (const a of arrivals) {
+      const k = a.idempotency_key;
+      if (!(typeof k === 'string' && k.trim())) unidentifiedEndpoints.add(a.endpoint ?? '(none)');
+    }
+    const repeats = arrivals.length - 1;
+    if (repeats <= 0) continue;
+    if (missing > 0) {
+      // Not classifiable. Fail closed: an unprovable repeat is not a clean one.
+      indeterminate += repeats;
+      continue;
+    }
+    const distinct = new Set(keys).size;
+    replays += arrivals.length - distinct;
+    recurrences += distinct - 1;
+  }
+
+  return {
+    replays,
+    recurrences,
+    indeterminate,
+    unidentified,
+    unidentified_endpoints: [...unidentifiedEndpoints].sort(),
+  };
+}
+
+// The one sentence a reader of a red journey needs, and the one this program
+// got wrong for a day: a recurrence is not the product misbehaving.
+export function verdictFor(id) {
+  if ((id.replays ?? 0) > 0) {
+    return 'VERDICT: EXACTLY-ONCE VIOLATED — a delivery identity arrived more than once.';
+  }
+  if ((id.indeterminate ?? 0) > 0) {
+    return (
+      'VERDICT: NOT PROVEN — zero replays observed, but repeats arrived with no delivery ' +
+      'identity, so exactly-once cannot be established for those adapters. This is a gap in ' +
+      'outbound idempotency, NOT evidence of a duplicate.'
+    );
+  }
+  return (
+    'VERDICT: NO DUPLICATE — every repeat carries a distinct delivery identity. The trigger ' +
+    'recurred inside the measurement window (`every:15` is rate-floored to 60s), so this run ' +
+    'is not a valid exactly-once measurement rather than a failed one.'
+  );
 }
 
 export function driverCommit() {
@@ -1033,6 +1248,8 @@ function main() {
     const receipt = journey.receipt();
     const receiptPath = path.join(journey.runDir, `${args.platform}-receipt.json`);
     fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    // Written first, graded second — see `assertFinalReconciliation`.
+    journey.assertFinalReconciliation(receipt);
     process.stdout.write(`JOURNEY COMPLETE platform=${args.platform} receipt=${receiptPath}\n`);
     journey.cleanup();
     process.exit(0);

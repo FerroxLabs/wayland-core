@@ -1,0 +1,4 @@
+247:# tests 24
+249:# pass 24
+250:# fail 0
+255:NODE_RC=0

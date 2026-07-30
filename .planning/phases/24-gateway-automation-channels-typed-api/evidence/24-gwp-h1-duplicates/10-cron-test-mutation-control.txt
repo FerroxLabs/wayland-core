@@ -1,0 +1,8 @@
+MUTATION APPLIED: expected floor 60 -> 15
+test runner::tests::every_15_is_floored_to_60s_and_each_occurrence_has_its_own_delivery_id ... FAILED
+assertion `left == right` failed: every:15 must be floored to the 60s bound, not honoured at 15s
+  left: TimeDelta { secs: 60, nanos: 0 }
+ right: TimeDelta { secs: 15, nanos: 0 }
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.00s
+MUTANT_CARGO_RC=101
+RESTORED: 0 modified files

@@ -1,0 +1,25 @@
+not ok 19 - M1 positive: a duplicate arriving AFTER step 13 reaches the receipt headline
+  ---
+  duration_ms: 46.433083
+  type: 'test'
+  location: '/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-gwp-h1-duplicates/.m1-control-tmp/scripts/f24-journey.test.mjs:322:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    12 !== 24
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 24
+  actual: 12
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-gwp-h1-duplicates/.m1-control-tmp/scripts/f24-journey.test.mjs:339:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
