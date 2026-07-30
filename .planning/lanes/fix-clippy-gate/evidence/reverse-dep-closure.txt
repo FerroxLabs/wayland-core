@@ -1,0 +1,12 @@
+workspace crates: 57
+
+seeds (keyring merge diff): ['wcore-config', 'wcore-agent']
+reverse-dep closure size  : 34 of 57
+wcore-cli IN closure?     : True   <-- the crate holding the broken test
+closure: ['wayland-ollama', 'wcore-acp', 'wcore-agent', 'wcore-browser', 'wcore-channel-discord', 'wcore-channel-email', 'wcore-channel-imessage', 'wcore-channel-matrix', 'wcore-channel-msteams', 'wcore-channel-signal', 'wcore-channel-slack', 'wcore-channel-sms', 'wcore-channel-telegram', 'wcore-channel-whatsapp', 'wcore-channels', 'wcore-channels-registry', 'wcore-cli', 'wcore-config', 'wcore-cua', 'wcore-eval', 'wcore-eval-scenarios', 'wcore-evolve', 'wcore-exec-backend', 'wcore-gateway', 'wcore-mcp', 'wcore-memory', 'wcore-observability', 'wcore-plugin-subprocess', 'wcore-pricing', 'wcore-providers', 'wcore-replay', 'wcore-skills', 'wcore-swarm', 'wcore-tools']
+
+KNOWN-NEGATIVE control -- closure of the top crate ['wcore-cli']: ['wcore-cli']
+  wcore-types excluded? : True  (must be True, else the graph is inverted)
+  size 1 (must be much smaller than 34)
+
+cost: seeds-plus-revdeps would run 34/57 crates = 60% of the workspace

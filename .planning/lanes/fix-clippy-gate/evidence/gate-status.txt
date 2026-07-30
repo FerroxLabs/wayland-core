@@ -1,0 +1,22 @@
+SHA=1eee4ce8026921b74d7a828b57011d771091a18b
+WLG1_META=0
+WLG2_FMT=0
+WLG3_CHECK=0
+WLG4_CLIPPY=0
+WLG5_CRON=0
+WLG6_MEMORY=0
+WLG7_BROWSER=0
+WLG8_AGENT=101
+WLDONE
+--- agent lib serial:
+
+test result: ok. 2252 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 140.11s
+
+--- agent lib parallel (mine, isolated):
+test result: FAILED. 2235 passed; 17 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.45s
+
+error: test failed, to rerun pass `-p wcore-agent --lib`
+--- agent lib parallel (BASE):
+test result: FAILED. 2230 passed; 22 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.37s
+
+error: test failed, to rerun pass `-p wcore-agent --lib`
