@@ -1,0 +1,8 @@
+post1: ok=True ts=1785384703.758879 error=None
+post2_same_key: ok=True ts=1785384704.229169 error=None
+post3_diff_key: ok=True ts=1785384704.734389 error=None
+distinct ts returned: 3
+SAME-KEY replay returned same ts? False
+ARRIVALS IN CHANNEL carrying the marker: 3
+arrival ts list: ['1785384703.758879', '1785384704.229169', '1785384704.734389']
+total messages in channel: 5
