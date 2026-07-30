@@ -1,0 +1,8 @@
+=== windows2 candidate= 7c610798 driver= 13361302
+   counts= {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+   adapter_coverage= [{"adapter": "slack", "endpoint": "chat.postMessage", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "whatsapp", "endpoint": "whatsapp.messages", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "sms", "endpoint": "twilio.messages", "submitted": 4, "arrived": 4, "unique": 4}]
+   arrivals-per-text histogram= {1: 13} total_lines= 13
+=== macos2 candidate= 7c610798 driver= 13361302
+   counts= {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+   adapter_coverage= [{"adapter": "slack", "endpoint": "chat.postMessage", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "whatsapp", "endpoint": "whatsapp.messages", "submitted": 4, "arrived": 4, "unique": 4}, {"adapter": "sms", "endpoint": "twilio.messages", "submitted": 4, "arrived": 4, "unique": 4}]
+   arrivals-per-text histogram= {1: 13} total_lines= 13
