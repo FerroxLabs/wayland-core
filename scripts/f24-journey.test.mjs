@@ -26,6 +26,7 @@ import {
   Journey,
   PLATFORMS,
   StepFailure,
+  VERDICT,
   classifyRepeats,
   hostPlatform,
   parseArgs,
@@ -34,6 +35,12 @@ import {
   shellish,
   verdictFor,
 } from './f24-journey.mjs';
+import {
+  buildQuadrants,
+  fixturePath,
+  serialise,
+  verdictPath,
+} from './f24-journey-quadrants.mjs';
 
 const DRIVER = fileURLToPath(new URL('./f24-journey.mjs', import.meta.url));
 
@@ -139,6 +146,74 @@ test('the driver refuses a missing required argument', () => {
     () => parseArgs(['--platform', 'linux', '--run-dir', '/tmp/x']),
     (error) => /--binary is required/.test(error.message),
   );
+});
+
+test('--adapters defaults to all of them and narrowing must be typed out', () => {
+  // CAN IT PASS / CAN IT FAIL, on the one knob that could be used to buy a
+  // greener verdict with less coverage.
+  const base = ['--platform', 'linux', '--run-dir', '/tmp/x', '--binary', '/bin/true'];
+
+  // Omitted: the full table. This is the direction that matters — a default
+  // that quietly narrowed to the keyed adapters would trade adapter coverage,
+  // a separate criterion, for an easier exactly-once verdict.
+  assert.deepEqual(parseArgs(base).adapters, ADAPTERS);
+  assert.equal(ADAPTERS.length, 3);
+
+  // Named: exactly those, in table order, with the table's endpoint bindings.
+  const one = parseArgs([...base, '--adapters', 'slack']).adapters;
+  assert.deepEqual(one.map((a) => a.adapter), ['slack']);
+  assert.equal(one[0].endpoint, 'chat.postMessage');
+  const two = parseArgs([...base, '--adapters', 'sms, slack']).adapters;
+  assert.deepEqual(two.map((a) => a.adapter), ['slack', 'sms'], 'table order, not argument order');
+
+  // An unknown name is refused rather than silently dropped — dropping it would
+  // narrow the run further than the operator asked and still look successful.
+  assert.throws(
+    () => parseArgs([...base, '--adapters', 'slack,telegram']),
+    (error) => /does not configure/.test(error.message) && /Known: slack,whatsapp,sms/.test(error.message),
+  );
+  assert.throws(
+    () => parseArgs([...base, '--adapters', ' , ']),
+    (error) => /no names/.test(error.message),
+  );
+});
+
+test('a narrowed run carries its narrowness into the receipt', () => {
+  // The safeguard that makes the knob honest: whatever it is set to lands in
+  // `adapter_coverage`, so `verify --min-adapters N` can still refuse it and a
+  // reader of the success line sees `adapters=1/10`.
+  const j = new Journey({
+    platform: hostPlatform() in PLATFORMS ? hostPlatform() : 'linux',
+    runDir: tmpdir(),
+    binary: process.execPath,
+    adapters: ADAPTERS.filter((a) => a.adapter === 'slack'),
+  });
+  for (const name of CANONICAL_STEPS) j.step(name, `cmd ${name}`, `out ${name}`);
+  j.candidateCommit = 'f'.repeat(40);
+  j.binaryVersion = 'x';
+  j.binarySha256 = '0'.repeat(64);
+  for (let i = 1; i <= 3; i += 1) {
+    const body = `narrow-${i}`;
+    j.bodies.push(body);
+    j.bodyAdapter.set(body, 'slack');
+  }
+  j.counts.submitted = 3;
+  fs.mkdirSync(j.runDir, { recursive: true });
+  fs.writeFileSync(
+    j.journalPath,
+    `${j.bodies
+      .map((b) =>
+        JSON.stringify({ text: b, endpoint: 'chat.postMessage', idempotency_key: `cron:${b}:1`, suppressed: false }),
+      )
+      .join('\n')}\n`,
+  );
+  const receipt = j.receipt();
+  assert.deepEqual(
+    receipt.adapter_coverage.exercised.map((e) => e.adapter),
+    ['slack'],
+    'the receipt must NAME the one adapter, so nobody can read the run as three',
+  );
+  assert.equal(receipt.adapter_coverage.registered_total, 10);
 });
 
 test('the driver refuses an unknown platform', () => {
@@ -360,12 +435,14 @@ test('M1 positive: a duplicate arriving AFTER step 13 reaches the receipt headli
   assert.equal(j.counts.arrived, 12);
   assert.notEqual(receipt.counts.arrived, j.counts.arrived);
 
-  // And the journey refuses to call this complete.
+  // And the journey refuses to call this complete. `writeArrivals` emits no
+  // idempotency key, so every repeat here is UNJUDGEABLE — the refusal is
+  // NOT-PROVEN, not a claim that a duplicate was observed.
   assert.throws(
     () => j.assertFinalReconciliation(receipt),
     (error) =>
       error instanceof StepFailure &&
-      /FINAL delivery reconciliation is not clean/.test(error.message) &&
+      /verdict=NOT-PROVEN/.test(error.message) &&
       /duplicates=12/.test(error.message) &&
       /12 arrival\(s\) landed after it/.test(error.message),
   );
@@ -443,7 +520,7 @@ test('H1 positive: the SAME delivery identity twice is a replay — exactly-once
   assert.equal(id.replays, 1);
   assert.equal(id.recurrences, 0);
   assert.equal(id.indeterminate, 0);
-  assert.match(verdictFor(id), /EXACTLY-ONCE VIOLATED/);
+  assert.match(verdictFor(id), /verdict=EXACTLY-ONCE-VIOLATED/);
 });
 
 test('H1 negative: the same body under DIFFERENT identities is a recurrence, not a duplicate', () => {
@@ -452,7 +529,7 @@ test('H1 negative: the same body under DIFFERENT identities is a recurrence, not
   assert.equal(id.replays, 0);
   assert.equal(id.recurrences, 1);
   assert.equal(id.indeterminate, 0);
-  assert.match(verdictFor(id), /NO DUPLICATE/);
+  assert.match(verdictFor(id), /verdict=RECURRENCE/);
   // The distinction is the whole finding: the OLD body-only tally called this
   // a duplicate, and that is how a false HIGH was raised against Windows.
   assert.ok(!/VIOLATED/.test(verdictFor(id)), 'a recurrence must never read as a violation');
@@ -468,7 +545,7 @@ test('H1: a repeat with no delivery identity is NOT PROVEN, and is counted again
   assert.equal(id.indeterminate, 1, 'an unprovable repeat must not read as clean');
   assert.equal(id.unidentified, 2);
   assert.deepEqual(id.unidentified_endpoints, ['whatsapp.messages']);
-  assert.match(verdictFor(id), /NOT PROVEN/);
+  assert.match(verdictFor(id), /verdict=NOT-PROVEN/);
   assert.match(verdictFor(id), /NOT evidence of a duplicate/);
 });
 
@@ -507,7 +584,7 @@ test('H1 on the REAL Windows arrivals: zero replays, and the buckets reconcile',
   assert.equal(id.recurrences, 4, 'the four adapters that emit an identity recurred once each');
   assert.equal(id.indeterminate, 8, 'the eight bodies with no identity cannot be judged');
   assert.equal(id.unidentified, 16);
-  assert.match(verdictFor(id), /NOT PROVEN/);
+  assert.match(verdictFor(id), /verdict=NOT-PROVEN/);
 
   // And the buckets account for every repeat the old body-only tally saw. The
   // headline `duplicates: 12` was arithmetically right and semantically wrong.
@@ -550,7 +627,7 @@ test('H1 both directions on the REAL journal: plant a replay, it is reported; re
   const after = classifyRepeats(planted);
 
   assert.equal(after.replays, 1, 'the planted replay IS reported');
-  assert.match(verdictFor(after), /EXACTLY-ONCE VIOLATED/);
+  assert.match(verdictFor(after), /verdict=EXACTLY-ONCE-VIOLATED/);
   // And it is attributed as a replay, not absorbed into the recurrence bucket.
   assert.equal(after.recurrences, before.recurrences);
   assert.equal(after.indeterminate, before.indeterminate);
@@ -559,6 +636,196 @@ test('H1 both directions on the REAL journal: plant a replay, it is reported; re
   const restored = classifyRepeats(planted.slice(0, -1));
   assert.equal(restored.replays, 0, 'with the plant removed the report is zero again');
   assert.deepEqual(restored, before);
+});
+
+// ── the four quadrants, driver side ─────────────────────────────────────────
+//
+// LANE-BRIEF §3b-iii: a gate must be driven in BOTH directions. Until this
+// change the driver and the Rust verifier both refused any `duplicates != 0`,
+// and on Windows a kill-and-recover leg ALWAYS crosses a 60 s trigger period
+// (Task Scheduler's minimum repetition is `PT1M`), so the Windows journey had no
+// achievable pass state whatsoever.
+//
+// The receipts come from `f24-journey-quadrants.mjs`, which builds them through
+// the driver's own `receipt()` from synthetic arrival journals. q1, q2 and q3
+// carry a BYTE-IDENTICAL headline, so nothing but the identity block can tell
+// them apart — which is the whole reason that block had to become verified data
+// rather than a decoration.
+
+test('the four quadrants: the driver passes recurrences and refuses everything else', () => {
+  const quadrants = buildQuadrants();
+  assert.equal(quadrants.length, 4, 'known-positive: all four quadrants were built');
+
+  const byName = new Map(quadrants.map((q) => [q.name, q]));
+  const expect = (name, verdict, clean) => {
+    const q = byName.get(name);
+    assert.ok(q, `${name} must be present`);
+    assert.equal(q.outcome.verdict, verdict, `${name}: ${q.outcome.reason}`);
+    assert.equal(q.outcome.clean, clean, `${name}: ${q.outcome.reason}`);
+    return q;
+  };
+
+  // Q1 — CAN IT PASS? This is the state that did not exist before.
+  const q1 = expect('q1-recurrence-passes', VERDICT.RECURRENCE, true);
+  assert.equal(q1.receipt.counts.duplicates, 12);
+  assert.equal(q1.receipt.delivery_identity.replays, 0);
+  assert.equal(q1.receipt.delivery_identity.recurrences, 12);
+
+  // Q2 — CAN IT FAIL? Same headline as q1 to the byte.
+  const q2 = expect('q2-replay-fails', VERDICT.EXACTLY_ONCE_VIOLATED, false);
+  assert.deepEqual(q2.receipt.counts, q1.receipt.counts,
+    'q1 and q2 must be indistinguishable by headline, or q2 could fail on the counts alone');
+  assert.equal(q2.receipt.delivery_identity.replays, 1);
+
+  // Q3 — an unprovable repeat is not a clean one.
+  const q3 = expect('q3-indeterminate-fails', VERDICT.NOT_PROVEN, false);
+  assert.deepEqual(q3.receipt.counts, q1.receipt.counts);
+  assert.equal(q3.receipt.delivery_identity.indeterminate, 8);
+  assert.equal(q3.receipt.delivery_identity.unidentified, 16);
+
+  // Q4 — the gate must still grade a quiet run.
+  const q4 = expect('q4-clean-passes', VERDICT.NO_REPEATS, true);
+  assert.equal(q4.receipt.counts.duplicates, 0);
+});
+
+test('q3 reproduces the REAL Windows run, arrival for arrival', () => {
+  // A synthetic fixture is only worth anything if it is faithful. These are the
+  // numbers measured at the sink on 2026-07-30 and asserted against the
+  // committed journal earlier in this file: 24 arrivals, 12 repeats, 4 of them
+  // classifiable and 8 not, 16 arrivals carrying no key.
+  const journal = fileURLToPath(
+    new URL(
+      '../.planning/phases/24-gateway-automation-channels-typed-api/evidence/' +
+        '24-gateway-platforms/windows-arrivals.jsonl',
+      import.meta.url,
+    ),
+  );
+  assert.ok(fs.existsSync(journal), 'the real Windows journal must be present');
+  const real = classifyRepeats(
+    fs
+      .readFileSync(journal, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+      .filter((r) => String(r.text ?? '').startsWith('f24j-delivery')),
+  );
+  const synthetic = buildQuadrants().find((q) => q.name === 'q3-indeterminate-fails')
+    .receipt.delivery_identity;
+
+  assert.deepEqual(
+    {
+      replays: synthetic.replays,
+      recurrences: synthetic.recurrences,
+      indeterminate: synthetic.indeterminate,
+      unidentified: synthetic.unidentified,
+    },
+    {
+      replays: real.replays,
+      recurrences: real.recurrences,
+      indeterminate: real.indeterminate,
+      unidentified: real.unidentified,
+    },
+    'the q3 fixture must classify identically to the journal it stands in for',
+  );
+  assert.deepEqual(synthetic.unidentified_endpoints, real.unidentified_endpoints);
+});
+
+test('the committed quadrant fixtures still match what the driver produces', () => {
+  // The drift guard. The Rust verifier grades committed BYTES, so a driver
+  // change that alters a receipt must move those bytes with it — otherwise the
+  // Rust side goes on grading a receipt the driver no longer emits, and the
+  // cross-gate agreement test becomes a comparison against history.
+  let checked = 0;
+  for (const q of buildQuadrants()) {
+    const receiptFile = fixturePath(q.name);
+    const verdictFile = verdictPath(q.name);
+    assert.ok(fs.existsSync(receiptFile), `${receiptFile} must be committed`);
+    assert.ok(fs.existsSync(verdictFile), `${verdictFile} must be committed`);
+    assert.equal(
+      fs.readFileSync(receiptFile, 'utf8'),
+      serialise(q.receipt),
+      `${q.name}: committed receipt drifted — regenerate with ` +
+        '`node scripts/f24-journey-quadrants.mjs --write`',
+    );
+    assert.equal(
+      fs.readFileSync(verdictFile, 'utf8'),
+      `${q.driverVerdict}\n`,
+      `${q.name}: committed driver verdict drifted`,
+    );
+    checked += 1;
+  }
+  assert.equal(checked, 4, 'a loop that silently shortened would report a pass over nothing');
+});
+
+test('the driver verdict sidecar carries exactly one known token', () => {
+  // The Rust cross-gate test extracts `verdict=<TOKEN>` from this file. An
+  // extractor is only sound if there is exactly one token to find — zero would
+  // make the comparison fall through to whatever matched next, and two would
+  // make it arbitrary. That is the self-passing shape wearing a regex.
+  const tokens = Object.values(VERDICT);
+  for (const q of buildQuadrants()) {
+    const found = tokens.filter((t) => q.driverVerdict.includes(`verdict=${t}`));
+    assert.deepEqual(found, [q.expected], `${q.name}: ${q.driverVerdict}`);
+  }
+});
+
+test('a passing journey still states its verdict — silence on green teaches the wrong lesson', () => {
+  // `assertFinalReconciliation` returns its report on the clean path instead of
+  // returning bare. A gate that is silent when it passes and eloquent when it
+  // fails trains a reader to read `duplicates=12` as bad news unconditionally,
+  // which is precisely the misreading that produced the F24-GWP-H1 finding.
+  const q1 = buildQuadrants().find((q) => q.name === 'q1-recurrence-passes');
+  assert.match(q1.driverVerdict, /verdict=RECURRENCE/);
+  assert.match(q1.driverVerdict, /duplicates=12/);
+  assert.ok(
+    !/The receipt was written and records the true/.test(q1.driverVerdict),
+    'the closing sentence belongs to a REFUSAL; a pass must not carry it',
+  );
+});
+
+test('step 13 waits on losses, never on duplicates', () => {
+  // The loop used to be `while (losses > 0 || duplicates > 0)`. `duplicates` is
+  // `arrived - unique` over an APPEND-ONLY journal, so it is monotonically
+  // non-decreasing: once one repeat landed the loop could not exit except by
+  // timeout, and it then held the gateway alive for the full 180 s budget —
+  // three more 60 s trigger periods — manufacturing the very repeats it was
+  // waiting to see disappear.
+  //
+  // Asserted on the SOURCE rather than by timing the loop, because a timing
+  // assertion would take three minutes to fail and would be flaky under load.
+  //
+  // Per LANE-BRIEF §6b-ii this self-test carries THREE assertions, not two:
+  // the matcher finds the real loop (known-positive), the loop no longer polls
+  // `duplicates` (the repair), AND the matcher would have CAUGHT the old code
+  // (without which the whole test would pass just as happily on the bug).
+  const condition = (source) => {
+    const loop = source.match(/while \(Date\.now\(\) < deadline([\s\S]*?)\) \{/);
+    return loop ? loop[1] : null;
+  };
+  // Scoped to `deliveryReconcile()`. The driver has OTHER deadline loops — the
+  // recovery poll among them — and a whole-file search finds whichever comes
+  // first in the file, which is not the one under test. That is the wrong-tree
+  // search §3b-i warns about: it returns a confident answer about code nobody
+  // asked after.
+  const source = fs.readFileSync(DRIVER, 'utf8');
+  const body = source.slice(source.indexOf('deliveryReconcile() {'));
+  assert.ok(body.startsWith('deliveryReconcile() {'), 'known-positive: the step-13 method exists');
+
+  const live = condition(body);
+  assert.ok(live !== null, 'known-positive: the reconcile wait loop is present in the driver');
+  assert.match(live, /losses > 0/, 'it must wait on the count that can actually fall');
+  assert.ok(
+    !/duplicates > 0/.test(live),
+    `the wait loop must not poll a monotone non-decreasing count: ${live}`,
+  );
+
+  // The third assertion. A matcher that stopped at the first `)` returned
+  // `while (Date.now() < deadline)` for BOTH the old and the new source, so it
+  // reported the repair as present before the repair existed.
+  const old = 'while (Date.now() < deadline && (t.losses > 0 || t.duplicates > 0)) {';
+  const before = condition(old);
+  assert.ok(before !== null, 'the matcher must also find the pre-fix loop');
+  assert.match(before, /duplicates > 0/, 'and it must SEE the defect there, or it proves nothing');
 });
 
 test('windows aliveness is read from tasklist OUTPUT, never from its exit status', () => {

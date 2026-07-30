@@ -458,23 +458,73 @@ fn the_prose_table_agrees_with_the_machine_readable_block() {
     }
 }
 
-/// The document must keep saying that Windows can duplicate on any adapter.
+/// §5 must keep carrying the measurement, and must not go back to the
+/// interpretation the measurement refuted.
 ///
-/// F24-GWP-H1 is measured, open and unfixed, and it is the one fact that makes
-/// the three exactly-once rows conditional. If someone removes the warning
-/// while the finding is still open, the table starts over-promising on Windows
-/// without a single row changing — which every other test here would pass.
+/// # Why this test changed shape
+///
+/// It used to read `the_windows_duplicate_finding_is_still_disclosed`, and it
+/// asserted that the document keeps saying Windows can duplicate on any adapter
+/// — because `F24-GWP-H1` was believed measured, open and unfixed.
+///
+/// **The finding was then refuted with its own evidence.** Every repeat in that
+/// run carried a DIFFERENT delivery id (5 of 5 keyed jobs, zero replays); the
+/// jobs were submitted `every:15`, which `wcore-cron/src/trigger.rs:238`
+/// rate-floors to sixty seconds; and the heartbeat in the same run — never
+/// inside a kill window — recurred with scheduled deltas of 60068 ms and
+/// 64940 ms, which nobody called duplicates. Windows crosses the period
+/// reliably, not exclusively.
+///
+/// The old test would still have PASSED over the rewritten section, because
+/// both of the strings it grepped for survive the correction. A gate that keeps
+/// passing after the claim beneath it has been inverted is not measuring the
+/// claim; so it is rewritten here rather than left to go on being green.
 #[test]
-fn the_windows_duplicate_finding_is_still_disclosed() {
+fn the_recurrence_section_keeps_its_measurement_and_its_correction() {
+    // The evidence. A warning — or a correction — without the numbers it rests
+    // on is an assertion.
+    for evidence in [
+        "{2: 12, 3: 1}",     // the measured Windows arrival histogram
+        "60068",             // the heartbeat delta that measures the 60s floor
+        "trigger.rs:238",    // where the floor is applied
+        "5 of 5 keyed jobs", // the delivery-id result that refuted the finding
+    ] {
+        assert!(
+            DECLARATION.contains(evidence),
+            "docs/delivery-semantics.md §5 has lost {evidence:?}, which is part of the \
+             measurement the section rests on"
+        );
+    }
+    // The finding is still NAMED, so a reader who arrives with the id can find
+    // out what became of it. Retiring a finding silently is how a refutation
+    // becomes indistinguishable from an oversight.
     assert!(
         DECLARATION.contains("F24-GWP-H1"),
-        "docs/delivery-semantics.md no longer names F24-GWP-H1. If the defect was fixed, remove \
-         this test in the same commit as the fix and cite the run that proves it; if it was not, \
-         the disclosure has to stay."
+        "docs/delivery-semantics.md no longer names F24-GWP-H1. The finding was refuted, not \
+         forgotten, and the id has to remain findable."
     );
+
+    // And the refuted sentence must not come back. A negative assertion is
+    // worthless on a dead instrument (LANE-BRIEF §3b-i), so the known-positive
+    // is checked in the same breath: the phrase IS present in the document, as
+    // the quoted description of what the section used to say.
+    let refuted = "re-fires cron jobs that have already fired";
     assert!(
-        DECLARATION.contains("{2: 12, 3: 1}"),
-        "the measured Windows arrival histogram has gone from the document. It is the evidence \
-         the warning rests on; a warning without it is an assertion."
+        DECLARATION.contains(refuted),
+        "known-positive for this search: §5 quotes the sentence it is correcting, so a search \
+         that cannot find it here is a broken search rather than a clean document"
+    );
+    let occurrences = DECLARATION.matches(refuted).count();
+    assert_eq!(
+        occurrences, 1,
+        "the refuted sentence appears {occurrences} times. It belongs in §5 exactly once, inside \
+         the quotation of what the section previously claimed — a second occurrence means the \
+         claim has been re-asserted somewhere as fact"
+    );
+    // The correction itself, in the section's own words.
+    assert!(
+        DECLARATION.contains("**Both halves of that sentence are wrong**"),
+        "§5 quotes the old claim but no longer states that it is wrong — which leaves the \
+         document asserting the refuted sentence"
     );
 }

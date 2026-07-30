@@ -1,0 +1,7 @@
+verdict=RECURRENCE 24 repeat(s), every one under a DISTINCT delivery identity. The trigger fired again — `every:15` is rate-floored to 60s by trigger.rs:238, applied at :366 — and the product delivered each occurrence exactly once. 36 arrival(s) under as many distinct identities is a STRONGER exactly-once measurement than a run short enough to miss the boundary, not a spoiled one
+  submitted=12 arrived=36 unique=12 duplicates=24 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=24 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=0 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=0 at endpoint(s) (none)
+step-13 reconcile had read arrived=12 duplicates=0; 24 arrival(s) landed after it.

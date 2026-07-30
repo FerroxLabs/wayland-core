@@ -1,0 +1,17 @@
+---- the_verifier_and_the_driver_return_the_same_verdict_on_the_same_receipt stdout ----
+
+thread 'the_verifier_and_the_driver_return_the_same_verdict_on_the_same_receipt' (3734181) panicked at crates/wcore-eval-scenarios/tests/journey_receipt_contract.rs:1189:9:
+assertion `left == right` failed: q1-recurrence-passes: the driver recorded verdict=RECURRENCE and the verifier returned verdict=UNCLASSIFIED-REPEATS. Two gates that disagree on one receipt make every grade downstream unreadable, and whichever gate a reader happens to run decides the answer
+  left: "RECURRENCE"
+ right: "UNCLASSIFIED-REPEATS"
+
+---- a_forged_classification_that_does_not_partition_the_repeats_is_refused stdout ----
+
+--- q1 ---
+---- quadrant_1_a_windows_run_of_proven_recurrences_verifies stdout ----
+
+thread 'quadrant_1_a_windows_run_of_proven_recurrences_verifies' (3734149) panicked at crates/wcore-eval-scenarios/tests/journey_receipt_contract.rs:1107:5:
+CAN IT PASS? it must — wayland-journey: verdict=UNCLASSIFIED-REPEATS receipt carries 12 repeated deliveries and no delivery_identity block; a repeat the receipt declines to classify is not a clean one. A repeated BODY may be a replay (exactly-once violated) or a recurrence (the trigger fired again under a new delivery identity) and the receipt has to say which
+
+
+---- quadrant_2_a_planted_replay_is_refused stdout ----

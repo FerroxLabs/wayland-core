@@ -21,7 +21,7 @@ the table below disagrees with the adapter's actual capability. See
 | **1 of 10** adapters | exactly-once — Matrix, and it is the only one ever proven at the real platform |
 | **9 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
 | **0 of 10** adapters | at-least-once (the gateway never automatically re-sends to a destination that cannot recognise a replay) |
-| **On Windows** | a known defect can produce a duplicate on **any** adapter, including the one above — see [§5](#5-windows-f24-gwp-h1) |
+| **On every platform** | a **recurring** job that outlives its trigger period sends again, under a new delivery id. Not a duplicate, and not Windows-specific — see [§5](#5-a-recurring-job-delivers-again-and-that-is-not-a-duplicate) |
 
 **On 2026-07-30 this table lost two of its three exactly-once rows.** Slack and Discord were
 each driven at their real API for the first time, and each produced **two** messages from a
@@ -174,42 +174,107 @@ scheduled instant, the destination gets one message.*
 It does **not** mean "the customer receives one message". If something upstream of the ledger
 fires the same job for a *different* scheduled instant, that is a new delivery id, and to the
 ledger and to every adapter it is a genuinely new delivery. No adapter's dedup can suppress it,
-because the key differs. That is not hypothetical — see §5.
+because the key differs.
+
+That is not hypothetical, and it is not a defect either: **the ordinary way it happens is a
+recurring trigger doing exactly what it was configured to do.** A job on `every:60` alive for
+three minutes produces three delivery ids and three messages. See
+[§5](#5-a-recurring-job-delivers-again-and-that-is-not-a-duplicate), which is the measured case
+and the one this programme initially mis-filed as a Windows duplication defect.
 
 ---
 
-## 5. Windows (F24-GWP-H1)
+## 5. A recurring job delivers again, and that is not a duplicate
 
-**On Windows, a gateway whose runtime restarts across the Task Scheduler `PT1M` repetition
-boundary re-fires cron jobs that have already fired.** Measured 2026-07-30 by
-`lane/gateway-platforms` at the sink's own journal, not the product's own count:
+**A recurring cron job whose run outlives one trigger period delivers each body again, under a
+NEW delivery id. That is the trigger working, on every platform.** Windows crosses the period
+more often than the others, and nothing about the behaviour is Windows-specific.
 
-| | arrival lines | distinct texts | arrivals per text |
-|---|---|---|---|
-| Windows | 27 | 13 | **`{2: 12, 3: 1}`** |
-| macOS | 13 | 13 | `{1: 13}` |
+This section previously read *"On Windows, a gateway whose runtime restarts across the Task
+Scheduler `PT1M` repetition boundary re-fires cron jobs that have already fired"* and was filed
+as the defect `F24-GWP-H1`. **Both halves of that sentence are wrong**, and the run it cited is
+the evidence against it:
 
-All twelve deliveries arrived twice, the second pass in one burst at the repetition boundary.
-It is **not** a lock failure — process count never exceeded 1. The ledger recorded **27
-distinct delivery ids, each settled exactly once**: the spine did its job perfectly and the
-duplicate was created *above* it, as a second delivery id.
+- *"re-fires jobs that have already fired"* — the second delivery of a body is a **different
+  scheduled occurrence**, not a re-fire of the first. Every repeat in that run carried a
+  **different delivery id**: 5 of 5 keyed jobs, **zero replays**.
+- *"On Windows"* — the mechanism is platform-neutral. Windows crosses the window **reliably**,
+  not exclusively.
 
-**So on Windows the one remaining exactly-once row in §2 is conditional on timing.**
-A different key is not a replay, so Matrix will post the second copy too.
-This applies to every adapter, not to a subset — Slack and Discord included, which since the
-2026-07-30 corrections above have no honoured idempotency slot at all and so duplicate on this
-path for the plainer reason that nothing anywhere is deduplicating them.
+**So the one remaining exactly-once row in §2 is conditional on timing — on every platform, not
+just Windows.** A recurrence carries a different delivery id, and a different id is not a replay,
+so Matrix will send the second copy too. That is correct behaviour for a recurring job and it is
+not what the exactly-once guarantee is about; §4 is the section that says what the guarantee is
+scoped to. Slack and Discord reach the same outcome by a plainer route: since the 2026-07-30
+corrections above, neither has an honoured idempotency slot at all, so nothing anywhere is
+deduplicating them.
 
-It is intermittent — a second Windows run that finished before crossing a boundary was clean.
-The honest statement is: *whenever a Windows run crosses the `PT1M` boundary with live cron
-jobs, deliveries repeat.*
+### What was actually measured, 2026-07-30
 
-**Do not grade this from the journey receipt's headline.** For that same run the headline read
-`arrived: 12, duplicates: 0, losses: 0` (`F24-GWP-M1`). Only the per-adapter breakdown
-dissented and only `wayland-journey verify` caught the disagreement. The table above is written
-from the sink's journal for that reason.
+The journey submits every job with `--trigger every:15`, which is **rate-floored to sixty
+seconds** — `TriggerBound::new((*every_secs).max(60), 1)` (`wcore-cron/src/trigger.rs:238`),
+applied to the resulting instant at `trigger.rs:366`. They are 60-second **recurring** jobs, so
+any run alive past one period legitimately sees each body twice.
 
-Linux and macOS show no such defect in the same journey.
+The internal control is in the same run: the **heartbeat** job, which was never inside a kill
+window, recurred three times with scheduled deltas of **60068 ms** and **64940 ms** — the floor,
+measured directly — and nobody ever called those duplicates.
+
+| | arrival lines | distinct texts | arrivals per text | distinct delivery ids among repeats |
+|---|---|---|---|---|
+| Windows | 27 | 13 | `{2: 12, 3: 1}` | **all distinct — 5 of 5 keyed jobs, 0 replays** |
+| macOS | 13 | 13 | `{1: 13}` | n/a — no repeats |
+
+It is **deterministic, not intermittent**. Task Scheduler's minimum repetition interval is
+`PT1M`, which exceeds the 60 s floor, so a Windows kill-and-recover leg always costs more than
+one period; launchd and systemd restart inside it. The two Windows runs bear this out exactly:
+the 67.7 s run produced 12 repeats, the 0.3 s run produced 0. Predicting the count from the run
+duration is what makes this recurrence rather than a fault.
+
+It was also **not** a lock failure — the process count never exceeded 1 — and the ledger
+recorded 27 distinct delivery ids **each settled exactly once**. The spine did its job
+perfectly, which is what you would expect, because there was nothing to suppress: see
+[§4](#4-what-the-guarantee-is-scoped-to). A different key is not a replay.
+
+### So do the §2 exactly-once rows still hold on Windows?
+
+**Yes, unchanged.** Exactly-once is scoped to a delivery id, and every delivery id in that run
+was delivered once. What a slow run changes is the number of delivery ids, not the guarantee
+over each — and *more* of them is a stronger measurement of the property, not a weaker one.
+
+What a reader should take from it is the §4 warning restated: **"exactly-once" does not mean
+"one message".** A recurring job that is alive for three minutes will send three messages, and
+no adapter's dedup can or should suppress that.
+
+### The one real gap the same run exposed
+
+Of 24 delivery arrivals, **only 8 carried an `idempotency_key` at all** — one adapter of the
+three. `twilio.messages` and `whatsapp.messages` emit none, so for them a replay is
+indistinguishable from a recurrence **in principle**, not merely in this harness. That is the
+`at-most-once` row in §2 seen from the measurement side, and it is why the journey gate counts
+an unclassifiable repeat **against** the run rather than passing it: an unmeasurable property
+reported as a measured clean one is the failure this document exists to prevent.
+
+### How to grade a run of this kind
+
+**Not from the receipt headline.** For that same run the headline read `arrived: 12,
+duplicates: 0, losses: 0` (`F24-GWP-M1`, since fixed). And **not from `duplicates` alone**
+either, in the other direction: `duplicates` counts repeats of a message **body**, which is not
+what exactly-once is about.
+
+`wayland-journey verify` reports the classification and grades on it
+(`crates/wcore-eval-scenarios/src/journey.rs`, `DeliveryIdentity`):
+
+| bucket | meaning | grade |
+|---|---|---|
+| `replays` | the same delivery id arrived twice | **FAIL** — a real exactly-once violation |
+| `recurrences` | the same body under different delivery ids | **PASS** — the trigger fired again |
+| `indeterminate` | a repeat where an arrival carried no id | **FAIL** — unprovable is not clean |
+
+Before that distinction existed, both the driver and the verifier refused any `duplicates != 0`,
+so a Windows journey — which crosses the period every time — had **no reachable pass state at
+all**. A gate that cannot pass proves as little as one that cannot fail, and it additionally
+hides real progress.
 
 ---
 

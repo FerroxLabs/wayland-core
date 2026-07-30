@@ -186,7 +186,7 @@ class StepFailure extends Error {}
 
 function parseArgs(argv) {
   const out = {};
-  const known = new Set(['--platform', '--run-dir', '--binary']);
+  const known = new Set(['--platform', '--run-dir', '--binary', '--adapters']);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!known.has(arg)) throw new StepFailure(`unknown argument ${arg}`);
@@ -200,7 +200,52 @@ function parseArgs(argv) {
   if (!PLATFORMS[out.platform]) {
     throw new StepFailure(`--platform must be one of ${Object.keys(PLATFORMS).join('|')}`);
   }
+  out.adapters = selectAdapters(out.adapters);
   return out;
+}
+
+/// Which adapters this run drives. Defaults to ALL of them, and narrowing is
+/// opt-in and explicit.
+///
+/// # Why it is selectable at all
+///
+/// On a platform slow enough to cross a trigger period — Windows always is —
+/// every submitted body arrives twice, and the run can only be GRADED for
+/// exactly-once on the arrivals that carry a delivery identity. Two of the three
+/// default adapters emit none, so a real Windows run of the default set is
+/// correctly graded `NOT-PROVEN` no matter how well the product behaves. That is
+/// an honest refusal about a real outbound-idempotency gap, not a stuck gate —
+/// but it means the DEFAULT set cannot demonstrate the passing state on Windows,
+/// and a claim that the gate can pass there has to be shown, not argued.
+///
+/// So the set is a parameter. It is deliberately NOT defaulted to the keyed
+/// adapters: that would quietly trade adapter coverage — a separate criterion,
+/// and the one Phase 24 was previously caught overstating — for a greener
+/// verdict. Narrowing must be typed out, it lands in the receipt's
+/// `adapter_coverage`, and `wayland-journey verify --min-adapters N` still
+/// refuses a narrow run whenever the claim being made is a matrix.
+export function selectAdapters(spec) {
+  if (spec === undefined) return ADAPTERS;
+  const wanted = spec
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (wanted.length === 0) {
+    throw new StepFailure('--adapters was given no names; omit it to drive all of them');
+  }
+  const known = new Set(ADAPTERS.map((a) => a.adapter));
+  for (const name of wanted) {
+    if (!known.has(name)) {
+      throw new StepFailure(
+        `--adapters names ${name}, which this journey does not configure. ` +
+          `Known: ${[...known].join(',')}`,
+      );
+    }
+  }
+  const chosen = new Set(wanted);
+  // Filtered from ADAPTERS rather than rebuilt from the names, so the order and
+  // the endpoint bindings stay the ones the table declares.
+  return ADAPTERS.filter((a) => chosen.has(a.adapter));
 }
 
 // Run an argv, never a shell string. Every argument this journey passes is a
@@ -272,6 +317,10 @@ function sleep(ms) {
 class Journey {
   constructor(args) {
     this.args = args;
+    // The adapter set this run drives. `parseArgs` resolves `--adapters`;
+    // constructing a Journey directly (the tests, the quadrant generator) gets
+    // the full table unless it says otherwise.
+    this.adapters = args.adapters ?? ADAPTERS;
     this.table = PLATFORMS[args.platform];
     this.runDir = path.resolve(args.runDir);
     this.binary = path.resolve(args.binary);
@@ -474,7 +523,7 @@ class Journey {
     // It does now. Each adapter lands on a DISTINCT endpoint, which is what
     // makes the per-adapter tally an observation rather than a restatement of
     // the config.
-    for (const spec of ADAPTERS) {
+    for (const spec of this.adapters) {
       fs.writeFileSync(
         path.join(this.home, 'channels', `${spec.channel}.toml`),
         spec.config(this.sinkUrl).join('\n'),
@@ -602,12 +651,12 @@ class Journey {
     // what the sink independently observed rather than assumed to agree.
     this.bodyAdapter = new Map();
     const lines = [];
-    const perAdapter = new Map(ADAPTERS.map((s) => [s.adapter, 0]));
+    const perAdapter = new Map(this.adapters.map((s) => [s.adapter, 0]));
     for (let i = 1; i <= DELIVERY_COUNT; i += 1) {
       // Round-robin, so the split is even and no adapter can be starved by an
       // ordering accident into contributing zero and being silently dropped
       // from the coverage list.
-      const spec = ADAPTERS[(i - 1) % ADAPTERS.length];
+      const spec = this.adapters[(i - 1) % this.adapters.length];
       const body = `f24j-delivery-${String(i).padStart(2, '0')}`;
       this.bodies.push(body);
       this.bodyAdapter.set(body, spec.adapter);
@@ -629,7 +678,7 @@ class Journey {
     const split = [...perAdapter.entries()].map(([a, n]) => `${a}=${n}`).join(' ');
     this.step(
       'deliveries-submit',
-      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', '<per-adapter>', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT} across ${ADAPTERS.length} adapters`,
+      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', '<per-adapter>', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT} across ${this.adapters.length} adapters (${this.adapters.map((a) => a.adapter).join(',')})`,
       `submitted=${DELIVERY_COUNT}\nsubmitted_by_adapter=${split}\n${lines.join('\n')}`,
     );
   }
@@ -669,7 +718,7 @@ class Journey {
     // restatement this receipt exists to refuse.
     const exercised = [];
     let attributed = 0;
-    for (const spec of ADAPTERS) {
+    for (const spec of this.adapters) {
       const mine = seen.filter((a) => a.endpoint === spec.endpoint);
       const submitted = [...this.bodyAdapter.entries()].filter(
         ([, adapter]) => adapter === spec.adapter,
@@ -823,18 +872,26 @@ class Journey {
   deliveryReconcile() {
     const deadline = Date.now() + ARRIVAL_BUDGET_MS;
     let snap = this.snapshot();
-    let t = snap.counts;
-    while (Date.now() < deadline && (t.losses > 0 || t.duplicates > 0)) {
+    // Wait for LOSSES to clear, and only losses.
+    //
+    // This loop used to be `while (losses > 0 || duplicates > 0)`, which cannot
+    // terminate on the state it waits for: `duplicates` is `arrived - unique`
+    // over an APPEND-ONLY journal, so it is monotonically non-decreasing and no
+    // amount of waiting reduces it. Once one repeat had landed the loop ran to
+    // its full 180 s budget — keeping the gateway alive across three more 60 s
+    // trigger periods and manufacturing the very repeats it was waiting to see
+    // go away. `losses` is the one that genuinely falls as arrivals land.
+    while (Date.now() < deadline && snap.counts.losses > 0) {
       sleep(3000);
       snap = this.snapshot();
-      t = snap.counts;
     }
+    const t = snap.counts;
     this.counts = t;
-    if (t.duplicates !== 0 || t.losses !== 0) {
+    const outcome = classifyVerdict(t, snap.identity);
+    if (!outcome.clean) {
       throw new StepFailure(
-        `delivery reconciliation is not clean across the kill and the recovery: ` +
-          `submitted=${t.submitted} arrived=${t.arrived} unique=${t.unique} ` +
-          `duplicates=${t.duplicates} losses=${t.losses}`,
+        'delivery reconciliation is not clean across the kill and the recovery:\n' +
+          deliveryLegReport(t, snap.identity, outcome),
       );
     }
     // Per-adapter, from the endpoint the SINK observed, out of the SAME
@@ -861,6 +918,19 @@ class Journey {
       `tally the independent sink's journal ${this.journalPath}, per observed endpoint`,
       `arrival_source=${ARRIVAL_SOURCE}\nsubmitted=${t.submitted}\narrived=${t.arrived}\n` +
         `unique=${t.unique}\nduplicates=${t.duplicates}\nlosses=${t.losses}\n` +
+        // Recorded even on the clean path. A step that captured only the
+        // headline would make a passing `duplicates=12` unreadable to anyone
+        // reviewing the receipt later, which is the same blindness the adapter
+        // breakdown was added to remove.
+        `verdict=${outcome.verdict}\nrepeats_classified=${
+          (snap.identity?.replays ?? 0) +
+          (snap.identity?.recurrences ?? 0) +
+          (snap.identity?.indeterminate ?? 0)
+        }\n` +
+        `replays=${snap.identity?.replays ?? 0}\n` +
+        `recurrences=${snap.identity?.recurrences ?? 0}\n` +
+        `indeterminate=${snap.identity?.indeterminate ?? 0}\n` +
+        `unidentified_arrivals=${snap.identity?.unidentified ?? 0}\n` +
         `journal_lines_total=${this.arrivals().length}\n` +
         `adapters_exercised=${coverage.exercised.length}/${REGISTERED_ADAPTER_TOTAL}\n${perAdapter}`,
     );
@@ -1066,38 +1136,21 @@ class Journey {
           'the headline and the breakdown cannot be reconciled',
       );
     }
-    if (c.duplicates !== 0 || c.losses !== 0) {
-      const id = receipt.delivery_identity ?? {};
-      // Internal consistency: every repeat must land in exactly one bucket. If
-      // this ever disagrees the classifier is lying and the verdict below is
-      // worthless, so it is checked rather than assumed.
-      const classified = (id.replays ?? 0) + (id.recurrences ?? 0) + (id.indeterminate ?? 0);
-      if (classified !== c.duplicates) {
-        throw new StepFailure(
-          `repeat classification does not reconcile: duplicates=${c.duplicates} but ` +
-            `replays=${id.replays} + recurrences=${id.recurrences} + ` +
-            `indeterminate=${id.indeterminate} = ${classified}`,
-        );
-      }
-      throw new StepFailure(
-        `FINAL delivery reconciliation is not clean: submitted=${c.submitted} ` +
-          `arrived=${c.arrived} unique=${c.unique} duplicates=${c.duplicates} ` +
-          `losses=${c.losses}\n` +
-          `  replays=${id.replays} (same delivery identity twice — a real ` +
-          'exactly-once violation)\n' +
-          `  recurrences=${id.recurrences} (same body, DIFFERENT identity — the ` +
-          'trigger fired again; not a duplicate)\n' +
-          `  indeterminate=${id.indeterminate} (repeat with no identity to ` +
-          'judge by; counted against the run)\n' +
-          `  unidentified_arrivals=${id.unidentified} at endpoint(s) ` +
-          `${(id.unidentified_endpoints ?? []).join(',') || '(none)'}\n` +
-          `${verdictFor(id)}\n` +
-          `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
-          `duplicates=${stepThirteen.duplicates}; ` +
-          `${c.arrived - stepThirteen.arrived} arrival(s) landed after it. ` +
-          'The receipt was written and records the true final counts.',
-      );
-    }
+    const id = receipt.delivery_identity ?? null;
+    const outcome = classifyVerdict(c, id);
+    const report =
+      `${deliveryLegReport(c, id, outcome)}\n` +
+      `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
+      `duplicates=${stepThirteen.duplicates}; ` +
+      `${c.arrived - stepThirteen.arrived} arrival(s) landed after it.`;
+    // Returned on the clean path rather than a bare `return`, so a PASSING run
+    // also states its verdict. A gate that is silent when it passes and eloquent
+    // when it fails teaches a reader that `duplicates=12` is always bad news,
+    // which is the misreading this whole change exists to correct.
+    if (outcome.clean) return report;
+    throw new StepFailure(
+      `${report}\nThe receipt was written and records the true final counts.`,
+    );
   }
 
   cleanup() {
@@ -1107,6 +1160,27 @@ class Journey {
       /* the sink is a child; a failure to signal it is not a journey result */
     }
   }
+}
+
+// The refusal text both driver gates print, so step 13 and the final assertion
+// cannot describe the same failure two different ways. Carries `verdict=<TOKEN>`
+// in the SAME shape the Rust verifier's refusals do, which is what makes
+// "the two gates agree" extractable rather than merely claimed.
+export function deliveryLegReport(counts, identity, outcome) {
+  const id = identity ?? {};
+  return (
+    `verdict=${outcome.verdict} ${outcome.reason}\n` +
+    `  submitted=${counts.submitted} arrived=${counts.arrived} unique=${counts.unique} ` +
+    `duplicates=${counts.duplicates} losses=${counts.losses}\n` +
+    `  replays=${id.replays ?? 0} (same delivery identity twice — a real exactly-once ` +
+    'violation)\n' +
+    `  recurrences=${id.recurrences ?? 0} (same body, DIFFERENT identity — the trigger fired ` +
+    'again; not a duplicate)\n' +
+    `  indeterminate=${id.indeterminate ?? 0} (repeat with no identity to judge by; counted ` +
+    'AGAINST the run)\n' +
+    `  unidentified_arrivals=${id.unidentified ?? 0} at endpoint(s) ` +
+    `${(id.unidentified_endpoints ?? []).join(',') || '(none)'}`
+  );
 }
 
 // ── F24-GWP-H1: a repeat is not automatically a duplicate ───────────────────
@@ -1187,24 +1261,219 @@ export function classifyRepeats(seen) {
   };
 }
 
-// The one sentence a reader of a red journey needs, and the one this program
-// got wrong for a day: a recurrence is not the product misbehaving.
-export function verdictFor(id) {
-  if ((id.replays ?? 0) > 0) {
-    return 'VERDICT: EXACTLY-ONCE VIOLATED — a delivery identity arrived more than once.';
-  }
-  if ((id.indeterminate ?? 0) > 0) {
-    return (
-      'VERDICT: NOT PROVEN — zero replays observed, but repeats arrived with no delivery ' +
-      'identity, so exactly-once cannot be established for those adapters. This is a gap in ' +
-      'outbound idempotency, NOT evidence of a duplicate.'
+// ── the verdict vocabulary, shared with the Rust verifier ───────────────────
+//
+// Mirrors `VERDICT_TOKENS` in `crates/wcore-eval-scenarios/src/journey.rs`.
+// Both gates emit exactly one `verdict=<TOKEN>` for any receipt, so "the driver
+// and the verifier agree" is a STRING EQUALITY a test can run rather than a
+// claim a human makes by reading two paragraphs.
+//
+// This matters more than it looks. The driver and the verifier grade the same
+// receipt, and a state where one passes and the other fails is worse than
+// either being wrong alone — every downstream grade becomes unreadable, and
+// whichever gate a reader happens to run decides the answer.
+export const VERDICT = {
+  NO_REPEATS: 'NO-REPEATS',
+  RECURRENCE: 'RECURRENCE',
+  EXACTLY_ONCE_VIOLATED: 'EXACTLY-ONCE-VIOLATED',
+  NOT_PROVEN: 'NOT-PROVEN',
+  DELIVERY_LOSS: 'DELIVERY-LOSS',
+  UNCLASSIFIED_REPEATS: 'UNCLASSIFIED-REPEATS',
+  CLASSIFICATION_UNRECONCILED: 'CLASSIFICATION-UNRECONCILED',
+  IDENTITY_INCOHERENT: 'IDENTITY-INCOHERENT',
+  UNIDENTIFIED_EXCEEDS_ARRIVED: 'UNIDENTIFIED-EXCEEDS-ARRIVED',
+  COUNTS_UNRECONCILED: 'COUNTS-UNRECONCILED',
+};
+
+export const PASSING_VERDICTS = new Set([VERDICT.NO_REPEATS, VERDICT.RECURRENCE]);
+
+// ── the predicate, stated once ──────────────────────────────────────────────
+//
+// A journey's delivery leg is CLEAN iff all of:
+//
+//   1. the arithmetic reconciles (duplicates == arrived - unique,
+//      losses == submitted - unique, unique within both bounds);
+//   2. losses == 0;
+//   3. every repeat is classified — duplicates > 0 requires an identity block,
+//      and its three buckets must sum to exactly duplicates;
+//   4. replays == 0;
+//   5. indeterminate == 0.
+//
+// `recurrences` is unconstrained. A run in which the trigger fired again under a
+// new delivery identity is a run in which the product behaved correctly, and it
+// is a STRONGER exactly-once measurement than a short run, not a weaker one:
+// 24 arrivals under 24 distinct identities, each delivered once, is 24
+// observations of the property where a 12-arrival run is 12.
+//
+// This is the JavaScript half of a pair. `verify_counts` in
+// `crates/wcore-eval-scenarios/src/journey.rs` is the Rust half and implements
+// the same five clauses in the same order. Changing one without the other is
+// the failure this function exists to prevent.
+export function classifyVerdict(counts, identity) {
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const submitted = n(counts?.submitted);
+  const arrived = n(counts?.arrived);
+  const unique = n(counts?.unique);
+  const duplicates = n(counts?.duplicates);
+  const losses = n(counts?.losses);
+
+  const fail = (code, reason) => ({ clean: false, verdict: code, reason });
+
+  // Clause 1.
+  const derivedDuplicates = Math.max(0, arrived - unique);
+  const derivedLosses = Math.max(0, submitted - unique);
+  if (
+    unique > submitted ||
+    unique > arrived ||
+    duplicates !== derivedDuplicates ||
+    losses !== derivedLosses
+  ) {
+    return fail(
+      VERDICT.COUNTS_UNRECONCILED,
+      `counts do not reconcile: submitted=${submitted} arrived=${arrived} unique=${unique} ` +
+        `duplicates=${duplicates} (derived ${derivedDuplicates}) losses=${losses} ` +
+        `(derived ${derivedLosses})`,
     );
   }
-  return (
-    'VERDICT: NO DUPLICATE — every repeat carries a distinct delivery identity. The trigger ' +
-    'recurred inside the measurement window (`every:15` is rate-floored to 60s), so this run ' +
-    'is not a valid exactly-once measurement rather than a failed one.'
-  );
+  // Clause 2. Unconditional: nothing about identity can make a delivery that
+  // never arrived acceptable.
+  if (losses !== 0) {
+    return fail(
+      VERDICT.DELIVERY_LOSS,
+      `${losses} of ${submitted} submitted deliveries never arrived at the independent sink ` +
+        `(${unique} distinct bodies arrived)`,
+    );
+  }
+  // Clause 3a. Absence of the block is only permitted where it is vacuous:
+  // duplicates == 0 implies replays == 0 by construction, because a replayed
+  // delivery identity is by definition a second arrival of the same job text.
+  if (!identity) {
+    if (duplicates !== 0) {
+      return fail(
+        VERDICT.UNCLASSIFIED_REPEATS,
+        `receipt carries ${duplicates} repeated deliveries and no delivery_identity block; a ` +
+          'repeat the receipt declines to classify is not a clean one',
+      );
+    }
+    return { clean: true, verdict: VERDICT.NO_REPEATS, reason: 'no repeats to classify' };
+  }
+
+  const replays = n(identity.replays);
+  const recurrences = n(identity.recurrences);
+  const indeterminate = n(identity.indeterminate);
+  const unidentified = n(identity.unidentified);
+  const endpoints = (identity.unidentified_endpoints ?? []).join(',') || '(none recorded)';
+
+  // Clause 3b. Checked even at duplicates == 0, so the two halves of the receipt
+  // cannot describe different runs in either direction.
+  const classified = replays + recurrences + indeterminate;
+  if (classified !== duplicates) {
+    return fail(
+      VERDICT.CLASSIFICATION_UNRECONCILED,
+      `repeat classification does not partition the repeats: duplicates=${duplicates} but ` +
+        `replays=${replays} + recurrences=${recurrences} + indeterminate=${indeterminate} = ` +
+        `${classified}`,
+    );
+  }
+  if (unidentified > arrived) {
+    return fail(
+      VERDICT.UNIDENTIFIED_EXCEEDS_ARRIVED,
+      `receipt reports ${unidentified} unidentified arrival(s) out of ${arrived} total`,
+    );
+  }
+  if (indeterminate > 0 && unidentified === 0) {
+    return fail(
+      VERDICT.IDENTITY_INCOHERENT,
+      `receipt reports ${indeterminate} indeterminate repeat(s) but ${unidentified} ` +
+        'unidentified arrival(s); a repeat is only indeterminate because an arrival carried ' +
+        'no delivery identity',
+    );
+  }
+  // Clause 4, then clause 5. Ordered so a run that is BOTH violated and unproven
+  // reports the violation, which is the more serious of the two.
+  if (replays !== 0) {
+    return fail(
+      VERDICT.EXACTLY_ONCE_VIOLATED,
+      `${replays} deliveries arrived under a delivery identity that had already been ` +
+        'delivered. This is the real duplicate — the destination received one ' +
+        '(job, scheduled instant) pair more than once',
+    );
+  }
+  if (indeterminate !== 0) {
+    return fail(
+      VERDICT.NOT_PROVEN,
+      `${indeterminate} repeat(s) carry no delivery identity to judge by (${unidentified} ` +
+        `unidentified arrival(s) at endpoint(s) ${endpoints}), so exactly-once can be neither ` +
+        'established nor refuted for them. An unmeasurable property is not a clean one; this ' +
+        'is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate',
+    );
+  }
+  return identityVerdict(identity, arrived);
+}
+
+// Clauses 4 and 5 plus the two passing states, on the identity block ALONE.
+//
+// Split out so `verdictFor` can grade a classification with no receipt around
+// it — the classifier is exercised directly against the real Windows journal in
+// `f24-journey.test.mjs` — without either caller synthesising counts for the
+// other's benefit. A synthesised `arrived` is how a check ends up firing on a
+// number nobody measured.
+function identityVerdict(identity, arrived) {
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const replays = n(identity?.replays);
+  const recurrences = n(identity?.recurrences);
+  const indeterminate = n(identity?.indeterminate);
+  const unidentified = n(identity?.unidentified);
+  const endpoints = (identity?.unidentified_endpoints ?? []).join(',') || '(none recorded)';
+
+  if (replays !== 0) {
+    return {
+      clean: false,
+      verdict: VERDICT.EXACTLY_ONCE_VIOLATED,
+      reason:
+        `${replays} deliveries arrived under a delivery identity that had already been ` +
+        'delivered. This is the real duplicate — the destination received one ' +
+        '(job, scheduled instant) pair more than once',
+    };
+  }
+  if (indeterminate !== 0) {
+    return {
+      clean: false,
+      verdict: VERDICT.NOT_PROVEN,
+      reason:
+        `${indeterminate} repeat(s) carry no delivery identity to judge by (${unidentified} ` +
+        `unidentified arrival(s) at endpoint(s) ${endpoints}), so exactly-once can be neither ` +
+        'established nor refuted for them. An unmeasurable property is not a clean one; this ' +
+        'is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate',
+    };
+  }
+  if (recurrences !== 0) {
+    const observed = arrived === null ? 'every' : String(arrived);
+    return {
+      clean: true,
+      verdict: VERDICT.RECURRENCE,
+      reason:
+        `${recurrences} repeat(s), every one under a DISTINCT delivery identity. The trigger ` +
+        'fired again — `every:15` is rate-floored to 60s by trigger.rs:238, applied at :366 — ' +
+        `and the product delivered each occurrence exactly once. ${observed} arrival(s) under ` +
+        'as many distinct identities is a STRONGER exactly-once measurement than a run short ' +
+        'enough to miss the boundary, not a spoiled one',
+    };
+  }
+  return { clean: true, verdict: VERDICT.NO_REPEATS, reason: 'no repeats' };
+}
+
+// The one sentence a reader of a journey needs, and the one this program got
+// wrong for a day: a recurrence is not the product misbehaving, and it is not a
+// spoiled measurement either.
+export function verdictFor(id) {
+  const { verdict, reason } = identityVerdict(id, null);
+  // `verdict=<TOKEN>` and not `VERDICT: <TOKEN>`, so every place either gate
+  // states a verdict — this, `deliveryLegReport`, step 13's captured output, the
+  // Rust refusals and the Rust success line — uses ONE grammar. The cross-gate
+  // agreement test extracts that token; a second spelling would be a second
+  // extractor, and the one that failed to match would fail silently.
+  return `verdict=${verdict} ${reason}`;
 }
 
 export function driverCommit() {
@@ -1249,7 +1518,18 @@ function main() {
     const receiptPath = path.join(journey.runDir, `${args.platform}-receipt.json`);
     fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
     // Written first, graded second — see `assertFinalReconciliation`.
-    journey.assertFinalReconciliation(receipt);
+    const verdict = journey.assertFinalReconciliation(receipt);
+    // The verdict is written next to the receipt and printed, on the PASSING
+    // path as well as the failing one. It is deliberately a SIDECAR and not a
+    // receipt field: `wayland-journey verify` must reach its own conclusion from
+    // the counts, and a receipt that carried the driver's answer would let the
+    // verifier grade the driver's opinion instead of the driver's measurements.
+    // Keeping it outside is what makes "the two gates agree" a real comparison.
+    fs.writeFileSync(
+      path.join(journey.runDir, `${args.platform}-driver-verdict.txt`),
+      `${verdict}\n`,
+    );
+    process.stdout.write(`${verdict}\n`);
     process.stdout.write(`JOURNEY COMPLETE platform=${args.platform} receipt=${receiptPath}\n`);
     journey.cleanup();
     process.exit(0);
