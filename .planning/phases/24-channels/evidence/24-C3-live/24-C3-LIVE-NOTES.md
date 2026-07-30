@@ -42,7 +42,60 @@ through Bash. Every absence gets a known-positive in the same capture. Observer 
 able to see a FAILURE (read a message id that does not exist → expect 404) before any of its
 200s are trusted.
 
+## Observer control — PASSED IN BOTH DIRECTIONS before any product run
+
+`/tmp/lane-discord-live/observer-control.txt`:
+
+```
+me_code=200            <- known-positive: GET /users/@me
+nonexistent_code=404   <- known-NEGATIVE: GET .../messages/000000000000000001
+chan_code=200
+bot_id 1532224324075913297 user WaylandCoreBot
+chan_id 1532226655102173318 name general guild 1532226655102173315
+```
+
+The 404 is the load-bearing one: it proves the observer can report a message's ABSENCE, so a
+later 404-after-delete is a real reading rather than a dead instrument. Bot id, channel id and
+guild id all match the brief exactly.
+
+hetzner egress verified before assuming any failure is the product's:
+`curl https://discord.com/api/v10/gateway` → `discord_https=200`, 986G free, 96 cores.
+
+## PREMISE REFUTED #1 — the ledger's "native actions" claim is STALE
+
+Ledger `.planning/CRITERIA-GAP-LEDGER.md:824-825` and `:868`:
+*"**media and native actions remain untouched for every adapter**"* and *"media and native
+actions remain at zero"*.
+
+**False for Discord at HEAD.** `wcore-channel-discord/src/lib.rs:465-472` declares
+`.edit(Implemented).delete(Implemented).react(Implemented).typing(Implemented)`, and
+`async fn edit_message` (`:475`) / `async fn delete_message` (`:502`) are real overrides
+calling `rest::edit_message` / `rest::delete_message`.
+
+## FINDING F24-C3-D1 — implemented, declared, and UNREACHABLE from the product
+
+Searched with `/usr/bin/grep`, captures in `/tmp/lane-discord-live/action-surface.txt` and
+`edit-on-callers.txt`:
+
+| Search | Result |
+|---|---|
+| `.edit_message(` / `.delete_message(` in wcore-cli, wcore-gateway, wcore-agent, wcore-tools, wcore-protocol | **0** (rc=1) |
+| known-positive, same tool, same dirs: `.send_message(` | **6 hits** — instrument alive |
+| manager wrappers `edit_on` / `delete_on` callers, whole `crates/` | **only tests** — `framework_matrix.rs:416,421,441,443`, `native_action_matrix.rs:265,270` |
+
+`wayland-core channel --help` offers `list / probe / health / reload / actions` — **no edit,
+no delete.** So the native-action capability is real at the adapter and has **zero
+operator-reachable surface**. `channel actions` will happily report Discord can edit and
+delete; nothing in the shipped binary can ask it to.
+
+Consequence for this lane, stated up front rather than discovered at the end: capabilities 2
+and 3 cannot be driven through a shipped operator verb. They are driven through the
+**production factory** (`channel_factory_for`, the same constructor the binary uses) against
+real Discord, and the missing surface is reported as a defect rather than papered over.
+
 ## Log
 
 - [t0] Worktree created, SHA asserted, brief + delivery-semantics + ledger 24-C3 rows read.
 - [t0] NOTES committed before any network work.
+- [t1] Observer control passed both directions. hetzner egress + build (1m49s) OK.
+- [t1] Premise refutation #1 and finding F24-C3-D1 recorded.
