@@ -1,0 +1,28 @@
+=== C4 CLOUD ORPHAN, BOTH DIRECTIONS @ 0d48b5515b816e8930456fcda7c91c0ec9a46ebd ===
+app=wayland-f25-test ; token value never printed
+T0 raw vendor machine census (independent of the product): 0
+  poll 1: raw vendor machines=0 controller_alive=YES
+  poll 2: raw vendor machines=1 controller_alive=YES
+
+PARTICIPANT ASSERTION: a real machine exists at the vendor = 1 (must be 1)
+
+--- POSITIVE: product must enumerate the cloud surface and FIND it
+POS_EXIT=0
+cloud      enumerated=true  found=1 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+
+--- KNOWN-NEGATIVE, same instant, same credential: an unused nonce
+NEG_EXIT=0
+cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+
+--- CANCEL / teardown
+CANCEL_EXIT=0
+backend:  cloud
+task:     cl66ce3dba03946c0a
+method:   machine destroy, then the vendor's own nonce-filtered machine listing re-read
+residual: none — the cleanup was verified by re-enumeration
+
+--- AFTER: product says zero, and the RAW VENDOR census agrees
+AFTER_EXIT=0
+cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+RAW VENDOR CENSUS AFTER = 0  (0 = no billable machine leaked)
+C4CLOUDDONE
