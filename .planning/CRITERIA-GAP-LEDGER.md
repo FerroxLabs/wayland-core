@@ -1608,7 +1608,7 @@ release trains rather than sessions.
 >
 > - **`27-C3`'s escalation caveat is DEAD.** §2's footnote reads *"flips to blocking if media
 >   generation is billable — media calls currently produce **no cost record**."* **A cost record now
->   exists.** `wcore-tools/src/media_cost.rs` (27.0 KB) defines `MediaCostLedger`, `MediaRateCard`,
+>   exists.** `wcore-tools/src/media_cost.rs` (27,696 B) defines `MediaCostLedger`, `MediaRateCard`,
 >   `MediaCostRecord`, `MediaOutcome`, `MediaUnits`, `ReportedCost`; wired at `bootstrap.rs:1317`
 >   `.with_rate_card(..)`; consumed by `wcore-cli/src/image.rs:29` and
 >   `wcore-tools/src/image_generation_tool.rs:67`; reads `x-flux-cost-usd` / `x-cost-usd` /
