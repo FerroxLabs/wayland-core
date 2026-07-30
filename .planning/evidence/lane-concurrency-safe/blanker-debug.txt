@@ -1,0 +1,3 @@
+matches=0
+total_lines=363
+writes_in_stripped= [334, 335, 336, 338]

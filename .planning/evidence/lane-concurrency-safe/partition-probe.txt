@@ -1,0 +1,77 @@
+CALLSITES_IN_SRC=51
+   SRC  crates/wcore-agent/src/skill_tool.rs:745
+   SRC  crates/wcore-agent/src/skill_tool.rs:872
+   SRC  crates/wcore-agent/src/skill_tool.rs:873
+   SRC  crates/wcore-agent/src/plugins/adapters/plugin_tool_adapter.rs:263
+   SRC  crates/wcore-agent/src/plan/tools.rs:199
+   SRC  crates/wcore-agent/src/plan/tools.rs:262
+   SRC  crates/wcore-agent/src/orchestration/mod.rs:3390
+   SRC  crates/wcore-tools/src/ask_user_question.rs:216
+   SRC  crates/wcore-tools/src/clarify.rs:325
+   SRC  crates/wcore-tools/src/cronjob_tools.rs:1544
+   SRC  crates/wcore-tools/src/discord_tool.rs:759
+   SRC  crates/wcore-tools/src/discord_tool.rs:760
+   SRC  crates/wcore-tools/src/discord_tool.rs:761
+   SRC  crates/wcore-tools/src/discord_tool.rs:762
+   SRC  crates/wcore-tools/src/discord_tool.rs:763
+   SRC  crates/wcore-tools/src/doc_tool.rs:967
+   SRC  crates/wcore-tools/src/email_parse_tool.rs:538
+   SRC  crates/wcore-tools/src/github_tool.rs:1161
+   SRC  crates/wcore-tools/src/github_tool.rs:1164
+   SRC  crates/wcore-tools/src/github_tool.rs:1167
+   SRC  crates/wcore-tools/src/github_tool.rs:1171
+   SRC  crates/wcore-tools/src/gitlab_tool.rs:830
+   SRC  crates/wcore-tools/src/gitlab_tool.rs:831
+   SRC  crates/wcore-tools/src/gitlab_tool.rs:832
+   SRC  crates/wcore-tools/src/gitlab_tool.rs:833
+   SRC  crates/wcore-tools/src/homeassistant_tool.rs:867
+   SRC  crates/wcore-tools/src/homeassistant_tool.rs:868
+   SRC  crates/wcore-tools/src/homeassistant_tool.rs:869
+   SRC  crates/wcore-tools/src/homeassistant_tool.rs:870
+   SRC  crates/wcore-tools/src/image_generation_tool.rs:818
+   SRC  crates/wcore-tools/src/image_inspect_tool.rs:310
+   SRC  crates/wcore-tools/src/lib.rs:577
+   SRC  crates/wcore-tools/src/linear_tool.rs:712
+   SRC  crates/wcore-tools/src/linear_tool.rs:713
+   SRC  crates/wcore-tools/src/notion_tool.rs:892
+   SRC  crates/wcore-tools/src/notion_tool.rs:895
+   SRC  crates/wcore-tools/src/notion_tool.rs:898
+   SRC  crates/wcore-tools/src/notion_tool.rs:902
+   SRC  crates/wcore-tools/src/pdf_tool.rs:464
+   SRC  crates/wcore-tools/src/voice_mode.rs:1606
+   SRC  crates/wcore-tools/src/wayland_introspection.rs:644
+   SRC  crates/wcore-tools/src/wayland_introspection.rs:645
+   SRC  crates/wcore-tools/src/web_fetch.rs:544
+   SRC  crates/wcore-tools/src/web_tools.rs:1123
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1686
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1687
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1688
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1689
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1690
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1692
+   SRC  crates/wcore-tools/src/yuanbao_tools.rs:1693
+CALLSITES_IN_TESTS=12
+   TEST crates/wcore-agent/tests/plan_tools_test.rs:168
+   TEST crates/wcore-agent/tests/plan_tools_test.rs:204
+   TEST crates/wcore-tools/tests/git_tool.rs:68
+   TEST crates/wcore-tools/tests/git_tool.rs:69
+   TEST crates/wcore-tools/tests/git_tool.rs:70
+   TEST crates/wcore-tools/tests/git_tool.rs:71
+   TEST crates/wcore-tools/tests/git_tool.rs:72
+   TEST crates/wcore-tools/tests/git_tool.rs:73
+   TEST crates/wcore-tools/tests/git_tool.rs:74
+   TEST crates/wcore-tools/tests/git_tool.rs:75
+   TEST crates/wcore-tools/tests/git_tool.rs:76
+   TEST crates/wcore-tools/tests/repomap_tool.rs:72
+
+FILE crates/wcore-agent/src/orchestration/mod.rs lines=4724
+  partition@559  ... (which covers the\n    // remaining indices). The two loops partition 0..total, so every\n    // `Option` slot is `Some` by the tim
+  partition@646  ....\n    let mut cancelled_ids = Vec::new();\n\n    for batch in partition(registry, tool_calls) {\n        if batch.is_concurrent {\n   
+  partition@3374  ...|candidate| std::ptr::eq(candidate, call))\n        .expect("partition retains references into the original call slice");\n    effec
+  partition@3381  ...))\n        .copied()\n        .unwrap_or(local as u64)\n}\n\nfn partition<'a>(registry: &ToolRegistry, calls: &'a [ContentBlock]) -> V
+  cfg(test) mod d1_refusal_terminal_tests @ line 77
+  cfg(test) mod f13_durability_tests @ line 79
+  cfg(test) mod tests @ line 3409
+  CONTROL count('fn execute_tool_calls')=9
+  CONTROL count('Batch')=6
+  CONTROL count('is_concurrent')=4

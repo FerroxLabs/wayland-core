@@ -1,0 +1,6 @@
+crates/wcore-tools/src/edit.rs:277      }\n            };\n\n        if let Err(e) = wcore_config::atomic_write(path, new_content.as_bytes()) {\n            ret
+crates/wcore-tools/src/piper_download.rs:378  ort). Matches the contract of Python `_atomic_download`.\nfn atomic_write(dest: &Path, bytes: &[u8]) -> Result<(), PiperE
+crates/wcore-tools/src/piper_download.rs:479             url: onnx_url,\n            });\n        }\n        atomic_write(&onnx_path, &bytes)?;\n    }\n\n    if !json_path.
+crates/wcore-tools/src/piper_download.rs:486  may be tiny — no size gate.\n                if let Err(e) = atomic_write(&json_path, &bytes) {\n                    traci
+crates/wcore-tools/src/piper_download.rs:556  or::BinaryArchiveTooSmall { actual: size, url });\n    }\n    atomic_write(&archive_path, &bytes)?;\n\n    let extract_dir =
+crates/wcore-tools/src/vfs.rs:358  ;\n        tokio::task::spawn_blocking(move || wcore_config::atomic_write(&path_owned, &data))\n            .await\n       

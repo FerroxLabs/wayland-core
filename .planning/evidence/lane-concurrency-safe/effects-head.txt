@@ -1,0 +1,20 @@
+TARGETS=34
+
+--- CONTROLS (known-positive, same invocation) ---
+CONTROL crates/wcore-tools/src/write.rs          hits=5 labels=['FS_CREATE_DIR', 'FS_REMOVE', 'FS_RENAME', 'FS_WRITE']
+CONTROL crates/wcore-tools/src/edit.rs           hits=0 labels=[]
+CONTROLS_ALIVE=NO -- ABSENCES BELOW ARE VOID
+
+
+FILE crates/wcore-agent/src/plan/tools.rs  decl_lines=[53, 133]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/ask_user_question.rs  decl_lines=[92]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/aws_cli_tool.rs  decl_lines=[355]
+  EFFECTS none-detected
+
+FILE crates/wcore-tools/src/clarify.rs  decl_lines=[87]
+  EFFECTS none-detected
+

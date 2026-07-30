@@ -1,0 +1,7 @@
+=== crates/wcore-tools/src/glob.rs (363 lines) ===
+  mod@200 : ...get("pattern").and_then(|v| v.as_str()).unwrap_or("*");\n        format!("Search for {}", pattern)\n    }\n}\n\n#[cfg(test)]\nmod tests {
+=== crates/wcore-tools/src/image_inspect_tool.rs (574 lines) ===
+  mod@302 : ...metadata tests — run regardless of the `image-inspect`\n/// feature, since they exercise no image backend.\n#[cfg(test)]\nmod schema_tests {
+  mod@361 : ...      .contains("without the `image-inspect` feature")\n        );\n    }\n}\n\n#[cfg(all(test, feature = "image-inspect"))]\nmod tests {
+=== crates/wcore-tools/src/grep.rs (356 lines) ===
+  mod@280 : ...sult {\n            content: format!("grep failed: {}", e),\n            is_error: true,\n        },\n    }\n}\n\n#[cfg(test)]\nmod tests {

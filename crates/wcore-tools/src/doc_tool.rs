@@ -213,7 +213,27 @@ impl Tool for DocExtractTool {
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        // Read-only filesystem access — safe to run alongside other tools.
+        // NOT read-only: the over-budget path writes a full-document artifact
+        // (see `write_doc_artifact`). The previous comment here claimed
+        // "Read-only filesystem access", which was false, and this `true` was
+        // therefore unbacked.
+        //
+        // The declaration is still `true`, but it is now EARNED rather than
+        // asserted, and it rests on exactly two properties of that writer:
+        //
+        // 1. The artifact path is CONTENT-ADDRESSED — `{hash:016x}.md` over
+        //    (display, len, body) — so two extractions racing the same path
+        //    necessarily carry byte-identical content. Distinct documents
+        //    cannot collide on a path.
+        // 2. The write is ATOMIC — unique temp file in the same directory,
+        //    then `rename`. A concurrent reader therefore observes either no
+        //    file or a COMPLETE file, never a torn prefix.
+        //
+        // Property 2 is what the old code lacked: it wrote in place with
+        // `fs::write`, so two identical extractions racing while the model was
+        // told to `read` the named path could expose a partial file. If either
+        // property is ever broken, this MUST become `false`.
+        // Proven by `concurrent_identical_artifact_writes_are_never_torn`.
         true
     }
 
@@ -398,9 +418,49 @@ fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::P
     let dir = std::env::temp_dir().join("wayland-doc-extract");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{hash:016x}.md"));
-    std::fs::write(&path, full_markdown).ok()?;
-    Some(path)
+
+    // ATOMIC publish. The old code did `fs::write(&path, ..)` straight onto the
+    // shared, content-addressed name. `DocExtractTool::is_concurrency_safe`
+    // returns `true`, so the orchestrator batches this tool for PARALLEL
+    // execution (`orchestration::partition`); two identical extractions racing
+    // here would interleave writes on one path while the model is being told to
+    // `read` that path — a torn read.
+    //
+    // Write to a per-call unique temp name in the SAME directory (so `rename`
+    // stays within one filesystem and is therefore atomic), then rename into
+    // place. Both racers publish byte-identical content, so last-writer-wins is
+    // correct; the only property that matters is that no reader ever sees a
+    // partial file.
+    //
+    // On Windows `fs::rename` fails if the destination exists, which is the
+    // common case here (the artifact is content-addressed and may already be
+    // published). A pre-existing destination already holds exactly the bytes we
+    // were about to write, so that failure is success: drop the temp file and
+    // return the path.
+    let unique = format!(
+        "{hash:016x}.{}.{}.tmp",
+        std::process::id(),
+        ARTIFACT_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let tmp = dir.join(unique);
+    if std::fs::write(&tmp, full_markdown).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Some(path),
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            // Only report success if the destination really is there.
+            path.exists().then_some(path)
+        }
+    }
 }
+
+/// Per-process sequence making each in-flight artifact temp name unique, so two
+/// concurrent writers of the SAME content never share a scratch file.
+#[cfg(feature = "doc-extract")]
+static ARTIFACT_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "doc-extract")]
 fn extract_inner(
@@ -1540,5 +1600,177 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("without the `doc-extract` feature"));
+    }
+}
+
+/// Concurrency tests for the full-document artifact writer.
+///
+/// `DocExtractTool::is_concurrency_safe` returns `true`, which makes the
+/// orchestrator batch this tool for PARALLEL execution. That declaration used
+/// to be justified by a comment claiming "Read-only filesystem access", which
+/// was false — the over-budget path writes an artifact. These tests hold the
+/// property the declaration now actually rests on.
+#[cfg(all(test, feature = "doc-extract"))]
+mod artifact_concurrency_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    /// Big enough that a non-atomic `fs::write` is observably multi-chunk.
+    /// A small payload would let the old in-place write finish inside one
+    /// syscall and the test would pass on the BROKEN code — i.e. it would be a
+    /// gate that cannot fail.
+    const PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+    fn payload() -> String {
+        "abcdefghijklmnopqrstuvwxyz0123456".repeat(PAYLOAD_BYTES / 33 + 1)
+    }
+
+    /// Unique per test-process so this never reads another lane's `/tmp` file
+    /// (LANE-BRIEF 6a-ii: `/tmp` on the build host is shared between lanes).
+    fn unique_display(tag: &str) -> String {
+        format!(
+            "lane-concurrency-safe/{tag}/{}/{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    /// THE REGRESSION TEST for the defect this lane fixed.
+    ///
+    /// N writers publish byte-identical content to the same content-addressed
+    /// path while M readers hammer that path. Every observation must be either
+    /// "absent" or "the complete payload" — never a prefix.
+    ///
+    /// Under the old in-place `fs::write`, a reader observes a short file and
+    /// `torn` becomes non-zero. Under the atomic temp+rename it cannot.
+    #[test]
+    fn concurrent_identical_artifact_writes_are_never_torn() {
+        let body = payload();
+        let display = unique_display("torn");
+
+        const WRITERS: usize = 4;
+        const READERS: usize = 4;
+        const READ_ROUNDS: usize = 400;
+
+        // Resolve the published path once, up front, so readers know where to
+        // look. This also creates the artifact, so delete it before the race.
+        let target = write_doc_artifact(&display, &body).expect("first publish");
+        std::fs::remove_file(&target).expect("clear artifact before the race");
+
+        // LANE-BRIEF 6a-i: a concurrency test self-passes when a PARTICIPANT
+        // NEVER STARTED. Count arrivals and assert every actor really ran.
+        let started = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(WRITERS + READERS));
+        let torn = Arc::new(AtomicUsize::new(0));
+        let saw_complete = Arc::new(AtomicUsize::new(0));
+        let reads_done = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..WRITERS {
+            let (body, display) = (body.clone(), display.clone());
+            let (started, barrier) = (started.clone(), barrier.clone());
+            handles.push(std::thread::spawn(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                barrier.wait();
+                for _ in 0..8 {
+                    let _ = write_doc_artifact(&display, &body);
+                }
+            }));
+        }
+        for _ in 0..READERS {
+            let expected_len = body.len();
+            let target = target.clone();
+            let (started, barrier) = (started.clone(), barrier.clone());
+            let (torn, saw_complete, reads_done) =
+                (torn.clone(), saw_complete.clone(), reads_done.clone());
+            handles.push(std::thread::spawn(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                barrier.wait();
+                for _ in 0..READ_ROUNDS {
+                    match std::fs::read(&target) {
+                        // Absent is fine: nothing published yet.
+                        Err(_) => {}
+                        Ok(bytes) => {
+                            reads_done.fetch_add(1, Ordering::SeqCst);
+                            if bytes.len() == expected_len {
+                                saw_complete.fetch_add(1, Ordering::SeqCst);
+                            } else {
+                                torn.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            WRITERS + READERS,
+            "not every participant started — a concurrency test with a missing \
+             actor is not the experiment (LANE-BRIEF 6a-i)"
+        );
+        assert!(
+            reads_done.load(Ordering::SeqCst) > 0,
+            "readers never observed the artifact at all, so the torn-read \
+             assertion below is vacuous: successful_reads=0"
+        );
+        assert_eq!(
+            torn.load(Ordering::SeqCst),
+            0,
+            "observed {} torn (partial) reads out of {} successful reads — the \
+             artifact write is not atomic",
+            torn.load(Ordering::SeqCst),
+            reads_done.load(Ordering::SeqCst)
+        );
+        assert!(saw_complete.load(Ordering::SeqCst) > 0);
+
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// The writer must leave no `.tmp` scratch files behind.
+    #[test]
+    fn artifact_writer_leaves_no_temp_files() {
+        let body = payload();
+        let display = unique_display("notemp");
+        let target = write_doc_artifact(&display, &body).expect("publish");
+        let dir = target.parent().unwrap().to_path_buf();
+
+        let stem = target.file_stem().unwrap().to_string_lossy().to_string();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            // Scope to OUR hash only: /tmp is shared with other lanes.
+            .filter(|n| n.starts_with(&stem) && n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp scratch files left behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// Content addressing: identical input publishes to ONE path, and
+    /// different input to a different path. This is property (1) that
+    /// `is_concurrency_safe` now depends on, so it is asserted rather than
+    /// assumed.
+    #[test]
+    fn artifact_path_is_content_addressed() {
+        let display = unique_display("addr");
+        let a = write_doc_artifact(&display, "same body").expect("a");
+        let b = write_doc_artifact(&display, "same body").expect("b");
+        let c = write_doc_artifact(&display, "DIFFERENT body").expect("c");
+        assert_eq!(a, b, "identical content must map to one path");
+        assert_ne!(a, c, "different content must not collide");
+        for p in [a, c] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
