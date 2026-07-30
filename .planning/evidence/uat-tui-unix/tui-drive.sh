@@ -31,15 +31,25 @@ assert_bin() {
 
 pty_control() {
   # Known-positive / known-negative pair. Returns 0 only if the pty discriminates.
+  #
+  # NOTE (instrument repair, in-lane): v1 of this function redirected the probe's
+  # stdout to a FILE inside tmux (`... > pty-inside.txt`). That redirection is
+  # itself a non-tty, so the probe reported ISATTY=False *inside a real pty* and
+  # the harness refused to run. The stdout of the probe must stay attached to the
+  # pane; the pane is then read back with `capture-pane`. Keeping the old form
+  # here as a comment because it is a perfect example of a probe that measures
+  # its own plumbing instead of the thing under test.
   local outside inside
   outside=$(python3 -c 'import sys;print(sys.stdout.isatty())' 2>/dev/null)
-  inside=$(tmux -L "$SOCK" new-session -d -s ptyctl \
-             "python3 -c 'import sys;print(\"ISATTY=\"+str(sys.stdout.isatty()))' > $OUT/pty-inside.txt 2>&1" \
-           && sleep 1 && cat "$OUT/pty-inside.txt" 2>/dev/null | tr -d '\r')
+  tmux -L "$SOCK" new-session -d -s ptyctl \
+    "python3 -c 'import sys;print(\"ISATTY=\"+str(sys.stdout.isatty()))'; sleep 60"
+  sleep 2
+  tmux -L "$SOCK" capture-pane -p -t ptyctl > "$OUT/pty-inside.txt" 2>&1
+  inside=$(grep -o 'ISATTY=[A-Za-z]*' "$OUT/pty-inside.txt" | head -1)
   echo "PTY_OUTSIDE_ISATTY=$outside"
   echo "PTY_INSIDE=$inside"
   case "$outside:$inside" in
-    False:*ISATTY=True*) echo "PTY_CONTROL=OK (discriminates: False outside, True inside)"; return 0 ;;
+    False:ISATTY=True) echo "PTY_CONTROL=OK (discriminates: False outside pty, True inside pty)"; return 0 ;;
     *) echo "PTY_CONTROL=DEAD (outside=$outside inside=$inside) — refusing to judge the TUI"; return 95 ;;
   esac
 }
@@ -107,14 +117,18 @@ tmux -L "$SOCK" kill-session -t ptyctl 2>/dev/null
 if [ "$prc" -ne 0 ]; then echo "VERDICT=ABORTED_NO_PTY"; exit "$prc"; fi
 
 # 3. build the command
+# NOTE: BSD `env` (macOS) parses OPTIONS first and stops at the first operand, so
+# every `-u` must precede any NAME=VALUE assignment. Writing `env HOME=x -u K` made
+# macOS treat `-u` as the command name and the run died with `env: -u: No such file
+# or directory` / rc=127. GNU env tolerates the other order; macOS does not.
 ENVPFX="env"
-[ -n "$HOMEDIR" ] && { mkdir -p "$HOMEDIR"; ENVPFX="$ENVPFX HOME=$HOMEDIR"; }
 if [ "$SCRUB" = "1" ]; then
   for k in FLUX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY \
            GROQ_API_KEY OPENROUTER_API_KEY FAL_API_KEY HF_API_KEY API_KEY PROVIDER BASE_URL MODEL; do
     ENVPFX="$ENVPFX -u $k"
   done
 fi
+[ -n "$HOMEDIR" ] && { mkdir -p "$HOMEDIR"; ENVPFX="$ENVPFX HOME=$HOMEDIR"; }
 PRELUDE=""
 if [ "$WITHFLUX" = "1" ]; then
   # value never reaches argv, disk, or this log — only the PATH to the env file does
@@ -158,10 +172,54 @@ cat "$OUT/$LABEL.rc" 2>&1 || echo "NO_RC_FILE (process still running or killed)"
 } > "$OUT/$LABEL.log" 2>&1
 
 # 6. teardown + orphan sweep (outside the log block so it always runs)
+#
+# Two instrument repairs, both made after the detector lied in this lane:
+#   (a) `pgrep -f <basename>` matched 17 unrelated processes — the checkout is
+#       itself named `waylandcore`, so the agent's own tooling matched.
+#   (b) `pgrep -f <abspath>` still matched THIS SCRIPT, because the harness is
+#       invoked as `tui-drive.sh --bin <abspath>` and pgrep -f searches the whole
+#       command line. It reported ORPHANS_AFTER_KILL=1 for a PID that was the
+#       harness itself and was already gone. A false orphan is exactly as bad as
+#       a missed one.
+# Repair: match only processes whose ARGV[0] is EXACTLY the binary, and never
+# count our own pid/ppid. (`pgrep -a` is GNU-only and is silently ignored on BSD,
+# which is why the earlier capture held bare PIDs with no command text.)
+# argv0 must equal the binary EXACTLY. That alone excludes this script (whose
+# argv0 is bash/the script path) and the ps|awk pipeline, so no pid-based
+# exclusion is needed — and adding a ppid exclusion would have hidden the
+# known-positive below, which is spawned as a child of this very script.
+orphan_scan() {
+  ps -Ao pid,ppid,args 2>/dev/null | awk -v b="$BIN" 'NR>1 && $3==b {print}'
+}
+
+# Count lines with awk, NOT `grep -c . || echo 0`: on an empty file `grep -c .`
+# prints 0 AND exits 1, so the `|| echo 0` fires and the variable becomes the two
+# lines "0\n0". That is the documented trap and it fired here on the first run.
+nlines() { awk 'END{print NR+0}' "$1" 2>/dev/null; }
+
 sleep 1
-pgrep -f "$(basename "$BIN")" > "$OUT/$LABEL.procs-before-kill.txt" 2>&1
+orphan_scan > "$OUT/$LABEL.procs-before-kill.txt" 2>&1
+BEFORE=$(nlines "$OUT/$LABEL.procs-before-kill.txt")
+
 tmux -L "$SOCK" kill-server 2>/dev/null
-sleep 3
-pgrep -af "$(basename "$BIN")" > "$OUT/$LABEL.orphans-after-kill.txt" 2>&1
-echo "ORPHAN_LINES=$(wc -l < "$OUT/$LABEL.orphans-after-kill.txt" | tr -d ' ')" >> "$OUT/$LABEL.log"
+sleep 5
+orphan_scan > "$OUT/$LABEL.orphans-after-kill.txt" 2>&1
+AFTER=$(nlines "$OUT/$LABEL.orphans-after-kill.txt")
+
+# DETECTOR LIVENESS: `ORPHANS_AFTER_KILL=0` is meaningless unless the same scan
+# has been shown to return non-zero for a process that really is there. The
+# pre-kill scan IS that known-positive: the product was running under tmux at
+# that moment, so BEFORE>=1 proves the scan can see this binary. A separately
+# spawned decoy was tried first and returned 0 — because `wayland-core --no-tui`
+# with no provider exits immediately rather than idling on stdin, so the decoy
+# was dead before it could be observed. That failure is retained here as the
+# reason the pre-kill scan is used instead.
+if [ "$BEFORE" -ge 1 ]; then DET="ALIVE"; else DET="DEAD"; fi
+
+{
+  echo "ORPHAN_SWEEP=argv0_exact_match pattern=$BIN"
+  echo "PROCS_BEFORE_KILL=$BEFORE"
+  echo "ORPHANS_AFTER_KILL=$AFTER"
+  echo "ORPHAN_DETECTOR=$DET (known-positive = the pre-kill scan; DEAD means ORPHANS_AFTER_KILL proves nothing)"
+} >> "$OUT/$LABEL.log"
 echo "DONE $LABEL -> $OUT/$LABEL.log"
