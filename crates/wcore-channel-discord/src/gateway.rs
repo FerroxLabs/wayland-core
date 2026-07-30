@@ -792,6 +792,46 @@ enum SessionExit {
 
 // One Gateway session carries many independent connection parameters;
 // grouping them into a struct would add indirection without clarity.
+/// Install a process-level rustls [`CryptoProvider`] if nothing has installed
+/// one yet.
+///
+/// # F24-C3-D2 — the reason the Discord inbound path had never been proven
+///
+/// `rustls` 0.23 refuses to guess a provider when BOTH the `aws-lc-rs` and
+/// `ring` backends are linked, and in this workspace both are (`Cargo.lock`
+/// carries one of each). With no process default installed,
+/// `tokio_tungstenite::connect_async` **panics** the moment it builds a TLS
+/// client:
+///
+/// ```text
+/// Could not automatically determine the process-level CryptoProvider from
+/// Rustls crate features.
+/// ```
+///
+/// Measured live on 2026-07-30 against the real Discord gateway: **84 panics
+/// in ~120 seconds** of one `wayland-core gateway run`, each caught by the
+/// supervisor, which then logged `channel reconnected; resuming polling` —
+/// 84 false recoveries over a socket that never opened once. Outbound REST
+/// worked throughout the same process (reqwest configures its own backend),
+/// which is the discriminating control proving this is the WebSocket TLS
+/// stack and not the network, the token, or the host.
+///
+/// `install_default` is called through a [`Once`] and its `Err` is ignored on
+/// purpose: `Err` means somebody else — an embedding host, or another adapter
+/// that got here first — already chose a provider, and silently keeping THEIR
+/// choice is correct. This function must never clobber an existing selection.
+///
+/// `ring` is the backend chosen because the workspace already selects it
+/// explicitly elsewhere (`wcore-agent/src/tool_backends/postgres_schema.rs`),
+/// so this adds no new cryptographic dependency and keeps one backend in use.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_one_session(
     url: &str,
@@ -808,6 +848,7 @@ async fn run_one_session(
     // function returns via Err (dropped socket).
     resume: &mut Option<ResumeState>,
 ) -> Result<SessionExit, String> {
+    ensure_crypto_provider();
     let (ws, _) = tokio_tungstenite::connect_async(url)
         .await
         .map_err(|e| format!("connect: {e}"))?;

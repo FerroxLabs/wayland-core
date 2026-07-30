@@ -121,7 +121,10 @@ async fn live_edit_and_delete_against_real_discord() {
         .send_to(&chan, OutgoingMessage::text(chan.clone(), original.clone()))
         .await
         .expect("live send must succeed");
-    println!("LIVE_SENT id={} conv={}", receipt.id, receipt.conversation_id);
+    println!(
+        "LIVE_SENT id={} conv={}",
+        receipt.id, receipt.conversation_id
+    );
     assert!(
         !receipt.id.is_empty(),
         "a receipt with no message id cannot be edited or deleted"
@@ -169,7 +172,10 @@ async fn live_edit_and_delete_against_real_discord() {
     );
     println!("LIVE_DELETE_KNOWN_NEGATIVE_ERR={:?}", again.unwrap_err());
 
-    println!("LIVE_ACTIONS_ALL_PASSED stamp={stamp} deleted_id={}", receipt.id);
+    println!(
+        "LIVE_ACTIONS_ALL_PASSED stamp={stamp} deleted_id={}",
+        receipt.id
+    );
 }
 
 /// Send then edit, and **leave the message in place**, so the edit can be

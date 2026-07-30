@@ -10,6 +10,9 @@ async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 futures-util = "0.3"
 reqwest = { workspace = true, features = ["json"] }
+# F24-C3-D2: the Gateway WebSocket needs a process-level rustls CryptoProvider
+# installed before `connect_async`, or it panics when both backends are linked.
+rustls = { workspace = true }
 wcore-egress = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
