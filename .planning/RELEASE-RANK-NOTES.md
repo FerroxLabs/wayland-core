@@ -15,7 +15,76 @@ can pass. All load-bearing greps via `/usr/bin/grep`; all git via `/usr/bin/git`
 
 ---
 
-## Status: IN PROGRESS
+## Status: MEASURED — §3 rewritten
+
+## Live verification on hetzner (NOT a source reading)
+
+The strongest objection to this lane is that "closed" was being asserted from **reading source**,
+in a programme whose standing rule is that live testing outranks green code — and a read is weaker
+even than green code. So the four load-bearing claims were **executed** on `hetzner-dsm`, in a
+private worktree `/root/wl-relrank` at an **asserted SHA** (`4dc571c1`, matching my lane HEAD),
+with the pass/ignore/filter counts read back per LANE-BRIEF §3.2. Run over ssh, so the `rtk`
+`cargo` rewrite that strips `0 ignored`/`0 filtered out` did not apply.
+
+| # | Suite | Underpins | Result |
+|---|---|---|---|
+| T1 | `cargo test -p wcore-cron --test event_producer` | de-blocking `24-C2` | **11 passed; 0 failed; 0 ignored; 0 filtered out** |
+| T2 | `cargo test -p wcore-channel-matrix idempotency` | the 3-of-10 tally | **1 passed; 0 failed; 0 ignored; 35 filtered out** |
+| T3 | `cargo test -p wcore-channel-discord idempotency` | the 3-of-10 tally | **1 passed; 0 failed; 0 ignored; 57 filtered out** |
+| T4 | `cargo test -p wcore-agent --test f24_c3_h5_reload_policies_test` | `F24-C3-H5` is fixed | **1 passed; 0 failed; 0 ignored; 0 filtered out** |
+
+T2/T3 are name-filtered runs — the exact shape of self-passing flavour (c) — so the executed count
+is asserted as **1, not 0**, which is what makes them meaningful. T1 includes
+`a_poll_job_never_fires_because_nothing_performs_the_poll`, i.e. the suite pins the *refusal* too.
+
+**Self-correction:** my static grep reported "2 tests" in the `F24-C3-H5` file by counting
+`async fn` and `#[tokio::test]` separately. The executed count is **1**
+(`a_reloaded_channel_carries_its_policy_and_its_posture`). The run is authoritative over my grep.
+
+## Cross-audit panel — and ONE VOTE WAS CONTAMINATED
+
+Per LANE-BRIEF §4, with a lane-unique prompt path (`panel-Q-release-rank.txt`, 6,359 bytes, first
+and last bytes verified before dispatch) and `< /dev/null` on every member.
+
+| Member | Vote | Independent? |
+|---|---|---|
+| `gemini-3.1-pro-preview` | **DISAGREE** | Yes |
+| `kimi` K3 | **DISAGREE** | Yes |
+| `codex gpt-5.6-sol` | *unusable* | **NO — read its peers' answers** |
+| internal adversarial | argued against my own emerging de-blocking | — |
+
+**New harness defect, §4 family, and it nearly produced a fabricated 3/3.** All three members ran
+in parallel with cwd `/tmp/release-rank-caps`, where each was writing its own output file. Codex's
+log line 1262 shows it executed:
+
+```
+/bin/zsh -lc 'for f in codex-out.txt gemini-out.txt kimi-out.txt; do echo "===== $f ====="; rtk cat "$f"; done'
+```
+
+It `cat`'d **its peers' answer files**, so the polished A–E block at its tail sits *after*
+`===== kimi-out.txt =====` (line 2668) — the text I first extracted as "codex's final answer" was
+**kimi's answer inside codex's own `cat` output.** Codex's vote is not independent and is discarded.
+
+**The previous lane's lesson was that a shared scratchpad *prompt* path is a shared mutable global.
+This is the same defect on the *output* side, and it is worse**, because the contamination reads as
+agreement rather than as a wrong answer. **Run panel members in separate cwds, or with output
+outside any member's reachable tree.**
+
+**I also got the direction backwards first.** I saw the duplicate text and concluded *kimi* had
+copied *codex*. Wrong: kimi's reasoning trace derives everything from my question and references my
+`cap*.txt` files by name. The reader is the member with filesystem access and the larger log, not
+the member whose text is duplicated. Recorded because the wrong call would have discarded the one
+vote that was clean.
+
+**Both independent members voted DISAGREE, so I moved.** Changes taken, all of which make my
+ranking *stricter*, are recorded in the new §3 under "Where the panel changed the ranking".
+
+**One panel factual error, not taken:** gemini argued the unmeasured policy baselines are blocking
+because *"your project is named wayland-core … you cannot ship a desktop-interacting agent if you
+cannot test its graphical security boundary … mock the Wayland compositor."* It conflated the
+product name with the Wayland display protocol. The conclusion is partly right for an unrelated
+reason — `27-C2(c)`'s CUA leg genuinely needs a display — so the recommendation survives its bad
+premise, and is credited to kimi/codex's `xvfb` point instead.
 
 ## Hypotheses handed to me (orchestrator's own words: "probably stale")
 
