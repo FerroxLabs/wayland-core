@@ -87,8 +87,114 @@ real for one-shot `-p` though. Needs a measurement + a decision, not a blind str
 5. Add a regression test that fails if an internal identifier reappears in help output, and
    prove it can fail by seeding one.
 
+## T+1h — BASELINE MEASURED on the real binary
+
+Binary `/root/wayland-fix-tui-noise/target/release/wayland-core`, sha256
+`f2078c290cffb053bfd27dbe6133e9e35a75eab157e7b669fa657cc7469a26e5`,
+`--build-info` self-reports source **`e7bc6d88…`** = the lane base. Provenance measured.
+
+Turn: `wayland-core --no-tui 'What is 17 times 23? Reply with just the number.'`, real
+Anthropic provider, answer `391` present (`ANSWER_HAS_391=1`) — a refused turn boots less and
+would have flattered every number below.
+
+| claim | UAT said | measured at base | verdict |
+|---|---|---|---|
+| C1 headless log lines | 32–68 | **42 stderr lines = 20 INFO + 19 WARN + 3 other** | CONFIRMED |
+| C2 Windows 29 INFO + 5 WARN | — | Linux figure above; Windows not re-run | UNRUN (see coverage) |
+| C4 answer + log on one line | yes | stdout has **no trailing newline**, so the next write lands on the same line | CONFIRMED, cause identified |
+| C5 `--help` size + ids | 215 / 216 lines | **`--help` 215 lines, `-h` 142** and **26 lines carrying internal ids** | CONFIRMED, and worse than reported |
+| C6 stdout `* 391`, 5 bytes | 5 bytes | **5 bytes, `2a 20 33 39 31`**, last byte `31` not `0a` | CONFIRMED byte-exact |
+| C3 Linux 11s vs macOS 2s | platform gap | **REFUTED as a platform gap — see below** | REFUTED |
+
+## T+1h30 — C3 DIAGNOSED, and the brief's framing is wrong
+
+**The 11 seconds is real. "Linux is 5x slower than macOS" is not.**
+
+Same binary, same host, same platform, same minute, only the working directory changed:
+
+| cwd | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| empty directory | **2.38 s** | **1.72 s** | **2.79 s** |
+| `/root` (40 build worktrees) | **12.02 s** | **11.80 s** | **11.67 s** |
+
+The UAT's "macOS 2s" and "Linux 11s" are these two numbers. Linux in an empty directory is at
+or below the macOS figure. The variable is **the size of the working-directory tree**, not the
+operating system.
+
+### What the 9.8 s is
+
+Log-timestamp gap analysis on the baseline stderr: one dominant gap of **9.800 s** between
+`INFO user-model: using local backend` and the second tool-registration pass. Everything else
+is sub-millisecond except the provider round trip (1.898 s). `RUST_LOG=debug` does not fill the
+gap — **zero** trace lines are emitted inside it.
+
+`strace -f -tt -T` over the whole turn, 2,587,703 syscalls:
+
+```
+938838 getdents64      472101 openat      468839 fstat      468806 close      195367 readlink
+     0 syscalls slower than 0.5 s        (extractor proven alive: 2,567,175 / 2,587,703 lines matched)
+```
+
+So it is not a blocked syscall or a network timeout. It is **two full recursive walks of the
+current working directory**, one per boot pass, each on the main thread. Top prefixes:
+`/root/rambuild/flux-litellm-…` 226,455 opens, `…/node_modules` 20,133, `/root/.cargo/registry`
+13,417, `/root/wayland/target` 10,473. The walk also plants **3,649 `inotify_add_watch`es**,
+including 891 inside this lane's own worktree and 938 inside `/root/wayland-25c4/crates` — i.e.
+other lanes' trees.
+
+### Which walkers — separated without a rebuild
+
+The two candidate walkers differ observably, so a purpose-built probe repo separates them:
+a git repo whose `.gitignore` hides a 20,000-file directory, run as cwd under
+`strace -e trace=openat`. `git status --untracked-files=all` sees 0 of the ignored files, so the
+ignore file is genuinely in force (control).
+
+| walker thread | opened `ignored_big/`? | opened `.git/`? | ⇒ |
+|---|---|---|---|
+| 3349564 (first) | **no** | **no** | `standard_filters(true)` + `.git` excluded by name ⇒ `wcore_repomap::scope::scope_files` (`scope.rs:209-213`) |
+| 3349666 (second) | **yes** | **yes**, all 8 subdirs | `standard_filters(false)`, no prune ⇒ `wcore_tools::workspace_policy::project_committed_secrets` (`workspace_policy.rs:837-841`) |
+
+Both are reached from boot: `bootstrap.rs:2871` builds `WorkspacePolicy::contained(&workspace)`
+for any non-trusted workspace, and the secret-deny walk is documented as deliberately
+un-pruned — *"NO directory prune … pruning `node_modules`/`target`/`.wcache` would deny a
+committed secret to Read/Edit/Grep while leaving it READABLE via `Bash cat`"* — with issue #234
+named as a prior DoS that was mitigated by a lexical prefilter on the *canonicalize*, not on the
+*readdir*.
+
+Cost is linear in non-ignored entry count, and a normal repo is fine:
+
+| cwd | wall |
+|---|---|
+| empty | 1.72–2.79 s |
+| probe repo, 20k files gitignored | **1.82 s** |
+| probe repo, same 20k files NOT gitignored | **2.86 s** |
+| probe repo, not a git repo at all | 2.31 s |
+| `/root`, ~2.5M entries | 11.67–12.02 s |
+
+`--dangerously-skip-permissions-and-sandbox` does **not** remove it (11.73 s) — the policy is
+still constructed even when the sandbox is bypassed at exec time.
+
+### Verdict on C3 — diagnosed here, NOT fixed here
+
+The remedy is a bounded-workspace-scan decision inside `wcore-tools` /`wcore-repomap`: either
+prune, cap, cache across the two passes, or parallelise `WalkBuilder`. All four change a
+**security-relevant** surface (the sandbox secret-deny list) whose current shape is a documented,
+deliberate tradeoff carrying two issue numbers. That is not a TUI-noise lane's call to make on
+its own evidence. Handed off with the measurements above rather than guessed at.
+
 ## Instrument defects found in my own harness (repaired in-lane, per §6b-ii)
 
-1. Unquoted `--include=*.rs` — zsh glob expansion killed two greps with `no matches found`
+1. **Unquoted `--include=*.rs`** — zsh glob expansion killed two greps with `no matches found`
    (exit 1), which a careless reader grades as "zero hits". Repaired: every glob quoted, and
    every absence claim now carries a known-positive in the same capture.
+2. **`-p` is `--provider`, not "prompt"** (`main.rs:269`; the prompt is a trailing positional).
+   The first baseline run therefore died in argv parsing and reported `INFO_LINES=0`,
+   `WARN_LINES=0` — **a perfect "no spew" result produced by never starting the engine.** Exactly
+   the self-passing shape §3b-i describes. Repaired two ways: the argv is corrected, *and* a hard
+   `ASSERT_TURN` now reddens the harness (`WLRC=96`) on any non-zero child exit, so the class
+   cannot recur silently even if a future invocation is wrong for a different reason.
+3. **The attribution probe counted opens of files inside the ignored directory** — but a
+   directory walk `getdents64`s a directory, it does not `openat` each file, so the count was
+   structurally 0 and would have "proved" gitignore was respected by *both* walkers. Repaired to
+   count `O_DIRECTORY` opens of the directory itself and to attribute them per thread id, which
+   is what separated the two walkers above.
