@@ -1767,10 +1767,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline && !delivered {
             if let Ok(Ok(tagged)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await
+                && matches!(tagged.event, ChannelEvent::MessageReceived { .. })
             {
-                if matches!(tagged.event, ChannelEvent::MessageReceived { .. }) {
-                    delivered = true;
-                }
+                delivered = true;
             }
         }
         assert!(
