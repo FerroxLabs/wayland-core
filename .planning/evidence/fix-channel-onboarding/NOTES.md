@@ -191,9 +191,54 @@ named error that points at the working path.
 
 ---
 
+## NEW FINDING (HIGH) — `channel probe` exits 0 when a config fails to parse
+
+Found by my own live run, not by the brief. `BEFORE` reproduced round trip 4 as
+`RT4_RC=1`, which looked correct — but that run had **every** channel broken, so the
+`registered == 0` guard fired. With **one good channel and one broken one**:
+
+```
+--- channel probe ---   (slack.toml with `name` removed)
+WARN channel config parse failed; skipping file=.../slack.toml ... missing field `name`
+discord (discord)
+  outcome:  Ok
+  ...
+RC=0                    <-- the gate says READY
+```
+
+`probe` iterates only over **registered** channels, so a config that never constructed
+contributes no `ProbeReport` and cannot make the gate fail. A first-time operator's typo
+makes the channel invisible to the verb whose whole job is to catch it — and the failure
+mode is silent-green, the worst direction.
+
+This is the same false zero `ChannelHealthReport` documents at length in the same file for
+F24-D-H2 ("`registered` counts construction, not usability"). Repaired the same way: count
+the configs on disk independently via `scan_channel_summaries` and disagree out loud.
+
+**Self-inflicted trap caught while writing the repair.** My first filter was
+`s.enabled && !reported`. But `scan_channel_summaries`' `broken()` closure sets
+`enabled: false` on a parse failure — it cannot know what the file said — so that predicate
+would have **excluded exactly the rows the check exists to catch**, re-creating the silent
+green in a new place. Correct predicate: `parse_error.is_some() || enabled`. A cleanly
+parsed, deliberately disabled channel stays exempt, so the gate remains satisfiable.
+
+---
+
+## Instrument defect I hit, and the repair (§6b-ii)
+
+My secret-sweep used `grep -c -F "$TOK" file || echo 0`, which the brief warns emits
+`"0\n0"` — and it did, visibly, in the QUADRANT sweep block. Both values were 0 so no
+number in this lane was wrong, but the construct is unreadable by anything parsing it.
+Repaired in the final sweep with `grep -c ... ; true` on a separate line and a
+three-assertion self-test (known-positive, known-negative, and that the old construct
+double-prints).
+
+---
+
 ## Open questions / next steps
 
-1. Reproduce the ORIGINAL failure on hetzner with the release binary before changing docs.
+1. ~~Reproduce the ORIGINAL failure~~ — done, `BEFORE-base-bc90ee1c.txt`.
 2. ~~Cross-audit the remove-vs-implement decision~~ — done, 4/4 remove.
-3. Build `channel credential set|list|remove`, stdin-only for the value.
-4. Doc-honesty test per Measurement 5, with a can-fail proof.
+3. ~~Build `channel credential set|list|remove`~~ — done, live-proven end to end.
+4. ~~Doc-honesty test~~ — done, 9/9, can-fail proven 4 ways against the real doc.
+5. Re-verify after the probe fix; run the full lint gate set.

@@ -785,6 +785,55 @@ async fn probe(only: Option<&str>, json: bool) -> Result<()> {
             names.join(", ")
         );
     }
+
+    // A channel that never CONSTRUCTED produces no report, so the loop above
+    // cannot see it. Measured live on 0.12.25 while proving this lane's fix:
+    // with one good channel configured and one whose config had a required
+    // field removed, `channel probe` printed the good channel and exited
+    // **0** — a first-time operator's typo makes the channel invisible to the
+    // gate that exists to catch it. The `registered == 0` guard above only
+    // catches the all-broken case, which is why the original UAT saw a
+    // correct exit code and this did not surface.
+    //
+    // This is the same false zero `ChannelHealthReport` (above) documents for
+    // F24-D-H2 — "registered counts construction, not usability" — so it gets
+    // the same repair: count the configs on DISK independently and disagree
+    // out loud. Only for a whole-directory probe; `--name` is a question
+    // about one channel and `probe_one` already errors for a broken one.
+    // `enabled = false` is a deliberate operator choice, so an absent report
+    // for a disabled channel is correct and must NOT redden the gate — a gate
+    // that cannot be satisfied is as useless as one that cannot fail.
+    //
+    // But a config that failed to PARSE also reports `enabled: false`, because
+    // `scan_channel_summaries` cannot know what it said. Filtering on
+    // `enabled` alone would therefore drop exactly the rows this check exists
+    // to catch, and the gate would go quiet again in a new way. A parse error
+    // always counts; only a cleanly-parsed, deliberately-disabled channel is
+    // exempt.
+    if only.is_none() {
+        let unusable: Vec<String> = wcore_channels_registry::scan_channel_summaries(&dir)
+            .into_iter()
+            .filter(|s| s.parse_error.is_some() || s.enabled)
+            .filter(|s| !reports.iter().any(|r| r.channel == s.name))
+            .map(|s| match &s.parse_error {
+                Some(e) => format!("{}: {e}", s.name),
+                None if !s.known_platform => {
+                    format!("{}: unknown platform {:?}", s.name, s.platform)
+                }
+                None => format!(
+                    "{}: configured but could not be constructed — see the warning above",
+                    s.name
+                ),
+            })
+            .collect();
+        if !unusable.is_empty() {
+            bail!(
+                "{} configured channel(s) could not be probed at all:\n  - {}",
+                unusable.len(),
+                unusable.join("\n  - ")
+            );
+        }
+    }
     Ok(())
 }
 
