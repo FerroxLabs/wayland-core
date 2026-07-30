@@ -1,0 +1,4 @@
+ok= True error= None
+count= 2
+{'ts': '1785382174.613739', 'type': 'message', 'subtype': 'channel_join', 'user': 'U0BLBKR56NT', 'bot_id': None, 'text': '<@U0BLBKR56NT> has joined the channel'}
+{'ts': '1785382157.617439', 'type': 'message', 'subtype': 'channel_join', 'user': 'U3PGRDZGA', 'bot_id': None, 'text': '<@U3PGRDZGA> has joined the channel'}

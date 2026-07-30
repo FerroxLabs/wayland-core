@@ -18,10 +18,17 @@ the table below disagrees with the adapter's actual capability. See
 
 | | |
 |---|---|
-| **2 of 10** adapters | exactly-once — Slack, Matrix |
-| **8 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
+| **1 of 10** adapters | exactly-once — Matrix, and it is the only one ever proven at the real platform |
+| **9 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
 | **0 of 10** adapters | at-least-once (the gateway never automatically re-sends to a destination that cannot recognise a replay) |
-| **On Windows** | a known defect can produce a duplicate on **any** adapter, including the two above — see [§5](#5-windows-f24-gwp-h1) |
+| **On Windows** | a known defect can produce a duplicate on **any** adapter, including the one above — see [§5](#5-windows-f24-gwp-h1) |
+
+**On 2026-07-30 this table lost two of its three exactly-once rows.** Slack and Discord were
+each driven at their real API for the first time, and each produced **two** messages from a
+replayed key. Both had held the claim on the strength of a mock. A mock can only prove that we
+put a token on the wire; it says nothing about whether the destination honours it, and for both
+of these it did not. Matrix is the only row that was driven live before it was believed, and it
+is the only one still standing.
 
 Nothing is ever silently dropped. An abandoned delivery is recorded, listed by
 `wayland-core gateway abandoned`, and re-sendable by an operator.
@@ -35,7 +42,7 @@ relying on it, because that scope is narrower than "one message".
 
 | Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
 |---|---|---|---|---|---|
-| **Slack** | `Idempotency-Key` HTTP header on the send | **exactly-once** | **retried** with the same key | one message | **Yes** — real HTTP; the key was present on both attempts |
+| **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
 | **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`.** See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **Yes** — a replayed key produced **two** messages, no dedupe token on the wire |
@@ -62,11 +69,51 @@ what makes the other rows interpretable: it is the known-positive proving
 a duplicate is genuinely produced when no key is honoured, rather than a duplicate being merely
 theorised.
 
+### Correction, 2026-07-30 — the Slack row was wrong, and how
+
+Until this date the Slack row read **exactly-once**, "On restart, expect: **one message**",
+live-proven. Its evidence column said *"real HTTP; the key was present on both attempts."*
+
+**That is evidence for a different claim.** Key-on-wire is a fact about our request. Arrival
+count is a fact about Slack. The row asserted the second and cited the first, and the three rows
+beneath it show what the missing measurement looks like when it is actually taken — they say
+"produced **two** messages", a count.
+
+It has now been taken. Against `slack.com`, private channel `C0BLR1UKKU6`, through the adapter as
+the production registry factory builds it:
+
+```text
+send   with key K -> ts 1785385438.299299
+send   with key K -> ts 1785385438.564099     <- a SECOND message, not the first one
+conversations.history: 2 arrivals with that body
+```
+
+Confirmed three independent ways in one run: two distinct `ts` values returned, two records read
+back from `conversations.history`, and `chat.delete` succeeding on **both** (a delete that
+succeeds proves the message existed; a delete of a fabricated `ts` returns `message_not_found`,
+which is the control proving that instrument can fail). A raw-`curl` probe outside the adapter
+reproduced it identically. Slack's Web API documents no request-level idempotency surface, and
+the adapter's own `api.rs` already said the header was "inert against real Slack" — the capability
+bit above it said the opposite, and the bit was the one the gateway read.
+
+The practical consequence while the row was wrong: `LedgeredHandler::dispatch_fire` **re-sent**
+outcome-unknown Slack deliveries on restart, believing the destination would collapse the replay.
+Slack does not. Those re-sends were duplicates, and invisible from our side because the ledger
+recorded one delivery. Slack now takes the same `abandoned` path as the other seven, which
+surfaces the delivery to an operator instead of silently doubling it.
+
+The header is still transmitted, because a Slack-compatible destination pointed at through
+`api_base_url` may honour it. What changed is the claim about `slack.com`.
+
+Standing lesson for this table: **the evidence column must state the same claim as the guarantee
+column.** A row whose evidence is about our request cannot support a guarantee about their
+arrival count.
+
 ### Where each guarantee comes from, in code
 
 | Adapter | Capability declared at | Key reaches the wire at |
 |---|---|---|
-| Slack | `wcore-channel-slack/src/lib.rs:249` | `idempotency-key` request header (`lib.rs:338`, `:371`); bound by tests `lib.rs:489` (header present when keyed) and `lib.rs:521` (header **absent** when unkeyed) |
+| Slack | `wcore-channel-slack/src/lib.rs` `supports_outbound_idempotency` — **`false`**, because `slack.com` ignores the key | the `idempotency-key` request header IS still sent on a keyed send (bound by the mockito test `a_keyed_send_puts_the_key_on_the_wire_though_slack_ignores_it`, and by its twin proving the header is **absent** when unkeyed) — but no Slack-honoured slot exists. The live arrival count is asserted by `wcore-channels-registry/tests/live_slack_actions.rs` |
 | Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539`, and by the live wire capture in [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | Discord | **`false`**, overridden explicitly in `wcore-channel-discord/src/lib.rs` | `rest::nonce_for_key` IS still sent as `nonce` (`lib.rs:170-172`), and Discord ignores it for deduplication — see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | the other seven | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
@@ -147,9 +194,11 @@ It is **not** a lock failure — process count never exceeded 1. The ledger reco
 distinct delivery ids, each settled exactly once**: the spine did its job perfectly and the
 duplicate was created *above* it, as a second delivery id.
 
-**So on Windows the exactly-once rows in §2 are conditional on timing, for all three of them.**
-A different key is not a replay, and Slack and Matrix will each post the second copy.
-This applies to every adapter, not to a subset.
+**So on Windows the one remaining exactly-once row in §2 is conditional on timing.**
+A different key is not a replay, so Matrix will post the second copy too.
+This applies to every adapter, not to a subset — Slack and Discord included, which since the
+2026-07-30 corrections above have no honoured idempotency slot at all and so duplicate on this
+path for the plainer reason that nothing anywhere is deduplicating them.
 
 It is intermittent — a second Windows run that finished before crossing a boundary was clean.
 The honest statement is: *whenever a Windows run crosses the `PT1M` boundary with live cron
@@ -345,7 +394,7 @@ is gone — never by the status code.
 <!-- DELIVERY-SEMANTICS-MACHINE-READABLE
 Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires
 them to agree, so a table edit that misses this block fails, and vice versa.
-slack = exactly-once
+slack = at-most-once
 matrix = exactly-once
 discord = at-most-once
 telegram = at-most-once

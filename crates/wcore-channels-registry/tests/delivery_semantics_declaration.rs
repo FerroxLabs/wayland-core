@@ -297,7 +297,7 @@ fn declaration_matches_every_adapter() {
 /// forward is that Discord was in this list on the strength of a mockito test,
 /// which can only prove what we SEND — never what the platform HONOURS.
 #[test]
-fn exactly_two_adapters_are_exactly_once() {
+fn exactly_one_adapter_is_exactly_once() {
     let measured = measured_capabilities();
     let mut idempotent: Vec<&str> = measured
         .iter()
@@ -308,12 +308,16 @@ fn exactly_two_adapters_are_exactly_once() {
 
     assert_eq!(
         idempotent,
-        vec!["matrix", "slack"],
+        vec!["matrix"],
         "the set of exactly-once adapters changed. This is a customer-facing guarantee: update \
          docs/delivery-semantics.md (both the table and the machine-readable block) in the same \
          commit, and PROVE AT THE REAL PLATFORM that it honours a replayed key before adding \
-         one. Discord was in this list for months on the strength of a mockito test and was \
-         wrong; a mock proves what we send, not what the destination does with it."
+         one. On 2026-07-30 both Discord and Slack were driven at their real APIs for the first \
+         time and BOTH produced TWO messages from a replayed key. Each had been in this list on \
+         the strength of a mockito test. A mock proves what we send; it cannot prove what the \
+         destination does with it, and for these two it was wrong. Matrix is the only member \
+         that has survived a live replay — the shipped binary was killed mid-send against \
+         matrix.org and the homeserver returned the original event_id."
     );
 }
 
@@ -356,12 +360,17 @@ fn comparator_rejects_a_downgraded_row() {
 
     // The other direction: the code gained a guarantee the document has not
     // caught up with. Less dangerous, still drift.
-    declared.insert("slack".into(), "at-most-once".into());
+    //
+    // Keyed on matrix since 2026-07-30 — this used slack, which was an
+    // exactly-once adapter until a live replay showed Slack ignoring the key.
+    // The mutation has to name an adapter that really does declare `true`, or
+    // the "document downgrades a real guarantee" case is not being exercised.
+    declared.insert("matrix".into(), "at-most-once".into());
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
-        problems[0].starts_with("slack:") && problems[0].contains("returns true"),
+        problems[0].starts_with("matrix:") && problems[0].contains("returns true"),
         "got: {problems:?}"
     );
 }

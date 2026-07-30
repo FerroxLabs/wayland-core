@@ -1,0 +1,5 @@
+final channel state, read from the Mac after the last run
+ok= True total= 2
+  1785382174.613739 channel_join '<@U0BLBKR56NT> has joined the channel'
+  1785382157.617439 channel_join '<@U3PGRDZGA> has joined the channel'
+WL markers remaining: 0
