@@ -52,7 +52,7 @@ pub fn channel_factory_for(platform: &str) -> Option<ChannelFactory> {
         "sms" => Some(make_sms),
         "whatsapp" => Some(make_whatsapp),
         "signal" => Some(make_signal),
-        // F-045 (W7-M): new channel adapters ported from desktop OpenClaw fork.
+        // F-045 (W7-M): channel adapters added to match the desktop app's set.
         "matrix" => Some(make_matrix),
         "msteams" => Some(make_msteams),
         // iMessage is macOS-only; return None on other platforms so the

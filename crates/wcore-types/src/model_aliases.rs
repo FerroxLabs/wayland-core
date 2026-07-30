@@ -300,8 +300,8 @@ pub fn minimax_m3() -> String {
 
 // Sakana ("Fugu") deliberately has NO model-id constants or catalog here: its
 // `/model` picker is driven by the live `https://api.sakana.ai/v1/models`
-// fetch (`OpenAIProvider::list_models`), the same live-source pattern Hermes /
-// OpenClaw / the desktop app use (models.dev) — never a hand-typed list. The
+// fetch (`OpenAIProvider::list_models`) — a live source, never a hand-typed
+// list that would drift the moment the provider ships a model. The
 // per-provider default (`fugu`) lives in `wcore_config::default_model_for`.
 
 /// The selectable models for a provider, as `(short_form, resolved_id)`

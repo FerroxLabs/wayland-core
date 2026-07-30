@@ -1,14 +1,12 @@
 //! Transcript-rewrite primitive (T2-B2).
 //!
-//! Ports the *intent* of `rewriteTranscriptEntries` from openclaw's
-//! `src/context-engine/types.ts`: a safe, additive helper that lets engines
-//! request scrubbing / replacement passes over a transcript prior to
-//! re-assembly. The TypeScript form is an async branch-and-reappend hook
-//! owned by the runtime; this Rust port is the synchronous *primitive*
-//! that operates on an in-memory `Vec<TranscriptEntry>` against a list of
-//! regex-based [`RewriteRule`]s. The on-disk DAG update is left to the
-//! caller (mirrors the openclaw split between engine-decides-what and
-//! runtime-owns-how).
+//! A safe, additive helper that lets engines request scrubbing / replacement
+//! passes over a transcript prior to re-assembly. This is deliberately a
+//! synchronous *primitive*: it operates on an in-memory
+//! `Vec<TranscriptEntry>` against a list of regex-based [`RewriteRule`]s and
+//! leaves the on-disk DAG update to the caller. That split keeps the
+//! engine deciding *what* to rewrite and the runtime owning *how* it is
+//! persisted, so this module needs no I/O and no async.
 //!
 //! Rollback: set `WAYLAND_TRANSCRIPT_REWRITE=off` to skip the rewrite
 //! step at the primitive itself — the function returns the input vector
