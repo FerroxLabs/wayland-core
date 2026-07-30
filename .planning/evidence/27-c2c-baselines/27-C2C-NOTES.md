@@ -198,6 +198,29 @@ leave the pointer pinned at `640,512`**. `xdpyinfo` confirms the server does adv
 Switching the observable from pointer *position* to **event delivery** (what a real client
 actually sees) — see UPDATE 7.
 
+## UPDATE 6 — all three baselines CLOSED; see `.planning/27-C2C-BASELINES.md`
+
+Final consolidated run: `raw-FINAL-all-three-baselines.log` at
+`HEAD=6f68848f9810dc2ff700a32856b1bc46dd8b5dc3`. B1 `2 passed`, B2 `2 passed` (incl. the real
+X11 arm), B3a/B3b `2 passed; 1 ignored`, B3c `1 passed` against the real Camoufox sidecar.
+Every one has a committed known-negative mutation proving it can redden, and every one has a
+positive arm proving it can green. `cargo fmt --all -- --check` rc=0.
+
+The X11 observable was switched from `QueryPointer` (dead on this Xvfb) to **delivered input
+events**, after confirming with `xev` that the input path itself is live. Both a false-red
+(QueryPointer) and a false-green (my first `xev` run used an invalid `-event pointer` mask and
+reported 0/0 from a usage dump) occurred in this lane and both were caught by reading the raw
+capture rather than a rendered count.
+
+Findings filed in the deliverable: `F-27C2C-01` `cargo --locked` broken at head
+(`wcore-eval-scenarios` dev-dep absent from `Cargo.lock`; NOT fixed — not my crate, and the
+lock is shared), `F-27C2C-02` the confinement gate guards two unimplemented ops,
+`F-27C2C-03` QueryPointer unusable on Xvfb, `F-27C2C-04` the real Camoufox sidecar is
+installable on hetzner via npm.
+
+Not measured: macOS/Windows for all three; end-to-end download (no backend implements it);
+the config→`CuaPolicy` trust boundary; Wayland CUA. Recorded as gaps, not passes.
+
 ## Standard I am holding myself to
 
 Every gate run in BOTH directions (LANE-BRIEF §3b-iii): construct the failing world and
