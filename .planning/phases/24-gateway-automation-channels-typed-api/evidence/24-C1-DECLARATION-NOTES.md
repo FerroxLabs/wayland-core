@@ -107,11 +107,66 @@ dedup by Message-ID. Declaring `true` on "Gmail probably will" is exactly the re
 sentence over unimplemented code this lane exists to prevent. Left unchanged; recorded as the
 one candidate a future product decision could revisit.
 
-## Still to establish
+## M8 — cross-audit panel on "can any of the 7 be fixed": UNANIMOUS NO (3/3)
 
-- [ ] What the gateway actually DOES on `supports == false` (`gateway.rs:956` consumer) — abandon vs retry.
-- [ ] Whether Matrix/Discord's overrides are restart-stable (brief says both were fixed).
-- [ ] Per-platform primitive for the other 7 — cite code, not the ledger.
-- [ ] F24-GWP-H1: Windows duplicate burst at the Task Scheduler `PT1M` boundary. Bears on every row.
-- [ ] Is any `false` adapter actually fixable? (Brief's judgement to test.)
-- [ ] Drift test, both directions.
+Question put to all three: does each platform's send API accept a client-supplied
+idempotency/dedup token the destination will HONOUR on replay?
+
+| Panelist | Verdict |
+|---|---|
+| codex 5.6 Sol | 7/7 **NO**, with primary sources (Twilio's own "is the request safe to retry" page; RFC 5321 §6.1 + RFC 5322 §3.6.4; signal-cli jsonrpc man page; Bot Framework activity spec) |
+| gemini 3.1 Pro | 7/7 **NO** |
+| kimi K3 | 7/7 **NO** (self-corrected mid-answer on Twilio, then confirmed) |
+
+**One nuance worth keeping**, from codex: Telegram's lower-level **MTProto** API has `random_id`;
+the **Bot API** `sendMessage` does not expose it. Our adapter is a Bot API client, so the token is
+unreachable from where we stand. Recorded in the doc — "the platform" ≠ "the API we use".
+
+Internal adversarial pass, arguing AGAINST: *"you never re-send to those seven, so it is
+effectively exactly-once, and 'at-most-once' undersells it."* **Rejected** — at-most-once is
+precisely right: the message may not have arrived, and the abandon path exists precisely because
+we do not know. Calling that exactly-once would be the overclaim.
+
+**So the brief's judgement HOLDS: every adapter fixable in code has been fixed.** I fixed no
+adapter, and say so. SMTP is the nearest miss and is documented as such (M7).
+
+## M9 — the drift test, run in BOTH directions on the REAL artifacts
+
+Not just in-memory comparator mutations — the real document and the real adapters, on hetzner at
+`003661d8` / `39f53536`, `CARGO_BUILD_JOBS=10`.
+
+| Run | What was mutated | Result |
+|---|---|---|
+| **known-positive** | nothing | `8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out` rc=**0** |
+| **mutation A** | `docs/delivery-semantics.md`: `telegram = at-most-once` → `exactly-once` | rc=**101**, `2 passed; 6 failed`; message: *telegram: the document says "exactly-once" … but the adapter returns false* |
+| **mutation B** | `wcore-channel-telegram/src/lib.rs`: adapter gains `supports_outbound_idempotency() -> true` | rc=**101**, `2 passed; 6 failed`; message: *telegram: the document says "at-most-once" … but the adapter returns true* |
+| **mutation C** | `wcore-channel-matrix`: `true` → `false` | see below |
+
+All three mutations reverted; `git status --porcelain | wc -l` = **0** after each.
+
+**Mutation C is the §6b-ii third assertion — "the old instrument would have missed it", executed
+rather than reasoned about.** With Matrix silently downgraded:
+
+| Test | Result |
+|---|---|
+| pre-existing `wcore-cli/tests/f24_c1_outbound_idempotency` (4 adapters) | **`6 passed`, rc=0 — BLIND** |
+| new `delivery_semantics_declaration` (all ten) | **rc=101**, `3 passed; 5 failed`, naming `matrix` |
+
+That test's name was `capability_is_declared_true_by_slack_alone_across_the_configurable_matrix`
+— a name claiming a census its body does not run. Renamed, and its three stale header facts
+(slack `:234` → `:249`; "Slack is the **only** adapter"; "the other **nine**") corrected.
+
+Crate health at `39f53536`: `wcore-channels-registry` **11 + 8 passed, 0 failed, 0 ignored,
+0 filtered out**; `cargo clippy -p wcore-channels-registry --all-targets -- -D warnings` rc=**0**
+(the single `warning:` line is the `imap-proto` future-incompat note, not a lint);
+`wcore-cli --test f24_c1_outbound_idempotency` **6 passed**, rc=0.
+
+## Established — nothing outstanding
+
+- [x] Gateway behaviour on `supports == false` → **abandon**, `automation.rs:201-215` (M4).
+- [x] Matrix/Discord restart-stability → both derive the token from the key by hash (M6).
+- [x] Per-platform primitive for the other 7 → none; panel-unanimous, code-cited (M6, M8).
+- [x] F24-GWP-H1 → a platform row affecting **all ten**, because a re-fire mints a NEW delivery
+      id and a different key is not a replay (M5).
+- [x] Any `false` adapter fixable? → **no**; judgement tested and upheld (M8).
+- [x] Drift test, both directions, on real artifacts (M9).
