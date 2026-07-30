@@ -1490,16 +1490,17 @@ bridge_path = "/nonexistent/bridge.js"
     fn preflight_fails_closed_naming_a_missing_node_runtime() {
         // node_path pointing at a nonexistent file is the deterministic way to
         // express "no Node" — emptying PATH would be process-global and would
-        // race every other test in this binary.
-        let script = tempfile::NamedTempFile::new().unwrap();
-        let mut c = cfg(WhatsappBackend::Baileys, script.path().to_path_buf());
+        // race every other test in this binary. The bridge is a fully INSTALLED
+        // one so that `node_runtime` is genuinely the only thing missing.
+        let (_dir, script) = installed_bridge(WhatsappBackend::Baileys);
+        let mut c = cfg(WhatsappBackend::Baileys, script);
         c.node_path = Some(PathBuf::from("/definitely/not/here/node"));
 
         let err = preflight(&c).unwrap_err();
         assert_eq!(
             err.findings,
             vec!["node_runtime".to_string()],
-            "only Node is missing — the script exists"
+            "only Node is missing — the script and its dependencies exist"
         );
         assert!(err.operator_message.contains("install Node"));
     }
