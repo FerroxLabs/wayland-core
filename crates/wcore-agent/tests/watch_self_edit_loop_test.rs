@@ -15,6 +15,7 @@
 //! every event would be exactly as broken as one that suppressed none, so the
 //! genuine-external-edit cases below are load-bearing, not decoration.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use wcore_agent::watch::{FileWatcher, render_external_edit_message};
@@ -24,6 +25,26 @@ use wcore_agent::watch::{FileWatcher, render_external_edit_message};
 const ARM: Duration = Duration::from_millis(300);
 /// Time given for events to be delivered into the channel before draining.
 const SETTLE: Duration = Duration::from_millis(600);
+
+/// HARNESS REPAIR — do not watch `tempdir()` directly.
+///
+/// `tempfile::tempdir()` names its directory `.tmpXXXXXX`, and
+/// `path_should_surface_as_edit` drops any path whose FILE NAME starts with
+/// `.tmp` (the atomic-write scratch filter, watch.rs). A watch root named
+/// `.tmpXXXXXX` is therefore swallowed by a filter that has nothing to do with
+/// the property under test, so every Direction-1 assertion taken against it
+/// passes no matter what the watcher does — a permanently-green gate.
+///
+/// Measured, not theorised: the first run of this file reported 6/6 passing on
+/// Linux while the raw event list contained `/tmp/.tmpbNcTnJ
+/// [Modify(Metadata(Any))]` — i.e. the watch root HAD leaked and the gate could
+/// not see it. Production cwds are ordinary directory names, so the harness
+/// uses one. `harness_selftest_*` below pins this.
+fn project_root(tmp: &tempfile::TempDir) -> PathBuf {
+    let root = tmp.path().join("project");
+    std::fs::create_dir_all(&root).expect("mkdir project root");
+    root
+}
 
 /// Drain and render, returning both the injection and the raw surfaced paths
 /// so a failure REPORTS THE SHAPE rather than merely asserting a boolean.
@@ -36,6 +57,54 @@ fn drain_report(watcher: &FileWatcher) -> (Option<String>, Vec<String>) {
     (render_external_edit_message(&events), paths)
 }
 
+// ── Harness self-test (LANE-BRIEF §6b-ii) ────────────────────────────────
+// Three assertions, because two would pass on the BROKEN harness too:
+//   (a) known-positive — a realistically-named root renders as an edit;
+//   (b) known-negative — a genuinely-filtered path does not;
+//   (c) the OLD harness would have missed it — a `.tmp`-named root is
+//       swallowed by an unrelated filter, which is the exact masking that
+//       made this file report 6/6 green while the watch root was leaking.
+// (c) is the only one that proves the repair changed anything.
+
+/// Pins the masking directly, with no watcher and no platform notifier
+/// involved, so it cannot itself go stale on a timing change.
+#[test]
+fn harness_selftest_tempdir_root_name_masked_the_result() {
+    use notify::EventKind;
+    use std::time::Instant;
+    use wcore_agent::watch::ExternalEvent;
+
+    let ev = |p: &str| ExternalEvent {
+        path: PathBuf::from(p),
+        kind: EventKind::Any,
+        at: Instant::now(),
+    };
+
+    // (a) known-positive: the name the repaired harness uses is visible.
+    assert!(
+        render_external_edit_message(&[ev("/tmp/.tmpbNcTnJ/project")]).is_some(),
+        "the repaired harness's root name must be renderable, else Direction-1 \
+         assertions taken against it are vacuous"
+    );
+
+    // (b) known-negative: a path the renderer is SUPPOSED to drop is dropped,
+    // proving the renderer is not simply returning Some for everything.
+    assert!(
+        render_external_edit_message(&[ev("/tmp/proj/target/debug/x.rlib")]).is_none(),
+        "renderer must still drop build artefacts"
+    );
+
+    // (c) the old harness would have missed it: `tempfile`'s own directory
+    // name is eaten by the `.tmp` scratch filter, so an event for the OLD
+    // watch root rendered as nothing whatever the watcher did.
+    assert!(
+        render_external_edit_message(&[ev("/tmp/.tmpbNcTnJ")]).is_none(),
+        "if a `.tmp`-prefixed root were renderable the original harness would \
+         have been sound and this repair would be pointless — the measured \
+         run showed it is not"
+    );
+}
+
 // ── Direction 1: the engine's own writes must NOT surface ────────────────
 
 /// The exact first-run sequence: bootstrap creates `.wayland-core/` and the
@@ -44,8 +113,8 @@ fn drain_report(watcher: &FileWatcher) -> (Option<String>, Vec<String>) {
 #[tokio::test]
 async fn engine_state_dir_creation_does_not_surface_as_user_edit() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let root = project_root(&tmp);
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
     std::fs::create_dir_all(root.join(".wayland-core/memory")).expect("mkdir");
@@ -73,15 +142,15 @@ async fn attribute_change_on_watch_root_does_not_surface_as_user_edit() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let root = project_root(&tmp);
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
-    let original = std::fs::metadata(root).expect("stat").permissions();
-    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).expect("chmod 555");
+    let original = std::fs::metadata(&root).expect("stat").permissions();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).expect("chmod 555");
     tokio::time::sleep(SETTLE).await;
     // Restore before asserting so a failure still lets tempdir clean up.
-    std::fs::set_permissions(root, original).expect("restore perms");
+    std::fs::set_permissions(&root, original).expect("restore perms");
 
     let (msg, paths) = drain_report(&watcher);
     eprintln!("[shape] chmod_on_watch_root surfaced: {paths:#?}");
@@ -99,8 +168,8 @@ async fn attribute_change_on_watch_root_does_not_surface_as_user_edit() {
 #[tokio::test]
 async fn watch_root_path_is_never_rendered_as_an_edit() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let root = project_root(&tmp);
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
     // Touching a file then removing it churns the root's own entry list.
@@ -110,7 +179,7 @@ async fn watch_root_path_is_never_rendered_as_an_edit() {
     tokio::time::sleep(SETTLE).await;
 
     let events = watcher.drain_external_events();
-    let root_canon = std::fs::canonicalize(root).expect("canon root");
+    let root_canon = std::fs::canonicalize(&root).expect("canon root");
     let root_events: Vec<_> = events
         .iter()
         .filter(|e| e.path == root_canon || e.path == root)
@@ -129,9 +198,9 @@ async fn watch_root_path_is_never_rendered_as_an_edit() {
 #[tokio::test]
 async fn genuine_edit_in_subdirectory_still_surfaces() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
+    let root = project_root(&tmp);
     std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
     std::fs::write(root.join("src/main.rs"), b"fn main() {}").expect("write");
@@ -153,8 +222,8 @@ async fn genuine_edit_in_subdirectory_still_surfaces() {
 #[tokio::test]
 async fn genuine_edit_of_file_directly_in_watch_root_still_surfaces() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let root = project_root(&tmp);
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
     std::fs::write(root.join("README.md"), b"# hello").expect("write");
@@ -179,8 +248,8 @@ async fn genuine_edit_of_file_directly_in_watch_root_still_surfaces() {
 #[tokio::test]
 async fn real_edit_survives_concurrent_engine_state_churn() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let watcher = FileWatcher::new(root).expect("watcher");
+    let root = project_root(&tmp);
+    let watcher = FileWatcher::new(&root).expect("watcher");
     tokio::time::sleep(ARM).await;
 
     std::fs::create_dir_all(root.join(".wayland-core/sessions")).expect("mkdir");
