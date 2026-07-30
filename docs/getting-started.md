@@ -52,10 +52,9 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--max-tokens <n>` | Max output tokens per response |
 | `--max-turns <n>` | Max agent loop turns |
 | `--system-prompt <text>` | Custom system prompt |
-| `--force` | Approve every tool call without prompting while retaining the OS sandbox (alias: `--yolo`) |
-| `--dangerously-skip-permissions` | Compatibility spelling for approval bypass; prints a notice and retains the OS sandbox |
-| `--dangerous` | Start an explicit local session that bypasses approvals and the OS sandbox for a bounded lease |
-| `--dangerous-ttl-secs <n>` | Dangerous lease lifetime; defaults to 15 minutes and is capped at one hour |
+| `--dangerously-skip-permissions` | **Tier 1.** Approve every tool call without prompting while the OS sandbox **stays on** (aliases: `--force`, `--yolo`) |
+| `--dangerously-skip-permissions-and-sandbox` | **Tier 2**, a superset of tier 1: bypasses approvals **and** the OS sandbox for a bounded lease (deprecated alias: `--dangerous`) |
+| `--dangerous-ttl-secs <n>` | Tier-2 lease lifetime; defaults to 15 minutes and is capped at one hour |
 | `--auto-approve` | Skip all tool confirmations |
 | `--project-dir <path>` | Directory to load the project `.wayland-core.toml` from (defaults to CWD) |
 | `--trust-workspace` | Trust the current executable repository fingerprint in Core's external user store; material changes make the grant stale |
@@ -206,7 +205,8 @@ auto_approve = false
 allow_list = ["Read", "Grep", "Glob"]
 
 # Optional global-only administrator floor. Project config cannot set or
-# relax this block. "deny" prevents even a local --dangerous launch.
+# relax this block. "deny" prevents even a local tier-2
+# (--dangerously-skip-permissions-and-sandbox) launch.
 [execution]
 managed = false
 approval_mode = "default"   # default | auto-edit | force
@@ -232,16 +232,25 @@ plan_directory = ".wayland-core/plans"
 
 ### Execution Postures
 
-Smart is the normal posture: approval behavior is configurable, but the OS
-sandbox remains required. `--force`, `--yolo`, `--auto-approve`, and
-`--dangerously-skip-permissions` affect approvals only; they do not disable
-containment.
+There are exactly **two danger tiers**, and the flag names are written so the
+superset relationship is visible in the spelling itself.
 
-Dangerous is a separate local launch posture selected with `--dangerous`. It
-bypasses both approvals and the OS sandbox for a monotonic, time-bounded lease;
-the session is terminated when that lease expires. Config files, environment
-variables, resumed state, child agents, ACP clients, and JSON-stream commands
-cannot create that lease.
+**Tier 1 — `--dangerously-skip-permissions`** (aliases `--force`, `--yolo`).
+Approvals are bypassed; **the OS sandbox stays on**. All three spellings are
+aliases of one flag, so they always mean the same thing. `--auto-approve` also
+affects approvals only.
+
+**Tier 2 — `--dangerously-skip-permissions-and-sandbox`** (deprecated alias
+`--dangerous`). A strict superset of tier 1: it bypasses approvals **and** the
+OS sandbox, for a monotonic, time-bounded lease; the session is terminated when
+that lease expires. Config files, environment variables, resumed state, child
+agents, ACP clients, and JSON-stream commands cannot create that lease — only
+argv on a local launch can.
+
+The two tiers refuse to stack: passing one of each is a usage error.
+
+`--dangerous` continues to work and is not scheduled for removal in this
+release, but it is deprecated in `--help`; prefer the explicit spelling.
 
 Managed installs a global approval floor and an allow/deny decision for local
 Dangerous launches. Lower-trust project, protocol, TUI, ACP, resume, and child

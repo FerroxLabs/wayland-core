@@ -1,15 +1,32 @@
-//! Smoke tests for the `--force` CLI flag (formerly `--yolo`).
+//! Smoke tests for the tier-1 approval-bypass flag and its aliases.
 //!
-//! `--force` (aliases `--yolo`, `--dangerously-skip-permissions`) flips the
-//! engine's session approval mode to `Force` at boot so every tool call is
-//! auto-approved without prompting. These tests prove:
+//! Tier 1 is canonically `--dangerously-skip-permissions`, with `--force` and
+//! `--yolo` as visible aliases of the SAME clap field. It flips the engine's
+//! session approval mode to `Force` at boot so every tool call is
+//! auto-approved without prompting — and it leaves the OS sandbox ON.
 //!
-//! 1. `--help` advertises `--force` as the canonical flag.
-//! 2. All three flag forms (`--force`, `--yolo`, `--dangerously-skip-permissions`)
-//!    are accepted by clap without error.
-//! 3. The `--force` form works end-to-end (canonical name visible in help).
+//! Tier 2 is `--dangerously-skip-permissions-and-sandbox` (deprecated alias
+//! `--dangerous`), which additionally bypasses the sandbox under a lease.
+//! The tier boundary itself is asserted in the `danger_spellings_never_change_tier`
+//! unit test; these tests cover the binary-level `--help` surface.
 
 use std::process::Command;
+
+/// `--help` text of the binary under test, asserted to have been produced by
+/// a successful run so a crashed binary cannot masquerade as "flag absent".
+fn help_text() -> String {
+    let output = Command::new(binary())
+        .arg("--help")
+        .output()
+        .expect("spawn wayland-core --help");
+    assert!(
+        output.status.success(),
+        "--help should exit 0; got {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
 
 /// Path to the debug binary under test.
 fn binary() -> &'static str {
@@ -108,4 +125,106 @@ fn clap_accepts_the_dangerously_skip_permissions_alias() {
         "clap must accept --dangerously-skip-permissions; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The tier-2 canonical spelling must be advertised, and it must name the
+/// superset relationship so an operator reading `--help` can see that tier 2
+/// contains tier 1 rather than having to infer it.
+#[test]
+fn help_advertises_the_tier_two_canonical_spelling() {
+    let help = help_text();
+    assert!(
+        help.contains("--dangerously-skip-permissions-and-sandbox"),
+        "`--help` does not advertise the tier-2 canonical flag:\n{help}"
+    );
+}
+
+/// `--dangerous` keeps working and `--help` says it is deprecated. Removing
+/// the alias, or dropping the deprecation wording, both redden this.
+#[test]
+fn help_marks_the_dangerous_alias_deprecated_and_still_accepts_it() {
+    let help = help_text();
+    assert!(
+        help.contains("--dangerous"),
+        "`--help` must still advertise the `--dangerous` alias:\n{help}"
+    );
+    assert!(
+        help.to_uppercase().contains("DEPRECATED"),
+        "`--help` must mark the `--dangerous` spelling deprecated:\n{help}"
+    );
+
+    let output = Command::new(binary())
+        .arg("--dangerous")
+        .arg("--help")
+        .output()
+        .expect("spawn wayland-core --dangerous --help");
+    assert!(
+        output.status.success(),
+        "the deprecated --dangerous alias must keep parsing; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--help` must state that tier 1 leaves the sandbox on. This is the sentence
+/// an operator relies on when choosing between the two flags, and it is the
+/// one that would become a lie if a tier-1 alias were ever moved to tier 2.
+#[test]
+fn help_states_that_tier_one_retains_the_sandbox() {
+    let help = help_text();
+    let lower = help.to_lowercase();
+    assert!(
+        lower.contains("sandbox stays on") || lower.contains("sandbox remains"),
+        "`--help` must state that tier 1 retains the OS sandbox:\n{help}"
+    );
+}
+
+/// The two tiers must refuse to stack at the binary level too, not merely in
+/// the in-process clap unit test.
+///
+/// NOTE ON THE HARNESS, because the obvious spelling of this test is broken:
+/// do NOT append `--help`. clap handles `--help` BEFORE it validates
+/// `conflicts_with`, so `--force --dangerously-skip-permissions-and-sandbox
+/// --help` exits 0 and prints help — the test then passes for a conflicting
+/// pair and would keep passing if the conflict were deleted outright. That is
+/// exactly a gate that cannot fail. Measured on this binary, 2026-07-30.
+///
+/// `--list-agents` is used instead: it is validated like any other argument,
+/// so a conflicting pair errors at parse, and on the pass side it exits
+/// promptly rather than opening a session the test would have to time out.
+#[test]
+fn the_binary_refuses_to_stack_the_two_tiers() {
+    let output = Command::new(binary())
+        .arg("--force")
+        .arg("--dangerously-skip-permissions-and-sandbox")
+        .arg("--list-agents")
+        .output()
+        .expect("spawn wayland-core --force --dangerously-skip-permissions-and-sandbox");
+    assert!(
+        !output.status.success(),
+        "stacking tier 1 and tier 2 must be refused; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "the refusal must be clap's conflict error, not an unrelated failure \
+         (an unrelated crash would also make this test pass):\n{stderr}"
+    );
+
+    // CONTROL IN THE PASS DIRECTION. The same invocation with only ONE of the
+    // two flags must succeed, proving the failure above is caused by the
+    // conflict and not by `--list-agents` being broken.
+    for solo in ["--force", "--dangerously-skip-permissions-and-sandbox"] {
+        let ok = Command::new(binary())
+            .arg(solo)
+            .arg("--list-agents")
+            .output()
+            .expect("spawn wayland-core <solo flag> --list-agents");
+        assert!(
+            ok.status.success(),
+            "{solo} --list-agents must succeed; stderr: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    }
 }
