@@ -211,3 +211,136 @@ impl VisionBackend for OpenAiVisionBackend {
         VisionOutcome::Ok { analysis }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use wcore_tools::media_cost::{MediaCostLedger, PriceSource};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A FluxRouter chat-completions reply. Flux reports the per-call cost in
+    /// `usage.cost_usd` **as well as** in the header — this fixture carries
+    /// only the body figure, so it exercises the body channel specifically.
+    fn flux_chat_body(cost_usd: Option<f64>) -> serde_json::Value {
+        let mut usage = serde_json::json!({
+            "prompt_tokens": 1500,
+            "completion_tokens": 240
+        });
+        if let Some(c) = cost_usd {
+            usage["cost_usd"] = serde_json::json!(c);
+        }
+        serde_json::json!({
+            "choices": [{ "message": { "content": "a red bicycle" } }],
+            "usage": usage
+        })
+    }
+
+    async fn analyze_against(body: serde_json::Value) -> Arc<MediaCostLedger> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let ledger = MediaCostLedger::shared();
+        let backend = OpenAiVisionBackend::with_endpoint(
+            "flux-test-key".to_string(),
+            format!("{}/v1/chat/completions", server.uri()),
+            "gpt-4o".to_string(),
+            "flux-router",
+        )
+        .with_accounting(MediaAccounting::new(
+            Arc::clone(&ledger),
+            Default::default(),
+        ));
+        let outcome = backend
+            .analyze("image/png", b"\x89PNG\r\n", "describe")
+            .await;
+        assert!(
+            matches!(outcome, VisionOutcome::Ok { .. }),
+            "mocked 200 must succeed: {outcome:?}"
+        );
+        ledger
+    }
+
+    /// **Both directions.** FluxRouter's `usage.cost_usd` must be read off the
+    /// body and recorded as a real, non-zero, provider-reported figure — and
+    /// the same reply without that field must record `unpriced`, not `$0.00`.
+    ///
+    /// This is the arm that matters most for `video_analyze`: it fans out to
+    /// nine of these, and this backend is the one measured to receive a genuine
+    /// provider figure.
+    #[tokio::test]
+    async fn flux_vision_cost_is_read_from_the_response_body() {
+        // --- direction 1: body carries a cost
+        let ledger = analyze_against(flux_chat_body(Some(0.004_21))).await;
+        let records = ledger.snapshot();
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.cost_usd, Some(0.004_21), "body figure must be recorded");
+        assert!(r.cost_usd.expect("priced") > 0.0, "must be non-zero");
+        assert_eq!(
+            r.price_source,
+            PriceSource::ProviderBody {
+                field: "usage.cost_usd".to_string()
+            },
+            "must name the channel it came from"
+        );
+        assert!(r.price_source.is_provider_reported());
+        assert_eq!(r.units.input_tokens, Some(1500));
+        assert_eq!(r.units.output_tokens, Some(240));
+
+        // --- direction 2: identical reply, cost field absent
+        let ledger2 = analyze_against(flux_chat_body(None)).await;
+        let r2 = &ledger2.snapshot()[0];
+        assert_eq!(r2.cost_usd, None, "absent field must not become zero");
+        assert!(
+            !r2.summary_line().contains("$0.00"),
+            "{}",
+            r2.summary_line()
+        );
+        // Units still recorded, so the call is not invisible just because it
+        // is unpriced.
+        assert_eq!(r2.units.total_tokens(), Some(1740));
+    }
+
+    /// The header outranks the body when both are present, and the record says
+    /// which one it used. An operator reconciling a bill needs to know.
+    #[tokio::test]
+    async fn header_outranks_body_and_the_record_names_the_channel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-flux-cost-usd", "0.009")
+                    .set_body_json(flux_chat_body(Some(0.004_21))),
+            )
+            .mount(&server)
+            .await;
+        let ledger = MediaCostLedger::shared();
+        let backend = OpenAiVisionBackend::with_endpoint(
+            "flux-test-key".to_string(),
+            format!("{}/v1/chat/completions", server.uri()),
+            "gpt-4o".to_string(),
+            "flux-router",
+        )
+        .with_accounting(MediaAccounting::new(
+            Arc::clone(&ledger),
+            Default::default(),
+        ));
+        let _ = backend
+            .analyze("image/png", b"\x89PNG\r\n", "describe")
+            .await;
+        let r = &ledger.snapshot()[0];
+        assert_eq!(r.cost_usd, Some(0.009), "header wins");
+        assert_eq!(
+            r.price_source,
+            PriceSource::ProviderHeader {
+                header: "x-flux-cost-usd".to_string()
+            }
+        );
+    }
+}

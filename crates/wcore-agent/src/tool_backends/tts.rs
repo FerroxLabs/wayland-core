@@ -1183,4 +1183,173 @@ mod tests {
             "opus"
         );
     }
+
+    // ------ 27-C3: cost accounting ------
+
+    /// Text of a deliberately non-round length, so the recorded character
+    /// count cannot accidentally match a constant.
+    const BILLED_TEXT: &str = "The quick brown fox jumps over the lazy dog, twice.";
+
+    fn text_request(output_path: PathBuf) -> TtsRequest {
+        TtsRequest {
+            text: BILLED_TEXT.to_string(),
+            ..make_request(output_path)
+        }
+    }
+
+    async fn synthesize_against(
+        template: ResponseTemplateForTts,
+    ) -> (
+        std::sync::Arc<wcore_tools::media_cost::MediaCostLedger>,
+        bool,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(template.0)
+            .mount(&server)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let out = tmp.path().join("speech.mp3");
+        let ledger = wcore_tools::media_cost::MediaCostLedger::shared();
+        let backend = OpenAiTtsBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/v1/audio/speech", server.uri()),
+        )
+        .with_accounting(MediaAccounting::new(
+            std::sync::Arc::clone(&ledger),
+            Default::default(),
+        ));
+        let ok = backend.synthesize(text_request(out)).await.is_ok();
+        (ledger, ok)
+    }
+
+    /// Newtype so the helper above can take a prebuilt template without
+    /// importing wiremock at module scope.
+    struct ResponseTemplateForTts(wiremock::ResponseTemplate);
+
+    /// **Both directions.** A billed speech call records its character count
+    /// and, when the provider reports one, a real non-zero dollar figure. The
+    /// same call without the header records `unpriced` — never `$0.00`.
+    ///
+    /// A TTS response body is raw audio, so the header is the only channel a
+    /// figure can arrive in for this shape; it was being discarded.
+    #[tokio::test]
+    async fn billed_speech_call_records_characters_and_a_nonzero_provider_cost() {
+        use wiremock::ResponseTemplate;
+        let audio: Vec<u8> = vec![0xFF, 0xFB, 0x90, 0x44];
+
+        // --- direction 1: provider reports a cost
+        let (ledger, ok) = synthesize_against(ResponseTemplateForTts(
+            ResponseTemplate::new(200)
+                .insert_header("x-flux-cost-usd", "0.000765")
+                .set_body_bytes(audio.clone()),
+        ))
+        .await;
+        assert!(ok, "the mocked 200 must succeed");
+        let records = ledger.snapshot();
+        assert_eq!(records.len(), 1, "one billable synthesis");
+        let r = &records[0];
+        assert_eq!(r.cost_usd, Some(0.000_765));
+        assert!(r.cost_usd.expect("priced") > 0.0, "must be non-zero");
+        assert!(r.price_source.is_provider_reported());
+        // The billable unit: characters of input text, counted from what we
+        // actually sent. Pinned to the literal so a change in either the text
+        // or the counting is visible.
+        assert_eq!(
+            r.units.billed_characters,
+            Some(BILLED_TEXT.chars().count() as u32)
+        );
+        assert_eq!(r.units.billed_characters, Some(51));
+        assert!(r.units.is_character_billed());
+        assert_eq!(r.units.images, 0, "speech produces no artifact");
+        assert_eq!(ledger.summary().billed_characters, 51);
+        assert_eq!(ledger.summary().character_billed_calls, 1);
+
+        // --- direction 2: same call, no cost header
+        let (ledger2, ok2) = synthesize_against(ResponseTemplateForTts(
+            ResponseTemplate::new(200).set_body_bytes(audio),
+        ))
+        .await;
+        assert!(ok2);
+        let r2 = &ledger2.snapshot()[0];
+        assert_eq!(r2.cost_usd, None, "absent header must not become zero");
+        assert!(
+            !r2.summary_line().contains("$0.00"),
+            "{}",
+            r2.summary_line()
+        );
+        // Units survive being unpriced.
+        assert_eq!(r2.units.billed_characters, Some(51));
+        assert_eq!(ledger2.summary().unpriced_calls, 1);
+    }
+
+    /// A rejected synthesis is billing-unknown, not free — and it still
+    /// records the characters that would have been charged for.
+    #[tokio::test]
+    async fn speech_http_failure_records_billing_unknown_not_zero() {
+        use wcore_tools::media_cost::{PriceSource, UnpricedReason};
+        use wiremock::ResponseTemplate;
+
+        let (ledger, ok) = synthesize_against(ResponseTemplateForTts(
+            ResponseTemplate::new(500).set_body_string("upstream exploded"),
+        ))
+        .await;
+        assert!(!ok, "a 500 must surface as an error");
+        let records = ledger.snapshot();
+        assert_eq!(records.len(), 1, "a reached-and-rejected call is recorded");
+        let r = &records[0];
+        assert_eq!(r.cost_usd, None);
+        assert_eq!(
+            r.price_source,
+            PriceSource::Unpriced {
+                reason: UnpricedReason::CallFailedBillingUnknown
+            }
+        );
+        assert_eq!(
+            r.outcome,
+            MediaOutcome::Failed {
+                category: "http_500".to_string()
+            }
+        );
+        assert_eq!(
+            r.units.billed_characters,
+            Some(51),
+            "the units requested are what would have been charged"
+        );
+    }
+
+    /// Known-negative for the wiring: unbound accounting records nowhere while
+    /// the call still succeeds.
+    #[tokio::test]
+    async fn unbound_accounting_records_no_speech_call() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-flux-cost-usd", "0.000765")
+                    .set_body_bytes(vec![0xFF, 0xFB]),
+            )
+            .mount(&server)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let unbound = wcore_tools::media_cost::MediaCostLedger::new();
+        let backend = OpenAiTtsBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/v1/audio/speech", server.uri()),
+        );
+        let ok = backend
+            .synthesize(text_request(tmp.path().join("s.mp3")))
+            .await
+            .is_ok();
+        assert!(ok);
+        assert_eq!(unbound.summary().calls, 0);
+    }
 }
