@@ -1,0 +1,31 @@
+=== C4 SSH ORPHAN FULL CYCLE @ 0d48b5515b816e8930456fcda7c91c0ec9a46ebd ===
+T+8  PARTICIPANT ASSERTIONS -- all must be positive or the run is void
+     controller alive: YES
+     far-end root:     YES
+     far-end procs:    1
+T+10 controller killed -9; far-end procs now: 1  (orphaned by the product, not planted)
+
+--- POSITIVE: product must FIND it
+POS_EXIT=0
+local      enumerated=true  found=2 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=true  found=2 via remote `ps -eo pid,args` filtered on the task nonce
+cloud      enumerated=false found=0 via backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+--- KNOWN-NEGATIVE at the same instant: an unused nonce, same binary, same far end
+NEG_EXIT=0
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+
+--- REAP with the verb that exists
+CANCEL_EXIT=0
+backend:  ssh
+task:     rkea90b00dfba9ea78
+method:   second ssh connection kills the remote session carrying the nonce (remote-kill-issued), then the remote process table is re-read
+residual: none — the cleanup was verified by re-enumeration
+
+--- AFTER THE REAP: same nonce, must now measure zero, and independently
+AFTER_EXIT=0
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+INDEP_AFTER_PROCS=0   (independent of the product)
+ELAPSED_GUARD: the task body was ; this cycle finished well inside it, so a zero here is a reap and not an expiry
+C4FULLDONE

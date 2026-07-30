@@ -1,0 +1,20 @@
+=== binary ===
+-rwxr-xr-x 2 root root 338718888 Jul 30 02:56 /root/wayland-reachc1c2/target/debug/wayland-core
+=== sha256 ===
+1621393b713f7c81835b8ca3a94cfcbe9fcdc355923951ab9e3900e2c357f1a3  /root/wayland-reachc1c2/target/debug/wayland-core
+=== version ===
+wayland-core 0.12.25
+=== build log tail ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 48s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+=== backend list (does the surface work at all?) ===
+[2m2026-07-30T02:57:33.885828Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+cloud      cloud      NO           credential_absent      backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+LIST_RC=0

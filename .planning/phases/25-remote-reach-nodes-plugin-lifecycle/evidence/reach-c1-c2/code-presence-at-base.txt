@@ -1,0 +1,19 @@
+BASE_SHA=3d96a5577f8b602d2a35254f70a49c4f88dd3552
+--- C1/G2 ssh cleanup fix: expect 1 ---
+ssh.rs  '|| status=$?'          : 1
+ssh.rs  KNOWN-POSITIVE 'REMOTE_RUNNER' : 9
+ssh.rs  KNOWN-NEGATIVE 'ZZZ_NOT_REAL'  : 0
+--- C2/hosts ssh injection fix: expect >0 ---
+ssh.rs  posix_quote             : 13
+--- test files present? ---
+HAVE ssh_far_end_quoting.rs
+HAVE ssh_remote_runner_cleanup.rs
+--- C4/G4 egress arming in backend.rs: expect 1+ ---
+backend.rs arm_egress_policy    : 2
+backend.rs KNOWN-POSITIVE 'fn ' : 6
+--- C4/G6 identity flag: expect 1+ ---
+against-backend                 : /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-reach-c1-c2/crates/wcore-cli/src/backend.rs:9
+--- C1 cloud cancel-marker arm: expect 1+ ---
+cloud.rs cancel_marker_taken    : 3
+--- C4-win MissingApiKey split: expect 1+ ---
+backend.rs MissingApiKey        : 2

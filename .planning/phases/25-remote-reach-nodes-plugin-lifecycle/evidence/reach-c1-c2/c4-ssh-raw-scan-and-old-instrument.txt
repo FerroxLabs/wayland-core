@@ -1,0 +1,39 @@
+########## scanpos (positive) ##########
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/.wayland/.dirty-death.1881263)
+orphan scan for task rclong3bccbba999b81443 (nonce rc3bccbba999b81443)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      2 (MEASURED)
+  row        process table: 1881370       1 1881256      13 ssh -F /root/reachc1c2/ssh_config -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 reachc1c2-far sh -s -- 'rc3bccbba999b81443' '' '/bin/sh' '-c' 'sleep 45'
+  row        process table: 1881377 1881371 1881377      13 sh -s -- rc3bccbba999b81443  /bin/sh -c sleep 45
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     remote `ps -eo pid,args` filtered on the task nonce
+  count      2 (MEASURED)
+  row        session-leader 164 still alive for nonce rc3bccbba999b81443
+  row        160     154 sh -s -- rc3bccbba999b81443  /bin/sh -c sleep 45
+
+TOTAL: 4 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+wayland-core backend: 4 orphaned execution surface(s) still carry nonce rc3bccbba999b81443
+
+########## scankill ##########
+error: unexpected argument '--kill' found
+
+Usage: wayland-core backend scan --task-id <TASK_ID> --nonce <NONCE>
+
+For more information, try '--help'.

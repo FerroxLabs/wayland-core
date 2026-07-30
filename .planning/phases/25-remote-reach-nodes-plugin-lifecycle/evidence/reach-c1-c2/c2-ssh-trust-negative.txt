@@ -1,0 +1,8 @@
+=== KNOWN-NEGATIVE control: hetzner -> a host that must NOT resolve/auth ===
+ssh: Could not resolve hostname seandesktop-does-not-exist: Temporary failure in name resolution
+NEG_RC=255
+outer_rc=0
+=== KNOWN-NEGATIVE 2: wrong account on the real host (brief says these are refused) ===
+seandonahoe@seandesktop: Permission denied (publickey,password,keyboard-interactive).
+NEG2_RC=255
+outer2_rc=0
