@@ -446,7 +446,7 @@ fn protocol_event_source_parser_is_alive_in_both_directions() {
     const SOURCE: &str = include_str!("../src/events.rs");
     let enum_body = &SOURCE[SOURCE.find("pub enum ProtocolEvent {").unwrap()..];
     assert!(
-        enum_body.chars().any(|character| !character.is_ascii()),
+        !enum_body.is_ascii(),
         "no non-ASCII character remains in the ProtocolEvent body, so this assertion \
          no longer exercises the multi-byte hazard it was written for — replace it \
          rather than letting it pass vacuously"
