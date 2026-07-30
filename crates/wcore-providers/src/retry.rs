@@ -735,9 +735,9 @@ const RETRY_AFTER_CAP_MS: u64 = 300_000;
 /// not strictly positive. The result is capped at 5 minutes
 /// ([`RETRY_AFTER_CAP_MS`]) — providers sometimes return absurd values.
 ///
-/// Source: openclaw MIT (c) Peter Steinberger 2025
-/// (`src/infra/retry-policy.ts` → `getChannelApiRetryAfterMs`),
-/// generalized to walk additional shapes seen across LLM provider APIs.
+/// Field precedence and the cap follow RFC 9110 §10.2.3 / RFC 7231 §7.1.3
+/// semantics for `Retry-After`, extended to the JSON body shapes LLM
+/// provider APIs return in place of the header.
 pub fn extract_retry_after_ms_from_nested(error_json: &serde_json::Value) -> Option<u64> {
     fn as_positive_ms(v: &serde_json::Value) -> Option<u64> {
         // Accept integer or float. Reject zero, negatives, NaN, infinity.

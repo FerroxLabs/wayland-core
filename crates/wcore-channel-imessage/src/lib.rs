@@ -13,8 +13,9 @@
 //! - Credentials: no token required; access is purely OS-level (Full Disk
 //!   Access + Automation TCC consent for Messages.app).
 //!
-//! Ported from the desktop app's TypeScript `ImessagePlugin` (OpenClaw MIT,
-//! adapted under Apache-2.0). See F-045 in the wcore audit triage.
+//! Written from the desktop app's TypeScript `ImessagePlugin`; see
+//! THIRD-PARTY-NOTICES.md for the derivation chain, and F-045 in the wcore
+//! audit triage.
 
 #[cfg(target_os = "macos")]
 mod applescript;
