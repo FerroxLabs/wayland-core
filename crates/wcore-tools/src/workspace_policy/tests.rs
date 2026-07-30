@@ -1,6 +1,51 @@
 use super::*;
 use std::path::Path;
 
+/// REGRESSION PIN for the boot-path walk.
+///
+/// `WorkspacePolicy::contained()` used to run `project_committed_secrets` — a
+/// full recursive NO-PRUNE walk of the workspace — at construction, to fill a
+/// deny list that (after #234) nothing in production read. Construction happens
+/// inside the bootstrap future that blocks the TUI's first paint, so on a large
+/// tree it cost seconds of dead startup time.
+///
+/// This asserts construction no longer walks, and it is stated as a RATIO
+/// against the walk it must not be doing rather than an absolute duration, so
+/// the machine's speed and any concurrent build load cancel out. If someone
+/// reintroduces an eager walk, construction and the explicit walk converge and
+/// the ratio collapses toward 1.
+#[test]
+fn contained_construction_does_not_walk_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Enough directories that a walk is unmistakably more expensive than not
+    // walking, but small enough to stay quick in CI.
+    for i in 0..3000 {
+        let sub = root.join(format!("d{i}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.rs"), b"fn main() {}").unwrap();
+    }
+
+    let t0 = std::time::Instant::now();
+    let p = WorkspacePolicy::contained(root);
+    let construct = t0.elapsed();
+
+    // Known-positive control in the same test: the walk this construction must
+    // NOT be doing is still reachable, still happens, and is measurably slow.
+    // Without this the assertion below could pass on a machine where BOTH are
+    // instant — i.e. where the instrument is dead.
+    let t1 = std::time::Instant::now();
+    let dynamic = p.secret_deny_paths_dynamic();
+    let walk = t1.elapsed();
+    let _ = dynamic;
+
+    assert!(
+        walk > construct * 10,
+        "construction must not walk the workspace: construct={construct:?} \
+         walk={walk:?} (an eager walk makes these converge)"
+    );
+}
+
 #[test]
 fn trusted_local_sets_cwd_and_does_not_redirect_caches() {
     let dir = tempfile::tempdir().unwrap();

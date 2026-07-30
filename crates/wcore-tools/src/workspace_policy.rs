@@ -868,24 +868,6 @@ fn git_content_stores(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Canonicalized readable roots (workspace + writable + readable extras), the
-/// same set `readable_roots()` exposes. Both sides of the under-mounted check
-/// must be canonicalized so macOS `/var` → `/private/var` matches.
-fn readable_canon_roots(
-    root: &Path,
-    writable_extra: &[PathBuf],
-    readable_extra: &[PathBuf],
-) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::iter::once(root.to_path_buf())
-        .chain(writable_extra.iter().cloned())
-        .chain(readable_extra.iter().cloned())
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        .collect();
-    v.sort();
-    v.dedup();
-    v
-}
-
 /// Best-effort canonicalization for the under-root scope check. Falls back to
 /// canonicalizing the parent + re-attaching the final component when `path`
 /// itself does not exist (e.g. a `Write` to a not-yet-created `.env`), so the
