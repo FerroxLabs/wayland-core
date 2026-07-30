@@ -12,28 +12,46 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::{str_or, u64_or};
+use super::{join_facts, opt_str, opt_u64};
 use crate::tui::theme::Theme;
+
+/// The written audio path, under whichever key the payload carries.
+fn out_path(payload: &Value) -> Option<&str> {
+    opt_str(payload, "file_path").or_else(|| opt_str(payload, "path"))
+}
 
 pub struct TtsFormatter;
 
 impl ToolResultFormatter for TtsFormatter {
+    // UAT-T3. `TextToSpeechTool` returns
+    // `{success, file_path, provider, format, bytes_written, voice_compatible}`
+    // (`wcore-tools/src/tts_tool.rs`). `provider` matched; `chars` does not
+    // exist (rendered `0`) and the output path is `file_path`, not `path`, so
+    // the arrow pointed at nothing and the detail view was empty.
     fn summary_line(&self, payload: &Value, _duration: Duration) -> String {
-        let chars = u64_or(payload, "chars", 0);
-        let provider = str_or(payload, "provider", "?");
-        let path = str_or(payload, "path", "");
-        let basename = basename(path);
-        format!(
-            "Synthesized {} chars · {} · → {}",
-            chars, provider, basename
-        )
+        let mut facts = vec!["Synthesized".to_string()];
+        if let Some(n) = opt_u64(payload, "chars") {
+            facts.push(format!("{n} chars"));
+        }
+        if let Some(b) = opt_u64(payload, "bytes_written") {
+            facts.push(format!("{b} bytes"));
+        }
+        if let Some(p) = opt_str(payload, "provider") {
+            facts.push(p.to_string());
+        }
+        if let Some(f) = opt_str(payload, "format") {
+            facts.push(f.to_string());
+        }
+        if let Some(p) = out_path(payload) {
+            facts.push(format!("\u{2192} {}", basename(p)));
+        }
+        join_facts(&facts)
     }
 
     fn detail_lines(&self, payload: &Value, theme: &Theme) -> Vec<Line<'static>> {
-        let path = str_or(payload, "path", "");
-        if path.is_empty() {
+        let Some(path) = out_path(payload) else {
             return Vec::new();
-        }
+        };
         let style = Style::default().fg(theme.text_dim);
         vec![Line::from(Span::styled(path.to_string(), style))]
     }

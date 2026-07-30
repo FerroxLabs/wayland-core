@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::{fmt_duration, str_or, u64_or};
+use super::{fmt_duration, join_facts, opt_str, opt_u64};
 use crate::tui::theme::Theme;
 
 /// Max lines of the analysis text shown in the expanded view.
@@ -22,17 +22,29 @@ const MAX_ANALYSIS_LINES: usize = 25;
 pub struct VisionFormatter;
 
 impl ToolResultFormatter for VisionFormatter {
+    // UAT-T3. `VisionAnalyzeTool` returns `{success, analysis, mime, bytes}`
+    // (`wcore-tools/src/vision_tools.rs`) — there is no `width`, `height` or
+    // `provider`, so this rendered `Analyzed image 0x0 · ? · 0.0s` on every
+    // successful call. Only `analysis` was ever real. Report what exists.
     fn summary_line(&self, payload: &Value, duration: Duration) -> String {
-        let w = u64_or(payload, "width", 0);
-        let h = u64_or(payload, "height", 0);
-        let provider = str_or(payload, "provider", "?");
-        format!(
-            "Analyzed image {}x{} · {} · {}",
-            w,
-            h,
-            provider,
-            fmt_duration(duration)
-        )
+        let mut facts = vec!["Analyzed image".to_string()];
+        match (opt_u64(payload, "width"), opt_u64(payload, "height")) {
+            (Some(w), Some(h)) => facts.push(format!("{w}x{h}")),
+            _ => {}
+        }
+        if let Some(m) = opt_str(payload, "mime") {
+            facts.push(m.to_string());
+        }
+        if let Some(b) = opt_u64(payload, "bytes") {
+            facts.push(format!("{b} bytes"));
+        }
+        if let Some(p) = opt_str(payload, "provider") {
+            facts.push(p.to_string());
+        }
+        if !duration.is_zero() {
+            facts.push(fmt_duration(duration));
+        }
+        join_facts(&facts)
     }
 
     fn detail_lines(&self, payload: &Value, theme: &Theme) -> Vec<Line<'static>> {

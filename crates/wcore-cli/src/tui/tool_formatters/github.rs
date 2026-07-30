@@ -15,17 +15,50 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::{i64_or, str_or};
+use super::{join_facts, opt_str};
 use crate::tui::theme::Theme;
 
 pub struct GithubFormatter;
 
 impl ToolResultFormatter for GithubFormatter {
+    // UAT-T3. `GitHubApiTool` is a straight PASSTHROUGH of the GitHub REST
+    // response (`wcore-tools/src/github_tool.rs`: `GitHubOutcome::Ok { payload }`
+    // -> `content: payload.to_string()`). It never adds an `action` or a
+    // `repo` field — a grep for either as a RESULT key returns nothing, while
+    // the control grep for the input-schema use of `repo` returns 14 — so the
+    // summary rendered a fabricated verb ("Did") and a fabricated repo ("?")
+    // on every call. `id` is also the wrong number: GitHub's `id` is the
+    // internal database id, and the human-facing issue/PR number is `number`.
     fn summary_line(&self, payload: &Value, _duration: Duration) -> String {
-        let action = str_or(payload, "action", "Did");
-        let repo = str_or(payload, "repo", "?");
-        let id = i64_or(payload, "id", 0);
-        format!("{} {} #{}", action, repo, id)
+        let mut facts: Vec<String> = Vec::new();
+        // `full_name` is the real repo key on a repo object; on an issue/PR
+        // it hangs off the nested `repository`. Absent -> no clause.
+        if let Some(repo) = opt_str(payload, "full_name").or_else(|| {
+            payload
+                .get("repository")
+                .and_then(|r| r.get("full_name"))
+                .and_then(Value::as_str)
+        }) {
+            facts.push(repo.to_string());
+        }
+        if let Some(n) = payload.get("number").and_then(Value::as_i64) {
+            facts.push(format!("#{n}"));
+        }
+        if let Some(state) = opt_str(payload, "state") {
+            facts.push(state.to_string());
+        }
+        if let Some(title) = opt_str(payload, "title") {
+            facts.push(title.to_string());
+        }
+        // An array response (a list operation) has a countable size and no
+        // fields at all; report the count rather than nothing.
+        if facts.is_empty()
+            && let Some(a) = payload.as_array()
+        {
+            let unit = if a.len() == 1 { "item" } else { "items" };
+            facts.push(format!("{} {unit}", a.len()));
+        }
+        join_facts(&facts)
     }
 
     fn detail_lines(&self, payload: &Value, theme: &Theme) -> Vec<Line<'static>> {

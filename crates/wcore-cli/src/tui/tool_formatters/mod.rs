@@ -42,6 +42,12 @@ pub mod vision;
 pub mod web;
 pub mod web_fetch;
 
+/// UAT-T3: the regression suite that drives the REAL tools instead of
+/// hand-built payloads. See its module docs for why the previous suite could
+/// not fail.
+#[cfg(test)]
+mod real_payload_tests;
+
 /// Render one tool's JSON result payload into UI lines.
 ///
 /// All three methods read from `serde_json::Value` and are tolerant of
@@ -163,6 +169,82 @@ pub(crate) fn u64_or(payload: &Value, key: &str, default: u64) -> u64 {
 /// numeric.
 pub(crate) fn i64_or(payload: &Value, key: &str, default: i64) -> i64 {
     payload.get(key).and_then(Value::as_i64).unwrap_or(default)
+}
+
+// ── UAT-T3: making "unknown" expressible ───────────────────────────────────
+//
+// The helpers above take a `default`, and every caller passed a *plausible
+// looking* one — `"?"` for a command, `0` for an exit code, `0` for a byte
+// count. When the payload did not carry the key (which, measured across all
+// 12 formatters, was the normal case and not the exception) the card rendered
+// those defaults as though they were facts. A shell command that failed with
+// exit 1 was reported as `exit 0`.
+//
+// A default is only safe when it is *true* for a missing field. `0` is not a
+// true exit code and `"?"` is not a true command. The `opt_*` readers below
+// return `None` instead, so a formatter has to decide what to do about not
+// knowing — and `join_facts` makes omission the easy path.
+//
+// Rule for every formatter in this module: **never render a value you did not
+// read.** If the field is absent, leave it out.
+
+/// Read `payload[key]` as a string, or `None` when absent / not a string.
+pub(crate) fn opt_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Read `payload[key]` as a u64, or `None` when absent / not numeric.
+pub(crate) fn opt_u64(payload: &Value, key: &str) -> Option<u64> {
+    payload.get(key).and_then(Value::as_u64)
+}
+
+/// The payload's raw text, when the tool did not emit JSON at all.
+///
+/// `parse_payload` (widget) / `parse_card_payload` (inline transcript) fall
+/// back to `Value::String(raw)` when `serde_json::from_str` fails. Several
+/// tools — `Bash`, `Read`, `Write`, `Edit` — return plain prose, so that
+/// fallback is their normal path, not an error path. Formatters read the text
+/// through here instead of calling `.get(…)` and silently getting `None` for
+/// everything.
+pub(crate) fn raw_text(payload: &Value) -> Option<&str> {
+    payload.as_str().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Join the facts a formatter actually established into one summary line.
+///
+/// Empty entries are dropped, so a formatter can push `None`-derived pieces
+/// without special-casing each one, and an absent field costs a missing
+/// clause rather than a fabricated value. Returns an empty string when
+/// nothing at all is known — callers surface that as "no summary", and the
+/// inline renderer's `is_filler` check already drops an empty body line.
+pub(crate) fn join_facts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A one-line, width-clamped preview of arbitrary text.
+///
+/// Used when a tool's payload is prose the formatter cannot decompose: show
+/// the tool's *real* first line rather than inventing structured fields. The
+/// clamp is by `char`, not by byte, so multi-byte output cannot be split
+/// mid-codepoint.
+pub(crate) fn first_line_preview(text: &str, max: usize) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = line.trim();
+    let count = trimmed.chars().count();
+    if count <= max {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }
 
 #[cfg(test)]
