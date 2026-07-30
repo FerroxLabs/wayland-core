@@ -194,8 +194,10 @@ mod tests {
         assert!(last.injected.is_empty());
     }
 
+    /// `record` overwrites rather than appends, so the surface always describes
+    /// the **latest** turn — never a stale one.
     #[test]
-    fn record_overwrites_so_the_surface_describes_the_LATEST_turn() {
+    fn record_overwrites_so_the_surface_describes_the_latest_turn() {
         let log = ActivationLog::new();
         log.record(RecallActivation {
             at: 1,

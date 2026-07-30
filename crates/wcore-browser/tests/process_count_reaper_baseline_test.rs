@@ -96,10 +96,11 @@ fn process_tree_size(root: u32) -> usize {
             if tree.contains(&p) {
                 continue;
             }
-            if let Some(pp) = ppid_of(p) {
-                if tree.contains(&pp) && alive(p) {
-                    tree.push(p);
-                }
+            if let Some(pp) = ppid_of(p)
+                && tree.contains(&pp)
+                && alive(p)
+            {
+                tree.push(p);
             }
         }
         if tree.len() == before {

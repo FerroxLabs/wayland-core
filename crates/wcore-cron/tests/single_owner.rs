@@ -502,7 +502,7 @@ fn cross_process_lease_worker() {
 
 /// Spawn a child worker against `dir`, and wait for it to publish a verdict.
 fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cross_process_lease_worker", "--nocapture"])
         .env(CHILD_DIR_ENV, dir)
         .env(CHILD_OUT_ENV, out)
@@ -511,13 +511,24 @@ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Ch
         .spawn()
         .expect("re-executing the test binary as a child must succeed");
     for _ in 0..300 {
-        if let Ok(text) = std::fs::read_to_string(out) {
-            if text.starts_with("STARTED") {
-                return child;
-            }
+        if let Ok(text) = std::fs::read_to_string(out)
+            && text.starts_with("STARTED")
+        {
+            return child;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // The child never published its marker, so nobody downstream holds a handle
+    // to it — and the `panic!` below is about to unwind past the `tempfile`
+    // guard that owns the directory the child is working in. Left alone, the
+    // child keeps running: `cross_process_lease_worker` spins for up to 30s
+    // waiting for a `.release` file this process will now never write, holding
+    // the schedule lease the whole time, and then panics writing its `.exited`
+    // marker into a directory that has been deleted underneath it. Reap it here
+    // so the timeout path fails loudly instead of leaking an orphan that
+    // outlives the test binary and can poison the next case's lease.
+    let _ = child.kill();
+    let _ = child.wait();
     panic!(
         "child never reached its START marker at {} — the participant did not launch, \
          so nothing was contended",
