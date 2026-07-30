@@ -82,3 +82,89 @@ Candidate Windows test targets (both directions live in these):
   i.e. both directions are already expressed.
 - `crates/wcore-channels/tests/framework_matrix.rs` — the `StartPolicy` reload matrix.
 
+
+---
+
+## MEASURED RESULTS
+
+### Task 1 — the lease on Windows. BOTH DIRECTIONS CLOSED.
+
+All at asserted Windows HEAD `f923161b`, `D:\lane-fxwr\src`, target `D:\lane-fxwr\target`.
+Every count read back from a `WLRC=/WLDONE` sentinel file via a separate ssh call
+(LANE-BRIEF exit-status pattern), never from an ssh exit status.
+
+| arm | `test result:` | rc |
+|---|---|---|
+| **control** (real `LockFileEx`) | **11 passed / 0 failed / 0 ignored / 0 measured / 0 filtered out** | 0 |
+| **`always_owner`** — a lock that NEVER blocks | **8 passed / 3 FAILED** | 101 |
+| **`never_owner`** — a lock that ALWAYS blocks | **2 passed / 9 FAILED** | 101 |
+
+One build, three arms, env-gated stub inside the `#[cfg(windows)]` `mod sys`.
+Mutation proven PRESENT before use (`MUTATION_MARKER_PRESENT=1`) and ABSENT after
+restore (`=0`) with a live known-positive on the same search (`LockFileEx` = 6 both
+times, so the zero is a real zero and not a dead instrument). Scratch clone only;
+never committed. `DIRTY=0` after restore.
+
+This satisfies the brief's actual requirement — *"A lock that never blocks and a lock
+that always blocks are equally broken"* — and §3b-iii (the gate has a reachable pass
+AND a reachable fail). rc 101 survived because it was written to a file inside
+PowerShell; over ssh it would have collapsed to 1.
+
+**Also run on Windows for the first time — the actual `f24-c3-h5-reload` fix:**
+
+| suite | result |
+|---|---|
+| `wcore-channels --test framework_matrix` (the `StartPolicy` reload matrix) | **19 passed / 0 failed / 0 ignored / 0 filtered out**, rc=0 |
+
+The `f24-c3-h5-reload` lane ran this on Linux only and explicitly declined to claim
+Windows. It now holds on Windows.
+
+### The residual I actually found and FIXED
+
+`crates/wcore-cron/tests/single_owner.rs` failed `just lint`
+(`cargo clippy --workspace --all-targets -- -D warnings`) on Windows with TWO
+deny-level lints — `clippy::collapsible_if` and `clippy::zombie_processes`.
+Reproduced on SeanDesktop at my base before touching it, fixed at `f923161b`,
+re-measured green (`WLRC=0`) and the suite still **11/0/0/0**.
+Neither lint suppressed; nothing weakened.
+
+Provenance: `4d5f8ec9 test(cron): take the single-owner lease across a real process
+boundary` — i.e. the previous Windows lane's own cross-process addition is what
+reddened Windows CI.
+
+### Task 1 premise correction
+
+My brief says the reload lease fix "has never had a Windows run". **Partly false.**
+`.planning/evidence/windows-legs-sweep/NOTES.md` (lane `windows-legs-sweep`) already
+ran the *lease primitive* on Windows — 11/11 plus a known-negative stub at 8/3 — and
+also measured the mandatory-lock hazard product-free. What that lane did NOT run, and
+what was genuinely never run on Windows, is the **`f24-c3-h5-reload` fix itself**
+(`StartPolicy` / `compose_registration_error` in `wcore-channels` + `wcore-cli`). That
+gap is now closed (19/0 above).
+
+### Task 3 — `ferrox-win-msvc`. PREMISE FALSE.
+
+Brief: *"across 40 runs it served zero jobs while its status read busy=true."*
+
+Measured over the last **40 workflow runs / 151 job rows** (`gh api`, per-job
+`runner_name`, controls: known-positive `ubuntu`=87, known-negative=0):
+
+| runner | jobs served |
+|---|---|
+| `sean-mac-arm64` | 10 |
+| **`ferrox-win-msvc`** | **4** |
+| `SEANDESKTOP` | 2 |
+| unassigned (queued, empty/NULL `runner_name`) | 15 |
+
+It is **not** serving zero. At the moment I measured, `C:\actions-runner-ferrox\bin\Runner.Worker.exe`
+(PID 53460) was live with `cargo`/`rustc` children — so `busy=true` was TRUE, not phantom.
+`.runner` config maps `C:\actions-runner-ferrox` → agent `ferrox-win-msvc`.
+Labels are IDENTICAL to `SEANDESKTOP` (`self-hosted, Windows, X64, msvc`), so it is not
+a labels mismatch either.
+
+**The real defect: every completed Windows self-hosted job FAILED (5 of 5), always
+before running a single test.** Step-level outcomes on 3 failed jobs show
+`Run tests (nextest CI profile)` = **skipped** in all three, because the job dies at
+`Clippy (warnings = errors)` (2 jobs) or at `Pre-build wcore-cli release binary` (1 job).
+So Windows CI has been emitting **no test signal at all**.
+
