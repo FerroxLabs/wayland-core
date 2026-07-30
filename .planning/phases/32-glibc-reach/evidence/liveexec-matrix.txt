@@ -1,0 +1,23 @@
+GLIBC EXECUTABILITY MATRIX   2026-07-30T03:54:13Z
+NEW = built in almalinux:9   (declared floor 2.34)
+OLD = built in ubuntu:24.04  (floor 2.39, what we ship today)
+
+DISTRO                 GLIBC    RESULT
+### ubuntu:22.04 (glibc 2.35)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core)
+### debian:12 (glibc 2.36)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core)
+### rockylinux:9 (glibc 2.34)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core)
+### almalinux:9 (glibc 2.34)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core)
+### amazonlinux:2023 (glibc 2.34)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by /root/glibc-reach-target/baseline-ubuntu2404/x86_64-unknown-linux-gnu/release/wayland-core)
+### ubuntu:24.04 (glibc 2.39)
+    NEW: rc=0 out=wayland-core 0.12.25
+    OLD: rc=0 out=wayland-core 0.12.25
