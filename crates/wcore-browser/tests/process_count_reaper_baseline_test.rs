@@ -395,15 +395,14 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
     );
 
     let tmp = tempfile::tempdir().unwrap();
-    let port = free_port();
-    // Exactly the production constructor, so the path under test is the shipped
-    // one — then the pid_dir/interval are pointed at the test sandbox.
-    let mut cfg = SupervisorConfig::local_camoufox(&format!("http://127.0.0.1:{port}"));
+    // Exactly the production constructor and the production port, so the path
+    // under test is the shipped one. `launch_camoufox_program` passes NO args,
+    // so the sidecar binds its own default (9377) — which is what
+    // `local_camoufox`'s default healthcheck URL points at.
+    let mut cfg = SupervisorConfig::local_camoufox("http://127.0.0.1:9377");
     cfg.pid_dir = tmp.path().join("pids");
     cfg.reaper_interval = Duration::from_millis(200);
-    cfg.startup_timeout = Duration::from_secs(90);
-    // The sidecar takes its port from PORT; `launch_camoufox_program` passes no args.
-    unsafe { std::env::set_var("PORT", port.to_string()) };
+    cfg.startup_timeout = Duration::from_secs(120);
     assert_eq!(
         cfg.sidecar_program.as_deref(),
         Some(bin.as_str()),
@@ -412,9 +411,22 @@ async fn baseline_process_count_against_real_camoufox_sidecar() {
 
     let sup = Arc::new(BrowserSupervisor::with_config(cfg));
 
+    // PRECONDITION (§6a-i, participant-started). `ensure_ready` REUSES an
+    // externally-managed sidecar if one is already healthy — in which case it
+    // spawns nothing and the "during" numbers below would describe someone
+    // else's process. Assert the field is clear so this run really is the
+    // participant.
+    assert!(
+        !sup.healthcheck(Duration::from_millis(500))
+            .await
+            .unwrap_or(false),
+        "PRECONDITION: a sidecar is ALREADY healthy on 9377. This test must spawn its \
+         own, else the process counts describe a process it did not start. Stop the \
+         running sidecar first."
+    );
     let before = sup.live_sessions().len();
     assert_eq!(before, 0);
-    println!("EV3C: phase=before tracked_sessions=0 tree_size=0");
+    println!("EV3C: phase=before tracked_sessions=0 tree_size=0 preexisting_sidecar=none");
 
     sup.ensure_ready().await.expect("real camoufox sidecar must become healthy");
     let live = sup.live_sessions();
