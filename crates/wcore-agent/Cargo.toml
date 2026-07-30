@@ -260,6 +260,12 @@ criterion.workspace   = true
 # browser tool's remediation hint prints through the real `ConfigFile` serde
 # types, so the hint cannot drift from the loader again. Dev-only.
 toml.workspace        = true
+# `tests/watch_self_edit_loop_test.rs` builds `watch::ExternalEvent` values
+# directly so the harness self-test can pin the renderer's filtering without a
+# platform notifier in the loop. `notify` is already a normal dependency of
+# this crate, so this only makes the type NAMEABLE from the test binary — it
+# adds nothing to the build graph.
+notify.workspace      = true
 
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]

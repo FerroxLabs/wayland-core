@@ -5003,8 +5003,23 @@ mod tests {
             .expect("persist sealed recovery checkpoint");
     }
 
+    /// Wait for an in-flight session switch to finish.
+    ///
+    /// This was `for _ in 0..100 { …; yield_now().await }`. A budget in
+    /// SCHEDULER RESCHEDULES is not a deadline: 100 yields elapse in
+    /// microseconds on an idle runtime, and a yield does not let wall-clock
+    /// time pass at all, so the helper could not distinguish "the switch is
+    /// broken" from "this binary is busy". Adding subprocess-spawning tests to
+    /// the same binary starved it and reddened unrelated `*_f14` tests. Bound
+    /// by wall clock instead, and sleep rather than yield so the runtime can
+    /// actually make progress on timers and blocking work.
     async fn await_session_switch(router: &mut Router, app: &mut App) {
-        for _ in 0..100 {
+        // Derived, not hardcoded: a literal in the message silently goes stale
+        // the moment the budget changes, which was observed while proving this
+        // assert can fire (budget mutated to 2s, message still said 30s).
+        let budget = std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + budget;
+        loop {
             router.poll_session_switch(app);
             if !router
                 .engine
@@ -5015,9 +5030,12 @@ mod tests {
                 router.poll_session_switch(app);
                 return;
             }
-            tokio::task::yield_now().await;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session switch did not complete within {budget:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
-        panic!("session switch did not complete");
     }
 
     async fn await_recovery_action(router: &mut Router, app: &mut App) {

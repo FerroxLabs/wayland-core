@@ -97,11 +97,23 @@ impl FileWatcher {
     /// last `FileWatcher` clone is dropped.
     pub fn new(root: &Path) -> Result<Self, WatchError> {
         let (tx, rx): (Sender<ExternalEvent>, _) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        // Resolve the watch root ONCE, here, so the notify callback — which
+        // runs on a platform thread and must not block — does no filesystem
+        // work per event. Both forms are kept because notify normalizes paths
+        // (macOS FSEvents resolves /var → /private/var) so the event path may
+        // be the canonical form while `root` as supplied is not.
+        let root_raw = root.to_path_buf();
+        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root_raw.clone());
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
                     let at = Instant::now();
                     for p in ev.paths {
+                        // Structural churn of the watch root itself is engine
+                        // noise, not a user edit — see `is_root_structural_noise`.
+                        if is_root_structural_noise(&p, ev.kind, &root_raw, &root_canon) {
+                            continue;
+                        }
                         // F-007 (CRIT): hard-exclude wcore's own state
                         // directories from the "user edited files" signal.
                         // Session JSON, cron store, plans, and config files
@@ -257,6 +269,71 @@ fn is_wcore_internal_path(path: &Path) -> bool {
         let s = c.as_os_str().to_string_lossy();
         s == ".wayland-core" || s == ".wayland"
     })
+}
+
+/// Return `true` when this event is the watch root churning STRUCTURALLY —
+/// an entry appearing in it, or its own attributes changing — rather than
+/// anything a user could have edited.
+///
+/// **Why the kind matters, and why a bare root check is not enough.** The
+/// first version of this filter dropped every event whose path was the watch
+/// root. On Linux that was fine. On macOS it disabled external-edit detection
+/// outright: measured 3/3 runs, every genuine user edit came back empty,
+/// because FSEvents also reports the root when a file inside it changes. A
+/// filter that suppresses everything is exactly as broken as one that
+/// suppresses nothing, so the kind is what separates them.
+///
+/// Event-kind census taken across both platforms (see the lane notes):
+///
+/// | path | kinds observed |
+/// |---|---|
+/// | watch root | `Create(Folder)`, `Modify(Metadata(..))` |
+/// | genuine edited file | `Create(File)`, `Modify(Data(..))`, `Modify(Metadata(..))` |
+///
+/// A root event was **never** observed carrying `Modify(Data(..))` or
+/// `Create(File)`, so those are deliberately NOT suppressed here even on the
+/// root: if a platform ever does coalesce a content change onto the root, that
+/// is a real edit and it must survive.
+fn is_root_structural_noise(
+    path: &Path,
+    kind: EventKind,
+    root_raw: &Path,
+    root_canon: &Path,
+) -> bool {
+    use notify::event::{CreateKind, ModifyKind};
+
+    if !is_watch_root(path, root_raw, root_canon) {
+        return false;
+    }
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::Folder) | EventKind::Modify(ModifyKind::Metadata(_))
+    )
+}
+
+/// Return `true` when `path` IS the watch root itself (the session's cwd),
+/// rather than something inside it.
+///
+/// **The self-edit loop.** `is_wcore_internal_path` filters by path COMPONENT,
+/// so it drops `<cwd>/.wayland-core/...` but is structurally unable to drop a
+/// bare `<cwd>` — the root carries none of the marker components. Yet a
+/// directory's own events are reported AGAINST that directory: creating
+/// `.wayland-core/` adds an entry to the root, and changing the project
+/// directory's permissions is an attribute change on the root. Each such event
+/// was rendered as "User edited `<cwd>` while I was thinking — re-read it
+/// before proceeding" and injected into the model's context, so the model
+/// answered the injected notice instead of the user's prompt; one observed run
+/// looped on "Re-reading now."
+///
+/// Measured on Linux at commit `7c42063e` before this filter existed:
+/// `surfaced paths: ["/tmp/.tmp5rMPaP/project [Modify(Metadata(Any))]"]`, with
+/// the watch root being exactly that path.
+///
+/// Pure path identity only — the caller
+/// ([`is_root_structural_noise`]) decides which root events to drop, because
+/// dropping ALL of them was measured to disable the feature on macOS.
+fn is_watch_root(path: &Path, root_raw: &Path, root_canon: &Path) -> bool {
+    path == root_raw || path == root_canon
 }
 
 /// v0.9.1.1 F7: cap on the number of edited paths the synthetic
@@ -422,6 +499,97 @@ mod tests {
     #[test]
     fn synthetic_message_is_empty_when_no_events() {
         assert!(render_external_edit_message(&[]).is_none());
+    }
+
+    #[test]
+    fn is_watch_root_matches_the_root_itself_and_nothing_below_it() {
+        let raw = Path::new("/proj");
+        let canon = Path::new("/private/proj");
+
+        // Both resolutions of the root ARE the root. notify may deliver
+        // either, depending on platform normalization.
+        assert!(is_watch_root(Path::new("/proj"), raw, canon));
+        assert!(is_watch_root(Path::new("/private/proj"), raw, canon));
+
+        // Everything inside the root is a candidate user edit and must pass.
+        // A file sitting DIRECTLY in the root is the case an over-broad rule
+        // would swallow, so it is pinned explicitly.
+        assert!(!is_watch_root(Path::new("/proj/README.md"), raw, canon));
+        assert!(!is_watch_root(Path::new("/proj/src/main.rs"), raw, canon));
+        assert!(!is_watch_root(
+            Path::new("/private/proj/README.md"),
+            raw,
+            canon
+        ));
+
+        // The string-prefix trap: `/projector` starts with `/proj` but is a
+        // different directory. This pins the comparison as whole-path
+        // equality, so rewriting it as `starts_with` reddens here.
+        assert!(!is_watch_root(Path::new("/projector"), raw, canon));
+        assert!(!is_watch_root(Path::new("/projector/main.rs"), raw, canon));
+
+        // An ancestor of the root is not the root.
+        assert!(!is_watch_root(Path::new("/"), raw, canon));
+    }
+
+    #[test]
+    fn root_structural_noise_is_dropped_but_real_edits_are_not() {
+        use notify::event::{CreateKind, DataChange, MetadataKind, ModifyKind};
+
+        let raw = Path::new("/proj");
+        let canon = Path::new("/private/proj");
+        let root = Path::new("/proj");
+        let file = Path::new("/proj/README.md");
+
+        // ── suppressed: the exact kinds the watch root was MEASURED to emit
+        // when the engine created `.wayland-core/` (macOS) or the project
+        // directory's permissions changed (Linux).
+        for kind in [
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Ownership)),
+        ] {
+            assert!(
+                is_root_structural_noise(root, kind, raw, canon),
+                "root {kind:?} is engine noise and must be dropped"
+            );
+            assert!(
+                is_root_structural_noise(canon, kind, raw, canon),
+                "the canonical root form must be dropped too, {kind:?}"
+            );
+        }
+
+        // ── kept: a CONTENT change, even if a platform coalesces it onto the
+        // root. Never observed, but if it happens it is a real edit.
+        assert!(
+            !is_root_structural_noise(
+                root,
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                raw,
+                canon
+            ),
+            "a content change on the root is a real edit and must survive"
+        );
+        assert!(
+            !is_root_structural_noise(root, EventKind::Create(CreateKind::File), raw, canon),
+            "a file appearing at the root is a real edit and must survive"
+        );
+
+        // ── kept: everything that is not the root, whatever the kind. This is
+        // the assertion that would have caught the first version of this fix,
+        // which dropped all root events and thereby blinded macOS.
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)),
+        ] {
+            assert!(
+                !is_root_structural_noise(file, kind, raw, canon),
+                "a path inside the root must never be dropped here, {kind:?}"
+            );
+        }
     }
 
     #[test]
