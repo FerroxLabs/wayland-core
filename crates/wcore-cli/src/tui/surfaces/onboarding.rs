@@ -3209,18 +3209,16 @@ mod tests {
         // without testing anything. (`a` is deliberately NOT in this list; it
         // lands on a step with a focused text field, which is pinned
         // separately by `a_connect_all_diverts_prose_into_the_name_field`.)
-        for msg in ["1 hello"] {
-            let mut surface = OnboardingSurface::with_env_keys(vec![
-                env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
-                env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
-            ]);
-            type_str(&mut surface, &mut app, msg);
-            assert_eq!(
-                surface.take_typeahead().as_deref(),
-                Some(msg),
-                "`{msg}` must survive intact"
-            );
-        }
+        let mut surface = OnboardingSurface::with_env_keys(vec![
+            env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
+            env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-2"),
+        ]);
+        type_str(&mut surface, &mut app, "1 hello");
+        assert_eq!(
+            surface.take_typeahead().as_deref(),
+            Some("1 hello"),
+            "`1 hello` must survive intact"
+        );
         // The commoner shape — one shortcut letter then prose — is unaffected.
         let mut surface = fresh();
         type_str(&mut surface, &mut app, "summarize this repo");

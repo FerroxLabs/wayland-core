@@ -1,0 +1,8 @@
+=== sha256 ===
+3745aa63223a68f2384e955b41f289b185fe4111e3c1efe13cd871f0373b2392  /tmp/lfmvn-dl/wayland-core
+=== --build-info (self-report) ===
+wayland-core 0.12.25 (source 9d8ed9d0c7da6f10473d5c239641e416fb3639a3)
+=== --version ===
+wayland-core 0.12.25
+=== arch ===
+arm64

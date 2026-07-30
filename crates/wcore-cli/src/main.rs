@@ -5926,8 +5926,7 @@ mod tests {
                 .find(|a| {
                     if token.starts_with("--") {
                         a.get_long() == Some(name)
-                            || a.get_all_aliases()
-                                .is_some_and(|v| v.iter().any(|x| *x == name))
+                            || a.get_all_aliases().is_some_and(|v| v.contains(&name))
                     } else {
                         name.chars().count() == 1 && a.get_short() == name.chars().next()
                     }
