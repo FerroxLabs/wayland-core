@@ -1,0 +1,25 @@
+Manage installed plugins (install / list / available / remove)
+
+Usage: wayland-core plugin [OPTIONS] <COMMAND>
+
+Commands:
+  install      Install a plugin. `name@marketplace` installs from a registered Claude Code marketplace (see `plugin marketplace add`); a bare `name` uses the legacy registry / GitHub-Releases path
+  marketplace  Manage Claude Code plugin marketplaces
+  list         List installed plugins
+  available    List plugins available in the local default registry (or the directory pointed at by `--registry-dir`)
+  remove       Remove an installed plugin
+  new          Scaffold a new plugin from a shipped template
+  test         Run a plugin's own test suite and return its verdict faithfully
+  verify       Report manifest validity, declared permissions and API compatibility. Non-zero exit on an incompatible declared API version
+  sign         Sign a plugin's entry artifact with the engine's Ed25519 trust root
+  publish      Produce a digest-addressed, signed bundle into a local marketplace directory. Never pushes, merges, releases or deploys
+  inspect      Report everything known about one installed plugin, including whether the loader will admit it. Non-zero exit when it is not installed
+  approve      Approve an installed plugin's CURRENT bytes so the loader will run it
+  update       Re-resolve a plugin from its marketplace, retaining the prior generation so the update can be rolled back
+  rollback     Restore the exact bytes of the retained prior generation
+  recover      Repair a half-written plugin store (interrupted update, missing live generation, drifted install directory)
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --install-root <INSTALL_ROOT>  Override the install root. Defaults to `dirs::data_dir()/wayland-core/plugins`. Mostly useful for tests and sandboxed setups; users normally don't touch this
+  -h, --help                         Print help

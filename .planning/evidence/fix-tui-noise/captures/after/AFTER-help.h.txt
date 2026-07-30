@@ -1,0 +1,142 @@
+A multi-provider AI agent CLI with tool orchestration support
+
+Usage: wayland-core [OPTIONS] [PROMPT]... [COMMAND]
+
+Commands:
+  models           Browse the bundled model catalog
+  plugin           Manage installed plugins (install / list / available / remove)
+  mcp-serve        Serve the engine's tool registry as an MCP server (stdio or SSE transport), so external MCP clients such as Claude Desktop or mcp-cli can call wayland-core's tools
+  swarm            Dispatch a worktree-isolated worker swarm
+  session          Operate on saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-readable `F23_SESSION=` token to STDOUT and uses the exit-code map documented in `session_cmd`
+  index            Manage the persistent repository index — `build`, `status`, `search` and `verify`. Every verb prints greppable `F23_INDEX=` lines to STDOUT; `verify` exits 6 when the store disagrees with the working tree
+  cache            Inspect the cache + compaction ledger — `report`, `list`, `show` and `verify` over what the prompt cache and the compactor actually did. Every verb prints greppable `F23_CACHE=` lines; `verify` exits 7 when the session's cost is not fully priced (the USD figure is then a floor, not spend) and 8 when there is no ledger to check
+  workflow         ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/` [aliases: forgeflows]
+  crucible         Crucible (Mixture-of-Providers): run the cross-provider council over a task. N proposers (each pinned to its own provider from `[providers]`) answer in parallel; a fenced, read-only aggregator fuses them. Requires `[crucible] enabled = true` with a `proposers` roster in your config
+  forge            Anvil (gated forge) — forge a candidate that passes a REAL executable gate (tests / build / lint), then stamp a verified receipt. Requires ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite
+  project-context  Print resolved project context from WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md, walking up from the current directory
+  init             Scaffold .wayland/config.toml + WAYLAND.md in the current directory
+  acp              ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip
+  agent            Manage user-defined agents (create, list, show, edit, delete). Built-ins from the bundled pack are read-only
+  cron             Manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick
+  self-update      Update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+  setup            CLI surface: launch the TUI on the Onboarding (connect/configure) surface regardless of whether a config already exists. Onboarding handles an existing config gracefully via an Overwrite/Keep choice. The plain `wayland-core` launch only opens Onboarding on a true first run; `setup` is the explicit re-entry point
+  auth             CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow
+  image            FluxRouter image generation (`POST /v1/images/generations`). Writes the decoded image to `--out` (or stdout when piped). A free / paid-but-uncleared Flux key returns a `premium_locked` message — image generation is a paid-only capability
+  fetch            FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it as markdown. `--render` selects the JS-rendered premium arm. A free / paid-but-uncleared Flux key returns an `upgrade_required` message — web_fetch is a paid-only capability
+  backend          Manage execution backends — list / probe / run / cancel / orphans / receipt verify / diff across local, container, ssh and cloud
+  gateway          Manage the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+  node             Manage paired nodes — pair / list / show / probe / revoke / submit / attribution across machines that host execution backends
+  goal             Manage durable Goals and their Fleet task ledger — open / task / run / status / exec-task. `run` recovers a killed Goal, revokes expired claim leases, drains completions the dead parent never observed, and drives the remaining tasks through the Fleet dispatcher
+  channel          Manage channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+  profile          Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted home with its own config, credentials, memory, and skills
+  migrate          Import an existing agent setup (Hermes) into wayland-core profiles
+  backup           Archive, verify, restore and recover a Wayland home
+  sandbox          Inspect platform containment — `status` reports the selected sandbox backend and its properties; `exec` runs a command through the agent's own shell tool so you can observe, from the child's own output, that the sandbox was ACTIVE rather than merely available
+  help             Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]...  Initial prompt (if omitted, enters interactive REPL mode)
+
+Options:
+  -p, --provider <PROVIDER>
+          Provider: "anthropic" or "openai" [env: PROVIDER=]
+  -k, --api-key <API_KEY>
+          API key [env: API_KEY=]
+  -b, --base-url <BASE_URL>
+          Base URL for the API [env: BASE_URL=]
+  -m, --model <MODEL>
+          Model name [env: MODEL=]
+      --agent <NAME>
+          Built-in agent persona to inherit (e.g. `architect`, `debugger`). Loads system_prompt + max_turns from the bundled agent pack unless an explicit `--system-prompt` / `--max-turns` is also set. Run `wayland-core --list-agents` to see all built-ins
+      --assistant <NAME>
+          The host's active assistant identity, for per-assistant MCP scoping. A config MCP server marked `only_for_assistant` is injected only when this matches its allow-list (fail-closed otherwise). Distinct from `--agent` (persona/system-prompt); the desktop host sets this when spawning the json-stream engine [env: WAYLAND_ASSISTANT=]
+      --list-agents
+          List built-in agent personas and exit
+      --max-tokens <MAX_TOKENS>
+          Max output tokens per response
+      --max-turns <MAX_TURNS>
+          Max agent loop turns
+      --system-prompt <SYSTEM_PROMPT>
+          Custom system prompt
+      --profile <PROFILE>
+          Named profile from config file
+      --auto-approve
+          Auto-approve all tool executions (skip confirmation)
+      --dangerously-skip-permissions
+          TIER 1 — bypass approval prompts ONLY. Every tool call is approved without asking and the OS sandbox STAYS ON. `--force` and `--yolo` are aliases of this one flag, so they are the same tier by construction and cannot drift apart. Only use for trusted, scripted runs: there is NO interactive permission gate once this is set. The TUI surfaces a `· FORCE` badge in the bottom status bar so the mode is impossible to forget. To bypass the sandbox as well, use the tier-2 superset `--dangerously-skip-permissions-and-sandbox` [aliases: --force, --yolo]
+      --dangerously-skip-permissions-and-sandbox
+          TIER 2, a superset of tier 1 — bypass approvals AND the OS sandbox until a time-bounded lease expires. Cannot be activated by config, environment, protocol, ACP, TUI commands, resumed state, or child agents: argv on a local launch is the only provenance that mints the lease. `--dangerous` is still accepted as a DEPRECATED alias [aliases: --dangerous]
+      --dangerous-ttl-secs <SECONDS>
+          Lease lifetime in seconds for `--dangerously-skip-permissions-and-sandbox` (maximum one hour)
+      --project-dir <PROJECT_DIR>
+          Project directory to load .wayland-core.toml from (defaults to CWD)
+      --trust-workspace
+          Trust the current repository's executable configuration fingerprint in Core's external trust store, then start the session. Material changes to hooks, MCP config or project skills automatically revoke eligibility
+      --untrust-workspace
+          Remove the current repository from Core's external trust store, then start with the strict untrusted-workspace profile
+      --allow-host-workspace-grants
+          Permit this JSON-stream host to approve read-only, process-lifetime developer capabilities. This launch opt-in does not permit writes, untrusted/remote grants, or sandbox bypass
+      --allow-host-budget-grants
+          Permit this local JSON-stream host to grant additional provider spend after Core has emitted a budget-exceeded receipt. Default-deny; managed sessions still refuse grants
+      --resume <RESUME>
+          Resume a previous session
+  -c, --continue
+          Resume the most-recent session (the latest by creation time). A convenience shortcut for `--resume <latest-id>` — mutually exclusive with `--resume` and `--session-id`
+      --session-id <SESSION_ID>
+          Use a specific session ID (instead of auto-generating one)
+      --list-sessions
+          List saved sessions
+      --no-color
+          Disable colored output
+      --json-stream
+          Enable JSON streaming mode for host client integration
+      --no-tui
+          Disable the ratatui TUI — fall back to the line-based REPL even on an interactive terminal. The TUI is the default for `wayland-core` on a TTY with no prompt; this is the escape hatch for users who prefer the bare REPL (or for terminals it cannot drive). `--json-stream` and `-p`/headless modes are unaffected
+      --init-config
+          Generate a default config file
+      --config-path
+          Print config file path and exit
+      --build-info
+          Print build provenance (version + embedded source git SHA) and exit. Catches the stale-build class: the SHA must match the HEAD the binary was compiled from. Used by the build-provenance integration test
+      --skills-path
+          Print skill directory paths and exit
+      --doctor
+          Run the system-dependency doctor. Probes external binaries (`wlrctl`, `grim`, `chromium`, `ollama`), environment signals (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`, `OLLAMA_BASE_URL`), and surfaces missing dependencies with per-distro install hints. Exit code `1` if any required check fails on the current platform, otherwise `0`
+      --probe-mcp
+          When running --doctor, actually CONNECT-TEST each declared MCP server (spawns stdio commands / dials URLs) instead of only listing them. Off by default so bare --doctor stays side-effect-free
+      --skills-audit
+          Run the skills audit. Writes JSON to .wayland-core/skills-audit.json and renders Markdown to stdout
+      --skills-audit-stale-days <SKILLS_AUDIT_STALE_DAYS>
+          Override the staleness threshold (days) used by --skills-audit [default: 180]
+      --skills-promote <SKILL_OR_PROCEDURE_ID>
+          Promote a drafted skill from `Staged` to `Active`
+      --skills-archive <PROCEDURE_ID>
+          Archive a drafted skill. Accepts either a `Staged` or an `Active` row — `Staged → Archived` is allowed directly, so losing drafts can be dismissed without a detour through Active. Pinned rows are NOT archivable from the CLI: promote then archive, or unpin them through the curator UI first
+      --skills-revoke <SKILL>
+          Revoke an installed skill. Retains every byte first, then removes it, then suppresses re-drafting, so the auto-draft loop cannot silently recreate what you removed. Undo with `--skills-rollback`
+      --skills-rollback <REVOCATION_ID>
+          Restore a revoked skill byte for byte and clear its suppression. The argument is the revocation id printed by `--skills-revoke` and listed by `--skills-govern`
+      --skills-govern
+          List installed skills with their promotion status, every revocation in force, and the append-only governance journal
+      --memory-show <SESSION_ID>
+          Dump the memory state for a given session id. Prints all episodes scoped to that session at the session+project tiers, plus all project-tier facts and procedures. Intended for human inspection; the format is a plain text table (not JSON) and may change between releases. Exits 0 even if the session has no recorded data so scripts can probe state without try/catch
+      --replay <TRACE_PATH>
+          Replay a session trace JSON file. Validates the schema and the version-skew guard (refuses traces recorded by a different wcore-core build unless --replay-force-version-skew is set). Prints the event count for the session. Combine with --replay-diff to surface the first divergence against another trace
+      --replay-diff <OTHER_TRACE_PATH>
+          Compare the trace passed to --replay against this second trace and print the changed/added/removed entries
+      --replay-force-version-skew
+          Skip the wcore-version guard in --replay (use only when inspecting traces from another release on purpose)
+      --compaction <COMPACTION>
+          Output compaction level: off, safe (default), full
+      --toon
+          Enable TOON encoding for JSON arrays (session-level, cannot change mid-conversation)
+      --online-evolution
+          Enable live online evolution. At session-end the engine emits one `evolution_event` and applies the Paraphrase mutator to successful trajectories (≥50% of turns had tool calls). Evolved system-prompt variants are persisted to `$WAYLAND_HOME/evolved/`. Equivalent to `[observability] online_evolution = true` in config
+      --no-memory
+          Run a stateless session: disable long-term memory for this run. Sets `memory.enabled = false` before the engine boots, so no MemoryManager is created — GEPA, SkillRouter seeds, SkillDrafter, and user-model write-back are all inert. Equivalent to `[memory] enabled = false` in wcore.toml, but scoped to this invocation only. Merge is one-directional: the flag can only turn memory off, never on
+      --search
+          FluxRouter web_search grounding: attach a server-side `web_search` tool to every turn so Flux grounds the answer via Perplexity Sonar and renders citations. Only fires when the active model is a Flux tier alias (`flux-auto` / `flux-fast` / `flux-standard` / `flux-reasoning`) — a no-op on other models. Paid-only on Flux
+  -h, --help
+          Print help (see more with '--help')
+  -V, --version
+          Print version

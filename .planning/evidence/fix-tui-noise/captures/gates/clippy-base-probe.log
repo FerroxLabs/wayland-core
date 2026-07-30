@@ -1,0 +1,36 @@
+    Checking wcore-agent v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agent)
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:229:40
+    |
+229 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+    = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:337:40
+    |
+337 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:396:40
+    |
+396 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:472:40
+    |
+472 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: could not compile `wcore-agent` (test "user_model_identity_wire") due to 4 previous errors

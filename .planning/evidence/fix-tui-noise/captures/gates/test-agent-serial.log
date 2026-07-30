@@ -1,0 +1,86 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-574879049bbe0ff7)
+
+running 77 tests
+test engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay ... ok
+test engine::audit_2026_05_22_tests::approval_bridge_default_constructs ... ok
+test engine::audit_2026_05_22_tests::approval_manager_reaper_collects_crashed_requester ... ok
+test engine::audit_2026_05_22_tests::approval_manager_reaper_collects_expired_entry ... ok
+test engine::audit_2026_05_22_tests::budget_cap_terminates_the_run ... ok
+test engine::audit_2026_05_22_tests::cancel_token_clone_observes_same_cancellation ... ok
+test engine::audit_2026_05_22_tests::cancel_token_is_observed_between_turns ... ok
+test engine::audit_2026_05_22_tests::cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled ... ok
+test engine::audit_2026_05_22_tests::cancelled_persisted_run_records_cancelled_without_provider_dispatch ... ok
+test engine::audit_2026_05_22_tests::cancelled_run_snapshot_carries_delta_for_terminal_stream_end ... ok
+test engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch ... ok
+test engine::audit_2026_05_22_tests::circuit_breaker_trips_on_repeated_failures_via_agent_path ... ok
+test engine::audit_2026_05_22_tests::completed_opaque_tool_error_does_not_stop_the_live_turn ... ok
+test engine::audit_2026_05_22_tests::configured_fallback_is_not_sent_when_its_reservation_exceeds_cap ... ok
+test engine::audit_2026_05_22_tests::continue_with_budget_reopens_only_the_current_smart_session ... ok
+test engine::audit_2026_05_22_tests::corrupt_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation ... ok
+test engine::audit_2026_05_22_tests::dangerous_lease_uses_monotonic_deadline_and_stays_terminal ... ok
+test engine::audit_2026_05_22_tests::dropped_run_is_failed_before_a_new_turn_starts ... ok
+test engine::audit_2026_05_22_tests::dropping_engine_terminalizes_owned_session_root ... ok
+test engine::audit_2026_05_22_tests::durable_conversation_repair_closes_orphaned_tool_use ... ok
+test engine::audit_2026_05_22_tests::durable_conversation_repair_leaves_well_formed_history_untouched ... ok
+test engine::audit_2026_05_22_tests::durable_image_turn_is_preserved_and_pre_checkpoint_crash_fails_closed ... ok
+test engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches ... ok
+test engine::audit_2026_05_22_tests::engine_does_not_loop_on_api_400_after_denial_v0911 ... ok
+test engine::audit_2026_05_22_tests::engine_owned_budget_guard_cancels_current_host_turn ... ok
+test engine::audit_2026_05_22_tests::existing_unknown_is_not_hidden_and_operator_resolution_unblocks_next_turn ... ok
+test engine::audit_2026_05_22_tests::fluff_stop_sequences_all_start_with_paragraph_break ... ok
+test engine::audit_2026_05_22_tests::host_turn_cancel_does_not_terminalize_session_root ... ok
+test engine::audit_2026_05_22_tests::hung_tool_times_out_with_error_result ... ok
+test engine::audit_2026_05_22_tests::invalid_live_session_switch_leaves_existing_authority_untouched ... ok
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... ok
+test engine::audit_2026_05_22_tests::managed_session_cannot_interactively_widen_budget ... ok
+test engine::audit_2026_05_22_tests::mid_stream_error_then_success_retries ... ok
+test engine::audit_2026_05_22_tests::missing_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation ... ok
+test engine::audit_2026_05_22_tests::missing_key_in_final_fallback_releases_every_provider_reservation ... ok
+test engine::audit_2026_05_22_tests::missing_key_releases_primary_reservation_before_fallback ... ok
+test engine::audit_2026_05_22_tests::missing_key_without_fallback_releases_the_provider_reservation ... ok
+test engine::audit_2026_05_22_tests::missing_provider_usage_consumes_the_conservative_reservation ... ok
+test engine::audit_2026_05_22_tests::newly_unknown_tool_stops_the_live_turn_before_another_provider_call ... ok
+test engine::audit_2026_05_22_tests::no_budget_tracker_does_not_terminate_early ... ok
+test engine::audit_2026_05_22_tests::online_evolve_persists_llm_rewrite_not_identity ... ok
+test engine::audit_2026_05_22_tests::open_circuit_without_fallback_releases_the_provider_reservation ... ok
+test engine::audit_2026_05_22_tests::parse_git_porcelain_empty_input_is_empty ... ok
+test engine::audit_2026_05_22_tests::parse_git_porcelain_extracts_paths_incl_renames ... ok
+test engine::audit_2026_05_22_tests::persisted_resume_without_journal_authority_fails_closed ... ok
+test engine::audit_2026_05_22_tests::persisted_run_journals_exact_conversation_and_one_terminal_transition ... ok
+test engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools ... ok
+test engine::audit_2026_05_22_tests::prepared_tool_is_terminalized_not_started_before_recovered_turn_fails ... ok
+test engine::audit_2026_05_22_tests::provider_reservation_settles_to_actual_usage ... ok
+test engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch ... ok
+test engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay ... ok
+test engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once ... ok
+test engine::audit_2026_05_22_tests::recovery_blocks_bare_turn_started_before_provider_dispatch ... ok
+test engine::audit_2026_05_22_tests::recovery_cancel_is_cursor_bound_and_durably_terminal ... ok
+test engine::audit_2026_05_22_tests::recovery_cancel_preserves_correlated_provider_dispatch_identity ... ok
+test engine::audit_2026_05_22_tests::recovery_cancel_refuses_unknown_provider_without_mutation ... ok
+test engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call ... ok
+test engine::audit_2026_05_22_tests::recovery_posture_digest_is_independent_of_tool_registration_order ... ok
+test engine::audit_2026_05_22_tests::recovery_rejects_stale_cursor_before_provider_dispatch ... ok
+test engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch ... ok
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... ok
+test engine::audit_2026_05_22_tests::resumed_session_carries_cumulative_usage_but_fresh_delta ... ok
+test engine::audit_2026_05_22_tests::retryable_stream_err_recovers_after_one_transient_failure ... ok
+test engine::audit_2026_05_22_tests::retryable_stream_err_uses_the_bounded_engine_retry_budget ... ok
+test engine::audit_2026_05_22_tests::seed_workflow_state_always_has_changed_files_array_and_cwd ... ok
+test engine::audit_2026_05_22_tests::session_control_stop_allows_the_next_run ... ok
+test engine::audit_2026_05_22_tests::startup_transitions_running_tool_to_unknown_and_blocks_before_provider_dispatch ... ok
+test engine::audit_2026_05_22_tests::stream_error_exhausts_retries_then_fails_the_turn ... ok
+test engine::audit_2026_05_22_tests::synthetic_result_is_durable_before_text_is_exposed ... ok
+test engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch ... ok
+test engine::audit_2026_05_22_tests::tool_denial_emits_well_formed_tool_result_v0911 ... ok
+test engine::audit_2026_05_22_tests::truncated_stream_then_success_retries_and_succeeds ... ok
+test engine::audit_2026_05_22_tests::turn_start_hook_block_halts_the_loop ... ok
+test engine::audit_2026_05_22_tests::unpriced_provider_is_rejected_while_a_usd_cap_is_active ... ok
+test engine::audit_2026_05_22_tests::unpriced_provider_remains_usable_under_implicit_smart_cap ... ok
+test engine::audit_2026_05_22_tests::usage_delta_resets_per_run_while_usage_accumulates ... ok
+test engine::audit_2026_05_22_tests::usage_delta_sums_all_round_trips_of_one_run ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 2178 filtered out; finished in 7.09s
+
