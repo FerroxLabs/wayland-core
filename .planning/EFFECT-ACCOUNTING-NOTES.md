@@ -52,3 +52,72 @@ Still to establish:
    CONCEPT, not the word `budget`).
 2. What the product prints/enforces across a real kill+restart with a low ceiling.
 3. B: where a pending approval lives, and what a mid-approval kill does to it.
+
+### t1 — A MEASURED LIVE. Claim A is substantially FALSE as written.
+
+Binary: `wayland-core 0.12.25`, debug, built on `hetzner-dsm` from `8548e834`, `BUILDRC=0`,
+`/root/wayland-effect-accounting/target/debug/wayland-core`.
+Harness: `.planning/evidence/effect-accounting/{mock_provider.py,run-budget.sh,run-fresh.sh}`.
+Meter: the loopback provider's OWN log (one `BILLED` line per round-trip, carrying the usage it
+will report) — never the product's stdout. Meter self-test asserts three things, including that
+the returned value is arithmetic-usable (see harness defect below).
+
+Config under test: `[budget] max_tokens_in = 25000`; mock bills 20000 input tokens per
+round-trip. Two arms differ ONLY in whether `WAYLAND_VAULT_PASSPHRASE` is supplied; the `off`
+arm additionally has no session bus, so `Config::resolve` degrades durable sessions off. Arm
+control asserted BOTH directions per launch: the degrade notice must appear in `off`
+(5/5 launches) and must NOT appear in `on` (0/5).
+
+**Continued session (`--session-id` then `--resume`), 5 launches each:**
+
+| arm | L1 | L2..L5 | round-trips | verdict |
+|---|---|---|---|---|
+| `on` (journal) | ok, 20000 billed | **budget refusal**, 0 billed | 1 | ceiling ENFORCED across restart |
+| `off` (degraded) | ok, 20000 billed | `Error: Session 'aaaaaa-000001' not found`, rc=1 | 1 | continuation IMPOSSIBLE, loud |
+
+`on`-L2 verbatim: `error: Provider call not started: budget cap 'per_session_input_tokens'
+would be exceeded (limit 25000 input tokens, reserved total 32082 input tokens).`
+
+So the `off` arm does **not** silently re-arm the ceiling on this path. It refuses with rc=1.
+
+**Fresh session per process (no `--resume`), 5 launches each:**
+
+| arm | round-trips | input tokens billed | cap | refusals |
+|---|---|---|---|---|
+| `on-fresh` (journal) | 5 | **100000** | 25000 | **0** |
+| `off-fresh` (degraded) | 5 | **100000** | 25000 | **0** |
+
+**Identical.** A new session gets a full fresh ceiling *whether or not durable sessions are on.*
+So "every restart is a fresh budget" is TRUE, but the journal is not what causes it — the
+configured ceiling is `per_session_input_tokens`, i.e. per session by construction. The only
+other ceiling in the tracker is `per_user_daily_usd`, and `wcore-budget/src/tracker.rs:55` says
+in terms: *"has no TOML counterpart today — set it manually"*. **There is no operator-reachable
+cross-session, per-day or per-account ceiling at all.** That, not the journal, is the
+compounding surface.
+
+**Gemini's half of the claim ("zero proof of what the agent did") is FALSE.** The cache/cost
+ledger is on by DEFAULT (`cache_ledger.rs:779 recording_enabled()`, env opt-OUT only), flushes
+after every round-trip, and is written in the degraded arm too: `ledger_files=5` in BOTH
+`on-fresh` and `off-fresh`. Sample from the degraded arm carries
+`"uncached_input_tokens": 20000, "output_tokens": 100, "cost_usd": 0.0,
+"cost_source": "unpriced"` (0.0 because `mock-model` is unpriced, which the product states
+explicitly rather than passing off as free).
+
+**Two side findings, both measured:**
+- Setting `max_cost_usd` at all on an unpriced model refuses EVERY call:
+  *"pricing is unavailable for openai/mock-model, so the explicit or managed USD cap cannot be
+  enforced… remove the explicit max_cost_usd to use token-only governance."* rc was **0** with
+  0 turns. (First harness run, `on-L1.stderr`.)
+- A degraded run given `--session-id` leaves an orphan `<id>.journal` and
+  `<id>.journal.writer.lock` in `sessions/` with no index entry. **Hypothesis that this poisons
+  a later vault-unlocked run: REFUTED.** The `poison` arm ran degraded, then vault-unlocked on
+  the same home+id, then `--resume`: all three behaved, and the resume was correctly refused at
+  `reserved total 32084 > limit 25000`.
+
+**Harness defect found and repaired in-lane (§6b-ii).** `grep -c` exits 1 on zero matches, so
+`grep -c … || echo 0` emitted `0\n0`; the arithmetic aborted the launch loop after L1 and the
+first run looked like a product failure. Repaired to `grep | wc -l`, plus a meter self-test with
+three assertions (known-positive, known-negative, and *arithmetic-usable* — the third is the only
+one the broken version would have failed). A second defect in the same script reported arm two's
+spend as 200000 by multiplying the *cumulative* round-trip count; repaired to a per-arm delta and
+re-run. Both figures above are from the repaired run.
