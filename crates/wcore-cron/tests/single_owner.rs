@@ -518,15 +518,12 @@ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Ch
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    // The child never published its marker, so nobody downstream holds a handle
-    // to it — and the `panic!` below is about to unwind past the `tempfile`
-    // guard that owns the directory the child is working in. Left alone, the
-    // child keeps running: `cross_process_lease_worker` spins for up to 30s
-    // waiting for a `.release` file this process will now never write, holding
-    // the schedule lease the whole time, and then panics writing its `.exited`
-    // marker into a directory that has been deleted underneath it. Reap it here
-    // so the timeout path fails loudly instead of leaking an orphan that
-    // outlives the test binary and can poison the next case's lease.
+    // The participant never launched, so nothing was contended. Reap it before
+    // panicking rather than leaking it: a child left alive here outlives the
+    // test process, and — because it may yet take the lease — it would hold the
+    // exclusion the NEXT case tries to contend against, turning one failure
+    // into a cascade of unrelated ones. On Windows it also survives as a
+    // genuine orphan, since there is no process group to collect it.
     let _ = child.kill();
     let _ = child.wait();
     panic!(
