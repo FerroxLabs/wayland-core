@@ -1,0 +1,13 @@
+1785426802.885 listening on 8474 tokens_in=20000 tokens_out=100
+1785426805.408 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426809.649 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426813.890 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426818.127 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426822.339 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426822.793 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426823.192 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426823.588 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426823.986 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426824.382 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426824.786 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100
+1785426827.085 BILLED path=/v1/chat/completions stream=True model=mock-model msgs=2 tokens_in=20000 tokens_out=100

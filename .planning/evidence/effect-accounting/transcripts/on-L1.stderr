@@ -1,0 +1,4 @@
+warning: /root/effacc-out/home-on/config.toml has permissions 0o644; tightening to 0o600 on next write
+Pricing unavailable for openai/mock-model; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+[turns: 1 | tokens: 20000 in / 100 out]
