@@ -55,6 +55,103 @@ const PERMANENT_ERROR_CODES: &[&str] = &[
 /// Initial base for exponential backoff (jittered ±25%).
 const BACKOFF_BASE_MS: u64 = 250;
 
+/// Slack `ok:false` codes that mean **the credential itself was refused**, as
+/// opposed to the request being wrong.
+///
+/// The distinction is the operator's next action: these say "rotate or
+/// re-scope the token", everything else says "fix the call". `account_inactive`
+/// belongs here because a deactivated bot user cannot be recovered by retrying
+/// — the token must be reissued against a live account.
+pub fn is_auth_rejection(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_auth" | "not_authed" | "token_revoked" | "token_expired" | "account_inactive"
+    )
+}
+
+/// `auth.test` response. Slack echoes the authenticated identity on success
+/// and `{"ok": false, "error": "invalid_auth"}` on a rejected token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthTestResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub team: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Ask Slack whether this bot token is live, **without sending a message**.
+///
+/// # Why this exists
+///
+/// Slack inbound is webhook-driven, so this adapter has no long-lived
+/// connection the platform can reject and no poll that would ever notice a
+/// refusal. Before this call, `start()` resolved the token out of the
+/// credential store and declared the channel connected — a REJECTED token and
+/// a good one produced byte-identical behaviour, and health read `Healthy`
+/// until somebody tried to send. `auth.test` is the one Slack surface that
+/// answers the credential question and puts no traffic on a channel.
+///
+/// # Error mapping is deliberately three-way
+///
+/// - [`SlackError::Auth`] — the platform refused the credential. Actionable,
+///   and the only variant callers may turn into `Unauthenticated`.
+/// - [`SlackError::Http`] — Slack could not be reached, or answered 5xx. This
+///   is NOT a verdict on the credential; treating it as one would flip a
+///   healthy channel to "rotate your token" on every network blip.
+/// - [`SlackError::Api`] / [`SlackError::MalformedPayload`] — Slack answered,
+///   but with something this function cannot interpret as either verdict.
+///
+/// On success returns the authenticated identity (`"<user_id>/<team>"`), never
+/// the token.
+pub async fn auth_test(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+) -> Result<String, SlackError> {
+    let url = format!("{}/api/auth.test", api_base.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(bot_token)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await
+        .map_err(|e| SlackError::Http(format!("auth.test send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(SlackError::Auth(format!("HTTP {}", status.as_u16())));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        // 5xx and friends are reachability, not a credential verdict.
+        return Err(SlackError::Http(format!(
+            "auth.test HTTP {}: {body}",
+            status.as_u16()
+        )));
+    }
+
+    let parsed: AuthTestResponse = resp
+        .json()
+        .await
+        .map_err(|e| SlackError::MalformedPayload(format!("decode auth.test response: {e}")))?;
+    if !parsed.ok {
+        let code = parsed.error.unwrap_or_else(|| "unknown".to_string());
+        if is_auth_rejection(&code) {
+            return Err(SlackError::Auth(code));
+        }
+        return Err(SlackError::Api(code));
+    }
+
+    Ok(format!(
+        "{}/{}",
+        parsed.user_id.as_deref().unwrap_or("unknown-user"),
+        parsed.team.as_deref().unwrap_or("unknown-team")
+    ))
+}
+
 /// Send `chat.postMessage` with retry. Returns the response on first
 /// success; on permanent failure returns the first non-retryable error.
 pub async fn post_message(

@@ -188,8 +188,59 @@ impl Channel for SlackChannel {
                 ))
             })?;
 
-        self.bot_token = Some(bot_token);
+        self.bot_token = Some(bot_token.clone());
         self.signing_secret = Some(signing_secret);
+
+        // Ask Slack whether the token is live before declaring the channel up.
+        //
+        // Slack inbound is webhooks, so nothing else in this adapter ever puts
+        // the credential in front of the platform. Without this call, `start()`
+        // proved only that a STRING was present in the credential store, and a
+        // revoked token reported `Healthy` indefinitely (UAT-C2).
+        match api::auth_test(&self.http, &self.config.api_base_url, &bot_token).await {
+            Ok(identity) => {
+                tracing::info!(
+                    target: "wcore_channel_slack",
+                    channel = %self.name,
+                    identity = %identity,
+                    "slack auth.test accepted the bot token"
+                );
+            }
+            Err(SlackError::Auth(code)) => {
+                // Queue the terminal event and return Ok. Returning Err instead
+                // would land in the manager's `start() failed` arm, which
+                // records `Disconnected` — the state that means "wait". A
+                // rejected credential means "rotate the token", and the only
+                // route to `HealthState::Unauthenticated` is an adapter-published
+                // event drained by the poll loop.
+                tracing::error!(
+                    target: "wcore_channel_slack",
+                    channel = %self.name,
+                    code = %code,
+                    "slack rejected the bot token at auth.test"
+                );
+                self.state = ConnectionState::AuthError;
+                self.inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::AuthExpired {
+                        reason: format!("slack auth.test rejected the bot token: {code}"),
+                    });
+                return Ok(());
+            }
+            Err(e) => {
+                // Unreachable or uninterpretable. NOT a credential verdict —
+                // proceed as before rather than accusing a live token.
+                tracing::warn!(
+                    target: "wcore_channel_slack",
+                    channel = %self.name,
+                    error = %e,
+                    "slack auth.test could not be completed; continuing without a \
+                     credential verdict"
+                );
+            }
+        }
+
         self.state = ConnectionState::Connected;
 
         self.inbox
@@ -464,7 +515,7 @@ impl SlackChannel {
             thread_ts: msg.reply_to.clone(),
         };
 
-        let resp = api::post_message_keyed(
+        let send_result = api::post_message_keyed(
             &self.http,
             &self.config.api_base_url,
             bot_token,
@@ -472,8 +523,32 @@ impl SlackChannel {
             self.config.max_retry_attempts,
             idempotency_key,
         )
-        .await
-        .map_err(ChannelError::from)?;
+        .await;
+
+        let resp = match send_result {
+            Ok(r) => r,
+            Err(SlackError::Auth(code)) => {
+                // A token that authenticated at start() can be revoked
+                // underneath a running gateway. For a webhook-driven adapter an
+                // outbound refusal is the ONLY moment that becomes observable,
+                // so publish it into the inbox instead of letting it die as a
+                // one-off send error the health surface never sees.
+                tracing::error!(
+                    target: "wcore_channel_slack",
+                    channel = %self.name,
+                    code = %code,
+                    "slack refused the bot token on send; publishing AuthExpired"
+                );
+                self.inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::AuthExpired {
+                        reason: format!("slack refused the bot token on send: {code}"),
+                    });
+                return Err(ChannelError::Auth(code));
+            }
+            Err(e) => return Err(ChannelError::from(e)),
+        };
 
         let ts = resp
             .ts
@@ -541,6 +616,169 @@ mod tests {
             ("slack.test.bot_token", "xoxb-test-token"),
             ("slack.test.signing_secret", "shhh"),
         ])
+    }
+
+    /// Drain the inbox and report which auth-relevant events it held.
+    async fn auth_events_of(ch: &SlackChannel) -> (usize, usize) {
+        let inbox = ch.inbox.lock().await;
+        let expired = inbox
+            .iter()
+            .filter(|e| matches!(e, ChannelEvent::AuthExpired { .. }))
+            .count();
+        let connected = inbox
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ChannelEvent::ConnectionStateChanged {
+                        state: ConnectionState::Connected
+                    }
+                )
+            })
+            .count();
+        (expired, connected)
+    }
+
+    /// UAT-C2. A token Slack REFUSES must publish the event that becomes
+    /// `HealthState::Unauthenticated`, and must NOT publish `Connected`.
+    #[tokio::test]
+    async fn a_rejected_bot_token_publishes_auth_expired_and_never_connects() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"invalid_auth"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        // start() still succeeds: a rejected credential is a HEALTH verdict the
+        // poll loop must observe, not a start failure (which reads Disconnected).
+        ch.start()
+            .await
+            .expect("start reports Ok and defers to health");
+        mock.assert_async().await;
+
+        let (expired, connected) = auth_events_of(&ch).await;
+        assert_eq!(expired, 1, "exactly one AuthExpired must be queued");
+        assert_eq!(
+            connected, 0,
+            "a refused token must never publish Connected — that is the false \
+             Healthy this fixes"
+        );
+
+        let evs = ch.poll_events().await.expect("first poll drains the inbox");
+        match &evs[0] {
+            ChannelEvent::AuthExpired { reason } => {
+                assert!(
+                    reason.contains("invalid_auth"),
+                    "the operator needs the platform's code: {reason}"
+                );
+                assert!(
+                    !reason.contains("xoxb-test-token"),
+                    "the reason must never carry the credential: {reason}"
+                );
+            }
+            other => panic!("expected AuthExpired, got {other:?}"),
+        }
+    }
+
+    /// The known-negative. An ACCEPTED token must take the old path exactly:
+    /// Connected, no AuthExpired. Without this, a producer that fired
+    /// unconditionally would pass the test above.
+    #[tokio::test]
+    async fn an_accepted_bot_token_connects_and_publishes_no_auth_expired() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/auth.test")
+            .match_header("authorization", "Bearer xoxb-test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.expect("a live token starts");
+        mock.assert_async().await;
+
+        let (expired, connected) = auth_events_of(&ch).await;
+        assert_eq!(expired, 0, "a live token must not be accused");
+        assert_eq!(connected, 1);
+    }
+
+    /// Reachability is not a credential verdict. A 500 must NOT flip the
+    /// channel to Unauthenticated — that would make every Slack outage look
+    /// like a revoked token and send operators rotating good credentials.
+    #[tokio::test]
+    async fn an_unreachable_auth_test_is_not_treated_as_a_rejection() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/auth.test")
+            .with_status(500)
+            .with_body("upstream boom")
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start()
+            .await
+            .expect("an unreachable probe does not fail start");
+        mock.assert_async().await;
+
+        let (expired, connected) = auth_events_of(&ch).await;
+        assert_eq!(
+            expired, 0,
+            "a 5xx says nothing about the credential and must publish no AuthExpired"
+        );
+        assert_eq!(connected, 1);
+    }
+
+    /// Mid-run revocation. A token that authenticated at start() and is later
+    /// revoked is only observable on an outbound send for a webhook adapter.
+    #[tokio::test]
+    async fn a_token_revoked_after_start_publishes_auth_expired_on_send() {
+        let mut server = mockito::Server::new_async().await;
+        let auth_mock = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+        let send_mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"token_revoked"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        auth_mock.assert_async().await;
+        // Clear the Connected event so the count below is unambiguous.
+        let _ = ch.poll_events().await.unwrap();
+
+        let err = ch
+            .send_message(OutgoingMessage::text("C1", "hi"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
+        send_mock.assert_async().await;
+
+        let evs = ch.poll_events().await.unwrap();
+        let expired: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, ChannelEvent::AuthExpired { .. }))
+            .collect();
+        assert_eq!(
+            expired.len(),
+            1,
+            "a revoked token discovered on send must reach the health surface, \
+             not die as a one-off send error: {evs:?}"
+        );
     }
 
     #[tokio::test]
