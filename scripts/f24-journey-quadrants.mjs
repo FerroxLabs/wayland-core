@@ -136,9 +136,19 @@ function quadrant(name, expected, note, journalFor) {
     driver_commit: PINNED.driverCommit,
     finished_at: PINNED.finishedAt,
   };
+  // The DRIVER'S OWN verdict, taken by invoking the driver's gate rather than
+  // by re-deriving it here. On the clean path `assertFinalReconciliation`
+  // returns its report; on the dirty path it throws one. Either way the text
+  // below is the JavaScript gate's, not this file's.
+  let driverVerdict;
+  try {
+    driverVerdict = journey.assertFinalReconciliation(receipt);
+  } catch (error) {
+    driverVerdict = error.message;
+  }
   const outcome = classifyVerdict(receipt.counts, receipt.delivery_identity);
   fs.rmSync(runDir, { recursive: true, force: true });
-  return { name, expected, note, receipt, outcome };
+  return { name, expected, note, receipt, outcome, driverVerdict };
 }
 
 export function buildQuadrants() {
@@ -219,19 +229,32 @@ export function fixturePath(name) {
   return path.join(FIXTURE_DIR, `${name}.json`);
 }
 
+/// The driver's verdict lives OUTSIDE the receipt, on purpose. The Rust verifier
+/// must reach its own conclusion from the counts; a receipt carrying the
+/// driver's answer would let the verifier grade the driver's opinion rather than
+/// the driver's measurements, and "the two agree" would then be a tautology.
+export function verdictPath(name) {
+  return path.join(FIXTURE_DIR, `${name}.driver-verdict.txt`);
+}
+
 function main() {
   const write = process.argv.includes('--write');
   const quadrants = buildQuadrants();
   if (write) fs.mkdirSync(FIXTURE_DIR, { recursive: true });
   let drift = 0;
   for (const q of quadrants) {
-    const target = fixturePath(q.name);
-    const body = serialise(q.receipt);
-    if (write) {
-      fs.writeFileSync(target, body);
-    } else if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== body) {
-      drift += 1;
-      process.stderr.write(`DRIFT ${q.name}: committed fixture differs from the driver's output\n`);
+    for (const [target, body] of [
+      [fixturePath(q.name), serialise(q.receipt)],
+      [verdictPath(q.name), `${q.driverVerdict}\n`],
+    ]) {
+      if (write) {
+        fs.writeFileSync(target, body);
+      } else if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== body) {
+        drift += 1;
+        process.stderr.write(
+          `DRIFT ${path.basename(target)}: committed fixture differs from the driver's output\n`,
+        );
+      }
     }
     const agree = q.outcome.verdict === q.expected;
     if (!agree) drift += 1;

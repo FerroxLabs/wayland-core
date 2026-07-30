@@ -1089,13 +1089,18 @@ class Journey {
     }
     const id = receipt.delivery_identity ?? null;
     const outcome = classifyVerdict(c, id);
-    if (outcome.clean) return;
-    throw new StepFailure(
+    const report =
       `${deliveryLegReport(c, id, outcome)}\n` +
-        `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
-        `duplicates=${stepThirteen.duplicates}; ` +
-        `${c.arrived - stepThirteen.arrived} arrival(s) landed after it. ` +
-        'The receipt was written and records the true final counts.',
+      `step-13 reconcile had read arrived=${stepThirteen.arrived} ` +
+      `duplicates=${stepThirteen.duplicates}; ` +
+      `${c.arrived - stepThirteen.arrived} arrival(s) landed after it.`;
+    // Returned on the clean path rather than a bare `return`, so a PASSING run
+    // also states its verdict. A gate that is silent when it passes and eloquent
+    // when it fails teaches a reader that `duplicates=12` is always bad news,
+    // which is the misreading this whole change exists to correct.
+    if (outcome.clean) return report;
+    throw new StepFailure(
+      `${report}\nThe receipt was written and records the true final counts.`,
     );
   }
 
@@ -1414,7 +1419,12 @@ function identityVerdict(identity, arrived) {
 // spoiled measurement either.
 export function verdictFor(id) {
   const { verdict, reason } = identityVerdict(id, null);
-  return `VERDICT: ${verdict} — ${reason}`;
+  // `verdict=<TOKEN>` and not `VERDICT: <TOKEN>`, so every place either gate
+  // states a verdict — this, `deliveryLegReport`, step 13's captured output, the
+  // Rust refusals and the Rust success line — uses ONE grammar. The cross-gate
+  // agreement test extracts that token; a second spelling would be a second
+  // extractor, and the one that failed to match would fail silently.
+  return `verdict=${verdict} ${reason}`;
 }
 
 export function driverCommit() {
@@ -1459,7 +1469,18 @@ function main() {
     const receiptPath = path.join(journey.runDir, `${args.platform}-receipt.json`);
     fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
     // Written first, graded second — see `assertFinalReconciliation`.
-    journey.assertFinalReconciliation(receipt);
+    const verdict = journey.assertFinalReconciliation(receipt);
+    // The verdict is written next to the receipt and printed, on the PASSING
+    // path as well as the failing one. It is deliberately a SIDECAR and not a
+    // receipt field: `wayland-journey verify` must reach its own conclusion from
+    // the counts, and a receipt that carried the driver's answer would let the
+    // verifier grade the driver's opinion instead of the driver's measurements.
+    // Keeping it outside is what makes "the two gates agree" a real comparison.
+    fs.writeFileSync(
+      path.join(journey.runDir, `${args.platform}-driver-verdict.txt`),
+      `${verdict}\n`,
+    );
+    process.stdout.write(`${verdict}\n`);
     process.stdout.write(`JOURNEY COMPLETE platform=${args.platform} receipt=${receiptPath}\n`);
     journey.cleanup();
     process.exit(0);
