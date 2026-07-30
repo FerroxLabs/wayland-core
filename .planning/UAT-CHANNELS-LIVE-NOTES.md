@@ -239,4 +239,38 @@ closed ("**A zero from a surface that was not looking is not a zero**", citing F
 F24-B-H3). The brief's premise — *"`channel health` exits 0 even while Degraded"* — is
 **understated**: for a revoked Matrix credential it never reaches `Degraded` at all.
 
+## T+3h — record of Discord messages deleted at cleanup
+
+My own (2): `1532336698355220610`, `1532336446961094720` — both `WL-UAT-DISCORD-CRON-OK`.
+
+Pre-existing debris from an earlier lane (16), newest `2026-07-30T04:07:30Z`, deleted at
+`~10:43Z` after judging a 6.6-hour gap decisive. Ids and contents preserved here:
+
+```
+1532238183000051753  04:07:30  'WL-INBOUND-PROBE-1785384450-content-length-matters'
+1532236030105616524  03:58:57  'WL-EDITPROOF-1785383936-AFTER'
+1532234524996538478  03:52:58  'WL-LIVE-IDEM-1785383514'
+1532234475344498829  03:52:46  'WL-LIVE-IDEM-1785383514'
+1532233859708747887  03:50:19  'WL-NONCE-ECHO-wl715feade0e1664b3'
+1532233853085941870  03:50:18  'WL-NONCE-ECHO-edited'
+1532233706088038480  03:49:43  'WL-WINDOW-90s-wl66e4e639cd350545'
+1532233322401370353  03:48:11  'WL-WINDOW-90s-wl66e4e639cd350545'
+1532233320211943434  03:48:11  'WL-WINDOW-30s-wl766f16648353e20b'
+1532233187801960489  03:47:39  'WL-WINDOW-30s-wl766f16648353e20b'
+1532233181867278427  03:47:38  'WL-WINDOW-5s-wl9f2033987a3264be'
+1532233158874108034  03:47:32  'WL-WINDOW-5s-wl9f2033987a3264be'
+1532233156847992891  03:47:32  'WL-WINDOW-0s-wlb12406988498c547'
+1532233150594289704  03:47:30  'WL-WINDOW-0s-wlb12406988498c547'
+1532231877019308233  03:42:26  'WL-LIVE-SEND-1785382891'
+1532226834043900035  03:22:24  ''
+```
+
+All 16 DELETE calls returned HTTP 204. Final read-back: `n=0`.
+
+## T+3h — the full report is `.planning/UAT-CHANNELS-LIVE.md`
+
+Everything above is the raw working record. The findings, ranked, the both-directions
+scorecard, the UNRUN cell count and the cleanup verification live in the report file.
+
+
 
