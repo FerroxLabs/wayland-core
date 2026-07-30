@@ -313,6 +313,37 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                     consecutive_failures = 0;
                     continue;
                 }
+                // A 401/403 is the homeserver REJECTING the access token
+                // (`M_UNKNOWN_TOKEN` on a revoked one), not a transient fault.
+                // Backoff cannot recover a dead credential, and — this is the
+                // defect — the manager cannot infer it either: this loop owns
+                // `consecutive_failures` privately, `poll_events()` drains an
+                // empty inbox and returns `Ok(vec![])`, and the manager's Ok arm
+                // RESETS its error count. So the channel reported `Healthy` while
+                // every single sync 401'd, measured live at 21 consecutive
+                // failures. Publish the rejection as the event the health
+                // projection already understands, and stop: the manager records
+                // `Unauthenticated` and ends the poll loop rather than reconnect-
+                // looping against a token that will never be accepted.
+                if matches!(
+                    e,
+                    MatrixError::Http {
+                        status: 401 | 403,
+                        ..
+                    }
+                ) {
+                    let reason = auth_rejection_label(&e);
+                    tracing::error!(
+                        target: "wcore_channel_matrix::sync",
+                        reason = %reason,
+                        "homeserver rejected the access token; stopping /sync. Rotate the token and run `channel reload`"
+                    );
+                    inbox
+                        .lock()
+                        .await
+                        .push_back(ChannelEvent::AuthExpired { reason });
+                    break;
+                }
                 tracing::warn!(
                     target: "wcore_channel_matrix::sync",
                     error = %e,
@@ -329,6 +360,30 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 }
             }
         }
+    }
+}
+
+/// A short, SECRET-FREE label for a credential rejection, suitable for the
+/// health surface's operator-facing `reason`.
+///
+/// Only the homeserver's `errcode` — a fixed spec vocabulary such as
+/// `M_UNKNOWN_TOKEN` — is surfaced, never the raw response body. The body is an
+/// echo of a request we authenticated, so treating it as printable would make
+/// the health surface a place a token could appear; `ProbeReport` holds the same
+/// line ("the NAME of a rejected item, never its value") and this must not be the
+/// weaker of the two. A body we cannot parse yields the status alone.
+fn auth_rejection_label(e: &MatrixError) -> String {
+    let MatrixError::Http { status, body } = e else {
+        return "platform rejected the credential".to_string();
+    };
+    match serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("errcode"))
+        .and_then(|c| c.as_str())
+    {
+        Some(errcode) => format!("homeserver rejected the access token: HTTP {status} {errcode}"),
+        None => format!("homeserver rejected the access token: HTTP {status}"),
     }
 }
 
@@ -1046,5 +1101,270 @@ mod tests {
             ids.len(),
         );
         let _ = std::fs::remove_file(&state);
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential rejection — `HealthState::Unauthenticated`'s producer.
+    //
+    // The measured defect: the homeserver 401s every `/sync`, this loop
+    // swallowed it into a private backoff counter, `poll_events()` therefore
+    // returned `Ok(vec![])`, and the manager reported the channel `Healthy`
+    // through 21 consecutive failures.
+    //
+    // These drive a REAL HTTP 401 through the REAL loop against `mockito`, and
+    // they run in BOTH directions: the 401 must produce the event, and a 500
+    // and a 200 must NOT. A producer that fires on any failure would be worse
+    // than the bug it fixes, so the negative controls below are load-bearing,
+    // not decoration.
+    // -----------------------------------------------------------------------
+
+    /// A token value that must never reach the health surface. Distinctive so a
+    /// leak is unambiguous rather than a coincidental substring.
+    const TOKEN_CANARY: &str = "syt_CANARY_2f9c41ab7de6_MUSTNOTLEAK";
+
+    fn auth_events(events: &[ChannelEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ChannelEvent::AuthExpired { reason } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Spawn the real loop and wait — bounded — for it to exit ON ITS OWN, with
+    /// no shutdown signal. Returns `(exited, inbox_contents)`.
+    ///
+    /// Self-exit is the assertion that matters for a terminal condition: a loop
+    /// that kept 401-ing forever would hang here and report `exited == false`,
+    /// which is exactly the pre-fix behaviour.
+    async fn run_until_self_exit(
+        server_url: &str,
+        state_path: &std::path::Path,
+        settle: Duration,
+    ) -> (bool, Vec<ChannelEvent>) {
+        let inbox: Arc<Mutex<VecDeque<ChannelEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let (tx, rx) = watch::channel(false);
+        let http = wcore_egress::EgressClient::builder()
+            .user_agent("wcore-matrix-auth-test")
+            .build()
+            .unwrap_or_default();
+        let handle = tokio::spawn(sync_loop(SyncArgs {
+            http,
+            api_base: server_url.to_string(),
+            access_token: TOKEN_CANARY.to_string(),
+            user_id: BOT.to_string(),
+            inbox: Arc::clone(&inbox),
+            shutdown: rx,
+            state_path: state_path.to_path_buf(),
+        }));
+
+        let exited = tokio::time::timeout(settle, handle).await.is_ok();
+        // Always release the loop if it is still parked, so a negative-control
+        // test does not leak a task into the rest of the suite.
+        let _ = tx.send(true);
+
+        let drained: Vec<ChannelEvent> = inbox.lock().await.drain(..).collect();
+        (exited, drained)
+    }
+
+    /// **Quadrant 1 — the platform rejects the credential.**
+    ///
+    /// A real 401 `M_UNKNOWN_TOKEN` over HTTP must produce exactly one
+    /// `AuthExpired`, and the loop must stop rather than hammer a dead token.
+    /// On the unfixed code the inbox stays EMPTY and the loop runs forever, so
+    /// both halves of this assertion redden without the fix.
+    #[tokio::test]
+    async fn a_401_publishes_auth_expired_and_stops_the_loop() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("auth401");
+        let _ = std::fs::remove_file(&state);
+
+        let m = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"errcode":"M_UNKNOWN_TOKEN","error":"Token is not active"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let (exited, events) =
+            run_until_self_exit(&server.url(), &state, Duration::from_secs(10)).await;
+
+        m.assert_async().await;
+        assert!(
+            exited,
+            "a rejected token is terminal: the loop must exit, not back off forever"
+        );
+
+        let reasons = auth_events(&events);
+        assert_eq!(
+            reasons.len(),
+            1,
+            "expected exactly 1 AuthExpired, got {} — {reasons:?}",
+            reasons.len()
+        );
+        assert!(
+            reasons[0].contains("M_UNKNOWN_TOKEN"),
+            "the reason must name the platform errcode so an operator can act: {:?}",
+            reasons[0]
+        );
+        // Secret-free by construction, with the canary proved to be the value
+        // actually in play (the loop authenticated with it above).
+        assert!(
+            !reasons[0].contains(TOKEN_CANARY),
+            "the health reason leaked the access token: {:?}",
+            reasons[0]
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **Quadrant 3 — a transient fault must NOT be reported as an auth
+    /// rejection.** This is the control that stops the fix being worse than the
+    /// defect: a health surface that cries `Unauthenticated` at every 500 would
+    /// send operators to rotate a perfectly good credential.
+    ///
+    /// A 500 must produce ZERO `AuthExpired` and must NOT stop the loop — the
+    /// existing backoff still owns it.
+    #[tokio::test]
+    async fn a_500_is_not_an_auth_rejection_and_does_not_stop_the_loop() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("auth500");
+        let _ = std::fs::remove_file(&state);
+
+        let m = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body(r#"{"errcode":"M_UNKNOWN","error":"Internal server error"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let (exited, events) =
+            run_until_self_exit(&server.url(), &state, Duration::from_secs(4)).await;
+
+        m.assert_async().await;
+        assert!(
+            !exited,
+            "a 500 is transient — the loop must keep backing off, not treat it as terminal"
+        );
+        assert!(
+            auth_events(&events).is_empty(),
+            "a 500 must NOT be reported as a credential rejection: {:?}",
+            auth_events(&events)
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **Quadrant 4 — everything fine.** A healthy 200 flow must produce no
+    /// `AuthExpired` at all. Paired with a known-positive (the message actually
+    /// arrives) so this cannot pass by the loop doing nothing.
+    #[tokio::test]
+    async fn a_healthy_sync_publishes_no_auth_expired() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("authok");
+        let _ = std::fs::remove_file(&state);
+
+        server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_body(body_empty("h1"))
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(resume_query("h1"))
+            .with_status(200)
+            .with_body(body_with_event("h2", "$ok1", "hello"))
+            .create_async()
+            .await;
+
+        let events = run_lifetime(&server.url(), &state, "h2", "healthy-noauth").await;
+
+        assert_eq!(
+            message_ids(&events),
+            vec!["$ok1".to_string()],
+            "known-positive: the healthy flow must actually deliver, or the \
+             absence assertion below is free"
+        );
+        assert!(
+            auth_events(&events).is_empty(),
+            "a healthy channel must never publish AuthExpired: {:?}",
+            auth_events(&events)
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// The 400 cursor-rejection path predates this change and must keep its own
+    /// behaviour: re-seed, do NOT classify as an auth rejection. Without this,
+    /// a broad `4xx` classification would silently convert a recoverable cursor
+    /// fault into a terminal "rotate your token".
+    #[test]
+    fn only_401_and_403_are_auth_rejections() {
+        for status in [400_u16, 404, 429, 500, 502] {
+            let e = MatrixError::Http {
+                status,
+                body: r#"{"errcode":"M_UNKNOWN"}"#.to_string(),
+            };
+            assert!(
+                !matches!(
+                    e,
+                    MatrixError::Http {
+                        status: 401 | 403,
+                        ..
+                    }
+                ),
+                "HTTP {status} must not be classified as a credential rejection"
+            );
+        }
+        for status in [401_u16, 403] {
+            let e = MatrixError::Http {
+                status,
+                body: r#"{"errcode":"M_UNKNOWN_TOKEN"}"#.to_string(),
+            };
+            assert!(
+                matches!(
+                    e,
+                    MatrixError::Http {
+                        status: 401 | 403,
+                        ..
+                    }
+                ),
+                "HTTP {status} IS a credential rejection"
+            );
+        }
+    }
+
+    /// The label is the string an operator reads on the health surface. It must
+    /// carry the errcode and never the response body, which is an echo of a
+    /// request we authenticated.
+    #[test]
+    fn the_auth_label_names_the_errcode_and_never_the_body() {
+        let label = auth_rejection_label(&MatrixError::Http {
+            status: 401,
+            body: format!(r#"{{"errcode":"M_UNKNOWN_TOKEN","error":"{TOKEN_CANARY}"}}"#),
+        });
+        assert!(label.contains("M_UNKNOWN_TOKEN"), "got {label:?}");
+        assert!(label.contains("401"), "got {label:?}");
+        assert!(
+            !label.contains(TOKEN_CANARY),
+            "the label echoed the response body verbatim: {label:?}"
+        );
+
+        // An unparseable body must degrade to the status alone, never to the
+        // raw bytes.
+        let label = auth_rejection_label(&MatrixError::Http {
+            status: 403,
+            body: TOKEN_CANARY.to_string(),
+        });
+        assert!(label.contains("403"), "got {label:?}");
+        assert!(
+            !label.contains(TOKEN_CANARY),
+            "an unparseable body must not be echoed: {label:?}"
+        );
     }
 }
