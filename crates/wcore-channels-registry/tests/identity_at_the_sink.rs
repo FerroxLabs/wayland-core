@@ -253,17 +253,22 @@ async fn twilio_and_whatsapp_arrivals_now_carry_a_delivery_identity() {
     // ---- the assertions, one arm at a time. Aggregating them would let a
     // failure in one direction be paid for by a success in the other.
     for endpoint in ["twilio.messages", "whatsapp.messages"] {
+        // Every field is compared as a STRING, including the counts. The tally
+        // arrives as JSON, and stringifying both sides means one comparison
+        // rule covers the numeric buckets and the verdict token alike — an
+        // `as_u64()` per bucket would silently yield `None` on a shape change
+        // and turn a mismatch into a different panic than the one written here.
         let a = tally(&arms, "A-UNKEYED", endpoint);
-        assert_eq!(a["arrived"], 2, "{endpoint} arm A must have two arrivals");
+        assert_eq!(a["arrived"], "2", "{endpoint} arm A must have two arrivals");
         assert_eq!(
-            a["unidentified"], 2,
+            a["unidentified"], "2",
             "{endpoint} arm A: an unkeyed send must still journal NO identity. If this is 0 the \
              adapter has started attaching an id unconditionally, which would mark every \
              unkeyed arrival as identified — a silent false-clean, because a receipt full of \
              identified arrivals is what a healthy run looks like."
         );
         assert_eq!(
-            a["indeterminate"], 1,
+            a["indeterminate"], "1",
             "{endpoint} arm A: the repeat must be UNJUDGEABLE. This is the gate proving it can \
              still fail; if it passes here the improvement below is the harness being kinder, \
              not the product being better."
@@ -271,30 +276,30 @@ async fn twilio_and_whatsapp_arrivals_now_carry_a_delivery_identity() {
         assert_eq!(a["verdict"], "NOT-PROVEN");
 
         let b = tally(&arms, "B-KEYED", endpoint);
-        assert_eq!(b["arrived"], 2, "{endpoint} arm B must have two arrivals");
+        assert_eq!(b["arrived"], "2", "{endpoint} arm B must have two arrivals");
         assert_eq!(
-            b["unidentified"], 0,
+            b["unidentified"], "0",
             "{endpoint} arm B: THE MEASUREMENT. Every keyed arrival must carry an identity. A \
              non-zero here means either the adapter did not transmit it or the sink did not \
              read it — the two independent causes of the NOT-PROVEN verdict, and this \
              assertion cannot tell them apart, only that neither is present."
         );
         assert_eq!(
-            b["indeterminate"], 0,
+            b["indeterminate"], "0",
             "{endpoint} arm B: with identities present nothing may remain unjudgeable"
         );
         assert_eq!(
-            b["recurrences"], 1,
+            b["recurrences"], "1",
             "{endpoint} arm B: the repeat must be classified as a recurrence — the trigger \
              firing again under a new (job, scheduled instant) pair"
         );
-        assert_eq!(b["replays"], 0, "{endpoint} arm B carries no replay");
+        assert_eq!(b["replays"], "0", "{endpoint} arm B carries no replay");
         assert_eq!(b["verdict"], "RECURRENCE");
 
         let c = tally(&arms, "C-REPLAY", endpoint);
-        assert_eq!(c["arrived"], 2, "{endpoint} arm C must have two arrivals");
+        assert_eq!(c["arrived"], "2", "{endpoint} arm C must have two arrivals");
         assert_eq!(
-            c["replays"], 1,
+            c["replays"], "1",
             "{endpoint} arm C: a genuine exactly-once violation must STILL be caught. Making \
              repeats classifiable is worthless — worse than worthless — if everything now \
              classifies as a benign recurrence."
