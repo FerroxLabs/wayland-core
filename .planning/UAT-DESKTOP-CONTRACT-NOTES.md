@@ -190,11 +190,29 @@ corpus. `execution_policy` and `workspace_policy` are emitted immediately after
 - `add_mcp_server` after session start → `error` *"only allowed before first
   Message"*. Desktop's type exposes no such ordering constraint.
 
-## Still to establish
+## T+3 — COMPLETE
 
-3. tsc gate against Desktop's real `protocol.ts` types.
-4. Adversarial fixtures — rejected for the STATED reason.
-5. `docs/json-stream-protocol.md` vs code.
+All legs closed. Full result in `.planning/UAT-DESKTOP-CONTRACT.md`.
+
+- tsc gate against Desktop's real `protocol.ts`: built, proven both directions
+  (pos rc=0; neg rc=2 with 4 distinct reasons). 30/38 live frames and 24/52
+  corpus fixtures fail Desktop's declared types.
+- Field extractor cross-validated 5/5 against tsc before its extra findings
+  were trusted; found 16 undeclared fields across 5 handled event types.
+- Adversarial: Core's reference observer rejects for the exact stated typed
+  reason; falsified by a one-field mutation (17/17 → 16/1), then restored,
+  tree clean. Desktop has no rejection path at all — the three poisoned
+  `ready` fixtures are byte-indistinguishable from golden to its decoder.
+- Doc vs code: §4.1 documents a `protocol_error` Core never emits (0/5,
+  controls green); Desktop's own comments misstate the rule-3 clause they cite;
+  44/59 events and 16/24 commands documented.
+- Two instrument defects found and REPAIRED in-lane (enum extractor; a dead
+  `grep` control whose spacing didn't match the file).
+
+hetzner worktree `/root/wayland-uat-desktop-contract` and branch
+`hz/uat-desktop-contract` removed; `/tmp` lane files cleaned; tree was clean
+(0 porcelain) before removal. Nothing was written to
+`/Users/seandonahoe/dev/wayland` (0 files modified).
 4. Drive the real `wcore-cli` binary on hetzner, capture a real session stream,
    diff its event types against both the corpus and Desktop's handled set.
    This is the leg that breaks the corpus's self-referential circularity.
