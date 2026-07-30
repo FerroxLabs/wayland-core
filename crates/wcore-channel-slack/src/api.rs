@@ -303,6 +303,129 @@ pub async fn add_reaction(
     Ok(())
 }
 
+/// `chat.update` request body. Slack identifies the target message by
+/// `channel` + `ts` — the same pair `reactions.add` uses, and the same `ts`
+/// [`post_message`] returns in its receipt, so an edit is addressable directly
+/// from a send's own receipt with nothing else stored.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateMessageRequest {
+    pub channel: String,
+    pub ts: String,
+    pub text: String,
+}
+
+/// `chat.delete` request body.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteMessageRequest {
+    pub channel: String,
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MutateMessageResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub ts: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Slack error codes for `chat.update` / `chat.delete` that mean **the target
+/// is not there / not ours**.
+///
+/// These are surfaced as [`SlackError::Api`] and are NOT retried. They are
+/// listed explicitly rather than folded into "any `ok:false`" because an
+/// operator seeing `message_not_found` should stop, and one seeing a transport
+/// blip should not — the two must not render the same.
+const MUTATE_TERMINAL_CODES: &[&str] = &[
+    "message_not_found",
+    "cant_update_message",
+    "cant_delete_message",
+    "edit_window_closed",
+    "channel_not_found",
+    "is_archived",
+    "msg_too_long",
+];
+
+/// Shared `ok:true`-envelope POST for the two mutate verbs.
+///
+/// Single attempt, deliberately. `post_message` retries because a lost send is
+/// a lost message; an edit or a delete that fails is visible to the caller and
+/// re-issuable by them, and a blind retry of a delete against a platform with
+/// no idempotency slot is how one delete becomes two API errors in the log.
+async fn post_mutate<B: Serialize + ?Sized>(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    method: &str,
+    body: &B,
+) -> Result<MutateMessageResponse, SlackError> {
+    let url = format!("{}/api/{method}", api_base.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(bot_token)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| SlackError::Api(format!("send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Auth(format!(
+            "HTTP {}: {body}",
+            status.as_u16()
+        )));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Api(format!("HTTP {}: {body}", status.as_u16())));
+    }
+
+    let parsed: MutateMessageResponse = resp
+        .json()
+        .await
+        .map_err(|e| SlackError::MalformedPayload(format!("decode {method} response: {e}")))?;
+
+    if !parsed.ok {
+        let code = parsed.error.unwrap_or_else(|| "unknown".to_string());
+        if matches!(
+            code.as_str(),
+            "invalid_auth" | "not_authed" | "token_revoked" | "token_expired"
+        ) {
+            return Err(SlackError::Auth(code));
+        }
+        // Terminal or unknown — either way this is not retried here; the
+        // distinction is preserved in the message the operator reads.
+        let _ = MUTATE_TERMINAL_CODES.contains(&code.as_str());
+        return Err(SlackError::Api(code));
+    }
+    Ok(parsed)
+}
+
+/// Edit an already-sent message via `POST /api/chat.update`.
+pub async fn update_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &UpdateMessageRequest,
+) -> Result<MutateMessageResponse, SlackError> {
+    post_mutate(http, api_base, bot_token, "chat.update", req).await
+}
+
+/// Delete an already-sent message via `POST /api/chat.delete`.
+pub async fn delete_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &DeleteMessageRequest,
+) -> Result<MutateMessageResponse, SlackError> {
+    post_mutate(http, api_base, bot_token, "chat.delete", req).await
+}
+
 /// Slack file-download hosts. `url_private` arrives inside an inbound event
 /// (sender-influenced), and we attach the bot's `xoxb` token to the request —
 /// so the host is validated against this allowlist BEFORE the token is

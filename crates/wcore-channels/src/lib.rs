@@ -13,6 +13,7 @@
 //! interface so the engine + UI don't care which platform a message
 //! came from.
 
+pub mod actions;
 pub mod auto_register;
 pub mod binding;
 pub mod chunk;
@@ -28,6 +29,7 @@ pub mod outgoing;
 pub mod probe;
 pub mod webhook;
 
+pub use actions::{ActionSupport, NativeActions};
 pub use binding::{Binding, BindingSource, BindingTable, ConversationRef, RouteTarget};
 pub use chunk::chunk_message;
 pub use config::{ChannelConfig, ChannelConfigLoader};
@@ -190,11 +192,51 @@ pub trait Channel: Send + Sync {
         MediaBounds::default()
     }
 
+    /// This adapter's DECLARED native-action surface — which of `edit`,
+    /// `delete`, `react` and `typing` it drives against the platform, and for
+    /// each one it does not, whether **the platform has no such API** or
+    /// **nobody has written it yet**.
+    ///
+    /// # Why a declaration and not just the call's error
+    ///
+    /// [`edit_message`](Self::edit_message) and
+    /// [`delete_message`](Self::delete_message) already fail honestly, with a
+    /// named [`ChannelError::Unsupported`]. But on 2026-07-30 **zero of ten
+    /// adapters overrode either**, and that `Unsupported` was indistinguishable
+    /// from WhatsApp Cloud API's permanent absence of an edit endpoint. One is a
+    /// fact about somebody else's product; the other was our backlog. The only
+    /// way to tell them apart was to make the call — which, for a delete, is a
+    /// request a caller may not want to issue speculatively.
+    ///
+    /// This is the same construct as
+    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency),
+    /// applied to the native-action half: a capability read BEFORE dispatch so
+    /// the caller can choose a different action rather than learn from a
+    /// failure.
+    ///
+    /// # The declaration is checked against behaviour, in both directions
+    ///
+    /// `wcore-channels-registry/tests/native_action_matrix.rs` builds every
+    /// adapter the registry can construct and asserts:
+    /// declared-[`Implemented`](crate::ActionSupport::Implemented) ops must NOT
+    /// answer `Unsupported`, and everything else MUST. An adapter that claims a
+    /// capability it lacks reddens, and so does one that implements a capability
+    /// it forgot to declare.
+    ///
+    /// Default: [`NativeActions::none`] — everything `NotImplemented`. A new
+    /// adapter therefore cannot inherit a green by staying silent.
+    fn native_actions(&self) -> NativeActions {
+        NativeActions::none()
+    }
+
     /// Edit an already-sent message.
     ///
     /// Default: [`ChannelError::Unsupported`] — a NAMED outcome, never a silent
     /// `Ok`. A caller that receives `Ok` from a platform with no edit API
     /// believes the message changed; the next reader sees the original.
+    ///
+    /// Ask [`native_actions`](Self::native_actions) first if you need to know
+    /// whether this will reach a real implementation without calling it.
     async fn edit_message(
         &self,
         _conversation_id: &str,

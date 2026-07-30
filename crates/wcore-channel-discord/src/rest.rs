@@ -330,6 +330,86 @@ pub(crate) async fn add_reaction(
     status_to_result(resp.status(), "reaction")
 }
 
+/// Body of `PATCH /channels/{c}/messages/{m}` — the edit.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct EditMessageBody<'a> {
+    pub content: &'a str,
+}
+
+/// Edit an already-sent message via
+/// `PATCH /channels/{channel_id}/messages/{message_id}` (`200` with the
+/// updated message object).
+///
+/// Single attempt. `send_message` retries because a lost send is a lost
+/// message; an edit that fails is visible to its caller and re-issuable by
+/// them, and Discord's edit endpoint has no idempotency slot, so a blind retry
+/// buys nothing and can only re-apply an edit the caller may have superseded.
+pub(crate) async fn edit_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+    content: &str,
+) -> Result<Message, DiscordError> {
+    let url = format!("{api_base}/api/v10/channels/{channel_id}/messages/{message_id}");
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .patch(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&EditMessageBody { content })
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.bytes().await.unwrap_or_default();
+        let err: ErrorResponse = serde_json::from_slice(&bytes).unwrap_or_default();
+        let desc = err.message.unwrap_or_else(|| format!("status {status}"));
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(DiscordError::Auth(desc));
+        }
+        return Err(DiscordError::Rejected {
+            code: status.as_u16(),
+            description: desc,
+        });
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| DiscordError::Http(format!("body read: {e}")))?;
+    serde_json::from_slice(&bytes).map_err(|e| DiscordError::Decode(e.to_string()))
+}
+
+/// Delete an already-sent message via
+/// `DELETE /channels/{channel_id}/messages/{message_id}` (`204 No Content`).
+///
+/// Discord answers `404 Unknown Message` for an id that is not there. That is
+/// surfaced as [`DiscordError::Rejected`] rather than swallowed as success:
+/// "already gone" and "we deleted it" are the same end state but not the same
+/// fact, and an operator chasing a message that was never sent needs to know
+/// which one happened.
+pub(crate) async fn delete_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), DiscordError> {
+    let url = format!("{api_base}/api/v10/channels/{channel_id}/messages/{message_id}");
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .delete(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+    status_to_result(resp.status(), "delete")
+}
+
 /// Discord media CDN hosts. Inbound `attachment.url` values are attacker-
 /// controlled (they arrive verbatim in gateway JSON), so media fetches are
 /// confined to these hosts — fail-closed against SSRF to internal/metadata

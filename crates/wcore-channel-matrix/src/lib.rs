@@ -364,6 +364,80 @@ impl Channel for MatrixChannel {
     fn media_bounds(&self) -> wcore_channels::MediaBounds {
         MEDIA_BOUNDS
     }
+
+    /// Matrix implements all four, though `edit` and `delete` are shaped
+    /// differently from every other platform here: an edit is a NEW event
+    /// carrying an `m.replace` relation, and a delete is a redaction that
+    /// strips content while leaving a tombstone in the timeline. The note says
+    /// so, because an operator who expects the message to vanish entirely will
+    /// otherwise read a correct redaction as a failure.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::Implemented;
+        wcore_channels::NativeActions::none()
+            .edit(Implemented)
+            .delete(Implemented)
+            .react(Implemented)
+            .typing(Implemented)
+            .note(
+                "edit: sent as an m.replace relation (a new event); \
+                 delete: a redaction — content is stripped, the event stub remains",
+            )
+    }
+
+    /// `m.replace` relation — see [`rest::edit_message`]. `message_id` is the
+    /// Matrix `event_id` of the message being replaced.
+    ///
+    /// The returned receipt carries the **replacement** event's id. The caller
+    /// keeps the original id for any further edit, because Matrix relates every
+    /// edit to the original rather than chaining them.
+    async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ChannelError::NotStarted)?;
+        let new_event_id = rest::edit_message(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+            new_text,
+        )
+        .await
+        .map_err(|e| ChannelError::Transport(e.to_string()))?;
+        Ok(MessageReceipt {
+            id: new_event_id,
+            conversation_id: conversation_id.to_string(),
+            ts_secs: 0,
+        })
+    }
+
+    /// Redaction — see [`rest::redact_event`].
+    async fn delete_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ChannelError::NotStarted)?;
+        rest::redact_event(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| ChannelError::Transport(e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -583,5 +657,143 @@ user_id = "@bot:matrix.example.org"
             "an unsafe key must be hashed into a path-safe id, got {odd}"
         );
         assert_ne!(odd, txn_id_for_key("cron:job a/b?:2"));
+    }
+
+    // ---- native actions: edit / delete (Phase 24 C3) ----------------------
+
+    /// The edit must carry `m.relates_to.rel_type == "m.replace"` and the
+    /// authoritative text in `m.new_content`.
+    ///
+    /// This is not decoration. Matrix has no update verb — a "replacement" that
+    /// omits the relation is just a second message in the room, i.e. a silent
+    /// duplicate. The mock matches the relation and the new content, so
+    /// dropping either reddens here rather than in a live room.
+    #[tokio::test]
+    async fn edit_sends_an_m_replace_relation_carrying_the_new_content() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "PUT",
+                mockito::Matcher::Regex(
+                    r"/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/wl-u[0-9a-f]+-[0-9a-f]+"
+                        .to_string(),
+                ),
+            )
+            .match_header("authorization", format!("Bearer {TEST_TOKEN}").as_str())
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "msgtype": "m.text",
+                "body": "* edited body",
+                "m.new_content": { "msgtype": "m.text", "body": "edited body" },
+                "m.relates_to": { "rel_type": "m.replace", "event_id": "$orig123" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"event_id":"$replacement456"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+        let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+
+        let receipt = ch
+            .edit_message(TEST_ROOM, "$orig123", "edited body")
+            .await
+            .expect("edit succeeds");
+        // The receipt names the REPLACEMENT, not the original. Returning the
+        // original would tell the caller nothing happened.
+        assert_eq!(receipt.id, "$replacement456");
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// The delete is a redaction on the redact route, with the event id
+    /// percent-encoded into the path (`$` and `:` are legal but the room id is
+    /// not, and both segments go through the same encoder).
+    #[tokio::test]
+    async fn delete_puts_to_the_redact_route_for_the_target_event() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "PUT",
+                mockito::Matcher::Regex(
+                    r"/_matrix/client/v3/rooms/[^/]+/redact/[^/]+/wl-u[0-9a-f]+-[0-9a-f]+"
+                        .to_string(),
+                ),
+            )
+            .match_header("authorization", format!("Bearer {TEST_TOKEN}").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"event_id":"$redaction789"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+        let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+
+        ch.delete_message(TEST_ROOM, "$orig123")
+            .await
+            .expect("redaction succeeds");
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// **The failing direction.** A homeserver that refuses the redaction
+    /// (`M_FORBIDDEN` — the bot lacks the power level) must produce an error.
+    #[tokio::test]
+    async fn a_forbidden_redaction_is_an_error_not_a_silent_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "PUT",
+                mockito::Matcher::Regex(r"/_matrix/client/v3/rooms/[^/]+/redact/.*".to_string()),
+            )
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to redact this event"}"#)
+            .create_async()
+            .await;
+
+        let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+        let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+
+        let err = ch.delete_message(TEST_ROOM, "$orig123").await.unwrap_err();
+        assert!(
+            !matches!(err, ChannelError::Unsupported { .. }),
+            "got Unsupported — the delete override is missing: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("M_FORBIDDEN"),
+            "the homeserver's own errcode must reach the operator, got {err}"
+        );
+        ch.stop().await.unwrap();
+    }
+
+    /// Declaration ↔ behaviour, both directions.
+    #[tokio::test]
+    async fn native_action_declaration_matches_behaviour() {
+        use wcore_channels::ActionSupport;
+        let ch = MatrixChannel::new("test", cfg(), MemCreds::empty());
+        let a = ch.native_actions();
+        assert_eq!(a.edit, ActionSupport::Implemented);
+        assert_eq!(a.delete, ActionSupport::Implemented);
+        assert_eq!(a.react, ActionSupport::Implemented);
+        assert_eq!(a.typing, ActionSupport::Implemented);
+        assert!(
+            a.note.contains("m.replace") && a.note.contains("redaction"),
+            "the note must name the two semantics that differ from every other adapter: {}",
+            a.note
+        );
+
+        let e = ch.edit_message(TEST_ROOM, "$x", "y").await.unwrap_err();
+        assert!(matches!(e, ChannelError::NotStarted), "got {e:?}");
+        let d = ch.delete_message(TEST_ROOM, "$x").await.unwrap_err();
+        assert!(matches!(d, ChannelError::NotStarted), "got {d:?}");
     }
 }

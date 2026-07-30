@@ -852,6 +852,112 @@ async fn post_once<B: Serialize>(
     })
 }
 
+/// `editMessageText` request body. Telegram addresses the target by
+/// `chat_id` + `message_id` — the same `message_id` a send receipt carries, so
+/// an edit needs nothing stored beyond the receipt.
+#[derive(Debug, Clone, Serialize)]
+pub struct EditMessageTextBody<'a> {
+    pub chat_id: &'a str,
+    pub message_id: i64,
+    pub text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_mode: Option<&'a str>,
+}
+
+/// `deleteMessage` request body.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteMessageBody<'a> {
+    pub chat_id: &'a str,
+    pub message_id: i64,
+}
+
+/// POST a body to an endpoint returning a `Message` envelope with **no retry**.
+///
+/// Distinct from [`post_with_retry`] deliberately. A lost `sendMessage` is a
+/// lost message, so it retries; an `editMessageText` that fails is visible to
+/// its caller and re-issuable by them, and Telegram offers no idempotency slot,
+/// so a blind retry can only re-apply an edit the caller may already have
+/// superseded.
+async fn post_message_once<B: Serialize>(
+    http: &wcore_egress::EgressClient,
+    url: &str,
+    body: &B,
+) -> Result<Message, TelegramError> {
+    let resp = http
+        .post(url)
+        .json(body)
+        .timeout(ACK_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| TelegramError::Http(format!("network: {e}")))?;
+
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| TelegramError::Http(format!("body read: {e}")))?;
+
+    if !status.is_success() {
+        let api = serde_json::from_slice::<ApiResponse<serde_json::Value>>(&bytes).ok();
+        let desc = api
+            .as_ref()
+            .and_then(|a| a.description.clone())
+            .unwrap_or_else(|| format!("status {status}"));
+        let code = api
+            .as_ref()
+            .and_then(|a| a.error_code)
+            .unwrap_or(status.as_u16() as i64);
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(TelegramError::Auth(desc));
+        }
+        return Err(TelegramError::Rejected {
+            code,
+            description: desc,
+        });
+    }
+
+    let api: ApiResponse<Message> = serde_json::from_slice(&bytes)
+        .map_err(|e| TelegramError::Decode(format!("editMessageText envelope: {e}")))?;
+    if !api.ok {
+        return Err(TelegramError::Rejected {
+            code: api.error_code.unwrap_or(0),
+            description: api
+                .description
+                .unwrap_or_else(|| "ok:false with no description".to_string()),
+        });
+    }
+    api.result
+        .ok_or_else(|| TelegramError::Decode("ok:true with no result message".to_string()))
+}
+
+/// Edit an already-sent message via `editMessageText`.
+pub(crate) async fn edit_message_text(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    body: &EditMessageTextBody<'_>,
+) -> Result<Message, TelegramError> {
+    let url = format!("{api_base}/bot{bot_token}/editMessageText");
+    post_message_once(http, &url, body).await
+}
+
+/// Delete an already-sent message via `deleteMessage` (returns `result: true`).
+///
+/// Telegram's own restriction — a bot may only delete a message younger than
+/// 48 hours — surfaces as its `400 message can't be deleted`, i.e. as a
+/// [`TelegramError::Rejected`] carrying the platform's own description. It is
+/// deliberately NOT pre-checked here: guessing the window locally would refuse
+/// deletes the platform would have honoured.
+pub(crate) async fn delete_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    body: &DeleteMessageBody<'_>,
+) -> Result<(), TelegramError> {
+    let url = format!("{api_base}/bot{bot_token}/deleteMessage");
+    post_once(http, &url, body).await
+}
+
 /// Clear any previously-registered webhook so `getUpdates` long-poll can run.
 ///
 /// A bot can use webhooks OR long-poll, never both: if a webhook is still

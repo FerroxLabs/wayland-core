@@ -424,6 +424,85 @@ impl Channel for TelegramChannel {
     fn max_message_len(&self) -> Option<usize> {
         Some(4096)
     }
+
+    /// Telegram implements all four: `editMessageText`, `deleteMessage`,
+    /// `setMessageReaction`, `sendChatAction`.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::Implemented;
+        wcore_channels::NativeActions::none()
+            .edit(Implemented)
+            .delete(Implemented)
+            .react(Implemented)
+            .typing(Implemented)
+            .note("delete: Telegram permits a bot to delete only messages younger than 48h; the platform's own 400 surfaces as Rejected")
+    }
+
+    /// `editMessageText` — see [`api::edit_message_text`].
+    ///
+    /// The new text is escaped for the configured parse mode by the same
+    /// [`config::escape_markdown_v2`] / [`config::escape_html`] the send path
+    /// uses. Skipping that would make an edit containing a reserved character
+    /// fail with `can't parse entities` where the original send succeeded —
+    /// i.e. the edit path would be strictly more fragile than the send path for
+    /// the same string.
+    async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        let message_id: i64 = message_id
+            .parse()
+            .map_err(|_| ChannelError::Rejected("invalid message_id".to_string()))?;
+
+        let escaped;
+        let text: &str = match self.config.parse_mode {
+            ParseMode::MarkdownV2 => {
+                escaped = config::escape_markdown_v2(new_text);
+                &escaped
+            }
+            ParseMode::Html => {
+                escaped = config::escape_html(new_text);
+                &escaped
+            }
+            ParseMode::Markdown => new_text,
+        };
+
+        let body = api::EditMessageTextBody {
+            chat_id: conversation_id,
+            message_id,
+            text,
+            parse_mode: Some(self.config.parse_mode.as_api_str()),
+        };
+        let result = api::edit_message_text(&self.http, &self.api_base, token, &body)
+            .await
+            .map_err(ChannelError::from)?;
+        Ok(MessageReceipt {
+            id: result.message_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            ts_secs: result.date,
+        })
+    }
+
+    /// `deleteMessage` — see [`api::delete_message`].
+    async fn delete_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        let message_id: i64 = message_id
+            .parse()
+            .map_err(|_| ChannelError::Rejected("invalid message_id".to_string()))?;
+        let body = api::DeleteMessageBody {
+            chat_id: conversation_id,
+            message_id,
+        };
+        api::delete_message(&self.http, &self.api_base, token, &body)
+            .await
+            .map_err(ChannelError::from)
+    }
 }
 
 // ===========================================================================
@@ -1427,5 +1506,155 @@ parse_mode = "MarkdownV2"
             ch.poll_handle.is_none(),
             "poll task must not spawn on auth failure"
         );
+    }
+
+    // ---- native actions: edit / delete (Phase 24 C3) ----------------------
+
+    /// A started channel whose long-poll finds nothing, so the mutate tests
+    /// exercise only the REST path they name.
+    async fn started_for_mutate(server: &mut mockito::Server) -> TelegramChannel {
+        let _updates = server
+            .mock("GET", format!("/bot{TEST_TOKEN}/getUpdates").as_str())
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":[]}"#)
+            .expect_at_least(0)
+            .create_async()
+            .await;
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        ch
+    }
+
+    #[tokio::test]
+    async fn edit_hits_edit_message_text_with_chat_and_message_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/editMessageText").as_str())
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "chat_id": "42",
+                "message_id": 7,
+                "text": "edited body"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"result":{"message_id":7,"date":1700000000,"chat":{"id":42,"type":"private"}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_for_mutate(&mut server).await;
+        let receipt = ch
+            .edit_message("42", "7", "edited body")
+            .await
+            .expect("edit succeeds");
+        assert_eq!(receipt.id, "7");
+        assert_eq!(receipt.conversation_id, "42");
+        assert_eq!(receipt.ts_secs, 1_700_000_000);
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// The edit escapes reserved characters for the configured parse mode, the
+    /// same way the send path does.
+    ///
+    /// Without this the edit path would be strictly MORE fragile than the send
+    /// path for an identical string: `a_b` sends fine and the edit of it would
+    /// fail with `can't parse entities`. The mock matches the escaped body, so
+    /// dropping the escape reddens here.
+    #[tokio::test]
+    async fn edit_escapes_reserved_characters_for_the_configured_parse_mode() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/editMessageText").as_str())
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "text": "a\\_b",
+                "parse_mode": "MarkdownV2"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"result":{"message_id":7,"date":1,"chat":{"id":42,"type":"private"}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_for_mutate(&mut server).await;
+        // POSITIVE CONTROL: confirm MarkdownV2 really is the mode under test,
+        // so a config default change cannot silently make this vacuous.
+        assert_eq!(ch.config.parse_mode.as_api_str(), "MarkdownV2");
+        ch.edit_message("42", "7", "a_b").await.expect("edit ok");
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_hits_delete_message_with_chat_and_message_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/deleteMessage").as_str())
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "chat_id": "42",
+                "message_id": 7
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"result":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_for_mutate(&mut server).await;
+        ch.delete_message("42", "7").await.expect("delete succeeds");
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// **The failing direction.** Telegram's 48-hour delete window is enforced
+    /// by the platform, not by us, and its refusal must reach the operator
+    /// verbatim rather than being smoothed into a success.
+    #[tokio::test]
+    async fn a_delete_the_platform_refuses_is_an_error_carrying_its_reason() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/deleteMessage").as_str())
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"ok":false,"error_code":400,"description":"Bad Request: message can't be deleted"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_for_mutate(&mut server).await;
+        let err = ch.delete_message("42", "7").await.unwrap_err();
+        assert!(
+            !matches!(err, ChannelError::Unsupported { .. }),
+            "got Unsupported — the delete override is missing: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("can't be deleted"), "msg = {msg}");
+        ch.stop().await.unwrap();
+    }
+
+    /// Declaration ↔ behaviour, both directions.
+    #[tokio::test]
+    async fn native_action_declaration_matches_behaviour() {
+        use wcore_channels::ActionSupport;
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let ch = TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
+        let a = ch.native_actions();
+        assert_eq!(a.edit, ActionSupport::Implemented);
+        assert_eq!(a.delete, ActionSupport::Implemented);
+        assert_eq!(a.react, ActionSupport::Implemented);
+        assert_eq!(a.typing, ActionSupport::Implemented);
+
+        // Unstarted → NotStarted proves the override ran; the trait default
+        // would have answered Unsupported.
+        let e = ch.edit_message("42", "7", "x").await.unwrap_err();
+        assert!(matches!(e, ChannelError::NotStarted), "got {e:?}");
+        let d = ch.delete_message("42", "7").await.unwrap_err();
+        assert!(matches!(d, ChannelError::NotStarted), "got {d:?}");
     }
 }

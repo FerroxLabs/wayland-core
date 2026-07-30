@@ -114,6 +114,29 @@ pub enum ChannelCmd {
     /// Adapters whose configuration did not change keep their running
     /// instance; changed ones are replaced and deconfigured ones are stopped.
     Reload,
+    /// Print the native-action matrix: for each configured channel, whether
+    /// edit / delete / react / typing are implemented, permanently absent from
+    /// the platform, or simply not built yet.
+    ///
+    /// Read-only and offline in the same sense as `list`: adapters are
+    /// CONSTRUCTED so their own declaration can be asked for, but never
+    /// started, and no network call is made. Unlike `probe` this does not
+    /// contact the platform at all.
+    ///
+    /// Exits non-zero when `--require` names an operation some channel cannot
+    /// perform, so an operator can gate a deployment on "every channel I have
+    /// configured can actually delete".
+    Actions {
+        /// Report only this channel. Default: every configured channel.
+        #[arg(long)]
+        name: Option<String>,
+        /// Fail unless EVERY reported channel implements this operation.
+        /// One of `edit`, `delete`, `react`, `typing`. Repeatable.
+        #[arg(long, value_name = "OP")]
+        require: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolve the home whose `channels/` directory and gateway files we act on.
@@ -268,7 +291,148 @@ pub async fn run(args: ChannelArgs) -> Result<()> {
         ChannelCmd::Probe { name, json } => probe(name.as_deref(), json).await,
         ChannelCmd::Health { json } => health(json),
         ChannelCmd::Reload => reload(),
+        ChannelCmd::Actions {
+            name,
+            require,
+            json,
+        } => actions(name.as_deref(), &require, json).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// actions — the native-action matrix
+// ---------------------------------------------------------------------------
+
+/// The four operations, in the order [`wcore_channels::NativeActions::entries`]
+/// yields them, so the CLI table and the conformance matrix agree on order.
+const ACTION_OPS: [&str; 4] = ["edit", "delete", "react", "typing"];
+
+/// Print each configured channel's DECLARED native-action surface.
+///
+/// # Where the answer comes from, and why this verb is offline
+///
+/// Following the truth-source discipline in this module's docs: the answer is
+/// a property of the ADAPTER TYPE, so it needs neither a running gateway (like
+/// `health`) nor a platform round trip (like `probe`). Adapters are
+/// constructed so their own declaration can be read, and nothing is started.
+///
+/// The distinction the table exists to draw is the one an operator otherwise
+/// cannot make: `no (platform)` means the platform has no such API and no
+/// amount of work closes it, while `NOT BUILT` is our backlog. Before this
+/// verb, both surfaced identically — as an `Unsupported` error, and only if
+/// you made the call.
+async fn actions(only: Option<&str>, require: &[String], json: bool) -> Result<()> {
+    for op in require {
+        if !ACTION_OPS.contains(&op.as_str()) {
+            bail!(
+                "--require {op:?} is not an operation; expected one of {}",
+                ACTION_OPS.join(", ")
+            );
+        }
+    }
+
+    let home = home()?;
+    let dir = channels_dir(&home);
+
+    let config = resolve_config_for_credentials()?;
+    let store = config
+        .open_credentials_store()
+        .context("cannot open the credentials store")?;
+    let creds: Arc<dyn wcore_config::credentials::CredentialsStore> = Arc::from(store);
+
+    let mut mgr = ChannelManager::new();
+    let registered = wcore_channels_registry::auto_register_from_dir(&mut mgr, &dir, creds)
+        .await
+        .with_context(|| format!("cannot load channels from {}", dir.display()))?;
+
+    // Same refusal as `probe`. An empty table would read as "no channel can do
+    // anything", which is a different claim from "no channel could be built" —
+    // the false-zero shape this module's docs are about.
+    if registered == 0 {
+        bail!(
+            "no channels could be constructed from {} — nothing to report",
+            dir.display()
+        );
+    }
+
+    let mut rows = mgr.native_action_matrix().await;
+    if let Some(want) = only {
+        rows.retain(|(n, _, _)| n == want);
+        if rows.is_empty() {
+            bail!("no configured channel named {want:?}");
+        }
+    }
+
+    if json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(name, platform, a)| {
+                serde_json::json!({
+                    "name": name,
+                    "platform": platform,
+                    "edit": a.edit.as_str(),
+                    "delete": a.delete.as_str(),
+                    "react": a.react.as_str(),
+                    "typing": a.typing.as_str(),
+                    "note": a.note,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!(
+            "{:<18} {:<10} {:<14} {:<14} {:<14} {:<14}",
+            "CHANNEL", "PLATFORM", "EDIT", "DELETE", "REACT", "TYPING"
+        );
+        for (name, platform, a) in &rows {
+            let cell = |s: wcore_channels::ActionSupport| match s {
+                wcore_channels::ActionSupport::Implemented => "yes",
+                wcore_channels::ActionSupport::PlatformHasNoApi => "no (platform)",
+                wcore_channels::ActionSupport::NotImplemented => "NOT BUILT",
+            };
+            println!(
+                "{:<18} {:<10} {:<14} {:<14} {:<14} {:<14}",
+                name,
+                platform,
+                cell(a.edit),
+                cell(a.delete),
+                cell(a.react),
+                cell(a.typing)
+            );
+            if !a.note.is_empty() {
+                println!("    note: {}", a.note);
+            }
+        }
+    }
+
+    // `--require` turns the report into a gate. Every unmet requirement is
+    // listed, not just the first: an operator fixing one at a time and
+    // re-running is how a five-minute check becomes five round trips.
+    let mut unmet: Vec<String> = Vec::new();
+    for op in require {
+        for (name, platform, a) in &rows {
+            let support = match op.as_str() {
+                "edit" => a.edit,
+                "delete" => a.delete,
+                "react" => a.react,
+                "typing" => a.typing,
+                _ => unreachable!("validated above"),
+            };
+            if !support.is_implemented() {
+                unmet.push(format!("{name} ({platform}) {op}: {}", support.as_str()));
+            }
+        }
+    }
+    if !unmet.is_empty() {
+        for u in &unmet {
+            eprintln!("REQUIRED BUT UNAVAILABLE: {u}");
+        }
+        bail!(
+            "{} of the required operations are unavailable on the configured channels",
+            unmet.len()
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

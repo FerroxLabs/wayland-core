@@ -875,6 +875,41 @@ impl ChannelManager {
         Some(guard.media_bounds())
     }
 
+    /// The native-action surface channel `name` declares via
+    /// [`Channel::native_actions`](crate::Channel::native_actions), or `None`
+    /// if no such channel is registered.
+    ///
+    /// Read this BEFORE calling [`Self::edit_on`] / [`Self::delete_on`] when the
+    /// answer matters and the call does not: a delete is a request a caller may
+    /// not want to issue speculatively just to discover the platform has no
+    /// delete endpoint.
+    pub async fn native_actions_on(&self, name: &str) -> Option<crate::NativeActions> {
+        let slot = self.channels.get(name)?;
+        let guard = slot.lock().await;
+        Some(guard.native_actions())
+    }
+
+    /// Every registered adapter's `(name, platform, declared actions)`, sorted
+    /// by name — the machine-readable native-action matrix.
+    ///
+    /// Sorted so a rendered matrix is diffable between runs; an unsorted matrix
+    /// whose rows shuffle looks changed when it is not.
+    pub async fn native_action_matrix(&self) -> Vec<(String, String, crate::NativeActions)> {
+        let mut out = Vec::with_capacity(self.channels.len());
+        for name in self.list_names() {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            out.push((
+                name.clone(),
+                guard.platform().to_string(),
+                guard.native_actions(),
+            ));
+        }
+        out
+    }
+
     /// List names of registered channels, sorted alphabetically.
     pub fn list_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.channels.keys().cloned().collect();

@@ -146,6 +146,31 @@ impl MsTeamsChannel {
         }
         Ok(())
     }
+
+    /// Resolve `(serviceUrl, conversationId, connector token)` for a
+    /// `{serviceUrl}|{conversationId}` chat id — the three things every
+    /// Connector call needs.
+    ///
+    /// Factored out for the mutate verbs rather than copied a third time.
+    /// `send_message` and `send_typing` predate it and are deliberately left
+    /// alone: rewriting two working, tested send paths to share a helper is a
+    /// drive-by refactor, and this lane's diff is meant to be reviewable.
+    async fn connector_context(
+        &self,
+        chat_id: &str,
+    ) -> Result<(String, String, String), ChannelError> {
+        let (app_id, app_password) = match (&self.app_id, &self.app_password) {
+            (Some(id), Some(pw)) => (id.clone(), pw.clone()),
+            _ => return Err(ChannelError::NotStarted),
+        };
+        let (service_url, conv_id) = parse_chat_id(chat_id, &self.config.service_url);
+        let token = self
+            .token_cache
+            .get_token(&self.http, &app_id, &app_password, &self.token_url)
+            .await
+            .map_err(|e| ChannelError::Auth(format!("token: {e}")))?;
+        Ok((service_url, conv_id, token))
+    }
 }
 
 #[async_trait]
@@ -411,6 +436,114 @@ impl Channel for MsTeamsChannel {
             let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::Rejected(format!(
                 "Teams typing failed ({status}): {body}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// MS Teams: the Connector REST API has `PUT` and `DELETE` on the ACTIVITY
+    /// resource and a `typing` activity, but **no reaction-send endpoint** —
+    /// Teams reactions are a client/Graph concern, not a connector capability.
+    ///
+    /// That last one is the reason this type distinguishes
+    /// `PlatformHasNoApi` from `NotImplemented`: reactions here are not a task
+    /// somebody forgot, they are absent from the surface this adapter speaks.
+    /// The pre-existing note on [`Self::send_typing`] recorded the fact in
+    /// prose; this makes it readable by a caller.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::{Implemented, PlatformHasNoApi};
+        wcore_channels::NativeActions::none()
+            .edit(Implemented)
+            .delete(Implemented)
+            .react(PlatformHasNoApi)
+            .typing(Implemented)
+            .note(
+                "react: the Bot Framework Connector REST API exposes no \
+                 reaction-send endpoint (Teams reactions are client/Graph)",
+            )
+    }
+
+    /// `PUT {serviceUrl}v3/conversations/{conv}/activities/{activityId}` — the
+    /// Connector's update-activity verb. `message_id` is the activity id a send
+    /// receipt carries.
+    async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let (service_url, conv_id, token) = self.connector_context(conversation_id).await?;
+        let url = format!(
+            "{service_url}v3/conversations/{}/activities/{}",
+            urlencoding_encode(&conv_id),
+            urlencoding_encode(message_id),
+        );
+
+        let activity = Activity {
+            activity_type: "message",
+            text: new_text,
+            text_format: "plain",
+        };
+
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&activity)
+            .send()
+            .await
+            .map_err(|e| ChannelError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::Rejected(format!(
+                "Teams edit failed ({status}): {body}"
+            )));
+        }
+
+        // The update response echoes `{"id": ...}`; an empty body is also legal
+        // for a successful update, in which case the id is unchanged.
+        let echoed: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        let id = echoed
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(message_id)
+            .to_string();
+
+        Ok(MessageReceipt {
+            id,
+            conversation_id: conversation_id.to_string(),
+            ts_secs: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    /// `DELETE {serviceUrl}v3/conversations/{conv}/activities/{activityId}`.
+    async fn delete_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let (service_url, conv_id, token) = self.connector_context(conversation_id).await?;
+        let url = format!(
+            "{service_url}v3/conversations/{}/activities/{}",
+            urlencoding_encode(&conv_id),
+            urlencoding_encode(message_id),
+        );
+
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| ChannelError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::Rejected(format!(
+                "Teams delete failed ({status}): {body}"
             )));
         }
         Ok(())
@@ -863,6 +996,156 @@ service_url = "https://smba.trafficmanager.net/emea/"
             matches!(unknown, ChannelError::Config(_)),
             "unknown channel must surface Config (-> 404); got {unknown:?}"
         );
+    }
+
+    // ---- native actions: edit / delete (Phase 24 C3) ----------------------
+
+    /// A started channel plus a mocked token endpoint, shared by the mutate
+    /// cases so each one only mocks the verb it is about.
+    async fn started_with_token(server: &mut mockito::Server) -> MsTeamsChannel {
+        server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"test_bearer","expires_in":3600,"token_type":"Bearer"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let creds = MemCreds::with(&[
+            ("msteams.test.app_id", "app-id-value"),
+            ("msteams.test.app_password", "app-secret-value"),
+        ]);
+        let mut ch =
+            MsTeamsChannel::with_token_url("test", cfg(), creds, format!("{}/token", server.url()));
+        ch.start().await.unwrap();
+        ch
+    }
+
+    /// The edit is a `PUT` on the ACTIVITY resource
+    /// (`…/activities/{activityId}`), not a `POST` to the activities
+    /// COLLECTION. Those two differ by one path segment and one verb, and
+    /// getting it wrong posts a second message instead of editing the first —
+    /// a silent duplicate. The mock pins both.
+    #[tokio::test]
+    async fn edit_puts_to_the_activity_resource_not_the_collection() {
+        let mut server = mockito::Server::new_async().await;
+        let edit_mock = server
+            .mock(
+                "PUT",
+                mockito::Matcher::Regex(
+                    r"/v3/conversations/[^/]+/activities/1%3Aactivity_id_here".to_string(),
+                ),
+            )
+            .match_header("authorization", "Bearer test_bearer")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "type": "message",
+                "text": "edited body"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"1:activity_id_here"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_with_token(&mut server).await;
+        let chat_id = format!("{}|19:conversation_abc", server.url());
+        let receipt = ch
+            .edit_message(&chat_id, "1:activity_id_here", "edited body")
+            .await
+            .expect("edit succeeds");
+        assert_eq!(receipt.id, "1:activity_id_here");
+
+        edit_mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_hits_the_activity_resource_with_delete() {
+        let mut server = mockito::Server::new_async().await;
+        let del_mock = server
+            .mock(
+                "DELETE",
+                mockito::Matcher::Regex(
+                    r"/v3/conversations/[^/]+/activities/1%3Aactivity_id_here".to_string(),
+                ),
+            )
+            .match_header("authorization", "Bearer test_bearer")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_with_token(&mut server).await;
+        let chat_id = format!("{}|19:conversation_abc", server.url());
+        ch.delete_message(&chat_id, "1:activity_id_here")
+            .await
+            .expect("delete succeeds");
+
+        del_mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// **The failing direction.** A Connector `403` must surface as an error
+    /// carrying the platform's status, not as a success.
+    #[tokio::test]
+    async fn a_refused_delete_is_an_error_not_a_silent_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "DELETE",
+                mockito::Matcher::Regex(r"/v3/conversations/[^/]+/activities/.*".to_string()),
+            )
+            .with_status(403)
+            .with_body(r#"{"error":{"code":"BotNotInConversationRoster"}}"#)
+            .create_async()
+            .await;
+
+        let mut ch = started_with_token(&mut server).await;
+        let chat_id = format!("{}|19:conversation_abc", server.url());
+        let err = ch.delete_message(&chat_id, "1:x").await.unwrap_err();
+        assert!(
+            !matches!(err, ChannelError::Unsupported { .. }),
+            "got Unsupported — the delete override is missing: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("403"),
+            "the connector status must reach the operator, got {err}"
+        );
+        ch.stop().await.unwrap();
+    }
+
+    /// Declaration ↔ behaviour, **both directions in one test** — this is the
+    /// only adapter in the workspace with one op on each side of the line, so
+    /// it is where the distinction is actually load-bearing.
+    #[tokio::test]
+    async fn native_action_declaration_matches_behaviour_on_both_sides() {
+        use wcore_channels::ActionSupport;
+        let ch = MsTeamsChannel::new("test", cfg(), MemCreds::empty());
+        let a = ch.native_actions();
+        assert_eq!(a.edit, ActionSupport::Implemented);
+        assert_eq!(a.delete, ActionSupport::Implemented);
+        assert_eq!(a.typing, ActionSupport::Implemented);
+        assert_eq!(a.react, ActionSupport::PlatformHasNoApi);
+
+        // POSITIVE side: declared Implemented → the override runs and answers
+        // NotStarted, never Unsupported.
+        let e = ch.edit_message("svc|conv", "1:x", "y").await.unwrap_err();
+        assert!(matches!(e, ChannelError::NotStarted), "got {e:?}");
+        let d = ch.delete_message("svc|conv", "1:x").await.unwrap_err();
+        assert!(matches!(d, ChannelError::NotStarted), "got {d:?}");
+
+        // NEGATIVE side: declared PlatformHasNoApi → the trait default answers
+        // Unsupported, naming the op and the platform. If someone implements
+        // Teams reactions and forgets the declaration, this reddens.
+        let r = ch.react("svc|conv", "1:x", "👀").await.unwrap_err();
+        match r {
+            ChannelError::Unsupported { op, platform } => {
+                assert_eq!(op, "react");
+                assert_eq!(platform, "msteams");
+            }
+            other => panic!("declared PlatformHasNoApi but got {other:?}"),
+        }
     }
 
     #[test]
