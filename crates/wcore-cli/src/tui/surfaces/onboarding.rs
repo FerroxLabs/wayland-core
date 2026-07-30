@@ -3137,25 +3137,29 @@ mod tests {
 
     /// The residual hole, pinned so it is a measured cost and not a surprise.
     ///
-    /// A message whose first TWO characters both bind shortcuts fires both and
-    /// loses both — there is no prose yet to establish that a sentence is being
-    /// written, so each is read as the shortcut it is documented to be. Closing
-    /// it would mean letting only one shortcut ever fire per card, which breaks
-    /// `s` then space (and `j` then `j`) — things people do repeatedly — to
-    /// save two characters in a case that needs a first message beginning
-    /// `s `, `o `, `1 ` or the like.
+    /// A message whose first TWO characters both bind shortcuts has each of
+    /// them read as the shortcut it is documented to be, because no prose has
+    /// yet arrived to establish that a sentence is being written. Measured
+    /// cost: `s hello` keeps ` hello` — the leading `s` is gone (and in the
+    /// live router the space also fires the handoff, so `hello` is what
+    /// reaches the composer).
+    ///
+    /// Closing it would mean letting only one shortcut ever fire per card,
+    /// which breaks `s` then space and `j` then `j` — things people do
+    /// repeatedly — to save one character in a case that needs a first message
+    /// beginning `s `, `o `, `1 ` or the like.
     ///
     /// If this ever needs closing, the honest fix is to stop binding bare
     /// letters as accelerators on a surface that also receives prose, not to
     /// make the lookahead cleverer.
     #[test]
-    fn a_message_beginning_with_two_shortcut_characters_loses_them() {
+    fn a_message_beginning_with_two_shortcut_characters_loses_the_first() {
         let mut surface = fresh();
         let mut app = App::new();
         type_str(&mut surface, &mut app, "s hello");
         assert_eq!(
             surface.take_typeahead().as_deref(),
-            Some("hello"),
+            Some(" hello"),
             "known residual: a leading `s ` is read as skip-then-confirm"
         );
         // The far commoner shape — one shortcut letter then prose — is NOT
