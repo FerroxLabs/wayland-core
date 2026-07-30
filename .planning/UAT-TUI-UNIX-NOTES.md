@@ -28,4 +28,29 @@ Not compiling it. Not `cargo test`. Driving it.
 2. Can I obtain a genuine arm64 Mach-O macOS artifact? If not → macOS reported UNRUN, not substituted.
 3. Does the TUI even attach under `script`/`tmux` on a headless box?
 
+### T1 — artifact provenance established (both platforms)
+
+**Linux (hetzner) pre-existing binary is NOT at integration base — attributability trap.**
+- `/root/wayland` tree: HEAD `e9bed1af`, `git status --porcelain` = 0 lines (clean).
+- `/root/wayland/target/release/wayland-core`: mtime `2026-07-30 09:35:35 UTC`.
+- `e9bed1af` commit time: `2026-07-30 16:51:51 +0700` = **09:51:51 UTC**.
+- The binary therefore predates its own checkout by **16 minutes**. A lane running that binary
+  and reporting "UAT at e9bed1af" would be stating something false with a clean tree to back it up.
+  → I am building my own at `e9bed1af` in `/root/wayland-uat-tui-unix` (worktree asserted
+  `WT_SHA=e9bed1af...`, DIRTY=0).
+
+**macOS arm64 artifact obtained — genuine, verified with a discriminating control.**
+- Source: run `30524784173`, artifact `8752771508` `wayland-core-aarch64-apple-darwin`,
+  head_sha `a903142b` ("merge(darwin-ci-selfhosted)"). `a903142b` **is an ancestor** of `e9bed1af`
+  (`git merge-base --is-ancestor` rc=0), **33 commits behind**.
+- `file` → `Mach-O 64-bit executable arm64`; `lipo -archs` → `arm64`.
+- **Control**: `lipo -archs /bin/ls` → `x86_64 arm64e`. The instrument discriminates, so the
+  subject's single-arch `arm64` is a real reading and not a dead tool returning one value.
+- sha256 `e5803944aead3c987b8b158a71576bc2d0b49dde6e71a6463df20590089c662b`, 80,209,792 bytes.
+- Runs on this Mac: `./wayland-core --version` → `wayland-core 0.12.25`, rc=0.
+- Codesign: `adhoc, linker-signed`, `TeamIdentifier=not set`. No Developer ID. (Distribution finding.)
+- No darwin artifact exists at `e9bed1af`: its CI run `30532433958` is `status=pending` with
+  **zero jobs scheduled** — CI starvation. macOS leg is therefore at `a903142b`, disclosed, not
+  substituted with the Linux result.
+
 (appended as work proceeds)
