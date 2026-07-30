@@ -153,8 +153,49 @@ different, weaker claim.
 ## Plan
 
 1. ~~Raw-curl ground truth for the idempotency question.~~ **DONE — see M4.**
-2. Author `crates/wcore-channels-registry/tests/live_slack_actions.rs` driving the production
-   factory, env-gated, every leg with a both-directions control.
-3. `cargo fmt --all -- --check` on the Mac; `cargo check --workspace --all-targets` on hetzner.
-4. Live-run the test from the Mac (network egress).
-5. Report skipped cells as skipped, with the exact missing scope. A skip is not a pass.
+2. ~~Author the live test.~~ **DONE** — `crates/wcore-channels-registry/tests/live_slack_actions.rs`.
+3. ~~fmt + compile.~~ **DONE — see M5.**
+4. ~~Live-run.~~ **DONE — see M5.**
+5. Fix the HIGH the run reproduced. ← next
+
+## M5 — LIVE RUN through the production adapter: 4/5 PASS, idempotency FAILS
+
+`cargo check -p wcore-channels-registry --all-targets` on hetzner at
+`81718bb276e2332a129ee4e5719b93abdbd4cd75` (worktree SHA asserted equal to the pushed head):
+**rc=0**. `cargo fmt --all -- --check` on the Mac: **rc=0**.
+
+Live run on hetzner (the Mac cannot compile). Credentials injected **on stdin only**, never in
+argv, never written to disk — the §0 sanctioned exception, disclosed here and in the summary.
+Secret sweep of the run log on hetzner **and** independently on the Mac against the live values:
+**0 hits for the bot token, 0 for the signing secret.** Sweep instrument proven alive on a
+known-positive in the same capture (`WL-LIVE-SLACK` found).
+
+```
+running 1 test
+  PASS  send         sent ts=1785385433.854489 and read it back from history;
+                     a fabricated channel was refused with channel_not_found
+  PASS  edit         edited ts=1785385434.912479; history text changed "…edit-before" -> "…edit-after";
+                     a fabricated ts was refused with message_not_found
+  PASS  delete       deleted ts=1785385436.335589 and confirmed its ABSENCE from history;
+                     the second delete of the same ts was refused with message_not_found
+  PASS  receive      read ts=1785385437.708659 back from conversations.history; the real record,
+                     independently signed and replayed through ingest_webhook, surfaced as
+                     MessageReceived; a corrupted signature was rejected and enqueued nothing
+  FAIL  idempotency  declares supports_outbound_idempotency() == true, so a replayed key must
+                     produce 1 message. It produced 2. ts 1785385438.299299 then .564099
+  clean channel: no marker messages remain
+  4/5 legs passed
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`WLRC=101`, `WLDONE` present. The executed count is **1 test run, 0 ignored, 0 filtered out** —
+not a vacuous suite.
+
+**The red is the correct outcome and is NOT being engineered away.** It reproduces M4's raw-API
+finding through the shipped adapter and the production registry factory, which is the strongest
+form of the evidence. The fix is to make the declaration true to the platform, not to soften the
+test.
+
+Note the failure message is generated from the declaration, not hardcoded: the leg asserts
+`arrivals == if declared {1} else {2}`. After the fix it goes green, and it would redden again if
+anyone re-asserted the guarantee or if Slack ever started honouring the header.
