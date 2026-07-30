@@ -253,6 +253,108 @@ Discord silently posts the second copy. **A false `true` is more dangerous than 
 `false`** — which is the exact argument `delivery-semantics.md` §6 already makes, applied to
 the row that violates it.
 
+## CAPABILITIES 2 and 3: edit and delete — PASS
+
+Driven through the **production registration path** (`auto_register_from_dir` + `ChannelManager`
+— the same functions `gateway run` uses at `wcore-cli/src/gateway.rs:929`), because no operator
+verb reaches them (finding F24-C3-D1 above).
+
+`cargo test -p wcore-channels-registry --test live_discord_actions -- --ignored`:
+
+```
+LIVE_SENT id=1532235755945070672 conv=1532226655102173318
+LIVE_EDITED id=1532235755945070672
+LIVE_EDIT_KNOWN_NEGATIVE_ERR=Rejected("404: Unknown Message")
+LIVE_DELETED id=1532235755945070672
+LIVE_DELETE_KNOWN_NEGATIVE_ERR=Rejected("404: delete: status 404 Not Found")
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Executed count read back, per §3.2 — this is not a suite that ran zero tests.
+
+**Both directions, in-process:** editing a nonexistent id fails 404; deleting an
+already-deleted id fails 404. **Both directions, independently at Discord:**
+
+| check | result |
+|---|---|
+| deleted message `1532235755945070672` | `deleted_msg_http=404` |
+| known-positive in the same capture — a message that still exists | `known_positive_existing_msg_http=200` |
+| edited message `1532236030105616524` content now | `'WL-EDITPROOF-1785383936-AFTER'` |
+| the pre-edit text | absent (`BEFORE_absent= True`) |
+| Discord's own edit marker | `edited_timestamp= 2026-07-30T03:58:57.461Z` |
+
+The `edited_timestamp` matters: it is Discord recording an EDIT, which distinguishes a real
+edit from "deleted the old one and posted a new one".
+
+## CAPABILITY 4: receive — PARTIAL. Transport now proven; the last hop needs a human.
+
+It was **impossible** before this lane: the socket panicked on every connect (F24-C3-D2). After
+the fix, at SHA `cf857965`, with `RUST_LOG=wcore_channel_discord=debug`:
+
+```
+READY received; session captured for resume                     -> 1
+MESSAGE_CREATE received from the Discord gateway
+    channel_id=1532226655102173318 author_is_bot=true content_len=50
+CryptoProvider panics                                           -> 0   (was 84)
+known-negative control                                          -> 0
+```
+
+Two things are proven that never had been:
+
+1. **The privileged intent is genuinely live.** The adapter IDENTIFYs with `intents=37376`
+   (`GUILD_MESSAGES | MESSAGE_CONTENT | DIRECT_MESSAGES`). Discord closes a connection with
+   **4014 Disallowed intent** when a privileged intent is requested but not granted. We got
+   READY instead, which is the platform itself confirming the grant — independent of the
+   app-flags read I did earlier, and stronger.
+2. **A real MESSAGE_CREATE crossed the live socket carrying non-empty content**:
+   `content_len=50`, exactly the length of the body I posted (`expected_content_len=50`).
+
+**What is NOT proven, stated plainly:** that a **human-authored** message becomes an
+`IncomingMessage` on `poll_events`. `map_message_create` (`gateway.rs:322-325`) drops **every**
+bot-authored message, not merely its own — so the bot cannot source its own inbound event, and
+neither can a channel webhook (Discord marks webhook messages `author.bot = true` too). I hold
+no human Discord account and credentials are Sean-reserved, so I did not run this leg.
+
+**It is now a one-line test for any human:** with the fixed binary running, type anything in
+`#general` and the debug log will show `author_is_bot=false` with a non-zero `content_len`.
+Before this lane that experiment would have measured nothing, because the socket never opened.
+
+## Doc + capability correction (the required outcome)
+
+`supports_outbound_idempotency()` for Discord: `true` → **`false`**.
+`docs/delivery-semantics.md`: 3-of-10 → **2-of-10** exactly-once, 7 → **8** at-most-once, the
+Discord row rewritten, the code-provenance table, the Windows §5 note, §6, the machine-readable
+block (`discord = at-most-once`), plus a new **§8** recording the measurement and its controls.
+
+**The enforcement gate proved it can fail before it was updated.** With the capability flipped
+and the census test still expecting three, the run went red exactly where it should:
+
+```
+test exactly_three_adapters_are_exactly_once ... FAILED
+delivery_semantics_declaration.rs:302
+test result: FAILED. 7 passed; 1 failed
+```
+
+That is direction-1 evidence for the doc/code binding (§3.2) obtained for free. Renamed to
+`exactly_two_adapters_are_exactly_once` and green after.
+
+Final run, hetzner, SHA `6170d6d6`:
+`wcore-channels-registry + wcore-channel-discord + wcore-gateway + wcore-channels` →
+**304 passed, 0 failed, TEST_RC=0** (3 ignored = my two live tests + 1 pre-existing);
+`wcore-cli --test f24_c1_outbound_idempotency` → **6 passed, 0 failed, rc=0**.
+
+## Secret hygiene
+
+Token reached hetzner on **stdin only**, never `argv`, never a log, never an evidence file. The
+hang proxy has `log_message` stubbed out precisely because the Authorization header transits it.
+Sweep over all 8 committed files with `/usr/bin/grep -c -F`:
+
+```
+0  (each of the 8 changed files)
+1  known-positive-control.txt   <- the sweep is alive
+0  files-with-hits-in-evidence-dir
+```
+
 ## Log
 
 - [t0] Worktree created, SHA asserted, brief + delivery-semantics + ledger 24-C3 rows read.
