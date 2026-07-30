@@ -144,9 +144,56 @@ test proving it can still pass.
 
 ---
 
+---
+
+## Decision 1 — `[secrets]` / `keychain:` — REMOVE. Cross-audit 4/4.
+
+Question put to the panel is `/tmp/chanonb-audit-q.txt` (reproduced in the SUMMARY).
+Raw replies: `/tmp/chanonb-audit-{codex,gemini,kimi}.txt`.
+
+| panelist | vote | on the error message |
+|---|---|---|
+| codex `gpt-5.6-sol` | **B — remove** | NAMED migration error |
+| gemini `3.1-pro-preview` | **B — remove** | NAMED migration error ("MUST") |
+| kimi K3 | **B — remove** | NAMED migration error |
+| internal adversarial (argued FOR keeping) | **B — remove** | NAMED migration error |
+
+Unanimous. Extraction note (LANE-BRIEF §4): codex repeats its final block — took the LAST
+`PANEL_POSITION=`; kimi bullet-prefixes and indents — matched unanchored, its vote is on an
+indented `• PANEL_POSITION=B` line and an anchored `^PANEL_POSITION=` regex would have
+dropped it, exactly as the brief warns.
+
+### The internal adversarial pass, which I ran arguing AGAINST removal
+
+Best case for keeping/implementing, and why it loses:
+
+1. *"`[secrets]` is the only inline escape hatch — on a headless host with no keyring a user
+   has nowhere else to put a secret."* — Loses. `CredentialsStore` already has
+   `PlaintextCredentialsStore`, `EncryptedFileCredentialsStore` and `FallbackCredentialsStore`
+   selected by config, so the headless case is a *store-backend* problem handled one layer down —
+   and it is precisely what sibling lane `fix-headless-keyring` is repairing. Adding an
+   inline-secret path here would undercut that lane and put plaintext secrets back into a
+   per-channel file users paste into bug reports.
+2. *"Removal breaks existing configs under `deny_unknown_fields`."* — Loses. Those configs
+   are already broken, silently. Removal converts a silent auth failure into a named parse
+   error. Strictly better for the same user.
+3. **The decisive point, which the panel only half-reached: `[secrets]` HAS NO CONSUMER
+   CONTRACT.** Even if the `keychain:<svc>:<acct>` string were resolved, there is nowhere to
+   put the resulting value. Adapters read `creds.get(<handle from [options]>)`. No adapter
+   field is bound to a `[secrets]` key; the resemblance between the fixture's `bot_token` and
+   `SlackConfig::credential_handle_bot_token` is naming coincidence, not a binding. To
+   "implement" it you would have to inject the resolved values into the `CredentialsStore`
+   under synthesized keys — i.e. reimplement handles, with a second syntax. **The feature was
+   never finished, not merely unimplemented**, so there is no design to restore.
+
+So: remove the field, remove the doc comments, and reject a legacy `[secrets]` table with a
+named error that points at the working path.
+
+---
+
 ## Open questions / next steps
 
 1. Reproduce the ORIGINAL failure on hetzner with the release binary before changing docs.
-2. Cross-audit the remove-vs-implement decision on `keychain:`.
+2. ~~Cross-audit the remove-vs-implement decision~~ — done, 4/4 remove.
 3. Build `channel credential set|list|remove`, stdin-only for the value.
 4. Doc-honesty test per Measurement 5, with a can-fail proof.
