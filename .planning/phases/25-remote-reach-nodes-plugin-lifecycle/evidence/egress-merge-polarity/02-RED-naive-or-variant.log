@@ -1,0 +1,36 @@
+running 7 tests
+test operator_off_switch_survives_a_project_silent_on_security ... FAILED
+test trusted_project_config_must_not_disable_the_egress_gate ... ok
+test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
+test control_operator_global_off_switch_disables_the_gate ... FAILED
+test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test untrusted_project_config_must_not_disable_the_egress_gate ... ok
+test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
+
+failures:
+
+---- operator_off_switch_survives_a_project_silent_on_security stdout ----
+warning: /tmp/.tmpjGPL2H/config.toml has permissions 0o644; tightening to 0o600 on next write
+warning: /tmp/.tmp5D2bII/.wayland-core.toml has permissions 0o644; tightening to 0o600 on next write
+
+thread 'operator_off_switch_survives_a_project_silent_on_security' (3292814) panicked at crates/wcore-agent/tests/egress_merge_polarity_test.rs:338:5:
+a project config that is SILENT on `[security]` must not resurrect the egress gate the operator switched off globally — `enabled` defaults to true, so `global || project` gets this wrong
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- control_operator_global_off_switch_disables_the_gate stdout ----
+warning: /tmp/.tmpPGcF9x/config.toml has permissions 0o644; tightening to 0o600 on next write
+warning: /tmp/.tmphV8Jf4/.wayland-core.toml has permissions 0o644; tightening to 0o600 on next write
+
+thread 'control_operator_global_off_switch_disables_the_gate' (3292813) panicked at crates/wcore-agent/tests/egress_merge_polarity_test.rs:232:5:
+the operator's global `[security] enabled = false` must survive the merge
+
+
+failures:
+    control_operator_global_off_switch_disables_the_gate
+    operator_off_switch_survives_a_project_silent_on_security
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-agent --test egress_merge_polarity_test`
+WLRC=101
+WLDONE

@@ -4417,18 +4417,43 @@ fn merge_config_files_with_trust(
     // `enabled = false` even though `true` now equals `MemoryConfig::default`.
     let memory = project.memory.or(global.memory);
 
-    // B2 — security: the egress gate stays ON unless a layer turns it off
-    // (most-restrictive `enabled`), and the operator allowlists concatenate
-    // (global first, then project), mirroring the hooks/skills merge.
+    // B2 — security. GHSA-8r7g, same family as `auto_approve` above: the egress
+    // master switch is OPERATOR-OWNED. It is read from the trusted GLOBAL layer
+    // only, so a project config (untrusted — it travels with a cloned repo) can
+    // never turn off a boundary the user's global config turned on.
     //
-    // This comment previously asserted that a config `enabled = false` "still
-    // requires the `--i-accept-exfil-risk` CLI flag to be honored (C8), so the
-    // merge can't silently disable the boundary." That flag DOES NOT EXIST, so
-    // the reassurance was false: most-restrictive merge is the ONLY thing
-    // standing between a project-local config and a disabled egress boundary.
-    // Corrected 2026-07-29 by lane `25-c4-egress`.
+    // This merge was `global.security.enabled && project.security.enabled`, and
+    // the comment called that "most-restrictive". For a GATE that is backwards:
+    // `enabled = true` means the boundary is ON, so `&&` lets EITHER layer
+    // switch it OFF — it is the LEAST restrictive merge on this field. A cloned
+    // repo shipping `[security] enabled = false` silently reduced the policy to
+    // `AgentEgressPolicy::disabled()`, which is a literal allow-all. There is no
+    // `--i-accept-exfil-risk` interlock behind it: that flag does not exist
+    // (measured 2026-07-29 by lane `25-c4-egress`), so the merge was the only
+    // thing standing in the way, and it was pointing the wrong way.
+    //
+    // Note this is deliberately NOT `global || project`, the polarity used by
+    // `default.read_only` above. `read_only` defaults to FALSE, so absence is
+    // the identity element for `||`. `enabled` defaults to TRUE
+    // (`#[serde(default = "default_true")]`), which is the identity for `&&` and
+    // ABSORBING for `||` — under `||` a project file that says nothing at all
+    // about `[security]` deserializes to `true` and would override the
+    // operator's deliberate global `enabled = false`. Measured: the `||` variant
+    // reddens `control_operator_global_off_switch_disables_the_gate` and
+    // `operator_off_switch_survives_a_project_silent_on_security` in
+    // `wcore-agent/tests/egress_merge_polarity_test.rs`. Reading the trusted
+    // layer alone keeps the operator's documented config-file off switch working
+    // (it is the switch the TUI writes, via `patch_global_config`) while giving
+    // the project layer no say at all.
+    //
+    // `egress_allow` still concatenates (global first, then project), mirroring
+    // the hooks/skills merge. That WIDENS rather than disables, and it is
+    // trust-gated: `restrict_untrusted_project_config` drops the project's
+    // entries entirely until the operator has granted the workspace
+    // fingerprint, exactly like project `[providers]`, `[mcp.servers]` and
+    // `tools.skills.allow`.
     let security = SecurityConfig {
-        enabled: global.security.enabled && project.security.enabled,
+        enabled: global.security.enabled,
         egress_allow: [global.security.egress_allow, project.security.egress_allow].concat(),
     };
 
@@ -4540,10 +4565,24 @@ fn restrict_untrusted_project_config(project: ConfigFile) -> ConfigFile {
     restricted.tools.skills.deny = project.tools.skills.deny;
     restricted.tools.verify_edits = project.tools.verify_edits;
 
-    // A repository may tighten egress and disable Anvil, but cannot add an
-    // origin, command gate, provider, MCP server, hook or executable skill
-    // permission until its independently stored fingerprint is trusted.
-    restricted.security.enabled = project.security.enabled;
+    // A repository may disable Anvil, but cannot add an origin, command gate,
+    // provider, MCP server, hook or executable skill permission until its
+    // independently stored fingerprint is trusted.
+    //
+    // `security.enabled` is deliberately NOT forwarded. This line used to read
+    // `restricted.security.enabled = project.security.enabled;` under the
+    // comment "a repository may tighten egress" — but for the egress gate
+    // `enabled = false` LOOSENS: it drops the policy to allow-all. So the one
+    // function whose whole job is neutralizing an untrusted project config was
+    // explicitly carrying that config's ability to switch the exfil boundary
+    // off, on the path taken by every freshly cloned repository. The merge now
+    // reads the operator's global value alone (see the `[security]` block in
+    // `merge_config_files_with_trust`), which makes this forward both
+    // unnecessary and misleading.
+    //
+    // Anvil keeps its forward because its polarity is the opposite:
+    // `anvil.enabled = false` removes an automation rail, so a project turning
+    // it off really is a narrowing.
     restricted.anvil.enabled = project.anvil.enabled;
 
     // F23A-01-H1: `skills_lifecycle = false` is an authority boundary (see the
@@ -5956,7 +5995,19 @@ gate = ["attacker-command"]
 
         assert!(merged.tools.skills.deny.contains(&"blocked".to_string()));
         assert!(merged.tools.verify_edits);
-        assert!(!merged.security.enabled);
+        // This assertion previously read `assert!(!merged.security.enabled)`,
+        // under a test named "narrowing survives" — it pinned the untrusted
+        // project's `[security] enabled = false` as a NARROWING that ought to
+        // survive. It is the opposite: `enabled = false` drops the egress policy
+        // to allow-all, so what the old assertion actually locked in was an
+        // untrusted repository's ability to switch the exfil boundary off. The
+        // egress switch is operator-owned now, so the attacker-supplied `false`
+        // must NOT survive.
+        assert!(
+            merged.security.enabled,
+            "an untrusted project's `[security] enabled = false` must not \
+             disable the operator's egress boundary"
+        );
         assert!(!merged.anvil.enabled);
         assert!(merged.anvil.gate.is_empty());
     }

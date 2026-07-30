@@ -1,0 +1,18 @@
+MARKER_HEAD=c81fc65734da2900dc744320556a019bce3d0608
+MARKER_MERGE_LINE=4456:        enabled: global.security.enabled,
+MARKER_SEG_ONE_BEGIN
+running 7 tests
+test trusted_project_config_must_not_disable_the_egress_gate ... ok
+test control_operator_global_off_switch_disables_the_gate ... ok
+test control_gate_denies_exfil_when_the_project_is_silent_on_security ... ok
+test trusted_project_egress_allow_widens_the_boundary_by_design ... ok
+test operator_off_switch_survives_a_project_silent_on_security ... ok
+test untrusted_project_cannot_append_to_the_egress_allowlist ... ok
+test untrusted_project_config_must_not_disable_the_egress_gate ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+MARKER_SEG_ONE_RC=0
+MARKER_SEG_TWO_BEGIN
+running 574 tests
+test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 105.20s
+MARKER_SEG_TWO_RC=0
+MARKER_ALLDONE
