@@ -1,0 +1,11 @@
+• This is a question-answer task, no code changes needed. Just answer directly.
+
+• PANEL_POSITION=D
+
+  **Pick: (D) — operator-provided path, spawn-and-fail-closed.**
+
+  **Strongest reason:** It is the only option that satisfies all three stated constraints *by construction* rather than by engineering around them. The bridge is an existing, maintained, Electron-product artifact with its own lifecycle and its own 122 MB dependency tree. (D) treats it as what it is: an external service the CLI connects to. Zero Node installed → meta-business default works untouched, binary unchanged, no vendored code, no npm side effects, no network fetches of third-party JS at runtime. Opt-in is a config key, Node never becomes a dependency, and "fail closed with an actionable message naming exactly what is missing" converts every failure mode into a support-ticket-proof error. It also cleanly sidesteps the license/attribution question: you are *executing* the operator's own copy of MIT/Apache-2.0 code, not redistributing it — no need to carry attribution headers, license texts, or a vendored node_modules in your release artifacts.
+
+  **Strongest argument against (D):** It pushes the integration burden onto the operator. Unlike (B) or (C), there is no smooth "it just works" path — the user must already have the bridge checked out *and* `npm install`ed, and the CLI has no control over bridge version drift: a config key naming a path says nothing about whether that bridge.js speaks the JSON-RPC dialect the CLI expects, so you will eventually need a handshake/version probe at spawn time and a compatibility matrix you don't fully own. (C) in particular would give you version pinning and a one-command setup at the cost of a runtime network fetch and supply-chain surface — a real trade-off you are giving up.
+
+To resume this session: kimi -r session_7d7d6153-1336-462f-a089-e1f7c5ec95d3

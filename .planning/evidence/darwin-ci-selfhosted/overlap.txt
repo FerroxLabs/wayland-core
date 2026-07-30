@@ -1,0 +1,2 @@
+spans: 37 overlaps: 0 (a one-job-at-a-time runner must have 0)
+UNION busy = 295.3 min over 348.2 min window -> 84.8% (sum-based said 84.8%)

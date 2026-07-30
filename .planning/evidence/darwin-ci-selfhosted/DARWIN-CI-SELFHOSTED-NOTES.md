@@ -189,11 +189,29 @@ exactly the "report a YAML edit as a working change" the brief forbids.
 evidence-backed follow-up with the panel's named mitigations (per-triple dir, pruning, artifact
 provenance check), not taken here.
 
-## Open questions this lane must still answer
+## T7 — live proof, and both directions
 
-1. Real duty cycle of runner 34 over the window since the job landed — not the 7.2 pushes/hr
-   estimate. Needs executed-job durations + a busy-fraction, cancelled runs excluded (the
-   cancelled-span defect that once produced "61 concurrent macOS jobs").
-2. Does moving a second job fit inside that measured duty cycle, on a machine Sean works on?
-3. A real Actions run proving whatever I change actually executes — a YAML diff is not evidence
-   (`lane/glibc-reach` precedent).
+Run `30523806783`, sha `9f3e1543`, one push, one runner slot. Self-hosted job present BY NAME,
+`runner_id=34`, queue 3 s, 8.00 min, 9/9 steps success. Artifact re-downloaded and independently
+verified `arm64` + executes, with `lipo -archs /bin/ls -> x86_64 arm64e` as the discriminating
+control. Hosted-macOS absence checked against a known-positive: identical matcher = **2** on the
+integration run, **0** on mine. Inherited `gate.py`: `GATE_FAILURES=0` and `SELF_TEST=PASS`
+(5/5 mutation arms caught).
+
+Caveat recorded honestly: my 3-second queue wait is a best case. Jobs earlier the same morning
+waited 85-151 min. Duty cycle (84.8%), not my sample, is the capacity figure.
+
+## T8 — instrument defect in MY OWN evidence capture, repaired (§6b-ii)
+
+`panel-kimi.txt` was committed at **0 bytes** while its source was 1907 bytes — the dissenting
+vote would have been absent from the evidence while the summary claimed to weigh it. Repaired
+with a `src_bytes == dst_bytes && != 0` assertion, proven able to fail on an emptied probe
+(`COPY-VERIFY FAIL .probe.tmp src=1907 dst=0`). Both panel files re-verified at 1907 / 5198 bytes.
+
+## Answers to the open questions
+
+1. Duty cycle: **84.8%** over 5.80 h, 37 executed jobs, 0 overlaps, union == sum. Answered.
+2. Does a second job fit? **No** — ~15% headroom, and the candidate job detects nothing.
+3. Live run: **yes**, run 30523806783, both directions controlled. Answered.
+
+**Final: decision B. Nothing moved, no workflow file touched. See `.planning/DARWIN-CI-SELFHOSTED.md`.**

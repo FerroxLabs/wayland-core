@@ -1,0 +1,8 @@
+control run (integration branch): 30517009690
+--- IDENTICAL matcher applied to the CONTROL run ---
+2
+--- the matching lines ---
+CI (macos-latest)
+Build (x86_64-apple-darwin)
+--- same matcher on MY run (expect 0) ---
+0
