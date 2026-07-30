@@ -199,3 +199,31 @@ test.
 Note the failure message is generated from the declaration, not hardcoded: the leg asserts
 `arrivals == if declared {1} else {2}`. After the fix it goes green, and it would redden again if
 anyone re-asserted the guarantee or if Slack ever started honouring the header.
+
+## M6 — fix landed and RE-PROVEN; the same gate driven red then green
+
+Fix at `28098809`. Live matrix re-run at that commit: **5/5 PASS**,
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
+
+```
+PASS idempotency  declared=false; replayed key -> 2 arrival(s); a distinct key -> 3
+5/5 legs passed
+```
+
+One assertion, two outcomes, caused by the product change:
+
+| commit | declaration | arrivals | gate |
+|---|---|---|---|
+| `81718bb2` | `true` | 2 | **RED** |
+| `28098809` | `false` | 2 | **GREEN** |
+
+That is §3b-iii satisfied on the real thing rather than argued: the gate can fail and it can pass,
+and both were observed.
+
+Clippy `-D warnings` over the three touched crates initially caught a `needless_borrow` in my own
+test — repaired at `3316fbe5`, re-run rc=0. `cargo check --workspace --all-targets` rc=0 with
+**120 crates checked** (count read back; a no-op run cannot pass as a clean one).
+
+Channel verified empty from the Mac after the final run: 2 `channel_join` events, 0 WL markers.
+Final secret sweep across `.planning/`, `crates/` and `docs/`: **0 files** contain either live
+value; sweep instrument proven alive (`WL-LIVE-SLACK` found in 5 files).
