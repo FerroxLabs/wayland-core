@@ -1,0 +1,128 @@
+failures:
+
+---- child_transaction::tests::rejects_append_reopen_reduce_corruption stdout ----
+
+thread 'child_transaction::tests::rejects_append_reopen_reduce_corruption' (3277268) panicked at crates/wcore-agent/src/child_transaction.rs:1101:65:
+called `Result::unwrap()` on an `Err` value: AlreadyOwned { lease_path: "/tmp/.tmpJqbQGG/session.journal" }
+
+---- engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop stdout ----
+
+thread 'engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop' (3277598) panicked at crates/wcore-agent/src/engine.rs:24123:60:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpWcIsCH/2f557d2d4b8c.journal
+
+---- engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch stdout ----
+
+thread 'engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch' (3277531) panicked at crates/wcore-agent/src/engine.rs:26350:61:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpOiWT8y/f14ca11ce100.journal
+
+---- engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state stdout ----
+
+thread 'engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state' (3277555) panicked at crates/wcore-agent/src/engine.rs:24214:60:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpX4yFEM/f14000a.journal
+
+---- engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch stdout ----
+
+thread 'engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch' (3277597) panicked at crates/wcore-agent/src/engine.rs:23622:57:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpLte3lr/f14b0001.journal
+
+---- engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call stdout ----
+
+thread 'engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call' (3277583) panicked at crates/wcore-agent/src/engine.rs:24480:56:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpYDrHTF/f14c005.journal
+
+---- goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition stdout ----
+
+thread 'goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition' (3277907) panicked at crates/wcore-agent/src/goal/strategy.rs:936:69:
+journal reopens: AlreadyOwned { lease_path: "/tmp/.tmpNh01ri/session.journal" }
+
+---- orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary stdout ----
+
+thread 'orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary' (3278372) panicked at crates/wcore-agent/src/orchestration/mod.rs:156:13:
+injected approval crash at AfterRequested
+
+thread 'orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary' (3278372) panicked at crates/wcore-agent/src/orchestration/f13_durability_tests.rs:1088:63:
+called `Result::unwrap()` on an `Err` value: AlreadyOwned { lease_path: "/tmp/.tmpKNwuG8/session.journal" }
+
+---- orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects stdout ----
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at BeforePrepared
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at AfterPrepared
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at BeforeRunning
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at AfterRunning
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at AfterPhysicalEffect
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:146:13:
+injected dispatcher crash at BeforeTerminalAppend
+
+thread 'orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects' (3278485) panicked at crates/wcore-agent/src/orchestration/mod.rs:3917:67:
+called `Result::unwrap()` on an `Err` value: AlreadyOwned { lease_path: "/tmp/.tmpRtV3tv/session.journal" }
+
+---- session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal stdout ----
+
+thread 'session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal' (3278923) panicked at crates/wcore-agent/src/session.rs:1191:58:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmp2fWCOq/ba89bd5f3642.journal
+
+---- session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror stdout ----
+
+thread 'session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror' (3278922) panicked at crates/wcore-agent/src/session.rs:1236:58:
+called `Result::unwrap()` on an `Err` value: session journal writer lease is already held at /tmp/.tmpygRf8l/d9559bf5c95a.journal
+
+---- session::tests::test_f034_empty_session_gc stdout ----
+
+thread 'session::tests::test_f034_empty_session_gc' (3278941) panicked at crates/wcore-agent/src/session.rs:1506:9:
+old empty session must be GC'd
+
+---- session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable stdout ----
+
+thread 'session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable' (3279030) panicked at crates/wcore-agent/src/session_lifecycle.rs:1252:47:
+called `Result::unwrap()` on an `Err` value: Journal { path: "/tmp/.tmprsG34q/0838ac91df4e.journal", source: AlreadyOwned { lease_path: "/tmp/.tmprsG34q/0838ac91df4e.journal" } }
+
+
+failures:
+    child_transaction::tests::rejects_append_reopen_reduce_corruption
+    engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch
+    engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state
+    engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call
+    engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch
+    engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop
+    goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition
+    orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary
+    orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects
+    session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror
+    session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal
+    session::tests::test_f034_empty_session_gc
+    session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable
+
+test result: FAILED. 2239 passed; 13 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.43s
+
+error: test failed, to rerun pass `-p wcore-agent --lib`
+test engine::retry_wedge_protection_tests::wire_fingerprint_covers_every_provider_visible_surface ... ok
+test engine::ijfw_session_start_e2e_tests::ijfw_prelude_reaches_cold_session_as_untrusted_user_block ... ok
+test engine::durable_session_authority_tests::fresh_engine_binds_shared_authority_only_after_canonical_init ... ok
+test engine::session_start_apply_tests::oversized_multibyte_prelude_truncates_on_a_char_boundary ... ok
+test child_transaction::tests::rejects_append_reopen_reduce_corruption ... FAILED
+test engine::session_start_apply_tests::pre_prompt_applies_into_user_tail ... ok
+test engine::session_start_apply_tests::pre_prompt_contribution_is_budget_capped ... ok
+test engine::session_start_apply_tests::pre_prompt_dedups_against_block_already_in_request ... ok
+test engine::session_start_apply_tests::pre_prompt_reapplies_across_turns_no_cross_turn_suppression ... ok
+test engine::session_start_apply_tests::pre_prompt_skips_non_user_tail ... ok
+test engine::audit_2026_05_22_tests::engine_owned_budget_guard_cancels_current_host_turn ... ok
+test engine::session_start_apply_tests::no_dispatcher_applies_nothing ... ok
+test budget_authority::tests::fallback_reservation_ignores_prior_attempts_under_same_dispatch ... ok
+test engine::session_start_apply_tests::resumed_session_skips_prelude ... ok
+test engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop ... FAILED
+test engine::set_config_tests::called_deferred_tool_is_declared_on_subsequent_turns ... ok
+test engine::session_start_apply_tests::cold_session_applies_untrusted_prelude_block ... ok
+test engine::audit_2026_05_22_tests::recovery_rejects_stale_cursor_before_provider_dispatch ... ok
+test engine::set_config_tests::catalog_mode_emits_no_stub_entries_and_config_off_restores_stubs ... ok
+test engine::set_config_tests::inject_history_between_rebinds_does_not_double_the_name ... ok
+test engine::audit_2026_05_22_tests::durable_image_turn_is_preserved_and_pre_checkpoint_crash_fails_closed ... ok

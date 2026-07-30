@@ -1208,6 +1208,42 @@ jobs:
           path: junit-reports
         continue-on-error: true
 
+      # A TEST STEP THAT NEVER RAN MUST NOT BE REPORTABLE AS ANYTHING BUT A
+      # FAILURE. Added 2026-07-30 (lane/fix-clippy-gate) after measuring the
+      # consequence of not having it.
+      #
+      # The `ci` matrix uploads its JUnit with `if: always()` AND
+      # `if-no-files-found: ignore` (line ~331). When a leg dies before its test
+      # step — as every completed Windows self-hosted job in the last 40 runs did,
+      # 5 of 5, all at "Clippy (warnings = errors)" with "Run tests (nextest CI
+      # profile)" SKIPPED — `target/nextest/ci/junit.xml` is never written, so the
+      # artifact is silently not created. `report` then finds zero XML, the
+      # `hashFiles(...) != ''` guard below skips the only step that does anything,
+      # and **the `report` job concludes SUCCESS**. A green check named `report`
+      # whose actual meaning is "zero tests ran anywhere" is indistinguishable in
+      # the checks list from one that published a clean suite. That is how Windows
+      # read green while running no tests, continuously, since 4d5f8ec9.
+      #
+      # This step closes it: no JUnit at all is a hard failure with a named
+      # annotation, so the absence of test signal is louder than a test failure
+      # rather than quieter. It is skipped only on a CANCELLED `ci` — a run the
+      # user or the concurrency gate stopped was never going to produce evidence
+      # and should not be re-reported as a defect.
+      - name: Assert test evidence exists (a skipped test step is not a pass)
+        if: ${{ needs.ci.result != 'cancelled' }}
+        run: |
+          set -euo pipefail
+          mkdir -p junit-reports
+          FOUND=$(find junit-reports -type f -name '*.xml' | sort)
+          COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
+          echo "ci job result      : ${{ needs.ci.result }}"
+          echo "junit report count : $COUNT"
+          printf '%s\n' "$FOUND"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error title=NO TEST SIGNAL::The ci matrix produced zero nextest JUnit reports, so no test ran on any leg. The ci job result was '${{ needs.ci.result }}'. A leg that dies before its test step (for example at the Clippy step) leaves no artifact, and without this check the report job would have gone GREEN on zero tests. See .planning/lanes/fix-clippy-gate/NOTES.md."
+            exit 1
+          fi
+
       - name: Publish test report
         uses: dorny/test-reporter@v3
         if: hashFiles('junit-reports/**/*.xml') != ''

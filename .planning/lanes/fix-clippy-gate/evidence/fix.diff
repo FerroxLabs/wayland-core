@@ -1,0 +1,130 @@
+diff --git a/crates/wcore-agent/tests/cache_ledger_engine_test.rs b/crates/wcore-agent/tests/cache_ledger_engine_test.rs
+index b81e12f7..efeddca1 100644
+--- a/crates/wcore-agent/tests/cache_ledger_engine_test.rs
++++ b/crates/wcore-agent/tests/cache_ledger_engine_test.rs
+@@ -79,7 +79,6 @@ fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> TokenUsa
+         output_tokens: output,
+         cache_read_tokens: cache_read,
+         cache_creation_tokens: cache_write,
+-        ..Default::default()
+     }
+ }
+ 
+diff --git a/crates/wcore-agent/tests/user_model_identity_wire.rs b/crates/wcore-agent/tests/user_model_identity_wire.rs
+index 98d87fc9..e0a5b736 100644
+--- a/crates/wcore-agent/tests/user_model_identity_wire.rs
++++ b/crates/wcore-agent/tests/user_model_identity_wire.rs
+@@ -226,7 +226,7 @@ fn user_model_path(cwd: &Path) -> std::path::PathBuf {
+ /// (`LocalBackend::observe`), at the path bootstrap reads from.
+ async fn seed_bucket(cwd: &Path, bucket: &str, fingerprint: [f32; 4]) {
+     let backend =
+-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
++        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
+     backend
+         .observe(
+             bucket,
+@@ -334,7 +334,7 @@ async fn the_resolved_user_ids_model_reaches_the_wire() {
+     // site's fault and not a seeding failure. This is the control whose
+     // absence would let a broken seeder read as a broken renderer.
+     let backend =
+-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
++        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
+     let seeded = backend.brief(NAMED_USER_ID).await.expect("brief");
+     assert!(
+         (seeded.style.formality - 0.5).abs() < 1e-6,
+@@ -393,7 +393,7 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
+     // produce the same "absent from the wire" result as a correct fix, and the
+     // assertion below would pass for free.
+     let backend =
+-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
++        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
+     let other = backend.brief(DEFAULT_BUCKET).await.expect("brief");
+     assert!(
+         (other.style.energy - 0.5).abs() < 1e-6,
+@@ -469,7 +469,7 @@ async fn the_prefix_render_expression_reads_an_empty_bucket() {
+     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;
+ 
+     let backend =
+-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
++        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
+ 
+     // --- the OLD read, replayed verbatim ---------------------------------
+     let old_brief = backend.brief(DEFAULT_BUCKET).await.unwrap_or_default();
+diff --git a/crates/wcore-browser/tests/process_count_reaper_baseline_test.rs b/crates/wcore-browser/tests/process_count_reaper_baseline_test.rs
+index 255b234d..6a819eb6 100644
+--- a/crates/wcore-browser/tests/process_count_reaper_baseline_test.rs
++++ b/crates/wcore-browser/tests/process_count_reaper_baseline_test.rs
+@@ -96,10 +96,11 @@ fn process_tree_size(root: u32) -> usize {
+             if tree.contains(&p) {
+                 continue;
+             }
+-            if let Some(pp) = ppid_of(p) {
+-                if tree.contains(&pp) && alive(p) {
+-                    tree.push(p);
+-                }
++            if let Some(pp) = ppid_of(p)
++                && tree.contains(&pp)
++                && alive(p)
++            {
++                tree.push(p);
+             }
+         }
+         if tree.len() == before {
+diff --git a/crates/wcore-cron/tests/single_owner.rs b/crates/wcore-cron/tests/single_owner.rs
+index 2bf74eb9..3ac89a13 100644
+--- a/crates/wcore-cron/tests/single_owner.rs
++++ b/crates/wcore-cron/tests/single_owner.rs
+@@ -502,7 +502,7 @@ fn cross_process_lease_worker() {
+ 
+ /// Spawn a child worker against `dir`, and wait for it to publish a verdict.
+ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
+-    let child = std::process::Command::new(std::env::current_exe().unwrap())
++    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+         .args(["--exact", "cross_process_lease_worker", "--nocapture"])
+         .env(CHILD_DIR_ENV, dir)
+         .env(CHILD_OUT_ENV, out)
+@@ -511,13 +511,24 @@ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Ch
+         .spawn()
+         .expect("re-executing the test binary as a child must succeed");
+     for _ in 0..300 {
+-        if let Ok(text) = std::fs::read_to_string(out) {
+-            if text.starts_with("STARTED") {
+-                return child;
+-            }
++        if let Ok(text) = std::fs::read_to_string(out)
++            && text.starts_with("STARTED")
++        {
++            return child;
+         }
+         std::thread::sleep(std::time::Duration::from_millis(50));
+     }
++    // The child never published its marker, so nobody downstream holds a handle
++    // to it — and the `panic!` below is about to unwind past the `tempfile`
++    // guard that owns the directory the child is working in. Left alone, the
++    // child keeps running: `cross_process_lease_worker` spins for up to 30s
++    // waiting for a `.release` file this process will now never write, holding
++    // the schedule lease the whole time, and then panics writing its `.exited`
++    // marker into a directory that has been deleted underneath it. Reap it here
++    // so the timeout path fails loudly instead of leaking an orphan that
++    // outlives the test binary and can poison the next case's lease.
++    let _ = child.kill();
++    let _ = child.wait();
+     panic!(
+         "child never reached its START marker at {} — the participant did not launch, \
+          so nothing was contended",
+diff --git a/crates/wcore-memory/src/activation.rs b/crates/wcore-memory/src/activation.rs
+index e588e88e..a3b0e19b 100644
+--- a/crates/wcore-memory/src/activation.rs
++++ b/crates/wcore-memory/src/activation.rs
+@@ -194,8 +194,10 @@ mod tests {
+         assert!(last.injected.is_empty());
+     }
+ 
++    /// `record` overwrites rather than appends, so the surface always describes
++    /// the **latest** turn — never a stale one.
+     #[test]
+-    fn record_overwrites_so_the_surface_describes_the_LATEST_turn() {
++    fn record_overwrites_so_the_surface_describes_the_latest_turn() {
+         let log = ActivationLog::new();
+         log.record(RecallActivation {
+             at: 1,

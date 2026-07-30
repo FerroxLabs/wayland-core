@@ -502,7 +502,7 @@ fn cross_process_lease_worker() {
 
 /// Spawn a child worker against `dir`, and wait for it to publish a verdict.
 fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cross_process_lease_worker", "--nocapture"])
         .env(CHILD_DIR_ENV, dir)
         .env(CHILD_OUT_ENV, out)
@@ -511,13 +511,21 @@ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Ch
         .spawn()
         .expect("re-executing the test binary as a child must succeed");
     for _ in 0..300 {
-        if let Ok(text) = std::fs::read_to_string(out) {
-            if text.starts_with("STARTED") {
-                return child;
-            }
+        if let Ok(text) = std::fs::read_to_string(out)
+            && text.starts_with("STARTED")
+        {
+            return child;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // The participant never launched, so nothing was contended. Reap it before
+    // panicking rather than leaking it: a child left alive here outlives the
+    // test process, and — because it may yet take the lease — it would hold the
+    // exclusion the NEXT case tries to contend against, turning one failure
+    // into a cascade of unrelated ones. On Windows it also survives as a
+    // genuine orphan, since there is no process group to collect it.
+    let _ = child.kill();
+    let _ = child.wait();
     panic!(
         "child never reached its START marker at {} — the participant did not launch, \
          so nothing was contended",

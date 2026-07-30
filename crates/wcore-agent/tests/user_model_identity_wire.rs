@@ -226,7 +226,7 @@ fn user_model_path(cwd: &Path) -> std::path::PathBuf {
 /// (`LocalBackend::observe`), at the path bootstrap reads from.
 async fn seed_bucket(cwd: &Path, bucket: &str, fingerprint: [f32; 4]) {
     let backend =
-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
     backend
         .observe(
             bucket,
@@ -334,7 +334,7 @@ async fn the_resolved_user_ids_model_reaches_the_wire() {
     // site's fault and not a seeding failure. This is the control whose
     // absence would let a broken seeder read as a broken renderer.
     let backend =
-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
     let seeded = backend.brief(NAMED_USER_ID).await.expect("brief");
     assert!(
         (seeded.style.formality - 0.5).abs() < 1e-6,
@@ -393,7 +393,7 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
     // produce the same "absent from the wire" result as a correct fix, and the
     // assertion below would pass for free.
     let backend =
-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
     let other = backend.brief(DEFAULT_BUCKET).await.expect("brief");
     assert!(
         (other.style.energy - 0.5).abs() < 1e-6,
@@ -469,7 +469,7 @@ async fn the_prefix_render_expression_reads_an_empty_bucket() {
     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;
 
     let backend =
-        LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+        LocalBackend::with_persistence(user_model_path(cwd)).expect("open user-model store");
 
     // --- the OLD read, replayed verbatim ---------------------------------
     let old_brief = backend.brief(DEFAULT_BUCKET).await.unwrap_or_default();

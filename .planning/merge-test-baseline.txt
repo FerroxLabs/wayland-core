@@ -1,0 +1,38 @@
+# merge-test-baseline.txt — tests known to be failing on the integration branch.
+#
+# Consumed by .planning/scripts/merge-test-gate.sh. A failure listed here is
+# tolerated; a failure NOT listed here reddens the merge gate; and an entry here
+# that starts PASSING also reddens it, so this file can only shrink without a
+# deliberate edit. It is a ledger of accepted debt, NOT a suppression list — do
+# not add a line to make a new failure go away.
+#
+# Every entry must carry: who established it is pre-existing, and where it is
+# being handled. An entry with no disposition is a bug in this file.
+#
+# Established at 43c84493 (lane/fix-clippy-gate) on hetzner-dsm, from two
+# independent full-workspace runs: `cargo nextest run --workspace --profile ci
+# --no-fail-fast` -> "13562 tests run: 13559 passed, 3 failed, 72 skipped" both
+# times, with the identical three IDs. Deterministic, not flake noise.
+#
+# Format: "<binary> <test>" exactly as nextest prints it after the timing and
+# progress fields are stripped.
+
+# 1. The keyring behaviour change vs a 2026-07-16 assertion.
+#    c73ac417 made a host with no secure store degrade and run the turn; this
+#    test (crates/wcore-cli/tests/f14_sigkill_recovery.rs:1106) asserts the
+#    opposite, including that the provider is never reached. Independently
+#    proven pre-existing by three lanes. The underlying conflict is a product
+#    decision escalated to Sean; it is deliberately NOT being made to pass.
+#    This gate exists BECAUSE of this incident — see the script header.
+wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+
+# 2. Desktop wire-contract fixture drift. Regenerating it means
+#    `wcore-contract generate`, which LANE-BRIEF.md §0 reserves as a
+#    release-coordination action, so no lane may clear this one unilaterally.
+#    Needs a seam request.
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+
+# 3. Failed in both full-workspace runs at 43c84493. In crates/wcore-cli, which
+#    lane/fix-clippy-gate did not touch. NOT diagnosed by this lane — recorded so
+#    the gate has a reachable pass state, and flagged as needing an owner.
+wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
