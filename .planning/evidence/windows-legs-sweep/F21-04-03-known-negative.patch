@@ -1,0 +1,27 @@
+diff --git a/crates/wcore-agent/src/session_journal.rs b/crates/wcore-agent/src/session_journal.rs
+index 622407f2..d5e8aa8a 100644
+--- a/crates/wcore-agent/src/session_journal.rs
++++ b/crates/wcore-agent/src/session_journal.rs
+@@ -545,11 +545,21 @@ impl SessionJournal {
+     where
+         F: FnOnce(&ReducedSessionState) -> Result<SessionEvent, JournalError>,
+     {
++        // KNOWN-NEGATIVE MUTATION (F21-04-03). Reverts the atomic-capture
++        // repair: read the head under one lock acquisition, RELEASE it, then
++        // append under a second. This is the exact pre-1eb9b5ca shape and must
++        // never be committed.
++        let event = {
++            let writer = self
++                .inner
++                .lock()
++                .map_err(|_| JournalError::WriterPoisoned)?;
++            build_event(&writer.state)?
++        };
+         let mut writer = self
+             .inner
+             .lock()
+             .map_err(|_| JournalError::WriterPoisoned)?;
+-        let event = build_event(&writer.state)?;
+         writer.append(event)
+     }
+ 

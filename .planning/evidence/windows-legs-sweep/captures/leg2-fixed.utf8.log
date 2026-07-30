@@ -1,0 +1,660 @@
+﻿cargo :    Compiling proc-macro2 v1.0.106
+At line:1 char:121
++ ... ls\target"; cargo test -p wcore-agent --lib budget_authority -- --noc ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling windows-link v0.2.1
+   Compiling memchr v2.8.1
+   Compiling log v0.4.30
+   Compiling itoa v1.0.18
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling libm v0.2.16
+   Compiling getrandom v0.3.4
+   Compiling bytes v1.11.1
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling futures-core v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.8.2
+   Compiling subtle v2.6.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling autocfg v1.5.1
+   Compiling futures-sink v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling slab v0.4.12
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling windows-sys v0.61.2
+   Compiling getrandom v0.2.17
+   Compiling lock_api v0.4.14
+   Compiling zmij v1.0.21
+   Compiling cpufeatures v0.2.17
+   Compiling thiserror v2.0.18
+   Compiling futures-channel v0.3.32
+   Compiling ryu v1.0.23
+   Compiling fnv v1.0.7
+   Compiling rand_core v0.6.4
+   Compiling tracing-core v0.1.36
+   Compiling ipnet v2.12.0
+   Compiling dunce v1.0.5
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling fs_extra v1.3.0
+   Compiling serde_json v1.0.150
+   Compiling zerocopy v0.8.50
+   Compiling percent-encoding v2.3.2
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.10.1
+   Compiling base64 v0.22.1
+   Compiling aws-lc-rs v1.17.0
+   Compiling rustls-pki-types v1.14.1
+   Compiling generic-array v0.14.7
+   Compiling stable_deref_trait v1.2.1
+   Compiling libc v0.2.186
+   Compiling anyhow v1.0.103
+   Compiling untrusted v0.9.0
+   Compiling untrusted v0.7.1
+   Compiling hashbrown v0.17.1
+   Compiling httparse v1.10.1
+   Compiling either v1.16.0
+   Compiling num-traits v0.2.19
+   Compiling rustls v0.23.40
+   Compiling http v1.4.1
+   Compiling tower-service v0.3.3
+   Compiling form_urlencoded v1.2.2
+   Compiling atomic-waker v1.1.2
+   Compiling try-lock v0.2.5
+   Compiling httpdate v1.0.3
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling sync_wrapper v1.0.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling tower-layer v0.3.3
+   Compiling fastrand v2.4.1
+   Compiling webpki-roots v1.0.7
+   Compiling regex-syntax v0.8.10
+   Compiling base64ct v1.8.3
+   Compiling want v0.3.1
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling workspace-hack v0.1.0 (D:\wls\repo\workspace-hack)
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling winnow v1.0.3
+   Compiling jobserver v0.1.34
+   Compiling windows-targets v0.52.6
+   Compiling option-ext v0.2.0
+   Compiling aho-corasick v1.1.4
+   Compiling mime v0.3.17
+   Compiling byteorder v1.5.0
+   Compiling unicase v2.9.0
+   Compiling ahash v0.8.12
+   Compiling pkg-config v0.3.33
+   Compiling vcpkg v0.2.15
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling windows-sys v0.59.0
+   Compiling glob v0.3.3
+   Compiling io-lifetimes v2.0.4
+   Compiling semver v1.0.28
+   Compiling cc v1.2.63
+   Compiling unsafe-libyaml v0.2.11
+   Compiling mime_guess v2.0.5
+   Compiling crc32fast v1.5.0
+   Compiling opaque-debug v0.3.1
+   Compiling password-hash v0.5.0
+   Compiling http-body v1.0.1
+   Compiling sha1_smol v1.0.1
+   Compiling syn v2.0.117
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling io-extras v0.18.4
+   Compiling cap-primitives v3.4.5
+   Compiling cpufeatures v0.3.0
+   Compiling time-core v0.1.8
+   Compiling ambient-authority v0.0.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling block-padding v0.3.3
+   Compiling windows-targets v0.53.5
+   Compiling http-body-util v0.1.3
+   Compiling num-conv v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling maybe-owned v0.3.4
+   Compiling cap-std v3.4.5
+   Compiling bumpalo v3.20.3
+   Compiling windows-sys v0.60.2
+   Compiling inout v0.1.4
+   Compiling digest v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling http v0.2.12
+   Compiling time-macros v0.2.27
+   Compiling deranged v0.5.8
+   Compiling poly1305 v0.8.0
+   Compiling vsimd v0.8.0
+   Compiling outref v0.5.2
+   Compiling cipher v0.4.4
+   Compiling bytes-utils v0.1.4
+   Compiling const-oid v0.9.6
+   Compiling simd-adler32 v0.3.9
+   Compiling pin-utils v0.1.0
+   Compiling sha2 v0.10.9
+   Compiling blake2 v0.10.6
+   Compiling rustc_version v0.4.1
+   Compiling hybrid-array v0.4.12
+   Compiling cmake v0.1.58
+   Compiling filetime v0.2.29
+   Compiling chacha20 v0.9.1
+   Compiling winsafe v0.0.19
+   Compiling heck v0.5.0
+   Compiling adler2 v2.0.1
+   Compiling cmov v0.5.4
+   Compiling tar v0.4.46
+   Compiling miniz_oxide v0.8.9
+   Compiling argon2 v0.5.3
+   Compiling encoding_rs v0.8.35
+   Compiling crossbeam-utils v0.8.21
+   Compiling zlib-rs v0.6.6
+   Compiling chacha20poly1305 v0.10.1
+   Compiling bitflags v2.11.1
+   Compiling indexmap v2.14.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_ignored v0.1.14
+   Compiling uuid v1.23.2
+   Compiling base64-simd v0.8.0
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.0
+   Compiling ctutils v0.4.2
+   Compiling regex-automata v0.4.14
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling http-body v0.4.6
+   Compiling const-oid v0.10.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling tinyvec v1.11.0
+   Compiling aws-lc-sys v0.41.0
+   Compiling ring v0.17.14
+   Compiling libsqlite3-sys v0.30.1
+   Compiling time v0.3.47
+   Compiling hmac v0.12.1
+   Compiling crossbeam-epoch v0.9.20
+   Compiling cranelift-srcgen v0.123.12
+   Compiling der v0.6.1
+   Compiling chacha20 v0.10.0
+   Compiling schemars v0.8.22
+   Compiling unicode-properties v0.1.4
+   Compiling digest v0.11.3
+   Compiling cranelift-assembler-x64-meta v0.123.12
+   Compiling unicode-normalization v0.1.25
+   Compiling keyring v3.6.3
+   Compiling unicode-bidi v0.3.18
+   Compiling rand v0.10.1
+   Compiling num-integer v0.1.46
+   Compiling rand_core v0.9.5
+   Compiling rustversion v1.0.22
+   Compiling dyn-clone v1.0.20
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling crypto-bigint v0.4.9
+   Compiling nom v8.0.0
+   Compiling ff v0.12.1
+   Compiling inventory v0.3.24
+   Compiling hex v0.4.3
+   Compiling cranelift-bitset v0.123.12
+   Compiling windows-link v0.1.3
+   Compiling foldhash v0.1.5
+   Compiling cranelift-isle v0.123.12
+   Compiling weezl v0.1.12
+   Compiling fd-lock v4.0.4
+   Compiling rtoolbox v0.0.5
+   Compiling winx v0.36.4
+   Compiling fs-set-times v0.20.3
+   Compiling stringprep v0.1.5
+   Compiling crossbeam-deque v0.8.6
+   Compiling base16ct v0.1.1
+   Compiling hashbrown v0.15.5
+   Compiling group v0.12.1
+   Compiling spki v0.6.0
+   Compiling sqlite-vec v0.1.9
+   Compiling cranelift-codegen-shared v0.123.12
+   Compiling target-lexicon v0.13.5
+   Compiling zopfli v0.8.3
+   Compiling signature v1.6.4
+   Compiling bstr v1.12.1
+   Compiling zune-core v0.5.1
+   Compiling humantime v2.3.0
+   Compiling pkcs8 v0.9.0
+   Compiling quick-error v2.0.1
+   Compiling bytemuck v1.25.0
+   Compiling pom v1.1.0
+   Compiling windows-strings v0.4.2
+   Compiling windows-result v0.3.4
+   Compiling gimli v0.32.3
+   Compiling wasmtime-internal-math v36.0.12
+   Compiling aws-types v1.3.16
+   Compiling fdeflate v0.3.7
+   Compiling sec1 v0.3.0
+   Compiling rfc6979 v0.3.1
+   Compiling cbc v0.1.2
+   Compiling zune-jpeg v0.5.15
+   Compiling ecb v0.1.2
+   Compiling flate2 v1.1.9
+   Compiling wcore-plugin-api v0.12.25 (D:\wls\repo\crates\wcore-plugin-api)
+   Compiling aes v0.8.4
+   Compiling md-5 v0.10.6
+   Compiling rustc-hash v2.1.2
+   Compiling pxfm v0.1.29
+   Compiling ttf-parser v0.25.1
+   Compiling debug_unsafe v0.1.4
+   Compiling color_quant v1.1.0
+   Compiling elliptic-curve v0.12.3
+   Compiling typed-path v0.12.3
+   Compiling byteorder-lite v0.1.0
+   Compiling arbitrary v1.4.2
+   Compiling zip v2.4.2
+   Compiling rangemap v1.7.1
+   Compiling fax v0.2.7
+   Compiling atoi_simd v0.18.1
+   Compiling gif v0.14.2
+   Compiling type1-encoding-parser v0.1.1
+   Compiling image-webp v0.2.4
+   Compiling adobe-cmap-parser v0.4.1
+   Compiling quick-xml v0.41.0
+   Compiling codepage v0.1.2
+   Compiling euclid v0.20.14
+   Compiling regex v1.12.3
+   Compiling ecdsa v0.14.8
+   Compiling globset v0.4.18
+   Compiling sha1 v0.10.6
+   Compiling csv-core v0.1.13
+   Compiling png v0.18.1
+   Compiling crypto-bigint v0.5.5
+   Compiling mutate_once v0.1.2
+   Compiling cff-parser v0.2.0
+   Compiling fast-float2 v0.2.3
+   Compiling cranelift-assembler-x64 v0.123.12
+   Compiling object v0.37.3
+   Compiling p256 v0.11.1
+   Compiling wasmparser v0.236.1
+   Compiling postscript v0.14.1
+   Compiling kamadak-exif v0.6.1
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling cranelift-control v0.123.12
+   Compiling csv v1.4.0
+   Compiling lru v0.18.0
+   Compiling cap-fs-ext v3.4.5
+   Compiling anstyle v1.0.14
+   Compiling wasm-encoder v0.236.1
+   Compiling signature v2.2.0
+   Compiling zip v8.6.0
+   Compiling num-bigint v0.4.6
+   Compiling id-arena v2.3.0
+   Compiling unicode-xid v0.2.6
+   Compiling wasmtime-internal-component-util v36.0.12
+   Compiling lexical-core v0.7.6
+   Compiling leb128fmt v0.1.0
+   Compiling regex-lite v0.1.9
+   Compiling pem v3.0.6
+   Compiling nom v5.1.3
+   Compiling utf8parse v0.2.2
+   Compiling wasmtime-internal-component-macro v36.0.12
+   Compiling arrayvec v0.5.2
+   Compiling xmlparser v0.13.6
+   Compiling once_cell_polyfill v1.70.2
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling schannel v0.1.29
+   Compiling dirs-sys v0.5.0
+   Compiling tempfile v3.27.0
+   Compiling rpassword v7.5.2
+   Compiling dirs v6.0.0
+   Compiling winapi-util v0.1.11
+   Compiling home v0.5.12
+   Compiling urlencoding v2.1.3
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling static_assertions v1.1.0
+   Compiling bitflags v1.3.2
+   Compiling thiserror v1.0.69
+   Compiling aws-smithy-xml v0.60.15
+   Compiling which v6.0.3
+   Compiling same-file v1.0.6
+   Compiling termcolor v1.4.1
+   Compiling anstyle-wincon v3.0.11
+   Compiling anstyle-parse v1.0.0
+   Compiling rustls-native-certs v0.8.4
+   Compiling walkdir v2.5.0
+   Compiling anstyle-query v1.1.5
+   Compiling itertools v0.14.0
+   Compiling wasmtime-internal-asm-macros v36.0.12
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling lazy_static v1.5.0
+   Compiling native-tls v0.2.18
+   Compiling rustix v1.1.4
+   Compiling colorchoice v1.0.5
+   Compiling errno v0.3.14
+   Compiling md-5 v0.11.0
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling notify-types v2.1.0
+   Compiling flagset v0.4.7
+   Compiling fallible-iterator v0.2.0
+   Compiling ignore v0.4.25
+   Compiling anstream v1.0.0
+   Compiling clap_lex v1.1.0
+   Compiling siphasher v1.0.3
+   Compiling data-encoding v2.11.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling wasmtime-internal-slab v36.0.12
+   Compiling strsim v0.11.1
+   Compiling system-interface v0.27.3
+   Compiling winapi v0.3.9
+   Compiling utf-8 v0.7.6
+   Compiling notify v8.2.0
+   Compiling phf_shared v0.13.1
+   Compiling postgres-protocol v0.6.12
+   Compiling windows-threading v0.1.0
+   Compiling blake3 v1.8.5
+   Compiling curve25519-dalek v4.1.3
+   Compiling webpki-roots v0.26.11
+   Compiling email-encoding v0.4.1
+   Compiling clap_builder v4.6.0
+   Compiling base64 v0.13.1
+   Compiling unicode-width v0.2.2
+   Compiling minimal-lexical v0.2.1
+   Compiling quoted_printable v0.5.2
+   Compiling convert_case v0.10.0
+   Compiling email_address v0.2.9
+   Compiling rayon-core v1.13.0
+   Compiling bufstream v0.1.4
+   Compiling phf v0.13.1
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling rstest_macros v0.26.1
+   Compiling ciborium-io v0.2.2
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayvec v0.7.6
+   Compiling plotters-backend v0.3.7
+   Compiling nom v7.1.3
+   Compiling predicates-core v1.0.10
+   Compiling litrs v1.0.0
+   Compiling whoami v2.1.2
+   Compiling arrayref v0.3.9
+   Compiling mockall_derive v0.14.0
+   Compiling is-terminal v0.4.17
+   Compiling ed25519 v2.2.3
+   Compiling serde_path_to_error v0.1.20
+   Compiling itertools v0.10.5
+   Compiling plotters-svg v0.3.7
+   Compiling relative-path v1.9.3
+   Compiling mockall v0.14.0
+   Compiling num_cpus v1.17.0
+   Compiling termtree v0.5.1
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling zerocopy-derive v0.8.50
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling async-trait v0.1.89
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling schemars_derive v0.8.22
+   Compiling pulley-macros v36.0.12
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling wasmtime-internal-versioned-export-macros v36.0.12
+   Compiling hashify v0.2.9
+   Compiling pulley-interpreter v36.0.12
+   Compiling thiserror-impl v1.0.69
+   Compiling der_derive v0.7.3
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling wasmtime v36.0.12
+   Compiling futures-util v0.3.32
+   Compiling clap_derive v4.6.1
+   Compiling derive_more-impl v2.1.1
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling windows-core v0.61.2
+   Compiling proc-macro-crate v3.5.0
+   Compiling document-features v0.2.12
+   Compiling tracing v0.1.44
+   Compiling deadpool-runtime v0.1.4
+   Compiling zerofrom v0.1.8
+   Compiling crossterm_winapi v0.9.1
+   Compiling cast v0.3.0
+   Compiling lopdf v0.42.0
+   Compiling mail-parser v0.11.3
+   Compiling yoke v0.8.2
+   Compiling cobs v0.3.0
+   Compiling simple_asn1 v0.6.4
+   Compiling derive_more v2.1.1
+   Compiling der v0.7.10
+   Compiling matchit v0.7.3
+   Compiling cranelift-codegen-meta v0.123.12
+   Compiling iana-time-zone v0.1.65
+   Compiling windows-collections v0.2.0
+   Compiling windows-numerics v0.2.0
+   Compiling windows-future v0.2.1
+   Compiling base64 v0.21.7
+   Compiling psl-types v2.0.11
+   Compiling criterion-plot v0.5.0
+   Compiling rayon v1.12.0
+   Compiling imap-proto v0.10.2
+   Compiling cap-time-ext v3.4.5
+   Compiling psl v2.1.212
+   Compiling plotters v0.3.7
+   Compiling predicates-tree v1.0.13
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling moxcms v0.8.1
+   Compiling serial_test_derive v3.5.0
+   Compiling windows v0.61.3
+   Compiling predicates v3.1.4
+   Compiling fragile v2.1.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling oorandom v11.1.5
+   Compiling downcast v0.11.0
+   Compiling clap v4.6.1
+   Compiling futures-timer v3.0.4
+   Compiling open v5.3.5
+   Compiling anes v0.1.6
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling spki v0.7.3
+   Compiling icu_locale_core v2.2.0
+   Compiling x509-cert v0.2.5
+   Compiling smallvec v1.15.1
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling wcore-compact v0.12.25 (D:\wls\repo\crates\wcore-compact)
+   Compiling wcore-safety v0.12.25 (D:\wls\repo\crates\wcore-safety)
+   Compiling humantime-serde v1.1.1
+   Compiling regalloc2 v0.12.2
+   Compiling calamine v0.36.1
+   Compiling postcard v1.1.3
+   Compiling cap-net-ext v3.4.5
+   Compiling cranelift-entity v0.123.12
+   Compiling assert-json-diff v2.0.2
+   Compiling ron v0.8.1
+   Compiling cranelift-codegen v0.123.12
+   Compiling tinytemplate v1.2.1
+   Compiling parking_lot v0.12.5
+   Compiling cranelift-bforest v0.123.12
+   Compiling icu_provider v2.2.0
+   Compiling tokio v1.52.3
+   Compiling crossterm v0.29.0
+   Compiling wit-parser v0.236.1
+   Compiling wcore-types v0.12.25 (D:\wls\repo\crates\wcore-types)
+   Compiling wcore-budget v0.12.25 (D:\wls\repo\crates\wcore-budget)
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling imap v2.4.1
+   Compiling postgres-types v0.2.14
+   Compiling cron v0.12.1
+   Compiling futures-executor v0.3.32
+   Compiling axum-core v0.4.5
+   Compiling rstest v0.26.1
+   Compiling futures v0.3.32
+   Compiling serial_test v3.5.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling hashbrown v0.14.5
+   Compiling url v2.5.8
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling tiff v0.11.3
+   Compiling ciborium-ll v0.2.2
+   Compiling rand v0.8.6
+   Compiling rand v0.9.4
+   Compiling ciborium v0.2.2
+   Compiling pdf-extract v0.12.0
+   Compiling hashlink v0.9.1
+   Compiling wasmtime-internal-wit-bindgen v36.0.12
+   Compiling rusqlite v0.32.1
+   Compiling criterion v0.5.1
+   Compiling cap-rand v3.4.5
+   Compiling rand_distr v0.5.1
+   Compiling image v0.25.10
+   Compiling wcore-repomap v0.12.25 (D:\wls\repo\crates\wcore-repomap)
+   Compiling wcore-permissions v0.12.25 (D:\wls\repo\crates\wcore-permissions)
+   Compiling wasmprinter v0.236.1
+   Compiling wasmtime-environ v36.0.12
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling wcore-protocol v0.12.25 (D:\wls\repo\crates\wcore-protocol)
+   Compiling wcore-user-model v0.12.25 (D:\wls\repo\crates\wcore-user-model)
+   Compiling tokio-stream v0.1.18
+   Compiling deadpool v0.12.3
+   Compiling wcore-cron v0.12.25 (D:\wls\repo\crates\wcore-cron)
+   Compiling tokio-test v0.4.5
+   Compiling h2 v0.4.14
+   Compiling aws-smithy-types v1.4.9
+   Compiling wcore-sandbox v0.12.25 (D:\wls\repo\crates\wcore-sandbox)
+   Compiling tokio-postgres v0.7.18
+   Compiling tower-http v0.6.11
+   Compiling rustls-webpki v0.103.13
+   Compiling jsonwebtoken v10.3.0
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling aws-smithy-query v0.60.15
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-sigv4 v1.4.3
+   Compiling aws-smithy-json v0.62.7
+   Compiling hyper v1.10.1
+   Compiling wcore-agents-pack v0.12.25 (D:\wls\repo\crates\wcore-agents-pack)
+   Compiling wayland-ijfw v0.12.25 (D:\wls\repo\crates\wayland-ijfw)
+   Compiling hyper-util v0.1.20
+   Compiling wcore-dispatch v0.12.25 (D:\wls\repo\crates\wcore-dispatch)
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling lettre v0.11.22
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.7.9
+   Compiling wiremock v0.6.5
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling tokio-tungstenite v0.24.0
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (D:\wls\repo\crates\wcore-config)
+   Compiling wcore-egress v0.12.25 (D:\wls\repo\crates\wcore-egress)
+   Compiling wayland-honcho v0.12.25 (D:\wls\repo\crates\wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (D:\wls\repo\crates\wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sso v1.98.0
+   Compiling wcore-observability v0.12.25 (D:\wls\repo\crates\wcore-observability)
+   Compiling wcore-channels v0.12.25 (D:\wls\repo\crates\wcore-channels)
+   Compiling wcore-pricing v0.12.25 (D:\wls\repo\crates\wcore-pricing)
+   Compiling wcore-memory v0.12.25 (D:\wls\repo\crates\wcore-memory)
+   Compiling wcore-channel-msteams v0.12.25 (D:\wls\repo\crates\wcore-channel-msteams)
+   Compiling wcore-channel-email v0.12.25 (D:\wls\repo\crates\wcore-channel-email)
+   Compiling wcore-channel-discord v0.12.25 (D:\wls\repo\crates\wcore-channel-discord)
+   Compiling wcore-channel-slack v0.12.25 (D:\wls\repo\crates\wcore-channel-slack)
+   Compiling wcore-channel-signal v0.12.25 (D:\wls\repo\crates\wcore-channel-signal)
+   Compiling wcore-channel-telegram v0.12.25 (D:\wls\repo\crates\wcore-channel-telegram)
+   Compiling wcore-channel-matrix v0.12.25 (D:\wls\repo\crates\wcore-channel-matrix)
+   Compiling wcore-channel-whatsapp v0.12.25 (D:\wls\repo\crates\wcore-channel-whatsapp)
+   Compiling wcore-channel-sms v0.12.25 (D:\wls\repo\crates\wcore-channel-sms)
+   Compiling aws-config v1.8.16
+   Compiling wcore-channels-registry v0.12.25 (D:\wls\repo\crates\wcore-channels-registry)
+   Compiling wcore-providers v0.12.25 (D:\wls\repo\crates\wcore-providers)
+   Compiling wcore-tools v0.12.25 (D:\wls\repo\crates\wcore-tools)
+   Compiling wcore-swarm v0.12.25 (D:\wls\repo\crates\wcore-swarm)
+warning: unused import: `Component`
+  --> crates\wcore-tools\src\media_intake.rs:56:17
+   |
+56 | use std::path::{Component, Path, PathBuf};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling cranelift-native v0.123.12
+   Compiling cranelift-frontend v0.123.12
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling wcore-mcp v0.12.25 (D:\wls\repo\crates\wcore-mcp)
+   Compiling wcore-cua v0.12.25 (D:\wls\repo\crates\wcore-cua)
+   Compiling wcore-browser v0.12.25 (D:\wls\repo\crates\wcore-browser)
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wcore-skills v0.12.25 (D:\wls\repo\crates\wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (D:\wls\repo\crates\wcore-plugin-subprocess)
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-eval v0.12.25 (D:\wls\repo\crates\wcore-eval)
+warning: `wcore-tools` (lib) generated 1 warning (run `cargo fix --lib -p wcore-tools` to apply 1 
+suggestion)
+   Compiling wcore-evolve v0.12.25 (D:\wls\repo\crates\wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (D:\wls\repo\crates\wayland-ollama)
+   Compiling wcore-plugin-wasm v0.12.25 (D:\wls\repo\crates\wcore-plugin-wasm)
+   Compiling wcore-agent v0.12.25 (D:\wls\repo\crates\wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 11s
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+     Running unittests src\lib.rs (D:\wls\target\debug\deps\wcore_agent-5529d88250ab1f11.exe)
+
+running 20 tests
+test budget_authority::tests::active_turn_rollups_survive_restore_and_finish ... ok
+test budget_authority::tests::authority_free_bind_rejects_non_pristine_imported_session ... ok
+test budget_authority::tests::budget_grant_request_survives_durable_reopen_without_double_extension ... ok
+test budget_authority::tests::concurrent_journal_writer_never_faults_budget_authority ... ok
+test budget_authority::tests::create_and_transaction_commit_complete_authority ... ok
+test budget_authority::tests::detached_coordinator_does_not_claim_a_durable_epoch ... ok
+test budget_authority::tests::fallback_can_reuse_dispatch_after_proved_no_send_release ... ok
+test budget_authority::tests::fallback_reservation_ignores_prior_attempts_under_same_dispatch ... ok
+test budget_authority::tests::journal_failure_permanently_latches_runtime_authority ... ok
+test budget_authority::tests::managed_restore_clamps_prior_interactive_budget_extension ... ok
+test budget_authority::tests::restart_reconciliation_posts_each_siblings_outcome_to_that_sibling_alone ... ok
+test budget_authority::tests::restart_releases_dispatch_reservation_when_no_send_started ... ok
+test budget_authority::tests::restart_settles_successful_dispatch_once_before_runtime_settlement ... ok
+test budget_authority::tests::restore_intersects_caps_and_conservatively_settles_reservations ... ok
+test budget_authority::tests::restore_reconciles_active_budget_when_durable_turn_is_terminal ... ok
+test budget_authority::tests::restore_repairs_turn_started_before_active_budget_commit ... ok
+test budget_authority::tests::shared_detached_seed_rebinds_in_place_to_durable_authority ... ok
+test budget_authority::tests::shared_rebind_rejects_an_already_durable_authority ... ok
+test budget_authority::tests::shared_session_bind_is_idempotent_but_rejects_cross_session_switch ... ok
+test spawner::posture_inheritance_tests::routed_seat_preserves_canonical_policy_and_budget_authority ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2194 filtered out; finished in 4.18s
+
