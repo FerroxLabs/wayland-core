@@ -1,0 +1,6 @@
+      1 warning: struct update has no effect, all the fields in the struct have already been specified
+      4 warning: the borrowed expression implements the required traits
+      1 warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+      1 warning: `wcore-agent` (test "cache_ledger_engine_test") generated 1 warning
+      1 warning: `wcore-agent` (test "user_model_identity_wire") generated 4 warnings (run `cargo clippy --fix --test "user_model_identity_wire" -p wcore-agent -- ` to apply 4 suggestions)
+CLIPPY_DONE

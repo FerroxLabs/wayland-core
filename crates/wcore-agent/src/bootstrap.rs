@@ -1033,17 +1033,34 @@ impl AgentBootstrap {
         // admitted by semantic compatibility, policy, health, and budget.
         // No fallbacks configured means an empty chain, preserving the prior
         // circuit-breaker-only behavior.
-        refresh_pricing_cache_if_enabled(&self.config).await;
-        let fallbacks = build_fallback_providers(&self.config)?;
+        refresh_pricing_cache_if_enabled(&self.config, &self.output).await;
+        // F05-TRUTH-1 (`CONT-*` cache economics). This was
+        // `self.config.provider_chain.enabled` read at the report site — a
+        // *configuration* value assigned to a `*_constructed` field, against
+        // `StartupCapabilityInputs`'s own contract that keeping the two apart is
+        // what "prevents configured from becoming ready by implication".
+        // `build_fallback_providers` now sets it on the line that actually
+        // constructs the refresher, so the report cannot drift from the path it
+        // describes.
+        let mut pricing_refresher_constructed = false;
+        let fallbacks = build_fallback_providers(&self.config, &mut pricing_refresher_constructed)?;
         let policy = failover_routing_policy(&self.config);
-        let provider: Arc<dyn LlmProvider> = Arc::new(ResilientProvider::new_with_policy(
+        let resilient = ResilientProvider::new_with_policy(
             self.config.provider_label.clone(),
             primary_provider,
             fallbacks,
             cfg,
             reporter,
             policy,
-        ));
+        );
+        // F05-TRUTH-3. This was the literal `true` at the report site, which made
+        // the `NoProductionConstructor` arm unreachable from production — a gate
+        // with no fail state proves as little as one with no pass state. Read off
+        // the constructed object instead. It is still structurally true on this
+        // path today (the wrap is unconditional); what changes is that the fact
+        // now follows the code if that ever stops being so.
+        let cooldown_tracker_constructed = resilient.cooldown_tracker_count() > 0;
+        let provider: Arc<dyn LlmProvider> = Arc::new(resilient);
 
         // #182: honor `[tools] windows_shell` for the BashTool interpreter on
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
@@ -2881,7 +2898,6 @@ impl AgentBootstrap {
         // `self.config` moves into the engine.
         let media_vision = crate::tool_backends::build_vision_backend(&self.config);
 
-        let pricing_refresher_constructed = self.config.provider_chain.enabled;
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_active_with_provider(
                 provider.clone(),
@@ -3037,7 +3053,7 @@ impl AgentBootstrap {
                 midflight_monitor_constructed: engine.midflight_monitor_constructed(),
                 learned_policy_constructed: engine.learned_policy_constructed(),
                 pricing_refresher_constructed,
-                cooldown_tracker_constructed: true,
+                cooldown_tracker_constructed,
             },
         );
 
@@ -4028,10 +4044,14 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
         window: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
         cooldown: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
     };
+    // This is the runtime rebind path (`/provider`, `/profile`), which does not
+    // produce a startup capability report, so the construction fact is
+    // discarded here rather than plumbed to a reader that does not exist.
+    let mut pricing_refresher_constructed = false;
     Ok(Arc::new(ResilientProvider::new_with_policy(
         config.provider_label.clone(),
         inner,
-        build_fallback_providers(config)?,
+        build_fallback_providers(config, &mut pricing_refresher_constructed)?,
         cfg,
         Arc::new(wcore_providers::NoOpCircuitReporter),
         failover_routing_policy(config),
@@ -4049,8 +4069,15 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
 ///
 /// No `fallback_models` configured → empty `Vec`, byte-for-byte the prior
 /// (circuit-breaker-only) behaviour.
+///
+/// `pricing_refresher_constructed` is an out-parameter, not a return value,
+/// because the caller needs the fact even on the early-return path. It is set
+/// at exactly one place — immediately after the `PricingRefresher` is built —
+/// so it is a record of what ran rather than a second copy of the predicate
+/// that decides whether it runs. See `StartupCapabilityInputs`.
 fn build_fallback_providers(
     config: &Config,
+    pricing_refresher_constructed: &mut bool,
 ) -> anyhow::Result<Vec<(FailoverCandidateMetadata, Arc<dyn LlmProvider>)>> {
     if !config.provider_chain.enabled {
         return Ok(Vec::new());
@@ -4071,6 +4098,7 @@ fn build_fallback_providers(
     );
 
     let refresher = wcore_pricing::PricingRefresher::default();
+    *pricing_refresher_constructed = true;
     let fallback_source = if std::env::var_os("WAYLAND_PRICING_PATH").is_some() {
         wcore_pricing::PricingSnapshotSource::Configured
     } else {
@@ -4136,7 +4164,15 @@ fn build_fallback_providers(
 /// their cost evidence. A fresh cache avoids network work; any fetch or write
 /// failure degrades to the trusted configured/bundled catalog in
 /// `build_fallback_providers` and is never treated as fresh live evidence.
-async fn refresh_pricing_cache_if_enabled(config: &Config) {
+///
+/// F05-TRUTH-1 runtime outcome proof is emitted here and nowhere else. The
+/// capability's real side effect is **publishing a fresh live snapshot to the
+/// cache** — that is the moment the refresher changes what a later cost
+/// estimate will read. Constructing a `PricingRefresher`, loading the bundled
+/// catalog, or reading an already-fresh cache are all reads, not outcomes, so
+/// none of them emits. A fetch that fails, or a save that fails, emits nothing
+/// either: the run degrades to the trusted catalog and nothing changed.
+async fn refresh_pricing_cache_if_enabled(config: &Config, output: &Arc<dyn OutputSink>) {
     if !config.provider_chain.enabled || !pricing_auto_refresh_enabled() {
         return;
     }
@@ -4149,6 +4185,12 @@ async fn refresh_pricing_cache_if_enabled(config: &Config) {
         Ok(catalog) => {
             if let Err(error) = refresher.save_snapshot(&cache_path, &catalog) {
                 tracing::warn!(%error, "live pricing fetched but cache publication failed; using trusted fallback catalog");
+            } else {
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::PricingRefresher,
+                ) {
+                    output.emit_capability_activation(&activation);
+                }
             }
         }
         Err(error) => {
@@ -4439,7 +4481,9 @@ mod fallback_pricing_identity_tests {
         fallback.resolved_fallbacks.clear();
         config.resolved_fallbacks = vec![fallback];
 
-        let fallbacks = build_fallback_providers(&config).unwrap();
+        let mut pricing_refresher_constructed = false;
+        let fallbacks =
+            build_fallback_providers(&config, &mut pricing_refresher_constructed).unwrap();
 
         assert_eq!(fallbacks.len(), 1);
         let (metadata, _) = &fallbacks[0];
@@ -4455,7 +4499,8 @@ mod fallback_pricing_identity_tests {
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
 
-        let error = build_fallback_providers(&config)
+        let mut pricing_refresher_constructed = false;
+        let error = build_fallback_providers(&config, &mut pricing_refresher_constructed)
             .err()
             .expect("unresolved fallback must be rejected");
 
@@ -4463,6 +4508,61 @@ mod fallback_pricing_identity_tests {
             error
                 .to_string()
                 .contains("fallback configuration resolution mismatch")
+        );
+        // The construction fact must record what actually ran. The mismatch
+        // check fires BEFORE the refresher is built, so a run that failed there
+        // never constructed one — and a report claiming otherwise would be the
+        // "configured implies ready" error this out-param exists to prevent.
+        assert!(
+            !pricing_refresher_constructed,
+            "a run that failed before constructing the refresher still reported \
+             it constructed"
+        );
+    }
+
+    /// F05-TRUTH-1: the construction fact, in BOTH directions, one variable.
+    ///
+    /// The old code read `config.provider_chain.enabled` at the report site.
+    /// That is a second copy of the predicate, not a record of the event, and
+    /// it would keep reporting `ready` if the construction ever moved behind a
+    /// further condition. These two halves share an instrument, so neither is
+    /// self-passing.
+    #[test]
+    fn pricing_refresher_construction_is_recorded_in_both_directions() {
+        let base = || {
+            let mut config = Config {
+                provider_label: "anthropic".into(),
+                compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
+                ..Default::default()
+            };
+            config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+            let mut fallback = config.clone();
+            fallback.model = "claude-haiku-4-5".into();
+            fallback.resolved_fallbacks.clear();
+            config.resolved_fallbacks = vec![fallback];
+            config
+        };
+
+        // ---- CAN-PASS: the chain is on, so the refresher is built. ----
+        let mut on = base();
+        on.provider_chain.enabled = true;
+        let mut constructed_on = false;
+        build_fallback_providers(&on, &mut constructed_on).unwrap();
+        assert!(
+            constructed_on,
+            "the chain is enabled and fallbacks resolved, so a PricingRefresher was \
+             built and the fact must say so"
+        );
+
+        // ---- CAN-FAIL: one variable, the chain flag. ----
+        let mut off = base();
+        off.provider_chain.enabled = false;
+        let mut constructed_off = false;
+        build_fallback_providers(&off, &mut constructed_off).unwrap();
+        assert!(
+            !constructed_off,
+            "the early return ran, so nothing was constructed, yet the fact claimed \
+             it was. `disabled_by_config` is the honest report here."
         );
     }
 }

@@ -269,6 +269,17 @@ impl ResilientProvider {
         }
     }
 
+    /// How many `CooldownTracker`s this provider actually constructed: one for
+    /// the primary plus one per admitted fallback candidate.
+    ///
+    /// Exists so the F05 capability report (`F05-TRUTH-3`) can state a measured
+    /// fact about the object that was built instead of asserting a literal at
+    /// the report site. A reader that wants "is the cooldown tracker
+    /// constructed" asks the thing that would own it.
+    pub fn cooldown_tracker_count(&self) -> usize {
+        1 + self.fallbacks.len()
+    }
+
     /// F32: forward every event from the primary's stream onto a fresh channel,
     /// recording the breaker verdict only when the stream terminates:
     /// `Done` → success (closes a HalfOpen trial), a terminal `Error` (or the
