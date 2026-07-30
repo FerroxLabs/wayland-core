@@ -89,6 +89,48 @@ They would all have gone green while this number moved by **zero**, because
 lane that spans both, and it deliberately cannot say which of the two was
 missing — only that neither is.
 
+## The adapter unit tests, falsified by mutation
+
+The three-arm test above proves the *classifier* gate moves in both directions.
+The adapter unit tests are a separate gate, so they get their own control: the
+production code was mutated on the build host and the tests re-run, to show they
+detect the thing they claim to.
+
+Host `hetzner-dsm`, commit `a9bfd7284faee6d919d76ebbb4a9cc4708e45530`.
+
+```text
+=== MUTATION 1: delete the Twilio header attach ===
+(occurrences of the mutation marker in api.rs: 1)
+test tests::an_unkeyed_send_carries_no_delivery_id_header ... ok
+test tests::a_keyed_send_puts_the_delivery_id_on_the_wire_though_twilio_ignores_it ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out
+
+=== MUTATION 2: delete the WhatsApp tracking attach ===
+(occurrences of the mutation marker in lib.rs: 2 — text path and media path)
+test tests::an_unkeyed_send_omits_biz_opaque_callback_data_entirely ... ok
+test tests::a_keyed_send_carries_the_delivery_id_as_biz_opaque_callback_data ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out
+
+=== RESTORED ===
+git status --porcelain -> " M Cargo.lock"   (source restored; lock touched by cargo)
+```
+
+Both mutations were confirmed **applied** before the run — a mutation test whose
+mutation silently failed to apply is a green for free, and the marker count is
+what rules that out.
+
+The result is exactly the shape wanted, in both directions at once:
+
+- the **keyed** test reddens, so it is genuinely measuring the id reaching the
+  wire and not passing on something incidental;
+- the **unkeyed** test stays green under the same mutation, which is correct —
+  removing the attach cannot make an unkeyed send start carrying an id. That
+  asymmetry is what shows the two tests are measuring different things rather
+  than being one assertion written twice.
+
+Source restored with `git checkout -- <path>` on two named paths, which moves no
+ref and is explicitly permitted.
+
 ## Instrument note — a false green caught in this lane
 
 The first run of this test failed to compile (`WLRC=101`, ten `E0277` errors) and

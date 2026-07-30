@@ -229,7 +229,14 @@ contention. All 12 changed paths are listed in §10.
 | `cargo test -p wcore-channel-whatsapp` | `13571bf1` | **42 passed, 0 failed, 0 ignored, 0 filtered out** |
 | `cargo test -p wcore-cli --test f24_c1_outbound_idempotency` | `13571bf1` | **6 passed, 0 failed, 0 ignored, 0 filtered out** |
 | `identity_at_the_sink -- --ignored` | `30bdb74e` | **1 passed, 0 failed, 0 ignored, 0 filtered out** (§5) |
-| `cargo fmt --all -- --check` (Mac) | `530bd6df` | rc=0, 0 lines |
+| `cargo check --workspace --all-targets` | `530bd6df` | **`WLRC=0`.** Two warnings, both pre-existing and neither mine: a snake-case name in `wcore-memory`, and `imap-proto` future-incompat |
+| `cargo test -p wcore-channels-registry --test delivery_semantics_declaration` | `530bd6df` | **8 passed, 0 failed, 0 ignored, 0 filtered out** — the build-enforced doc check accepts the corrected rows |
+| `cargo clippy -p wcore-channel-sms -p wcore-channel-whatsapp -p wcore-channels-registry --all-targets -- -D warnings` | `a9bfd728` | **`WLRC=0`.** It was **not** clean first time: two `redundant closure` errors in my `with_tracking_data`, fixed in `a9bfd728` |
+| mutation control on the adapter tests | `a9bfd728` | keyed tests **FAILED** under mutation, unkeyed stayed **ok**, source restored — see `IDENTITY-DIFFERENTIAL.md` |
+| `cargo fmt --all -- --check` (Mac) | `a9bfd728` | rc=0, 0 lines |
+
+The `--workspace --all-targets` run is the one the dispatch brief insists on, and
+it was taken rather than a per-crate substitute.
 
 Changed paths, diffed against the captured merge-base `4caaa31c`:
 
