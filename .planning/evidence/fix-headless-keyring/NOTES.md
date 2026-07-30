@@ -194,3 +194,19 @@ negative control showing `-D warnings` is armed.
 4. **Keyring-PRESENT arm proven via the vault, not a real OS keyring** — same
    branch of `select_confidential_backend`; a real macOS Keychain run is UNRUN.
 5. **macOS at this SHA unrun entirely.**
+
+## Post-summary addendum: `wcore-agent --lib` (measured, not assumed)
+
+My change touches `engine.rs`, so the crate's own lib suite had to be run. Under
+parallel execution on hetzner it reds with ~16 "session journal writer lease is
+already held" failures. Four measurements show that is **pre-existing flakiness
+under host contention, not this lane** (`agent-lib-suite-flakiness.txt`):
+
+1. My SHA, **single-threaded**: `2252 passed; 0 failed; 3 ignored; 0 filtered`.
+2. **Same command, same commit, twice**: 17 failed both times — but **6 of the 17
+   are different tests** between the two runs. A regression cannot do that.
+3. **Integration base**, same parallel command: already `14 failed`.
+4. The base and head failure sets **overlap but neither contains the other** —
+   base fails six tests my SHA passes.
+
+Reported red, not silenced: no `#[ignore]`, no retry, no `serial_test` guard added.
