@@ -211,9 +211,16 @@ materially higher.
 5. `--doctor`'s Linux/macOS grading split, and the "3 of ~10 providers" API-key error
    (UAT-TUI-UNIX F6/F9) — same family, different lanes' briefs.
 
+## The non-one-shot path was live-checked, not reasoned about
+
+`printf 'What is 17 times 23?…\n/quit\n' | wayland-core --no-tui` (REPL: no prompt on argv):
+stdout is `\n> * 391\n> ` — **the `* ` marker is still there**, the prompt is intact, `391` is
+correct, stderr is 2 lines. So the gate is exactly `!cli.prompt.is_empty()` and nothing else
+changed. rc=0.
+
 ## Coverage — what was NOT run
 
-**Six unrun cells, counted, not implied:**
+**Five unrun cells, counted, not implied:**
 
 1. **Windows.** UAT-TUI-WINDOWS F3/F4/F5 were **not re-measured**; every number here is Linux.
    `SeanD@seandesktop` was reachable in principle and simply not used — no Windows binary was
@@ -225,10 +232,8 @@ materially higher.
    being used as the good baseline.
 3. **`--json-stream` under the new sink** — exercised only indirectly, via `f14_sigkill_recovery`
    (10/1 both before and after, i.e. unchanged), not driven directly.
-4. **Interactive REPL** (`--no-tui` with no prompt) — reasoned unaffected (the marker is gated on
-   `!cli.prompt.is_empty()`), not measured.
-5. **`cargo test -p wcore-agent --tests`** (integration targets) — not run; only `--lib`.
-6. **Behaviour when the log file cannot be opened** (no `$HOME`/`$WAYLAND_HOME`) — the code falls
+4. **`cargo test -p wcore-agent --tests`** (integration targets) — not run; only `--lib`.
+5. **Behaviour when the log file cannot be opened** (no `$HOME`/`$WAYLAND_HOME`) — the code falls
    back to the previous stderr-at-INFO path, which is the existing documented degradation, but it
    was not exercised.
 
