@@ -659,12 +659,15 @@ mod tests {
         .expect("baileys must construct even with no bridge on disk");
 
         // An unknown backend is REJECTED, not defaulted.
-        let err = factory(
-            "wa-typo".into(),
-            &whatsapp_options(Some("baileyz")),
-            Arc::clone(&creds),
-        )
-        .expect_err("an unknown backend must be rejected, never defaulted");
+        // `Box<dyn Channel>` is not `Debug`, so unwrap the error by hand.
+        let err = expect_construct_err(
+            factory(
+                "wa-typo".into(),
+                &whatsapp_options(Some("baileyz")),
+                Arc::clone(&creds),
+            ),
+            "an unknown backend must be rejected, never defaulted",
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("baileyz"),
@@ -684,11 +687,27 @@ mod tests {
         let factory = channel_factory_for("whatsapp").expect("whatsapp factory");
         let mut opts = toml::Table::new();
         opts.insert("backend".into(), toml::Value::String("baileys".into()));
-        let err = factory("wa".into(), &opts, creds()).expect_err("bridge_path is required");
+        let err = expect_construct_err(
+            factory("wa".into(), &opts, creds()),
+            "bridge_path is required",
+        );
         assert!(
             err.to_string().contains("bridge_path"),
             "the error must name the missing key: {err}"
         );
+    }
+
+    /// `Box<dyn Channel>` is not `Debug`, so `Result::expect_err` is
+    /// unavailable on a factory result. Unwrap the error by hand, and panic
+    /// loudly if a construction that must fail instead succeeded.
+    fn expect_construct_err(
+        result: Result<Box<dyn Channel>, ChannelLoadError>,
+        msg: &str,
+    ) -> ChannelLoadError {
+        match result {
+            Ok(ch) => panic!("{msg} — but it constructed a {:?} channel", ch.platform()),
+            Err(e) => e,
+        }
     }
 
     /// F-045 (W7-M): verify the 3 new platforms are registered.
