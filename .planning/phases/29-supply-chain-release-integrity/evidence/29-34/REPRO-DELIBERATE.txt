@@ -135,4 +135,57 @@ to fail. It is not this suite's result.)
 ==========================================================================
 ARM D -- both sites gated.  Source commit 5fa47abd.
 ==========================================================================
-See ARM-D-RESULT below (appended after the run).
+alpha b9a2b4067a3b5a4990f14f873d423771e269b88c5bdd8d720c75b2dd047a3ac0
+beta  c710d3c48ee042e7bd340806d72b29558d2b2043dc3da9ce287269dc159c6188
+                                                            -> STILL DIFFER
+sizes 98003544 / 98003496 (48 bytes apart); 647,793 differing bytes.
+
+BUT EVERY EMBEDDED BUILD PATH IS NOW GONE:
+  d-alpha.bin : 0 occurrences of any "wl-s2934" path
+  d-beta.bin  : 0 occurrences of any "wl-s2934" path
+  known-positive in the same invocation: 24 hits for "/build", the remap
+  placeholder -- so `strings | grep` was demonstrably alive when it returned
+  those zeros. (An absence is what a dead instrument returns for free.)
+
+WHAT STILL DIFFERS, LOCATED EXACTLY. Diffing the sorted string sets leaves
+45 strings unique to each binary, and they are all one shape:
+  alpha: anon.68701565214d472e099372474bc73ec8.333.llvm.15554408849794364881
+  beta : anon.68701565214d472e099372474bc73ec8.333.llvm.8592441538425800383
+The anon prefix hash is IDENTICAL. Only LLVM's trailing module-ID differs,
+and the two ids have 20 and 19 digits -- which accounts for the 45-byte
+string-table delta (readelf: 0xa05a22 vs 0xa059f5) and the 48-byte file
+delta. These are LLVM internal-linkage symbol suffixes living in .symtab.
+
+ROOT CAUSE, AND WHY IT IS NOT FIXABLE BY REMAPPING. The module id is derived
+from the crate's `-C metadata` hash, which Cargo computes from the package's
+SourceId -- and for a workspace path dependency the SourceId CONTAINS THE
+ABSOLUTE PATH. There is no stable Cargo knob to canonicalize it.
+`--remap-path-prefix` operates on source spans and cannot reach it.
+
+==========================================================================
+IS THE RESIDUAL REMOVABLE?  Post-hoc strip test, both directions.
+==========================================================================
+The profile ships `strip = "debuginfo"` (Cargo.toml:566), which drops debug
+info but KEEPS .symtab -- exactly where these symbols live.
+
+  strip --strip-all on the ARM-D (remapped) pair:
+    sizes 84265208 / 84265208  -- IDENTICAL
+    contents DIFFER by 20 BYTES
+
+  strip --strip-all on the ARM-A (unremapped) control pair:
+    contents DIFFER by 4,096,883 bytes
+    -> strip ALONE is not sufficient; the remap is doing the real work.
+
+Twenty bytes is the length of a SHA-1, i.e. the GNU build-id -- which 29-02
+already established is "a CONSEQUENCE, not an independent cause": it hashes
+the linked content, and the content differed before stripping. Stripping
+post-hoc cannot retract a build-id already computed over unstripped input.
+
+So the prediction is that stripping AT LINK TIME, so the symbols never exist
+when the build-id is computed, closes the last 20 bytes. That prediction is
+tested in ARM E rather than asserted.
+
+==========================================================================
+ARM E -- remap + `-Cstrip=symbols` at link time.  Source commit 5fa47abd.
+==========================================================================
+See ARM-E-RESULT below (appended after the run).
