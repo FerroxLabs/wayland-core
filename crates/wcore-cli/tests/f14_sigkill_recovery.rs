@@ -106,15 +106,6 @@ impl CoreProcess {
         Self::launch_with_secure_store(env, fixture, Some(vault), session_id, resume).await
     }
 
-    #[cfg(target_os = "linux")]
-    async fn launch_without_secure_store(
-        env: &TempEnv,
-        fixture: &RunningOpenAiFixture,
-        session_id: &str,
-    ) -> Self {
-        Self::launch_with_secure_store(env, fixture, None, session_id, false).await
-    }
-
     async fn launch_with_secure_store(
         env: &TempEnv,
         fixture: &RunningOpenAiFixture,
@@ -1101,17 +1092,101 @@ fn packaged_local_surfaces_pin_distinct_policy_provenance() {
     );
 }
 
-/// Append a `[session]` policy to a hermetic profile's seeded `config.toml`.
+/// Declare `[session] require_durability = true` in a hermetic profile.
 ///
-/// `tempenv::build` writes the whole file, so appending is the only way to add
-/// a table without teaching the shared scenario builder about a policy only
-/// these tests care about.
+/// The key is inserted INTO the existing `[session]` table rather than appended
+/// as a new one: `tempenv::build` already emits `[session]`, and a second table
+/// with the same name is a TOML duplicate-key error, which the product reports
+/// as a config-parse refusal. That refusal is indistinguishable at the exit
+/// code from the policy refusal under test, so appending would have produced a
+/// test that passed for the wrong reason — it did, on the first run.
 #[cfg(target_os = "linux")]
 fn require_durability(env: &TempEnv) {
     let path = env.home().join("config.toml");
-    let mut config = fs::read_to_string(&path).expect("read seeded profile config");
-    config.push_str("\n[session]\nrequire_durability = true\n");
-    fs::write(&path, config).expect("write durability policy into profile config");
+    let config = fs::read_to_string(&path).expect("read seeded profile config");
+    assert!(
+        config.contains("[session]\n"),
+        "the seeded profile no longer has a [session] table to extend:\n{config}"
+    );
+    let patched = config.replacen("[session]\n", "[session]\nrequire_durability = true\n", 1);
+    assert_ne!(patched, config, "durability policy was not inserted");
+    fs::write(&path, patched).expect("write durability policy into profile config");
+}
+
+/// Launch packaged Core with no secure store and return its `ready` frame
+/// WITHOUT asserting a session identity.
+///
+/// [`CoreProcess::launch_without_secure_store`] asserts that `ready` names the
+/// requested session. A degraded launch cannot satisfy that, and finding out
+/// why is a result in itself: `ProtocolEvent::Ready.session_id` is
+/// `Option<String>` with `skip_serializing_if = "Option::is_none"`
+/// (`wcore-protocol/src/events.rs:559-562`), so the degraded `ready` simply
+/// OMITS the field. A `--json-stream` host therefore receives a frame that is
+/// byte-identical in shape to a legacy producer's and is told nothing at all.
+#[cfg(target_os = "linux")]
+async fn launch_degraded(
+    env: &TempEnv,
+    fixture: &RunningOpenAiFixture,
+    session_id: &str,
+) -> (CoreProcess, Value) {
+    let mut command = Command::new(binary());
+    command
+        .arg("--json-stream")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--model")
+        .arg(FIXTURE_MODEL)
+        .arg("--base-url")
+        .arg(fixture.base_url())
+        .arg("--session-id")
+        .arg(session_id)
+        .current_dir(env.path())
+        .env("HOME", env.path())
+        .env("WAYLAND_HOME", env.home())
+        .env("OPENAI_API_KEY", FIXTURE_KEY)
+        .env_remove("WAYLAND_VAULT_PASSPHRASE")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!(
+                "unix:path={}",
+                env.path().join("missing-secret-service-bus").display()
+            ),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("spawn degraded wayland-core");
+    let stdin = child.stdin.take().expect("Core stdin pipe");
+    let stdout = BufReader::new(child.stdout.take().expect("Core stdout pipe")).lines();
+    let mut child_stderr = child.stderr.take().expect("Core stderr pipe");
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_capture = Arc::clone(&stderr);
+    let stderr_task = tokio::spawn(async move {
+        let mut chunk = [0_u8; 4096];
+        while let Ok(read) = child_stderr.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            let mut output = stderr_capture.lock().expect("lock Core stderr capture");
+            let remaining = 128 * 1024_usize - output.len().min(128 * 1024);
+            output.extend_from_slice(&chunk[..read.min(remaining)]);
+        }
+    });
+    let mut process = CoreProcess {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        stderr_task,
+    };
+    let ready = process.next_type("ready").await;
+    (process, ready)
 }
 
 /// Every file under a profile home, relative to it, with its bytes.
@@ -1329,7 +1404,19 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
     let session_id = "f1400000000000000000000000000005";
     let prompt = "F14-DEGRADED-PROMPT-MUST-NOT-BECOME-DURABLE";
 
-    let mut process = CoreProcess::launch_without_secure_store(&env, &fixture, session_id).await;
+    let (mut process, ready) = launch_degraded(&env, &fixture, session_id).await;
+
+    // MEASURED, and worth pinning: the degraded `ready` omits `session_id`
+    // entirely. That is the whole of what a Desktop host is told. Asserting it
+    // here means a later change that starts naming the degraded state in-band
+    // reds this line and gets read, rather than passing silently.
+    assert_eq!(
+        ready.get("session_id"),
+        None,
+        "the degraded ready frame is expected to omit session_id today; if it \
+         now carries one, the host-facing contract changed: {ready}"
+    );
+
     send_message(&mut process, "f14-degraded", prompt).await;
     let terminal = process.next_type("stream_end").await;
     assert_eq!(terminal["msg_id"], "f14-degraded");
