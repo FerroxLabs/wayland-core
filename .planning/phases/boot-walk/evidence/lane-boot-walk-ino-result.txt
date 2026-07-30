@@ -1,0 +1,9 @@
+=== pids doing node_modules/d opens ===
+    150 207654
+    300 208193
+=== pids doing inotify_add_watch, and count ===
+    164 208193
+=== total inotify_add_watch ===
+164
+=== WLPROBE in this run ===
+1
