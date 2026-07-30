@@ -123,6 +123,127 @@ user_id = "{user_id}"
     mgr
 }
 
+/// Watch the manager's production event fan-out for one nonce, bounded.
+///
+/// Returns the arriving message's text, or `None` on timeout. `subscribe()` is
+/// the same broadcast the gateway's inbound stack consumes, so an arrival here
+/// is an arrival at the product — not at a test-only hook.
+async fn await_nonce(
+    mut rx: tokio::sync::broadcast::Receiver<wcore_channels::TaggedEvent>,
+    nonce: &str,
+    budget: std::time::Duration,
+) -> Option<(String, String)> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(left, rx.recv()).await {
+            Err(_) => return None,
+            Ok(Err(e)) => {
+                println!("MLR_INBOUND_RECV_ERR={e}");
+                return None;
+            }
+            Ok(Ok(tagged)) => {
+                if let wcore_channels::event::ChannelEvent::MessageReceived { msg } = tagged.event {
+                    println!(
+                        "MLR_INBOUND_SAW id={} sender={} text_len={}",
+                        msg.id,
+                        msg.sender_id,
+                        msg.text.len()
+                    );
+                    if msg.text.contains(nonce) {
+                        return Some((msg.text, msg.sender_id));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// INBOUND — an event already in the real room reaches the product, with
+/// non-empty content, through the production `/sync` loop.
+///
+/// # The single-account constraint, stated rather than worked around
+///
+/// `sync.rs:414-416` drops every event whose sender equals the adapter's
+/// configured `user_id`, to prevent self-loops. This programme holds exactly
+/// one Matrix account, so the probe's sender IS that account and the filter
+/// would discard it. `MATRIX_PROBE_USER_ID` therefore names a different mxid.
+/// The token and the `user_id` field are independent config inputs, so this is
+/// a real configuration and not a patched binary.
+///
+/// It also buys the control this leg would otherwise lack. The SAME event is
+/// then offered to a second production adapter whose `user_id` IS the real
+/// sender, and must NOT arrive. Without that, "the message arrived" would be
+/// indistinguishable from "the filter is broken", and a green would be
+/// available to an adapter that admits everything.
+#[tokio::test]
+#[ignore = "live: drives a real Matrix homeserver; requires MATRIX_* configuration"]
+async fn matrix_inbound_reaches_the_product_from_a_real_room() {
+    assert_eq!(required("MATRIX_LIVE"), "1");
+    let base = required("MATRIX_HOMESERVER");
+    let sender = required("MATRIX_USER_ID");
+    let probe_user = required("MATRIX_PROBE_USER_ID");
+    let nonce = required("MATRIX_INBOUND_NONCE");
+    let _ = required("MATRIX_ACCESS_TOKEN");
+    assert_ne!(
+        probe_user, sender,
+        "MATRIX_PROBE_USER_ID must differ from the sender or the self-echo \
+         filter makes this leg unobservable"
+    );
+
+    let budget = std::time::Duration::from_secs(90);
+
+    // ---- positive: a distinct configured user_id, so the event is admitted
+    let tmp_a = tempfile::tempdir().unwrap();
+    // A fresh WAYLAND_HOME per adapter: the /sync cursor persists under
+    // `$WAYLAND_HOME/channel-state/`, and a resumed cursor would skip the very
+    // event this leg is waiting for.
+    unsafe { std::env::set_var("WAYLAND_HOME", tmp_a.path()) };
+    let mgr_a = production_manager(&tmp_a.path().join("channels"), &probe_user, &base).await;
+    let rx_a = mgr_a.subscribe();
+    let got = await_nonce(rx_a, &nonce, budget).await;
+    match &got {
+        Some((text, from)) => println!(
+            "MLR_INBOUND_ARRIVED=true text_len={} sender={} text={:?}",
+            text.len(),
+            from,
+            text
+        ),
+        None => println!("MLR_INBOUND_ARRIVED=false"),
+    }
+
+    // ---- negative control: ONE variable changed — user_id is now the sender
+    let tmp_b = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("WAYLAND_HOME", tmp_b.path()) };
+    let mgr_b = production_manager(&tmp_b.path().join("channels"), &sender, &base).await;
+    let rx_b = mgr_b.subscribe();
+    // A shorter budget is fine and is NOT the reason this must be empty: the
+    // positive above proves the event is reachable within `budget`, and the
+    // initial /sync that serves it is the first request either adapter makes.
+    let echoed = await_nonce(rx_b, &nonce, std::time::Duration::from_secs(45)).await;
+    println!("MLR_INBOUND_SELF_ECHO_ADMITTED={}", echoed.is_some());
+
+    let (text, from) = got.expect(
+        "the probe event did not reach the product within 90s. This is the leg \
+         six lanes said had never been driven; a timeout here is a FAILURE, not \
+         a skip.",
+    );
+    assert!(
+        !text.trim().is_empty(),
+        "arrived with EMPTY content — an arrival with no body is not an arrival"
+    );
+    assert_eq!(from, sender, "the sender identity must survive the parse");
+    assert!(
+        echoed.is_none(),
+        "the self-echo filter admitted the adapter's own user — the positive \
+         result above would then prove nothing about admission"
+    );
+    println!("MLR_INBOUND_DONE");
+}
+
 /// Send → edit → delete, plus both negative controls, against a real room.
 #[tokio::test]
 #[ignore = "live: drives a real Matrix homeserver; requires MATRIX_* configuration"]
