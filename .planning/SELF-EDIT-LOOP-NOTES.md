@@ -106,6 +106,56 @@ watcher off**, which is why the reporting lane still saw injections across
 "three configurations". Reported, not fixed — adding a config surface is a
 product decision, not a filter repair.
 
+## MEASUREMENT — Darwin leg (LANE-BRIEF §0 single-crate/single-test exception)
+
+Used `cargo test -p wcore-agent --test watch_self_edit_loop_test` on the Mac.
+Justified: the question is whether FSEvents surfaces the watch root, and
+**hetzner is Linux and structurally cannot answer it**. No workspace build, no
+clippy, no release build.
+
+### The brief's mechanism is CONFIRMED on Darwin, and it is the stronger case
+
+Pre-fix, `engine_state_dir_creation` (creating `.wayland-core/`):
+```
+".../project [Create(Folder)]"
+".../project [Modify(Metadata(Extended))]"
+injected: User edited `.../project` while I was thinking — re-read it before proceeding.
+```
+So on macOS the PARENT (cwd) really does surface when the engine creates its
+own state dir — exactly as the scoping agent inferred, and the platform where
+the loop was originally observed. On Linux that same scenario surfaced `[]`;
+Linux leaks the root via `chmod` instead (`Modify(Metadata(Any))`).
+
+### My first fix was WRONG — it disabled the feature on macOS
+
+Blanket "drop any event whose path is the watch root", 3/3 repeat runs:
+every Direction-2 test returned `surfaced paths: []`. That is the
+"suppresses everything is as broken as suppresses nothing" failure the brief
+warned about, in my own patch. **Not shipped.**
+
+### Event-kind census — this is the discriminator
+
+| Path | Kinds observed |
+|---|---|
+| watch ROOT | `Create(Folder)`, `Modify(Metadata(Extended))`, `Modify(Metadata(Ownership))`, `Modify(Metadata(Any))` (Linux chmod) |
+| genuine edited FILE | `Create(File)`, `Modify(Data(Content))`, `Modify(Metadata(Extended))` |
+
+A root event was **never** observed carrying `Modify(Data(Content))` or
+`Create(File)`. So: suppress root events that are folder-creation or
+metadata-only, and never suppress a content change.
+
+### PRE-EXISTING, NOT MINE — macOS delivery granularity is flaky
+
+The same test at the same PRE-FIX commit both passed and failed across runs:
+`genuine_edit_in_subdirectory` = `ok` in `DARWIN-PREFIX.log`, FAILED in
+`DARWIN-KINDS.log`. In the failing run a write to `src/main.rs` surfaced only
+`project` and `project/src` — directory granularity, no file event at all.
+
+So FSEvents sometimes coalesces a file change up to its parent directory. That
+is independent of this lane's change and is why the Direction-2 assertions
+need a deadline-bounded wait rather than a fixed 600 ms sleep — the same
+"budget, not a deadline" defect as `await_session_switch`, in my own harness.
+
 ## Open questions to measure, not assume
 
 1. What path does `notify` ACTUALLY surface when `.wayland-core/` is created
