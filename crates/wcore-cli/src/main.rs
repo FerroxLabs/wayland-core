@@ -328,28 +328,35 @@ struct Cli {
     #[arg(long)]
     auto_approve: bool,
 
-    /// Force mode: approve every tool call without prompting. Only use for
-    /// trusted, scripted runs — there is NO interactive permission gate
-    /// once this is set. Equivalent to flipping the engine's session
-    /// approval mode to `Force` for the entire run. The TUI surfaces a
-    /// `· FORCE` badge in the bottom status bar so the mode is impossible
-    /// to forget. Alias: `--yolo`.
-    #[arg(long = "force", alias = "yolo")]
-    force: bool,
-
-    /// Compatibility spelling for approval bypass. This does NOT disable the
-    /// OS sandbox. Use `--dangerous` for an explicit, time-bounded local
-    /// sandbox bypass.
-    #[arg(long = "dangerously-skip-permissions", conflicts_with = "dangerous")]
+    /// TIER 1 — bypass approval prompts ONLY. Every tool call is approved
+    /// without asking and the OS sandbox STAYS ON. `--force` and `--yolo` are
+    /// aliases of this one flag, so they are the same tier by construction and
+    /// cannot drift apart. Only use for trusted, scripted runs: there is NO
+    /// interactive permission gate once this is set. The TUI surfaces a
+    /// `· FORCE` badge in the bottom status bar so the mode is impossible to
+    /// forget. To bypass the sandbox as well, use the tier-2 superset
+    /// `--dangerously-skip-permissions-and-sandbox`.
+    #[arg(
+        long = "dangerously-skip-permissions",
+        visible_aliases = ["force", "yolo"],
+        conflicts_with = "dangerous"
+    )]
     dangerously_skip_permissions: bool,
 
-    /// Explicit local Dangerous session: bypass approvals and the OS sandbox
-    /// until the lease expires. Cannot be activated by config, environment,
-    /// protocol, ACP, TUI commands, resumed state, or child agents.
-    #[arg(long, conflicts_with_all = ["force", "dangerously_skip_permissions"])]
+    /// TIER 2, a superset of tier 1 — bypass approvals AND the OS sandbox
+    /// until a time-bounded lease expires. Cannot be activated by config,
+    /// environment, protocol, ACP, TUI commands, resumed state, or child
+    /// agents: argv on a local launch is the only provenance that mints the
+    /// lease. `--dangerous` is still accepted as a DEPRECATED alias.
+    #[arg(
+        long = "dangerously-skip-permissions-and-sandbox",
+        visible_alias = "dangerous",
+        conflicts_with = "dangerously_skip_permissions"
+    )]
     dangerous: bool,
 
-    /// Dangerous-session lifetime in seconds (maximum one hour).
+    /// Lease lifetime in seconds for
+    /// `--dangerously-skip-permissions-and-sandbox` (maximum one hour).
     #[arg(long, value_name = "SECONDS", requires = "dangerous")]
     dangerous_ttl_secs: Option<u64>,
 
@@ -1079,6 +1086,22 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
     msg
 }
 
+/// The ONE wiring point from parsed argv to the two danger tiers, returning
+/// `(approval_bypass, dangerous_launch)`.
+///
+/// Tier 1 (`--dangerously-skip-permissions`, aliases `--force` / `--yolo`)
+/// bypasses approvals and leaves the OS sandbox REQUIRED. Tier 2
+/// (`--dangerously-skip-permissions-and-sandbox`, deprecated alias
+/// `--dangerous`) additionally bypasses the sandbox, under a lease that only a
+/// local argv launch can mint. Tier 2 does not need `approval_bypass`: its
+/// grant already resolves approvals to `Bypass`.
+///
+/// `run()` and the tier-regression test both read the wiring from here, so an
+/// edit that moves a tier-1 alias into tier 2 cannot pass the test.
+fn danger_tiers(cli: &Cli) -> (bool, bool) {
+    (cli.dangerously_skip_permissions, cli.dangerous)
+}
+
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
     // Record protocol mode before ANY fallible startup work, so every refusal
@@ -1088,14 +1111,21 @@ async fn run() -> anyhow::Result<ExitCode> {
     if cli.json_stream {
         wcore_cli::startup_error::mark_json_stream_active();
     }
-    let approval_bypass = cli.force || cli.dangerously_skip_permissions;
+    let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
     let dangerous_ttl_secs = cli
         .dangerous_ttl_secs
         .unwrap_or(DEFAULT_DANGEROUS_SESSION_TTL_SECS);
-    if cli.dangerously_skip_permissions {
+    // The compatibility notice stays scoped to the danger-NAMED tier-1
+    // spelling, exactly as before the rename, so existing `--force` / `--yolo`
+    // runs keep byte-identical stderr. All three spellings are one clap field
+    // and therefore one tier; only this advisory text is spelling-scoped.
+    if cli.dangerously_skip_permissions
+        && std::env::args().any(|arg| arg == "--dangerously-skip-permissions")
+    {
         eprintln!(
             "wayland-core: --dangerously-skip-permissions bypasses approval prompts only; \
-             the OS sandbox remains required. Use --dangerous for an explicit, time-bounded \
+             the OS sandbox remains required. Use \
+             --dangerously-skip-permissions-and-sandbox for an explicit, time-bounded \
              local sandbox bypass."
         );
     }
@@ -1826,7 +1856,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .downcast_ref::<wcore_config::config::MissingApiKey>()
                 .is_some();
             if would_open_tui
-                && !cli.dangerous
+                && !dangerous_launch
                 && (missing_credentials || (first_run && !project_config_exists()))
             {
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
@@ -1927,7 +1957,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     let execution = resolve_local_execution(
         &config,
         approval_bypass,
-        cli.dangerous,
+        dangerous_launch,
         dangerous_ttl_secs,
         cli.json_stream,
     )?;
@@ -7639,27 +7669,140 @@ mod tests {
         assert!(view.tools_auto_approve);
     }
 
+    /// TIER REGRESSION GUARD — the artifact that makes the danger-flag rename
+    /// safe forever.
+    ///
+    /// For every accepted danger spelling, assert WHICH TIER it lands in, and
+    /// in particular that the OS sandbox is still required for every tier-1
+    /// spelling. If a future edit makes `--force` or `--yolo` an alias of the
+    /// tier-2 flag, every existing script and CI job using them silently loses
+    /// its OS sandbox on upgrade — a privilege escalation delivered by a
+    /// rename, invisible in the caller's own diff.
+    ///
+    /// This derives BOTH tier arguments from the parsed `Cli` through
+    /// `danger_tiers` — the same wiring `run()` uses. The test it replaces
+    /// (`foreign_dangerous_alias_is_approval_only`) hardcoded
+    /// `resolve_local_execution(&cfg, /*approval_bypass*/ true,
+    /// /*dangerous*/ false, ..)`, so rewiring a tier-1 alias into tier 2 would
+    /// have left it green.
     #[test]
-    fn foreign_dangerous_alias_is_approval_only() {
+    fn danger_spellings_never_change_tier() {
         use clap::Parser as _;
-        use wcore_types::execution_policy::SandboxPolicy;
+        use wcore_types::execution_policy::{MAX_DANGEROUS_SESSION_TTL_SECS, SandboxPolicy};
 
-        let cli = Cli::try_parse_from(["wayland-core", "--dangerously-skip-permissions"])
-            .expect("compatibility alias must remain accepted");
-        assert!(cli.dangerously_skip_permissions);
-        assert!(!cli.dangerous);
+        // (argv spelling, does this spelling bypass the OS sandbox?)
+        let cases: [(&str, bool); 5] = [
+            ("--force", false),
+            ("--yolo", false),
+            ("--dangerously-skip-permissions", false),
+            ("--dangerously-skip-permissions-and-sandbox", true),
+            ("--dangerous", true),
+        ];
 
-        let selection = resolve_local_execution(
-            &Config::default(),
-            true,
-            false,
-            DEFAULT_DANGEROUS_SESSION_TTL_SECS,
-            false,
-        )
-        .unwrap();
-        assert_eq!(selection.approvals(), ApprovalPolicy::Bypass);
-        assert_eq!(selection.baseline().sandbox(), SandboxPolicy::Required);
-        assert!(selection.dangerous_grant().is_none());
+        for (spelling, expect_sandbox_bypass) in cases {
+            let cli = Cli::try_parse_from(["wayland-core", spelling])
+                .unwrap_or_else(|e| panic!("{spelling} must remain accepted: {e}"));
+            let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+
+            let selection = resolve_local_execution(
+                &Config::default(),
+                approval_bypass,
+                dangerous_launch,
+                DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                false,
+            )
+            .unwrap_or_else(|e| panic!("{spelling} must resolve an execution selection: {e}"));
+
+            // The half both tiers share.
+            assert_eq!(
+                selection.approvals(),
+                ApprovalPolicy::Bypass,
+                "{spelling} must bypass approval prompts"
+            );
+
+            // The half that must NEVER move for a tier-1 spelling.
+            let sandbox_bypassed = selection.dangerous_grant().is_some();
+            assert_eq!(
+                sandbox_bypassed, expect_sandbox_bypass,
+                "{spelling} CHANGED TIER: sandbox_bypassed={sandbox_bypassed}, expected \
+                 {expect_sandbox_bypass}. A tier-1 spelling that gains a dangerous grant \
+                 strips the OS sandbox from every existing script that uses it."
+            );
+
+            // The baseline is Required for BOTH tiers; only a resolver-minted
+            // lease may override it. This catches a change that weakened the
+            // baseline itself rather than the tier wiring.
+            assert_eq!(
+                selection.baseline().sandbox(),
+                SandboxPolicy::Required,
+                "{spelling}: the baseline sandbox must stay Required"
+            );
+
+            match selection.dangerous_grant() {
+                Some(grant) => {
+                    assert!(
+                        expect_sandbox_bypass,
+                        "{spelling}: a tier-1 spelling must not mint a lease"
+                    );
+                    assert!(
+                        grant.ttl_millis() > 0
+                            && grant.ttl_millis() <= MAX_DANGEROUS_SESSION_TTL_SECS * 1_000,
+                        "{spelling}: lease must be bounded within the one-hour cap, got {}ms",
+                        grant.ttl_millis()
+                    );
+                }
+                None => assert!(
+                    !expect_sandbox_bypass,
+                    "{spelling}: a tier-2 spelling must mint a bounded lease"
+                ),
+            }
+        }
+    }
+
+    /// The two tiers are a superset relationship, not a stack: asking for both
+    /// at once is a parse error in every spelling combination.
+    #[test]
+    fn the_two_tiers_refuse_to_stack_in_every_spelling() {
+        use clap::Parser as _;
+
+        for tier1 in ["--force", "--yolo", "--dangerously-skip-permissions"] {
+            for tier2 in ["--dangerously-skip-permissions-and-sandbox", "--dangerous"] {
+                assert!(
+                    Cli::try_parse_from(["wayland-core", tier1, tier2]).is_err(),
+                    "{tier1} {tier2} must be refused: the tiers do not stack"
+                );
+            }
+        }
+    }
+
+    /// `--auto-approve` is deliberately NOT a tier-1 alias, and this locks the
+    /// measured reason in: it is the CLI face of the `[tools] auto_approve`
+    /// config key, it has no conflict relationship with the danger flags, and
+    /// `--dangerous --auto-approve` parses today. Aliasing it would start
+    /// rejecting an invocation that works, which is the same class of silent
+    /// behaviour change this module's tier guard exists to prevent.
+    #[test]
+    fn auto_approve_is_not_a_danger_tier_alias() {
+        use clap::Parser as _;
+
+        let cli = Cli::try_parse_from([
+            "wayland-core",
+            "--dangerously-skip-permissions-and-sandbox",
+            "--auto-approve",
+        ])
+        .expect("--auto-approve must keep composing with the tier-2 flag");
+        assert!(cli.auto_approve);
+        let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+        assert!(
+            !approval_bypass,
+            "--auto-approve must not feed the tier-1 approval-bypass wiring"
+        );
+        assert!(dangerous_launch);
+
+        // And on its own it selects NEITHER tier.
+        let alone =
+            Cli::try_parse_from(["wayland-core", "--auto-approve"]).expect("parses standalone");
+        assert_eq!(danger_tiers(&alone), (false, false));
     }
 
     #[test]
