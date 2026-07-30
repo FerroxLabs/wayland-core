@@ -77,10 +77,60 @@ configured plaintext backend (`PlaintextBackendRejected`) are configurations the
 *chose*. Silently degrading those would hide a real misconfiguration. Only "this host has no
 secure store at all" degrades.
 
+## CORRECTION — `init_session` is NOT the single point. My own first answer was wrong.
+
+Measured after writing the section above. `session_journal` has **three** production
+writers, not one:
+
+| # | site | reached by |
+|---|---|---|
+| 1 | `init_session` engine.rs:3643 | CLI fresh run; channel conversation where `is_new` |
+| 2 | `resume_with_provider_parts` engine.rs:3388 (constructor) | `AgentBootstrap::resume` — CLI `--resume`, and **every channel conversation that already exists on disk** (`channel_dispatch.rs:227` `load_for_run_if_exists`) |
+| 3 | `switch_active_session` engine.rs:3712 | in-TUI session switch |
+
+Site 2 bypasses `init_session` entirely, so an `init_session`-only fix would have left
+every *restarted* channel conversation broken while looking green on a fresh one. This also
+means the UAT lane's `[session] enabled = false` workaround is **itself incomplete**: with
+sessions disabled, `channel_dispatch` still builds its own `SessionManager` and still hands
+`bootstrap.resume()` a live journal, so a resumed conversation keeps a journal and keeps
+failing. Their conversations were all new, so they never saw it.
+
+**The real single point is one layer up: `session.enabled` itself.** It is read in exactly
+two places (`engine.rs:3094`, `engine.rs:3336`) and it is the switch the working workaround
+flips. Resolving it correctly at `Config::resolve` — one site, upstream of every engine,
+every entrance, and every surface — covers all three journal writers at once.
+
+Chosen implementation:
+1. `Config::resolve_inner_from_files` (config.rs ~2459): if durable sessions are on and this
+   host has no confidential-capable store, set `session.enabled = false` and announce once.
+2. `resume_with_provider_parts`: an engine whose sessions are disabled must not hold a
+   journal. Closes the `enabled = false` + resume hole above (site 2).
+
+## Quadrant 2 — BUG REPRODUCED BEFORE THE FIX (hetzner, pre-fix binary)
+
+`wayland-core --build-info` → `wayland-core 0.12.25 (source bc90ee1c1f08b76e6682b4beab2386fc7216a52e)`
+sha256 `05116fee539dc04533c312a4f3c9ce18bd711cbec60ba6c40b270c842e8f418d`
+Status read back from a file by a separate ssh call, never from `$?` across the pipe.
+
+| run | vault | WLRC | answer | session files |
+|---|---|---|---|---|
+| `q2-prefix-novault` | no | **1** | none | **0** |
+| `q3-prefix-vault` | yes | **0** | `* WLHK_TURN_OK` | **2** |
+
+`q2` stderr, verbatim:
+```
+error: Session persistence authority unavailable: secure recovery storage is unavailable:
+no OS keyring was usable and no encrypted credentials vault is unlocked. ...
+```
+
+The pair is the instrument control: the harness discriminates in both directions on the
+same binary, same host, same prompt — so the `rc=1` is the defect and not a dead harness.
+Sharp detail: `q2` **did** create `sessions/<id>.journal` before dying. The session opens;
+only the turn fails. That is the "accept the work, then fail invisibly" shape exactly.
+
 ## Still to establish
 
-- [ ] Confirm `session_journal` is set ONLY by `init_session` (grep, with known-positive).
-- [ ] Reproduce the bug on hetzner BEFORE the fix (quadrant 2).
+- [x] Reproduce the bug on hetzner BEFORE the fix (quadrant 2).
 - [ ] Implement.
 - [ ] Quadrants 1/3/4 on hetzner.
 - [ ] fmt / clippy / check --workspace --all-targets / cargo metadata --locked.
