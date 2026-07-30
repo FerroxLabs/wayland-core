@@ -134,15 +134,46 @@ impl WhatsappBackend {
         matches!(self, Self::Baileys | Self::WhatsappWeb)
     }
 
+    /// The npm package this backend needs installed beside the bridge.
+    ///
+    /// `None` for `meta-business`, which the bridge serves with `axios` alone.
+    /// Measured from `whatsapp-bridge/package.json`.
+    pub const fn npm_package(self) -> Option<&'static str> {
+        match self {
+            Self::MetaBusiness => None,
+            Self::Baileys => Some("@whiskeysockets/baileys"),
+            Self::WhatsappWeb => Some("whatsapp-web.js"),
+        }
+    }
+
+    /// Subdirectory of the bridge's session root this backend stores pairing
+    /// material under, and the entry inside it that exists once paired.
+    ///
+    /// Measured from `backends/baileys.js` (`<session>/baileys/creds.json`, via
+    /// `useMultiFileAuthState`) and `backends/whatsapp-web.js`
+    /// (`<session>/whatsapp-web/session-wayland`, via `LocalAuth` with
+    /// `clientId: 'wayland'`).
+    const fn pairing_marker(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::MetaBusiness => None,
+            Self::Baileys => Some(("baileys", "creds.json")),
+            Self::WhatsappWeb => Some(("whatsapp-web", "session-wayland")),
+        }
+    }
+
     /// Every accepted wire name, for error messages and operator help.
     pub const ALL_WIRE_NAMES: [&'static str; 3] = ["meta-business", "baileys", "whatsapp-web"];
 }
 
 /// A `backend` value that names no known backend.
 ///
-/// Returned rather than defaulted. `bridge.js` itself falls back to `baileys`
-/// on an unrecognised `--backend`, so a silent default here would route a typo
-/// onto an operator's personal WhatsApp number.
+/// Returned rather than defaulted, and the reason is measured rather than
+/// assumed. Driving the real `bridge.js` shows it treats an unrecognised
+/// `--backend` value verbatim — `health` echoes `baileyz` back — and only
+/// fails later, at backend load, with `-32000 Unknown backend: baileyz`. What
+/// it DOES silently default to `baileys` is an **absent or valueless**
+/// `--backend` flag. Either way a typo must be caught here, at parse time,
+/// rather than after a Node process is holding a WhatsApp socket.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown whatsapp backend {got:?} — expected one of: {}", WhatsappBackend::ALL_WIRE_NAMES.join(", "))]
 pub struct UnknownBackend {
@@ -285,6 +316,53 @@ fn resolve_node(explicit: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+/// Whether the backend's npm package is resolvable from the bridge's directory.
+///
+/// # Why this check exists
+///
+/// Driving the real `bridge.js` with no `node_modules` present shows that
+/// `health` **still succeeds** — it is answered before any backend is loaded —
+/// while the very next `connect` fails with
+/// `-32000 Failed to load backend baileys: Cannot find module …`. A readiness
+/// verdict taken from the handshake alone would therefore report a green for a
+/// bridge that cannot send a single message. This is that gap closed.
+///
+/// Node resolves `node_modules` by walking up from the importing file, so this
+/// walks the same ancestors rather than checking only the sibling directory —
+/// a hoisted install must not read as missing.
+fn backend_package_installed(bridge_path: &Path, backend: WhatsappBackend) -> bool {
+    let Some(pkg) = backend.npm_package() else {
+        return true;
+    };
+    let Some(dir) = bridge_path.parent() else {
+        return false;
+    };
+    dir.ancestors()
+        .any(|a| a.join("node_modules").join(pkg).is_dir())
+}
+
+/// Resolve the directory the bridge will keep pairing material in.
+///
+/// Mirrors the bridge's own default (`$HOME/.wayland/whatsapp`) so the answer
+/// is the same one the subprocess will compute. Measured from
+/// `backends/baileys.js` and `backends/whatsapp-web.js`.
+fn pairing_dir(cfg: &WhatsappBridgeConfig) -> Option<PathBuf> {
+    let (subdir, marker) = cfg.backend.pairing_marker()?;
+    let root = match cfg.session_dir.as_ref() {
+        Some(d) => d.clone(),
+        None => dirs_home()?.join(".wayland").join("whatsapp"),
+    };
+    Some(root.join(subdir).join(marker))
+}
+
+/// Home directory, without taking a dependency for one lookup.
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
 /// Decide whether the bridge can be launched, from the filesystem alone.
 ///
 /// Spawns nothing and sends nothing. Every missing item is collected, so an
@@ -325,6 +403,17 @@ pub fn preflight(cfg: &WhatsappBridgeConfig) -> Result<BridgeLaunch, BridgeUnava
              bridge_path at the bridge.js of a Wayland Desktop install (or a checkout of it) \
              whose dependencies are installed",
             cfg.bridge_path.display()
+        ));
+    } else if !backend_package_installed(&cfg.bridge_path, cfg.backend) {
+        // Only meaningful when the script exists — otherwise this would just
+        // restate the finding above.
+        findings.push("bridge_dependencies".to_string());
+        lines.push(format!(
+            "the bridge at {} has no resolvable {} — its `health` will still answer, but the \
+             first connect fails with `Cannot find module`; run `npm install` (or `bun install`) \
+             in the bridge's directory",
+            cfg.bridge_path.display(),
+            cfg.backend.npm_package().unwrap_or("backend package"),
         ));
     }
 
@@ -1186,10 +1275,18 @@ impl Channel for WhatsappBridgeChannel {
     /// Readiness, answered from the filesystem and then from the bridge itself.
     ///
     /// This is the surface that keeps the capability from being advertised when
-    /// it is not reachable. It spawns the bridge only when preflight passed, and
-    /// it reports [`ProbeOutcome::Ok`](wcore_channels::probe::ProbeOutcome::Ok)
-    /// only after the bridge has confirmed, in its own words, which backend it
-    /// loaded.
+    /// it is not reachable, and every one of its three gates was put there by a
+    /// measurement rather than by anticipation:
+    ///
+    /// 1. **[`preflight`]** — Node, the script, and the backend's npm package.
+    ///    Without the third, a bridge with no `node_modules` answers `health`
+    ///    happily and then fails every `connect`.
+    /// 2. **The `health` handshake** — the bridge confirms, in its own words,
+    ///    which backend it loaded.
+    /// 3. **Pairing material on disk** — a reachable bridge that has never been
+    ///    paired cannot send anything. `ProbeOutcome::Ok` sets
+    ///    `authenticated: true`, so claiming it without evidence of a pairing
+    ///    would be exactly the unearned green this type exists to prevent.
     async fn probe(&self) -> Result<ProbeReport, ChannelError> {
         let launch = match preflight(&self.config) {
             Ok(l) => l,
@@ -1210,11 +1307,23 @@ impl Channel for WhatsappBridgeChannel {
         {
             Ok(session) => {
                 session.close().await;
-                Ok(ProbeReport::ok(
-                    &self.name,
-                    PLATFORM,
-                    format!("bridge/{}", self.config.backend),
-                ))
+
+                // Gate 3. Both bridged backends authenticate by QR pairing, and
+                // a probe must send nothing — so pairing is read from the
+                // material the backend persists, at the path the bridge itself
+                // computes.
+                match pairing_dir(&self.config) {
+                    Some(marker) if marker.exists() => Ok(ProbeReport::ok(
+                        &self.name,
+                        PLATFORM,
+                        format!("bridge/{}", self.config.backend),
+                    )),
+                    _ => Ok(ProbeReport::incomplete(
+                        &self.name,
+                        PLATFORM,
+                        vec!["whatsapp_pairing".to_string()],
+                    )),
+                }
             }
             Err(BridgeError::BackendMismatch { want, got }) => Ok(ProbeReport::unauthenticated(
                 &self.name,
@@ -1419,21 +1528,129 @@ bridge_path = "/nonexistent/bridge.js"
         assert!(err.findings.contains(&"backend".to_string()));
     }
 
+    /// Lay out a directory that looks the way an installed bridge looks:
+    /// `<root>/bridge.js` plus `<root>/node_modules/<pkg>/`. Returns the
+    /// tempdir (kept alive by the caller) and the script path.
+    fn installed_bridge(backend: WhatsappBackend) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bridge.js");
+        std::fs::write(&script, "// stand-in\n").unwrap();
+        if let Some(pkg) = backend.npm_package() {
+            std::fs::create_dir_all(dir.path().join("node_modules").join(pkg)).unwrap();
+        }
+        (dir, script)
+    }
+
     #[test]
-    fn preflight_passes_when_node_and_the_script_both_exist() {
-        // CAN PASS — the control that proves the failures above are about the
-        // missing items and not about preflight being unable to succeed.
-        // A real executable stands in for Node: preflight only checks that the
-        // path is a file, it runs nothing.
-        let script = tempfile::NamedTempFile::new().unwrap();
+    fn preflight_passes_when_node_the_script_and_the_backend_package_all_exist() {
+        // CAN PASS — the control proving the failures above are about missing
+        // items and not about preflight being unable to succeed. A real file
+        // stands in for Node: preflight checks the path, it runs nothing.
+        let (_dir, script) = installed_bridge(WhatsappBackend::Baileys);
         let fake_node = tempfile::NamedTempFile::new().unwrap();
-        let mut c = cfg(WhatsappBackend::Baileys, script.path().to_path_buf());
+        let mut c = cfg(WhatsappBackend::Baileys, script.clone());
         c.node_path = Some(fake_node.path().to_path_buf());
 
         let launch = preflight(&c).expect("preflight must be able to succeed");
         assert_eq!(launch.backend, WhatsappBackend::Baileys);
-        assert_eq!(launch.script, script.path());
+        assert_eq!(launch.script, script);
         assert_eq!(launch.node, fake_node.path());
+    }
+
+    #[test]
+    fn preflight_names_bridge_dependencies_when_the_backend_package_is_absent() {
+        // The gate that closes the measured gap: the real bridge answers
+        // `health` with no node_modules and only fails at the first `connect`,
+        // so a handshake-only verdict would hand out an unearned green.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bridge.js");
+        std::fs::write(&script, "// stand-in\n").unwrap();
+        let fake_node = tempfile::NamedTempFile::new().unwrap();
+        let mut c = cfg(WhatsappBackend::Baileys, script);
+        c.node_path = Some(fake_node.path().to_path_buf());
+
+        let err = preflight(&c).unwrap_err();
+        assert_eq!(err.findings, vec!["bridge_dependencies".to_string()]);
+        assert!(
+            err.operator_message.contains("@whiskeysockets/baileys"),
+            "the message must name the package to install: {}",
+            err.operator_message
+        );
+    }
+
+    #[test]
+    fn a_hoisted_node_modules_above_the_bridge_counts_as_installed() {
+        // Node resolves node_modules by walking up, so checking only the
+        // sibling directory would report a false red on a hoisted install.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            root.path()
+                .join("node_modules")
+                .join("@whiskeysockets/baileys"),
+        )
+        .unwrap();
+        let nested = root.path().join("packages").join("bridge");
+        std::fs::create_dir_all(&nested).unwrap();
+        let script = nested.join("bridge.js");
+        std::fs::write(&script, "// stand-in\n").unwrap();
+
+        assert!(
+            backend_package_installed(&script, WhatsappBackend::Baileys),
+            "known-positive: a hoisted install must resolve"
+        );
+        assert!(
+            !backend_package_installed(&script, WhatsappBackend::WhatsappWeb),
+            "known-negative: a package that is NOT installed must not resolve"
+        );
+    }
+
+    #[test]
+    fn each_bridged_backend_checks_for_its_own_package() {
+        // Guards against a check that passes for any backend once one package
+        // happens to be installed.
+        let (_d1, baileys_script) = installed_bridge(WhatsappBackend::Baileys);
+        assert!(backend_package_installed(
+            &baileys_script,
+            WhatsappBackend::Baileys
+        ));
+        assert!(!backend_package_installed(
+            &baileys_script,
+            WhatsappBackend::WhatsappWeb
+        ));
+
+        let (_d2, www_script) = installed_bridge(WhatsappBackend::WhatsappWeb);
+        assert!(backend_package_installed(
+            &www_script,
+            WhatsappBackend::WhatsappWeb
+        ));
+        assert!(!backend_package_installed(
+            &www_script,
+            WhatsappBackend::Baileys
+        ));
+    }
+
+    #[test]
+    fn pairing_marker_paths_match_the_layout_each_backend_actually_writes() {
+        // Measured from backends/baileys.js (useMultiFileAuthState under
+        // <session>/baileys, creds.json) and backends/whatsapp-web.js
+        // (LocalAuth dataPath <session>/whatsapp-web, clientId "wayland").
+        let session = PathBuf::from("/srv/wa");
+        let mut c = cfg(WhatsappBackend::Baileys, PathBuf::from("/x/bridge.js"));
+        c.session_dir = Some(session.clone());
+        assert_eq!(
+            pairing_dir(&c),
+            Some(session.join("baileys").join("creds.json"))
+        );
+
+        c.backend = WhatsappBackend::WhatsappWeb;
+        assert_eq!(
+            pairing_dir(&c),
+            Some(session.join("whatsapp-web").join("session-wayland"))
+        );
+
+        // meta-business has no bridge pairing at all.
+        c.backend = WhatsappBackend::MetaBusiness;
+        assert_eq!(pairing_dir(&c), None);
     }
 
     #[test]
