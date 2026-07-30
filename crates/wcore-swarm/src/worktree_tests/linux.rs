@@ -646,6 +646,62 @@ async fn wait_until_process_gone(pid: u32) {
     );
 }
 
+/// One-shot read of a PID written by a fixture git script. `None` while the
+/// value is not there YET — file absent, or present but not yet holding a
+/// parseable number.
+///
+/// The "present but empty" case is the whole reason this exists, and it is not
+/// theoretical. Every fixture script writes its child PID as
+/// `printf %s "$child" > "$WAYLAND_TEST_PID_FILE"`, and a `>` redirection
+/// CREATES AND TRUNCATES the file when the shell sets the redirection up —
+/// strictly before `printf` puts any bytes in it. So there is a window in which
+/// the file exists and is zero bytes long.
+///
+/// `status_output_cap_kills_git_descendant` lands in that window: its child
+/// floods stdout in a busy loop, so `assert_clean()` can hit the 4096-byte cap
+/// and return while the parent shell has not finished writing the PID. The test
+/// then did `read_to_string(..).unwrap().parse::<u32>().unwrap()` and panicked
+/// with `ParseIntError { kind: Empty }` — in 0.057s, so this was never a timeout.
+///
+/// Measured on hetzner-dsm 2026-07-31: the test passes 16/16 run alone and
+/// failed in 2 of 3 full-workspace runs (13,609 tests, 592 binaries), all three
+/// attempts of `retries = 2` included. Load widens the gap between the
+/// redirection and the write; it does not create it. Checking `.exists()` first
+/// does not help, because `exists()` is true for the empty file.
+#[cfg(target_os = "linux")]
+fn try_read_child_pid(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+/// Poll until a fixture script's child PID is readable, or fail loudly.
+///
+/// Deliberately a bounded wait and NOT a bare retry-forever: if the script never
+/// writes a PID that is a real failure and must still fail, just not by racing.
+/// Mirrors `wait_until_process_gone`'s shape (3s deadline, 20ms tick) so both
+/// waits in this file behave the same way.
+#[cfg(target_os = "linux")]
+async fn read_child_pid(path: &std::path::Path) -> u32 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(pid) = try_read_child_pid(path) {
+            return pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fixture script never wrote a parseable child PID to {} within 3s \
+             (exists: {}, contents: {:?})",
+            path.display(),
+            path.exists(),
+            std::fs::read_to_string(path).ok()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn local_checkout_filter_is_refused_before_execution() {
@@ -879,10 +935,7 @@ async fn status_output_cap_kills_git_descendant() {
     manager.set_ambient_git_env("WAYLAND_TEST_PID_FILE", pid_file.as_os_str());
     let error = manager.assert_clean().await.unwrap_err().to_string();
     assert!(error.contains("stdout exceeded the 4096-byte"), "{error}");
-    let pid = std::fs::read_to_string(pid_file)
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
+    let pid = read_child_pid(&pid_file).await;
     wait_until_process_gone(pid).await;
 }
 
@@ -921,10 +974,7 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         "{error}"
     );
     assert!(manager.swarm_root().join("worker-1").is_dir());
-    let pid = std::fs::read_to_string(pid_file)
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
+    let pid = read_child_pid(&pid_file).await;
     wait_until_process_gone(pid).await;
 }
 
@@ -949,16 +999,21 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
     let cancel = CancellationToken::new();
     let cleanup = manager.cleanup_all(&cancel);
     tokio::pin!(cleanup);
-    while !pid_file.exists() {
+    // Wait for a PARSEABLE pid, not merely for the path to exist. `>` creates the
+    // file empty before `printf` writes to it, so `exists()` goes true one step
+    // too early and the read below could still land on zero bytes — the same race
+    // that made `status_output_cap_kills_git_descendant` flaky. The select! is
+    // kept because this test must also fail loudly if cleanup returns before the
+    // cancellation, which a bare poll would silently wait out.
+    let pid = loop {
+        if let Some(pid) = try_read_child_pid(&pid_file) {
+            break pid;
+        }
         tokio::select! {
             result = &mut cleanup => panic!("cleanup returned before cancellation: {result:?}"),
             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
-    }
-    let pid = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
+    };
     cancel.cancel();
     let error = tokio::time::timeout(Duration::from_secs(1), &mut cleanup)
         .await
