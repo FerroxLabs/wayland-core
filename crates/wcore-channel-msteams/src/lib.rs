@@ -12,8 +12,8 @@
 //! the serviceUrl is tenant-specific and required by the Connector API. This
 //! is populated by the caller from a previously received inbound activity.
 //!
-//! Follows the desktop app's `MsTeamsPlugin` surface so the two agree on
-//! channel semantics. See F-045 in the wcore audit triage.
+//! Ported from the desktop app's TypeScript `MsTeamsPlugin` (OpenClaw MIT + Apache-2.0).
+//! See F-045 in the wcore audit triage.
 
 pub mod auth;
 pub mod config;

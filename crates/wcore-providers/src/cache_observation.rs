@@ -1,4 +1,4 @@
-//! Cache retention forensics.
+//! Cache retention forensics — ported from openclaw MIT (c) Peter Steinberger 2025.
 //!
 //! Tracks WHY a prompt cache hit / miss / invalidation happened so observability
 //! can correlate cost spikes with workload patterns. Sits adjacent to cache_tier
@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Retention policy for cached prompt prefixes.
+/// Retention policy for cached prompt prefixes (matches openclaw's
+/// ContextEnginePromptCacheRetention shape).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheRetention {
