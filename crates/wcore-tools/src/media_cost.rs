@@ -55,6 +55,38 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// What a media call is billed *on*. Recorded explicitly rather than inferred
+/// from which fields happen to be populated.
+///
+/// Inference was tried and rejected: a transcription whose provider declined to
+/// report a duration has no populated unit field at all, and would be
+/// indistinguishable from a token-billed vision call. Both would then land in
+/// whichever bucket the inference happened to default to, and a summary that
+/// silently files one billing basis under another is the same category of lie
+/// as a `$0.00` — it reads as a measurement and is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingBasis {
+    /// Billed per artifact produced — image generation.
+    Artifacts,
+    /// Billed per second of audio processed — transcription.
+    Duration,
+    /// Billed per token — the multimodal chat calls behind `vision_analyze`
+    /// and, nine at a time, behind `video_analyze`.
+    Tokens,
+    /// Billed per character of input text — speech synthesis.
+    Characters,
+}
+
+impl Default for BillingBasis {
+    /// Artifacts, matching the only shape that existed when this type was
+    /// introduced, so a record deserialized from an older host reads the way it
+    /// did when it was written.
+    fn default() -> Self {
+        Self::Artifacts
+    }
+}
+
 /// Billable units actually performed by one media call.
 ///
 /// Every field here is observable without the provider pricing anything, and
@@ -62,8 +94,17 @@ use serde_json::{Value, json};
 /// makes this record a measurement rather than a constant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaUnits {
+    /// What this call is billed on. See [`BillingBasis`].
+    #[serde(default)]
+    pub basis: BillingBasis,
     /// Number of media artifacts produced (images returned, clips rendered).
     /// Always known — it is the count of artifacts the caller received.
+    ///
+    /// **Stays 0 for every non-[`BillingBasis::Artifacts`] shape**, including
+    /// a vision call that *consumed* an image. A vision call produces no
+    /// artifact, and setting `images: 1` for one would let a per-artifact rate
+    /// card price it as though it had generated an image — a wrong figure,
+    /// which is worse than the `$0.00` this module already refuses.
     pub images: u32,
     /// Pixel dimensions, when the surface actually knows them.
     ///
@@ -80,16 +121,45 @@ pub struct MediaUnits {
     /// provider reports one. `None` for still images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billed_seconds: Option<f64>,
+    /// Prompt tokens the provider reported for a token-billed call. `None`
+    /// means the provider did not report a count — never `0`, which would
+    /// claim it processed an empty prompt on a call it charged for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    /// Completion tokens the provider reported for a token-billed call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
+    /// Characters of input text submitted to a character-billed call
+    /// (speech synthesis). Counted locally from the text we sent, so unlike
+    /// the token counts this is always known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billed_characters: Option<u32>,
 }
 
 impl MediaUnits {
+    /// Shared zero value. Every constructor below starts here and sets only
+    /// the fields its billing basis actually has, so a new field can never
+    /// silently default to a value that reads as a measurement.
+    fn empty(basis: BillingBasis) -> Self {
+        Self {
+            basis,
+            images: 0,
+            width: None,
+            height: None,
+            billed_seconds: None,
+            input_tokens: None,
+            output_tokens: None,
+            billed_characters: None,
+        }
+    }
+
     /// One still image at the given pixel dimensions.
     pub fn one_image(width: u32, height: u32) -> Self {
         Self {
             images: 1,
             width: Some(width),
             height: Some(height),
-            billed_seconds: None,
+            ..Self::empty(BillingBasis::Artifacts)
         }
     }
 
@@ -98,9 +168,7 @@ impl MediaUnits {
     pub fn images_of_unknown_size(images: u32) -> Self {
         Self {
             images,
-            width: None,
-            height: None,
-            billed_seconds: None,
+            ..Self::empty(BillingBasis::Artifacts)
         }
     }
 
@@ -110,7 +178,30 @@ impl MediaUnits {
             images,
             width: Some(width),
             height: Some(height),
-            billed_seconds: None,
+            ..Self::empty(BillingBasis::Artifacts)
+        }
+    }
+
+    /// A token-billed multimodal call — the shape behind `vision_analyze`, and
+    /// behind every one of the nine provider calls a single `video_analyze`
+    /// fans out into.
+    ///
+    /// `images` stays 0 deliberately: the call *consumed* an image and
+    /// *produced* text. See the field comment on [`Self::images`].
+    pub fn tokens(input_tokens: Option<u32>, output_tokens: Option<u32>) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            ..Self::empty(BillingBasis::Tokens)
+        }
+    }
+
+    /// A character-billed call — speech synthesis, which OpenAI and ElevenLabs
+    /// both price per character of input text.
+    pub fn text_characters(characters: u32) -> Self {
+        Self {
+            billed_characters: Some(characters),
+            ..Self::empty(BillingBasis::Characters)
         }
     }
 
@@ -125,10 +216,8 @@ impl MediaUnits {
     /// to it rather than multiplying by zero and reporting `$0.00`.
     pub fn audio_seconds(seconds: f64) -> Self {
         Self {
-            images: 0,
-            width: None,
-            height: None,
             billed_seconds: Some(seconds),
+            ..Self::empty(BillingBasis::Duration)
         }
     }
 
@@ -138,23 +227,45 @@ impl MediaUnits {
     /// provider processed zero seconds of audio. This says "we do not know",
     /// matching the `Option` discipline the rest of the module uses.
     pub fn audio_of_unknown_duration() -> Self {
-        Self {
-            images: 0,
-            width: None,
-            height: None,
-            billed_seconds: None,
-        }
+        Self::empty(BillingBasis::Duration)
     }
 
-    /// True when this call produced no image artifact, and is therefore billed
-    /// on something other than artifacts (seconds of audio, characters of
-    /// text). Keyed on `images == 0` rather than on the presence of
+    /// True when this call is billed per second of audio.
+    ///
+    /// Reads the declared [`BillingBasis`] rather than inferring from
     /// `billed_seconds`, because a provider that declines to report a duration
     /// does not thereby turn a transcription into an image call — and if it
     /// did, the call would land in `calls_of_unknown_size`, a figure that is
     /// supposed to mean "we produced pixels but could not measure them".
+    ///
+    /// This previously keyed on `images == 0`, which was correct while audio
+    /// was the only zero-artifact shape. It is not any more: vision is
+    /// token-billed and speech synthesis is character-billed, and both also
+    /// have `images == 0`.
     pub fn is_duration_billed(&self) -> bool {
-        self.images == 0
+        self.basis == BillingBasis::Duration
+    }
+
+    /// True when this call is billed per token — the vision / `video_analyze`
+    /// shape.
+    pub fn is_token_billed(&self) -> bool {
+        self.basis == BillingBasis::Tokens
+    }
+
+    /// True when this call is billed per character of input text — speech
+    /// synthesis.
+    pub fn is_character_billed(&self) -> bool {
+        self.basis == BillingBasis::Characters
+    }
+
+    /// Total tokens the provider reported, or `None` when it reported neither
+    /// count. `Some` when either is present, so a provider that reports only
+    /// one of the two still contributes a real figure.
+    pub fn total_tokens(&self) -> Option<u32> {
+        match (self.input_tokens, self.output_tokens) {
+            (None, None) => None,
+            (i, o) => Some(i.unwrap_or(0).saturating_add(o.unwrap_or(0))),
+        }
     }
 
     /// Total megapixels produced, or `None` when the dimensions are unknown.
@@ -292,13 +403,19 @@ impl MediaCostRecord {
         let backend_id = backend_id.into();
         let (cost_usd, price_source) = match reported {
             Some(r) => (Some(r.usd), r.source),
-            // A per-image rate card can only price a call that produced
-            // images. Applying it to a duration-billed call (transcription,
-            // speech synthesis — `images == 0`) multiplies the rate by zero
-            // and records **$0.00 for a call that cost real money**, which is
-            // precisely the lie this module exists to prevent. Such a call
-            // falls through to `unpriced`, keeping its billed seconds.
-            None if units.images == 0 => (
+            // A per-artifact rate card can only price a call that produced
+            // artifacts. Applying it to any other basis — duration
+            // (transcription), tokens (vision, and the nine calls behind
+            // `video_analyze`) or characters (speech synthesis) — multiplies
+            // the rate by zero artifacts and records **$0.00 for a call that
+            // cost real money**, which is precisely the lie this module exists
+            // to prevent. Such a call falls through to `unpriced`, keeping its
+            // own units.
+            //
+            // Keyed on the declared basis rather than on `images == 0` so that
+            // a future artifact-billed shape which legitimately produced zero
+            // artifacts is not silently reclassified.
+            None if units.basis != BillingBasis::Artifacts || units.images == 0 => (
                 None,
                 PriceSource::Unpriced {
                     reason: UnpricedReason::ProviderReportsNoCost,
@@ -402,13 +519,37 @@ impl MediaCostRecord {
             },
             (None, _) => "unpriced".to_string(),
         };
-        let size = match (self.units.width, self.units.height, self.units.megapixels()) {
-            (Some(w), Some(h), Some(mp)) => format!("{w}x{h} = {mp:.3} MP"),
-            _ => "size not reported by this surface".to_string(),
+        // Render the units this call was actually billed on. Printing
+        // "0 image(s)" for a vision or speech call would read as "nothing was
+        // produced", i.e. as free — the same misreading `$0.00` produces.
+        let work = match self.units.basis {
+            BillingBasis::Artifacts => {
+                let size = match (self.units.width, self.units.height, self.units.megapixels()) {
+                    (Some(w), Some(h), Some(mp)) => format!("{w}x{h} = {mp:.3} MP"),
+                    _ => "size not reported by this surface".to_string(),
+                };
+                format!("{} image(s) {size}", self.units.images)
+            }
+            BillingBasis::Duration => match self.units.billed_seconds {
+                Some(s) => format!("{s:.3}s of audio"),
+                None => "audio of a duration this provider did not report".to_string(),
+            },
+            BillingBasis::Tokens => match (self.units.input_tokens, self.units.output_tokens) {
+                (None, None) => "tokens this provider did not report".to_string(),
+                (i, o) => format!(
+                    "{} in / {} out tokens",
+                    i.map_or_else(|| "?".to_string(), |v| v.to_string()),
+                    o.map_or_else(|| "?".to_string(), |v| v.to_string())
+                ),
+            },
+            BillingBasis::Characters => match self.units.billed_characters {
+                Some(c) => format!("{c} characters of input text"),
+                None => "text of a length this surface did not record".to_string(),
+            },
         };
         format!(
-            "{} via {} ({}): {} image(s) {} — {}",
-            self.tool, self.backend_id, self.model, self.units.images, size, price
+            "{} via {} ({}): {} — {}",
+            self.tool, self.backend_id, self.model, work, price
         )
     }
 }
@@ -483,6 +624,25 @@ pub struct MediaCostSummary {
     /// Number of duration-billed calls. Reported so `billed_seconds` can be
     /// read the same way `total_usd` is read against `unpriced_calls`.
     pub duration_billed_calls: usize,
+    /// Prompt tokens across the token-billed calls (vision, and every call
+    /// behind `video_analyze`). Counts only what providers actually reported.
+    pub input_tokens: u64,
+    /// Completion tokens across the token-billed calls.
+    pub output_tokens: u64,
+    /// Number of token-billed calls. **This is the figure that makes
+    /// `video_analyze` legible**: one tool call fans out to nine provider
+    /// calls, so a session with a single video analysis shows nine here.
+    pub token_billed_calls: usize,
+    /// Characters of input text across the character-billed calls (speech
+    /// synthesis).
+    pub billed_characters: u64,
+    /// Number of character-billed calls.
+    pub character_billed_calls: usize,
+    /// Token-billed calls for which the provider reported no token counts.
+    /// Sits alongside the token totals for the same reason `unpriced_calls`
+    /// sits alongside `total_usd`: a total that silently omits them reads as
+    /// though those calls did no work.
+    pub calls_of_unknown_tokens: usize,
 }
 
 /// Session-scoped accumulation of [`MediaCostRecord`]s.
@@ -520,6 +680,12 @@ impl MediaCostLedger {
             calls_of_unknown_size: 0,
             billed_seconds: 0.0,
             duration_billed_calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            token_billed_calls: 0,
+            billed_characters: 0,
+            character_billed_calls: 0,
+            calls_of_unknown_tokens: 0,
         };
         for r in records.iter() {
             match r.cost_usd {
@@ -530,18 +696,89 @@ impl MediaCostLedger {
                 None => summary.unpriced_calls += 1,
             }
             summary.images += r.units.images;
-            if r.units.is_duration_billed() {
-                summary.duration_billed_calls += 1;
-                summary.billed_seconds += r.units.billed_seconds.unwrap_or(0.0);
-            } else {
-                match r.units.megapixels() {
+            // Bucket on the DECLARED basis. Seconds, tokens, characters and
+            // pixels are four different billable units; summing any two of
+            // them produces a number that means nothing, and filing one under
+            // another produces a number that means something false.
+            match r.units.basis {
+                BillingBasis::Artifacts => match r.units.megapixels() {
                     Some(mp) => summary.megapixels += mp,
                     // An image call whose size the surface did not report.
                     None => summary.calls_of_unknown_size += 1,
+                },
+                BillingBasis::Duration => {
+                    summary.duration_billed_calls += 1;
+                    summary.billed_seconds += r.units.billed_seconds.unwrap_or(0.0);
+                }
+                BillingBasis::Tokens => {
+                    summary.token_billed_calls += 1;
+                    match r.units.total_tokens() {
+                        Some(_) => {
+                            summary.input_tokens += u64::from(r.units.input_tokens.unwrap_or(0));
+                            summary.output_tokens += u64::from(r.units.output_tokens.unwrap_or(0));
+                        }
+                        None => summary.calls_of_unknown_tokens += 1,
+                    }
+                }
+                BillingBasis::Characters => {
+                    summary.character_billed_calls += 1;
+                    summary.billed_characters += u64::from(r.units.billed_characters.unwrap_or(0));
                 }
             }
         }
         summary
+    }
+}
+
+/// The two things every billable media backend needs in order to account for
+/// itself: somewhere to accumulate, and the operator's price list.
+///
+/// Bundled because they were being threaded separately and one of them kept
+/// getting dropped: at the time this was added, `bootstrap.rs` bound a rate
+/// card to image generation and to nothing else, so an operator who had
+/// configured `[tools.media_pricing]` had it silently ignored for
+/// transcription. A single value that carries both makes "wired for cost" one
+/// decision per backend instead of two independent ones.
+///
+/// [`Default`] is the unconfigured install: no ledger, empty price list —
+/// which records units and `unpriced`, never a guess.
+#[derive(Debug, Clone, Default)]
+pub struct MediaAccounting {
+    pub ledger: Option<Arc<MediaCostLedger>>,
+    pub rate_card: MediaRateCard,
+}
+
+impl MediaAccounting {
+    /// A session ledger with the operator's price list.
+    pub fn new(ledger: Arc<MediaCostLedger>, rate_card: MediaRateCard) -> Self {
+        Self {
+            ledger: Some(ledger),
+            rate_card,
+        }
+    }
+
+    /// Record one billable call: emit the structured log line every backend
+    /// shares, then accumulate if a ledger is bound. Returns the record so a
+    /// caller can surface it without a ledger.
+    ///
+    /// Centralised so a backend cannot accidentally log without recording, or
+    /// record without logging — the two halves drifted apart across backends
+    /// before this existed.
+    pub fn account(&self, record: MediaCostRecord) -> MediaCostRecord {
+        tracing::info!(
+            target: "wcore::media_cost",
+            tool = %record.tool,
+            backend_id = %record.backend_id,
+            model = %record.model,
+            basis = ?record.units.basis,
+            cost_usd = ?record.cost_usd,
+            "media call accounted: {}",
+            record.summary_line()
+        );
+        if let Some(ledger) = &self.ledger {
+            ledger.record(record.clone());
+        }
+        record
     }
 }
 
@@ -940,6 +1177,273 @@ mod tests {
             "an unsized IMAGE call must still be counted"
         );
         assert_eq!(s2.duration_billed_calls, 1, "and it is not duration-billed");
+    }
+
+    /// **The `$0.00` trap, token edition.** A vision call has `images == 0`
+    /// and is billed on tokens. A per-artifact rate card that happens to match
+    /// its backend id must not price it — and must not price it as *zero*,
+    /// which is how `usd_per_image * 0` would land.
+    ///
+    /// This is the `video_analyze` exposure in miniature: at the default frame
+    /// count one tool call is nine of these, so a wrong figure here is wrong
+    /// nine times over.
+    #[test]
+    fn rate_card_never_prices_a_token_billed_call_as_zero() {
+        let rc = card(&[("anthropic", 0.08)]);
+        let vision = MediaCostRecord::for_success(
+            "vision_analyze",
+            "anthropic",
+            "claude-sonnet-4-6",
+            MediaUnits::tokens(Some(1_842), Some(310)),
+            None,
+            &rc,
+        );
+        assert_eq!(
+            vision.cost_usd, None,
+            "a per-artifact card must not price a token-billed call"
+        );
+        assert_eq!(
+            vision.price_source,
+            PriceSource::Unpriced {
+                reason: UnpricedReason::ProviderReportsNoCost
+            }
+        );
+        let rendered = vision.summary_line();
+        assert!(
+            !rendered.contains("$0.00"),
+            "a billable vision call must never render as $0.00: {rendered}"
+        );
+        // It must also not claim it produced nothing — "0 image(s)" reads as
+        // free just as surely as "$0.00" does.
+        assert!(
+            !rendered.contains("0 image(s)"),
+            "a vision call must not be described in artifacts: {rendered}"
+        );
+        assert!(
+            rendered.contains("1842 in / 310 out tokens"),
+            "the units actually billed must be rendered: {rendered}"
+        );
+        // The units survive being unpriced — that is the whole point.
+        assert_eq!(vision.units.total_tokens(), Some(2_152));
+
+        // KNOWN-POSITIVE (can this path still price anything?): the SAME card,
+        // same backend id, applied to an ARTIFACT call, does produce a figure.
+        // Without this the assertion above would pass on an implementation
+        // whose rate card had simply stopped working.
+        let image = MediaCostRecord::for_success(
+            "image_generate",
+            "anthropic",
+            "some-image-model",
+            MediaUnits::one_image(1024, 1024),
+            None,
+            &rc,
+        );
+        assert_eq!(
+            image.cost_usd,
+            Some(0.08),
+            "the same card must still price an artifact call"
+        );
+    }
+
+    /// A character-billed speech call gets the same protection, and is
+    /// likewise described in the units it was billed on.
+    #[test]
+    fn rate_card_never_prices_a_character_billed_call_as_zero() {
+        let rc = card(&[("openai", 0.04)]);
+        let speech = MediaCostRecord::for_success(
+            "text_to_speech",
+            "openai",
+            "tts-1",
+            MediaUnits::text_characters(2_048),
+            None,
+            &rc,
+        );
+        assert_eq!(speech.cost_usd, None);
+        let rendered = speech.summary_line();
+        assert!(!rendered.contains("$0.00"), "{rendered}");
+        assert!(
+            rendered.contains("2048 characters of input text"),
+            "{rendered}"
+        );
+        assert_eq!(speech.units.billed_characters, Some(2_048));
+
+        // KNOWN-POSITIVE: the same card still prices an artifact call.
+        let image = MediaCostRecord::for_success(
+            "image_generate",
+            "openai",
+            "gpt-image-1",
+            MediaUnits::one_image(512, 512),
+            None,
+            &rc,
+        );
+        assert_eq!(image.cost_usd, Some(0.04));
+    }
+
+    /// A provider-reported figure must still reach a token-billed call. This
+    /// is the production shape for vision served over FluxRouter, which the
+    /// module header records as returning `x-flux-cost-usd` on chat.
+    #[test]
+    fn token_billed_call_still_takes_a_provider_reported_figure() {
+        let rc = card(&[("flux-router", 0.08)]);
+        let r = MediaCostRecord::for_success(
+            "vision_analyze",
+            "flux-router",
+            "gpt-4o",
+            MediaUnits::tokens(Some(1_500), Some(240)),
+            Some(ReportedCost::from_header("x-flux-cost-usd", 0.004_21)),
+            &rc,
+        );
+        assert_eq!(r.cost_usd, Some(0.004_21));
+        assert!(
+            r.price_source.is_provider_reported(),
+            "a header figure must be labelled provider-reported, not rate-card"
+        );
+        assert_ne!(
+            r.price_source,
+            PriceSource::LocalRateCard {
+                entry: "flux-router".to_string()
+            },
+            "the matching rate-card entry must not shadow the provider's own number"
+        );
+    }
+
+    /// Four billing bases, four buckets, no cross-contamination. Pixels,
+    /// seconds, tokens and characters are not summable with one another and a
+    /// call filed under the wrong basis is a false measurement.
+    #[test]
+    fn summary_keeps_all_four_billing_bases_separate() {
+        let ledger = MediaCostLedger::new();
+        let empty = MediaRateCard::default();
+        for units in [
+            MediaUnits::one_image(1024, 1024),
+            MediaUnits::audio_seconds(42.0),
+            MediaUnits::tokens(Some(100), Some(20)),
+            MediaUnits::text_characters(500),
+        ] {
+            ledger.record(MediaCostRecord::for_success(
+                "t", "b", "m", units, None, &empty,
+            ));
+        }
+
+        let s = ledger.summary();
+        assert_eq!(s.calls, 4);
+        // Each basis lands in exactly one bucket...
+        assert_eq!(s.images, 1, "only the artifact call produced an image");
+        assert_eq!(s.duration_billed_calls, 1);
+        assert_eq!(s.token_billed_calls, 1);
+        assert_eq!(s.character_billed_calls, 1);
+        // ...and contributes to no other bucket's total.
+        assert!(
+            (s.billed_seconds - 42.0).abs() < 1e-9,
+            "{}",
+            s.billed_seconds
+        );
+        assert_eq!(s.input_tokens, 100);
+        assert_eq!(s.output_tokens, 20);
+        assert_eq!(s.billed_characters, 500);
+        assert!((s.megapixels - 1.048_576).abs() < 1e-9, "{}", s.megapixels);
+        // The regression this guards hardest: before the basis field existed,
+        // `is_duration_billed()` was `images == 0`, so the vision call and the
+        // speech call would BOTH have been counted as duration-billed and
+        // added 0.0 seconds each — inflating a seconds-denominated call count
+        // with calls that have no seconds.
+        assert_eq!(
+            s.duration_billed_calls, 1,
+            "token and character calls must not be counted as duration-billed"
+        );
+        // And neither is an image of unmeasured size.
+        assert_eq!(
+            s.calls_of_unknown_size, 0,
+            "no non-artifact call is an image of unknown size"
+        );
+
+        // KNOWN-NEGATIVE: a genuinely unsized ARTIFACT call MUST still raise
+        // `calls_of_unknown_size`, and a token call whose provider reported no
+        // counts MUST still raise `calls_of_unknown_tokens`. Without these the
+        // assertions above would pass on an implementation that had simply
+        // stopped counting.
+        ledger.record(MediaCostRecord::for_success(
+            "t",
+            "b",
+            "m",
+            MediaUnits::images_of_unknown_size(2),
+            None,
+            &empty,
+        ));
+        ledger.record(MediaCostRecord::for_success(
+            "t",
+            "b",
+            "m",
+            MediaUnits::tokens(None, None),
+            None,
+            &empty,
+        ));
+        let s2 = ledger.summary();
+        assert_eq!(s2.calls_of_unknown_size, 1, "unsized artifact call counted");
+        assert_eq!(
+            s2.calls_of_unknown_tokens, 1,
+            "token call with no reported counts must be visible, not silently zero"
+        );
+        assert_eq!(s2.token_billed_calls, 2);
+        assert_eq!(
+            s2.input_tokens, 100,
+            "an unreported token count must not be summed as 0 into the total"
+        );
+    }
+
+    /// **The `video_analyze` exposure, stated as an assertion.** One tool call
+    /// at the default frame count is nine billable provider calls. The ledger
+    /// must show nine, because a user who sees one has been told this cost
+    /// roughly a ninth of what it did.
+    #[test]
+    fn video_analyze_fan_out_is_nine_visible_token_billed_calls() {
+        const DEFAULT_FRAMES: usize = 8;
+        let ledger = MediaCostLedger::new();
+        let empty = MediaRateCard::default();
+        // 8 per-frame vision calls...
+        for i in 0..DEFAULT_FRAMES {
+            ledger.record(MediaCostRecord::for_success(
+                "video_analyze",
+                "flux-router",
+                "gpt-4o",
+                MediaUnits::tokens(Some(1_000 + i as u32), Some(50)),
+                Some(ReportedCost::from_header("x-flux-cost-usd", 0.002)),
+                &empty,
+            ));
+        }
+        // ...plus the synthesis pass.
+        ledger.record(MediaCostRecord::for_success(
+            "video_analyze",
+            "flux-router",
+            "gpt-4o",
+            MediaUnits::tokens(Some(4_000), Some(600)),
+            Some(ReportedCost::from_header("x-flux-cost-usd", 0.011)),
+            &empty,
+        ));
+
+        let s = ledger.summary();
+        assert_eq!(
+            s.calls, 9,
+            "one video_analyze must be visible as nine billable calls"
+        );
+        assert_eq!(s.token_billed_calls, 9);
+        assert_eq!(s.priced_calls, 9, "every call carried a provider figure");
+        assert_eq!(s.unpriced_calls, 0);
+        // 8 * 0.002 + 0.011
+        assert!(
+            (s.total_usd - 0.027).abs() < 1e-9,
+            "total must be the SUM of all nine, not one: {}",
+            s.total_usd
+        );
+        // The synthesis pass is materially more expensive than a frame, so a
+        // total that had counted only one call would be visibly wrong either
+        // way — this pins that the fan-out is summed, not sampled.
+        assert!(
+            s.total_usd > 0.011,
+            "total must exceed the single most expensive call: {}",
+            s.total_usd
+        );
+        assert_eq!(s.images, 0, "video_analyze produces no artifacts");
     }
 
     /// The JSON the model and the host see must carry the price source, not
