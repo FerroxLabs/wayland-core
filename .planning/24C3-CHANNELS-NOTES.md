@@ -69,6 +69,70 @@ distinguishable without making a call."*
 
 ---
 
+## M3 — what landed (commits on `lane/24c3-channels`)
+
+| Commit | Content |
+|---|---|
+| `a455a736` | these notes |
+| `a957daed` | `NativeActions` capability type + Slack `chat.update` / `chat.delete` |
+| `814a54ee` | Discord `PATCH`/`DELETE` on the message resource; Telegram `editMessageText` / `deleteMessage` |
+| `c2c9e460` | Matrix `m.replace` / redaction; MS Teams activity `PUT`/`DELETE` |
+| `4f12f99e` | the five negative declarations + the cross-adapter conformance matrix |
+
+**edit/delete went 0/10 → 5/10 implemented**, and the other five are now
+*declared* rather than merely defaulted — with the reason each one is absent.
+
+## M4 — iMessage: a Darwin-only measurement (2026-07-30, this Mac)
+
+`macOS 26.3` build `25D125`, `Messages.app 26.0`. Instrument: `/usr/bin/sdef`.
+
+```
+$ sdef /System/Applications/Messages.app | grep -o '<command name="[^"]*"' | sort -u
+<command name="login"
+<command name="logout"
+<command name="send"
+```
+
+- **known-positive** `<command name="send"` → **1 hit** (instrument alive)
+- target `edit|unsend|delete|redact|recall|remove` → **0 hits**
+- class list: `account`, `chat`, `file transfer`, `participant` — **there is no
+  `message` class at all**
+
+So iMessage edit/delete is not an unwritten adapter method: there is **no
+scriptable object representing a sent message** to address an operation to.
+Messages.app has had human-facing edit/unsend since macOS 13 and exposes none of
+it to AppleScript, which is this adapter's only outbound path. `PlatformHasNoApi`
+with evidence.
+
+**This is the Darwin-behaviour exception being used as intended** (LANE-BRIEF §0):
+no permitted build host runs macOS, and this fact is unobtainable anywhere else.
+It required no `cargo` at all — only `sdef` against the system app bundle.
+
+## M5 — BOTH DIRECTIONS of the matrix gate, measured (hetzner, `4f12f99e`)
+
+The gold standard set by `F24-C-ARRIVAL` is *the gate failed first*. Three
+one-variable runs at the same SHA, tree verified clean before and after:
+
+| Run | Change | RC | Result |
+|---|---|---|---|
+| **baseline** | none | **0** | `3 passed; 0 failed` — **the gate CAN pass** |
+| **mutation A** | Slack `.edit(Implemented)` → `PlatformHasNoApi` (1 line) | **101** | `FAILED. 2 passed; 1 failed` |
+| **mutation B** | MS Teams `.react(PlatformHasNoApi)` → `Implemented` (1 line) | **101** | `FAILED. 2 passed; 1 failed` |
+
+Mutation A's message: *"`slack.edit`: declared `platform-has-no-api` but the call
+did NOT answer Unsupported … outcome = `Err(Auth("bot token not loaded"))`"*.
+Mutation B's: *"`msteams.react`: declared `implemented` but the call fell through
+to the trait's Unsupported default — the override is missing."*
+
+So the gate detects **both** an overclaimed capability and a stale absence, and
+it is green only when the declaration and the wire agree. `FINAL_DIRTY=0`.
+
+**Instrument defect found and REPAIRED in-lane, not written up (§6b-ii):** the
+first mutation run used `set -e`, so the failing `cargo test` aborted the script
+**before the revert**, leaving the mutation on disk (`PRE_DIRTY=1` on the next
+run caught it). Re-driven with a `trap … EXIT` revert; `FINAL_DIRTY=0` asserted
+at the end of the run rather than assumed.
+
 ## Standing risks recorded up front
 
 - `rtk` rewrites tool output including `git diff --numstat` and `grep -c`. **Every number
