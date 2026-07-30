@@ -251,3 +251,45 @@ native-windows-live = { max-threads = 1 }
 platform = 'cfg(windows)'
 filter = 'binary(/hard_process_containment_windows/) or binary(/live_fs_acl/)'
 test-group = 'native-windows-live'
+
+# ---------------------------------------------------------------------------
+# wcore-swarm process/timing tests: reserve capacity so they are not starved.
+#
+# MEASURED, 2026-07-31, hetzner-dsm (96 cores), the merge test gate:
+#   * Full workspace, `--profile ci --no-fail-fast`: one wcore-swarm test failed
+#     per run and it was a DIFFERENT test each time --
+#       run B  wcore-swarm::heartbeat_test worker_writes_heartbeat_during_long_running_task
+#       run C  wcore-swarm worktree::tests::linux::status_output_cap_kills_git_descendant
+#     at the SAME commit, while run A at a neighbouring commit was clean. So 2 of
+#     3 full runs reddened, on a rotating cast.
+#   * wcore-swarm ALONE, `--profile ci`, 3 reps: 150 tests run, 150 passed, every
+#     time, in ~2.2 s.
+#   * The heartbeat test alone: 16 consecutive passes, including with eight
+#     background `cargo check` jobs running.
+#   * `retries = 2` is already set for this profile, so each of those failures
+#     was a test failing THREE times inside the suite and passing 16/16 outside it.
+#
+# The cause is starvation, not a defect in the tests' logic: these spawn real
+# child processes and assert on heartbeat freshness and on a kill propagating
+# through a process tree, and under 13,609 tests across 592 binaries the child
+# does not get scheduled inside the window the parent is willing to wait.
+#
+# `threads-required` is the lever that matches that cause. A test-group with
+# `max-threads` would NOT fix this: groups bound concurrency WITHIN the group,
+# and the pressure here comes from the other ~13,450 tests in the run.
+# `threads-required` instead makes nextest reserve slots from the global pool for
+# the duration of the test, which is exactly the resource being contended.
+#
+# Scoped to the whole package deliberately. The rotating cast above is the point:
+# enumerating the two tests seen so far would fix those two and leave the next one
+# to redden a later merge. The package is 150 tests that finish in 2.2 s, so
+# reserving capacity across all of them is close to free, and far cheaper than a
+# gate people learn to re-run until it is green.
+#
+# This is a SCHEDULING change only. No test, assertion, timeout, or selector is
+# added, removed, or loosened -- a starved test still fails, it just is not
+# starved by our own runner. If any of these ever fails again, that failure is
+# real and must be treated as real.
+[[profile.ci.overrides]]
+filter = 'package(wcore-swarm)'
+threads-required = 4

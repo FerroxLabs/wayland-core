@@ -421,6 +421,20 @@ main() {
 
   compare_failures "$baseline" "$obs" "$existing"
   local rc=$?
+
+  # Keep the nextest log when the gate reddens. The first time this gate failed
+  # for real, it deleted the only copy of the output that said WHY -- the report
+  # named the failing test and nothing else, so diagnosing it needed a second
+  # 125-second full run. A gate that discards the evidence for its own verdict
+  # makes every failure cost twice what it should.
+  if [ "$rc" -ne 0 ]; then
+    local keep="${MERGE_TEST_LOG_DIR:-${TMPDIR:-/tmp}}/merge-test-gate-failure.log"
+    if cp "$log" "$keep" 2>/dev/null; then
+      echo ""
+      echo "full nextest output kept at: $keep"
+    fi
+  fi
+
   rm -f "$log" "$obs" "$existing"
   return $rc
 }
