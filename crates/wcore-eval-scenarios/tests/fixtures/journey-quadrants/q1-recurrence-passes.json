@@ -1,0 +1,156 @@
+{
+  "schema": "wayland.journey.receipt/1",
+  "platform": "windows",
+  "service_family": "schtasks",
+  "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "binary_version": "wayland-core 0.12.25",
+  "binary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "driver_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "started_at": "2026-07-30T00:00:00.000Z",
+  "finished_at": "2026-07-30T00:04:00.000Z",
+  "arrival_source": "independent-sink",
+  "counts": {
+    "submitted": 12,
+    "arrived": 24,
+    "unique": 12,
+    "duplicates": 12,
+    "losses": 0
+  },
+  "delivery_identity": {
+    "replays": 0,
+    "recurrences": 12,
+    "indeterminate": 0,
+    "unidentified": 0,
+    "unidentified_endpoints": []
+  },
+  "adapter_coverage": {
+    "registered_total": 10,
+    "exercised": [
+      {
+        "adapter": "slack",
+        "endpoint": "chat.postMessage",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      },
+      {
+        "adapter": "whatsapp",
+        "endpoint": "whatsapp.messages",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      },
+      {
+        "adapter": "sms",
+        "endpoint": "twilio.messages",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "preflight-clean",
+      "command": "command for preflight-clean",
+      "output": "output 0",
+      "ok": true
+    },
+    {
+      "name": "binary-identity",
+      "command": "command for binary-identity",
+      "output": "output 1",
+      "ok": true
+    },
+    {
+      "name": "profile-setup",
+      "command": "command for profile-setup",
+      "output": "output 2",
+      "ok": true
+    },
+    {
+      "name": "sink-start",
+      "command": "command for sink-start",
+      "output": "output 3",
+      "ok": true
+    },
+    {
+      "name": "gateway-install",
+      "command": "command for gateway-install",
+      "output": "output 4",
+      "ok": true
+    },
+    {
+      "name": "gateway-start",
+      "command": "command for gateway-start",
+      "output": "output 5",
+      "ok": true
+    },
+    {
+      "name": "status-running",
+      "command": "command for status-running",
+      "output": "output 6",
+      "ok": true
+    },
+    {
+      "name": "automation-add",
+      "command": "command for automation-add",
+      "output": "output 7",
+      "ok": true
+    },
+    {
+      "name": "deliveries-submit",
+      "command": "command for deliveries-submit",
+      "output": "output 8",
+      "ok": true
+    },
+    {
+      "name": "arrival-before-kill",
+      "command": "command for arrival-before-kill",
+      "output": "output 9",
+      "ok": true
+    },
+    {
+      "name": "hard-kill",
+      "command": "command for hard-kill",
+      "output": "output 10",
+      "ok": true
+    },
+    {
+      "name": "platform-recover",
+      "command": "command for platform-recover",
+      "output": "output 11",
+      "ok": true
+    },
+    {
+      "name": "delivery-reconcile",
+      "command": "command for delivery-reconcile",
+      "output": "output 12",
+      "ok": true
+    },
+    {
+      "name": "upgrade-in-place",
+      "command": "command for upgrade-in-place",
+      "output": "output 13",
+      "ok": true
+    },
+    {
+      "name": "rollback",
+      "command": "command for rollback",
+      "output": "output 14",
+      "ok": true
+    },
+    {
+      "name": "redaction-canary",
+      "command": "command for redaction-canary",
+      "output": "output 15",
+      "ok": true
+    },
+    {
+      "name": "drain-uninstall-clean",
+      "command": "command for drain-uninstall-clean",
+      "output": "output 16",
+      "ok": true
+    }
+  ]
+}

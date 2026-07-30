@@ -34,6 +34,9 @@
 //! * **Counts that do not reconcile.** `duplicates` and `losses` are DERIVED
 //!   from submitted/arrived/unique, so a receipt cannot assert zero of either
 //!   while carrying numbers that say otherwise.
+//! * **A repeat that is not classified.** See [`DeliveryIdentity`]. A repeated
+//!   message body is not automatically a duplicate delivery, but a repeat the
+//!   receipt declines to classify is refused rather than waved through.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -136,6 +139,143 @@ pub struct DeliveryCounts {
     /// Claimed losses. Must equal `submitted - unique`.
     pub losses: u64,
 }
+
+/// What KIND of repeat the run's `duplicates` were.
+///
+/// # Why a repeat is not automatically a duplicate
+///
+/// `duplicates` is `arrived - unique`: it counts repeats of a message BODY.
+/// Exactly-once is not a property of a body. It is scoped to a **delivery
+/// identity** — `cron:{job_id}:{scheduled_for_millis}`
+/// (`wcore-cron/src/runner.rs:327`), a *(job, scheduled instant)* pair. See
+/// [§4 of `docs/delivery-semantics.md`](../../../docs/delivery-semantics.md).
+///
+/// The journey submits every job with `--trigger every:15`, and `every:15` is
+/// rate-floored to **sixty seconds** by
+/// `TriggerBound::new((*every_secs).max(60), 1)` (`wcore-cron/src/trigger.rs:238`,
+/// applied to the resulting instant at `:366`). Those are therefore **recurring**
+/// jobs, and any run alive past one 60 s period legitimately delivers each body
+/// again under a NEW identity. The heartbeat measured that floor directly in the
+/// Windows run of 2026-07-30: scheduled deltas of 60068 ms and 64940 ms, three
+/// occurrences, and nobody ever called those duplicates.
+///
+/// So the three outcomes are distinguished and never collapsed:
+///
+/// | bucket | meaning | verdict |
+/// |---|---|---|
+/// | `replays` | the SAME delivery identity arrived twice | a real exactly-once violation — **fails** |
+/// | `recurrences` | the same body under DIFFERENT identities | the trigger fired again — **passes** |
+/// | `indeterminate` | a repeat where at least one arrival carries NO identity | unprovable — **fails** |
+///
+/// # Why `indeterminate` fails rather than passes
+///
+/// Only 8 of the 24 delivery arrivals in that run carried an `idempotency_key`
+/// at all; `twilio.messages` and `whatsapp.messages` emit none. For those a
+/// replay is indistinguishable from a recurrence **in principle**, not merely in
+/// this harness. Passing them would publish an unmeasurable property as a
+/// measured clean one — which is the exact defect (F24-GWP-M1) that the
+/// single-snapshot receipt was built to close, one level down. They are counted
+/// AGAINST the run.
+///
+/// # Why this exists at all
+///
+/// Before it, both gates refused any `duplicates != 0` outright. On Windows the
+/// Task Scheduler minimum repetition interval is `PT1M`, which exceeds the 60 s
+/// floor, so a Windows kill-and-recover leg **always** crosses a period boundary
+/// while launchd and systemd restart inside it. The Windows journey therefore had
+/// **no reachable pass state**: a permanently-red gate, which proves as little as
+/// a permanently-green one and additionally hides real progress.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeliveryIdentity {
+    /// Repeats where one delivery identity arrived more than once.
+    pub replays: u64,
+    /// Repeats where the body recurred under a distinct delivery identity.
+    pub recurrences: u64,
+    /// Repeats that cannot be classified because an arrival carried no identity.
+    pub indeterminate: u64,
+    /// Arrivals — repeated or not — that carried no delivery identity.
+    pub unidentified: u64,
+    /// The sink-observed endpoints those unidentified arrivals came from, so a
+    /// reader can see WHICH adapters cannot be graded rather than only how many.
+    #[serde(default)]
+    pub unidentified_endpoints: Vec<String>,
+}
+
+impl DeliveryIdentity {
+    /// The three repeat buckets, which must partition `counts.duplicates`.
+    #[must_use]
+    pub fn classified(&self) -> u64 {
+        self.replays
+            .saturating_add(self.recurrences)
+            .saturating_add(self.indeterminate)
+    }
+
+    /// The verdict token for a receipt whose delivery leg is otherwise sound.
+    ///
+    /// Only the two PASSING tokens can come out of here — the failing states are
+    /// returned as refusals by [`verify_counts`], each carrying its own token in
+    /// its message. See [`VERDICT_TOKENS`] for why this is a token and not prose.
+    #[must_use]
+    pub fn verdict(&self) -> &'static str {
+        if self.replays > 0 {
+            VERDICT_EXACTLY_ONCE_VIOLATED
+        } else if self.indeterminate > 0 {
+            VERDICT_NOT_PROVEN
+        } else if self.recurrences > 0 {
+            VERDICT_RECURRENCE
+        } else {
+            VERDICT_NO_REPEATS
+        }
+    }
+}
+
+/// # The verdict vocabulary, shared with the JavaScript driver
+///
+/// Both gates — `verify_counts` here and `classifyVerdict` in
+/// `scripts/f24-journey.mjs` — emit exactly one `verdict=<TOKEN>` from this list
+/// for any receipt, on their success line or inside their refusal.
+///
+/// It is a single hyphenated token rather than prose so that "the two gates
+/// agree" is a **string equality a test can run**, not a claim a human makes by
+/// reading two paragraphs. Two gates that contradict each other on one receipt —
+/// one passing, one failing — is a worse state than either being wrong alone,
+/// because it makes every downstream grade unreadable. The four-quadrant test in
+/// `tests/journey_receipt_contract.rs` extracts this token from both sides over
+/// the same receipt bytes and fails on any difference.
+pub const VERDICT_TOKENS: [&str; 10] = [
+    VERDICT_NO_REPEATS,
+    VERDICT_RECURRENCE,
+    VERDICT_EXACTLY_ONCE_VIOLATED,
+    VERDICT_NOT_PROVEN,
+    VERDICT_DELIVERY_LOSS,
+    VERDICT_UNCLASSIFIED_REPEATS,
+    VERDICT_CLASSIFICATION_UNRECONCILED,
+    VERDICT_IDENTITY_INCOHERENT,
+    VERDICT_UNIDENTIFIED_EXCEEDS_ARRIVED,
+    VERDICT_COUNTS_UNRECONCILED,
+];
+
+/// PASS. No body arrived twice, so no delivery identity did either.
+pub const VERDICT_NO_REPEATS: &str = "NO-REPEATS";
+/// PASS. Every repeat carried a distinct delivery identity — the recurring
+/// trigger fired again and the product delivered each occurrence once.
+pub const VERDICT_RECURRENCE: &str = "RECURRENCE";
+/// FAIL. One delivery identity was delivered more than once.
+pub const VERDICT_EXACTLY_ONCE_VIOLATED: &str = "EXACTLY-ONCE-VIOLATED";
+/// FAIL. A repeat carried no identity, so exactly-once is unprovable for it.
+pub const VERDICT_NOT_PROVEN: &str = "NOT-PROVEN";
+/// FAIL. A submitted delivery never arrived.
+pub const VERDICT_DELIVERY_LOSS: &str = "DELIVERY-LOSS";
+/// FAIL. Repeats present and the receipt declined to classify them.
+pub const VERDICT_UNCLASSIFIED_REPEATS: &str = "UNCLASSIFIED-REPEATS";
+/// FAIL. The classification buckets do not partition the repeats.
+pub const VERDICT_CLASSIFICATION_UNRECONCILED: &str = "CLASSIFICATION-UNRECONCILED";
+/// FAIL. Indeterminate repeats claimed with nothing unidentified to cause them.
+pub const VERDICT_IDENTITY_INCOHERENT: &str = "IDENTITY-INCOHERENT";
+/// FAIL. More unidentified arrivals than arrivals.
+pub const VERDICT_UNIDENTIFIED_EXCEEDS_ARRIVED: &str = "UNIDENTIFIED-EXCEEDS-ARRIVED";
+/// FAIL. The five headline numbers are internally false.
+pub const VERDICT_COUNTS_UNRECONCILED: &str = "COUNTS-UNRECONCILED";
 
 /// What one channel adapter carried, at the independent sink.
 ///
@@ -245,6 +385,19 @@ pub struct JourneyReceipt {
     pub arrival_source: String,
     /// The five numbers.
     pub counts: DeliveryCounts,
+    /// What kind of repeat `counts.duplicates` were — see [`DeliveryIdentity`].
+    ///
+    /// Optional in the SHAPE, mandatory in the CASE that matters: a receipt with
+    /// `duplicates == 0` has nothing to classify and may omit it, and one with
+    /// `duplicates > 0` and no block is refused as
+    /// [`JourneyError::UnclassifiedRepeats`]. Absence is therefore never a pass —
+    /// it is only permitted where it is vacuous.
+    ///
+    /// `duplicates == 0` implies `replays == 0` without needing this field at
+    /// all: a replayed delivery identity is by construction a second arrival of
+    /// the same job text, so it always shows up as a repeated body first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_identity: Option<DeliveryIdentity>,
     /// Which adapters carried those numbers. Mandatory — see
     /// [`AdapterCoverage`] for why a receipt is not allowed to be silent here.
     pub adapter_coverage: AdapterCoverage,
@@ -283,9 +436,9 @@ pub enum JourneyError {
     #[error("arrival_source is {found:?}; the only accepted value is {expected:?}")]
     WrongArrivalSource { found: String, expected: String },
     #[error(
-        "counts do not reconcile: submitted={submitted} arrived={arrived} unique={unique} \
-         duplicates={duplicates} (derived {derived_duplicates}) losses={losses} \
-         (derived {derived_losses})"
+        "verdict=COUNTS-UNRECONCILED counts do not reconcile: submitted={submitted} \
+         arrived={arrived} unique={unique} duplicates={duplicates} \
+         (derived {derived_duplicates}) losses={losses} (derived {derived_losses})"
     )]
     CountsUnreconciled {
         submitted: u64,
@@ -298,8 +451,70 @@ pub enum JourneyError {
     },
     #[error("journey submitted zero deliveries; a reconciliation over nothing proves nothing")]
     NoDeliveries,
-    #[error("delivery reconciliation is not clean: duplicates={duplicates} losses={losses}")]
-    DirtyReconciliation { duplicates: u64, losses: u64 },
+    #[error(
+        "verdict=DELIVERY-LOSS {losses} of {submitted} submitted deliveries never arrived at the \
+         independent sink ({unique} distinct bodies arrived)"
+    )]
+    DeliveryLoss {
+        losses: u64,
+        submitted: u64,
+        unique: u64,
+    },
+    #[error(
+        "verdict=UNCLASSIFIED-REPEATS receipt carries {duplicates} repeated deliver{plural} and \
+         no delivery_identity block; a repeat the receipt declines to classify is not a clean \
+         one. A repeated BODY may be a replay (exactly-once violated) or a recurrence (the \
+         trigger fired again under a new delivery identity) and the receipt has to say which"
+    )]
+    UnclassifiedRepeats {
+        duplicates: u64,
+        plural: &'static str,
+    },
+    #[error(
+        "verdict=CLASSIFICATION-UNRECONCILED repeat classification does not partition the \
+         repeats: duplicates={duplicates} but replays={replays} + recurrences={recurrences} + \
+         indeterminate={indeterminate} = {classified}; a classifier whose buckets do not add up \
+         cannot support any verdict"
+    )]
+    RepeatClassificationUnreconciled {
+        duplicates: u64,
+        replays: u64,
+        recurrences: u64,
+        indeterminate: u64,
+        classified: u64,
+    },
+    #[error(
+        "verdict=IDENTITY-INCOHERENT receipt reports {indeterminate} indeterminate repeat(s) but \
+         {unidentified} unidentified arrival(s); a repeat is only indeterminate because an \
+         arrival carried no delivery identity, so these cannot both be right"
+    )]
+    IdentityIncoherent {
+        indeterminate: u64,
+        unidentified: u64,
+    },
+    #[error(
+        "verdict=UNIDENTIFIED-EXCEEDS-ARRIVED receipt reports {unidentified} unidentified \
+         arrival(s) out of {arrived} total; a receipt cannot have seen more unidentified \
+         arrivals than arrivals"
+    )]
+    UnidentifiedExceedsArrived { unidentified: u64, arrived: u64 },
+    #[error(
+        "verdict=EXACTLY-ONCE-VIOLATED {replays} deliver{plural} arrived under a delivery \
+         identity that had already been delivered. This is the real duplicate — the destination \
+         received one (job, scheduled instant) pair more than once"
+    )]
+    ExactlyOnceViolated { replays: u64, plural: &'static str },
+    #[error(
+        "verdict=NOT-PROVEN {indeterminate} repeat(s) carry no delivery identity to judge by \
+         ({unidentified} unidentified arrival(s) at endpoint(s) {endpoints}), so exactly-once can \
+         be neither established nor refuted for them. An unmeasurable property is not a clean \
+         one; this is an outbound-idempotency gap in those adapters, NOT evidence of a duplicate"
+    )]
+    UnprovenRepeats {
+        indeterminate: u64,
+        unidentified: u64,
+        endpoints: String,
+    },
     #[error(
         "receipt names zero exercised adapters; a delivery tally that cannot say which adapter \
          carried it reads as the whole population"
@@ -448,7 +663,7 @@ pub fn verify_structure(
             expected: ARRIVAL_SOURCE_INDEPENDENT_SINK.to_string(),
         });
     }
-    verify_counts(&receipt.counts)?;
+    verify_counts(&receipt.counts, receipt.delivery_identity.as_ref())?;
     verify_adapter_coverage(&receipt.adapter_coverage, &receipt.counts)
 }
 
@@ -533,7 +748,35 @@ pub fn verify_adapter_coverage(
 }
 
 /// The count reconciliation, on its own so its refusals are directly testable.
-pub fn verify_counts(counts: &DeliveryCounts) -> Result<(), JourneyError> {
+///
+/// # The predicate, stated once
+///
+/// A journey's delivery leg is **clean** iff all of:
+///
+/// 1. the arithmetic reconciles (`duplicates == arrived - unique`,
+///    `losses == submitted - unique`, `unique` within both bounds);
+/// 2. `losses == 0`;
+/// 3. every repeat is classified — `duplicates > 0` requires an identity block,
+///    and its three buckets must sum to exactly `duplicates`;
+/// 4. `replays == 0`;
+/// 5. `indeterminate == 0`.
+///
+/// `recurrences` is unconstrained. A run in which the trigger fired again under
+/// a new delivery identity is a run in which the product behaved correctly, and
+/// it is a STRONGER exactly-once measurement than a short run, not a weaker one:
+/// 24 arrivals under 24 distinct identities, each delivered once, is 24
+/// observations of the property where a 12-arrival run is 12.
+///
+/// This function is the Rust half of a pair. `classifyVerdict` in
+/// `scripts/f24-journey.mjs` is the JavaScript half and implements the same five
+/// clauses; `tests/journey_receipt_contract.rs` drives both over the same
+/// receipt bytes in all four quadrants and fails if they ever disagree. Changing
+/// one without the other produces two gates that contradict each other on one
+/// receipt, which is worse than either being wrong alone.
+pub fn verify_counts(
+    counts: &DeliveryCounts,
+    identity: Option<&DeliveryIdentity>,
+) -> Result<(), JourneyError> {
     if counts.submitted == 0 {
         return Err(JourneyError::NoDeliveries);
     }
@@ -556,13 +799,75 @@ pub fn verify_counts(counts: &DeliveryCounts) -> Result<(), JourneyError> {
             derived_losses,
         });
     }
-    if counts.duplicates != 0 || counts.losses != 0 {
-        return Err(JourneyError::DirtyReconciliation {
-            duplicates: counts.duplicates,
+    // Clause 2. A loss is unconditional: nothing about identity can make a
+    // delivery that never arrived acceptable.
+    if counts.losses != 0 {
+        return Err(JourneyError::DeliveryLoss {
             losses: counts.losses,
+            submitted: counts.submitted,
+            unique: counts.unique,
+        });
+    }
+    // Clause 3a. Absence of the block is only permitted where it is vacuous.
+    let Some(identity) = identity else {
+        if counts.duplicates != 0 {
+            return Err(JourneyError::UnclassifiedRepeats {
+                duplicates: counts.duplicates,
+                plural: plural(counts.duplicates, "y", "ies"),
+            });
+        }
+        return Ok(());
+    };
+    // Clause 3b. Checked even when `duplicates == 0`, so a receipt cannot carry
+    // a block asserting replays beside a headline that admits no repeats.
+    let classified = identity.classified();
+    if classified != counts.duplicates {
+        return Err(JourneyError::RepeatClassificationUnreconciled {
+            duplicates: counts.duplicates,
+            replays: identity.replays,
+            recurrences: identity.recurrences,
+            indeterminate: identity.indeterminate,
+            classified,
+        });
+    }
+    if identity.unidentified > counts.arrived {
+        return Err(JourneyError::UnidentifiedExceedsArrived {
+            unidentified: identity.unidentified,
+            arrived: counts.arrived,
+        });
+    }
+    if identity.indeterminate > 0 && identity.unidentified == 0 {
+        return Err(JourneyError::IdentityIncoherent {
+            indeterminate: identity.indeterminate,
+            unidentified: identity.unidentified,
+        });
+    }
+    // Clause 4, then clause 5. Ordered so a run that is BOTH violated and
+    // unproven reports the violation, which is the more serious of the two.
+    if identity.replays != 0 {
+        return Err(JourneyError::ExactlyOnceViolated {
+            replays: identity.replays,
+            plural: plural(identity.replays, "y", "ies"),
+        });
+    }
+    if identity.indeterminate != 0 {
+        return Err(JourneyError::UnprovenRepeats {
+            indeterminate: identity.indeterminate,
+            unidentified: identity.unidentified,
+            endpoints: if identity.unidentified_endpoints.is_empty() {
+                "(none recorded)".to_string()
+            } else {
+                identity.unidentified_endpoints.join(",")
+            },
         });
     }
     Ok(())
+}
+
+/// Singular/plural suffix. Exists so a refusal message reads as English rather
+/// than `1 deliverys`, which invites a reader to distrust the number beside it.
+fn plural(count: u64, one: &'static str, many: &'static str) -> &'static str {
+    if count == 1 { one } else { many }
 }
 
 /// The full verification, including hashing the binary the verifier was given.
@@ -603,9 +908,26 @@ pub fn verify_receipt(
             computed,
         });
     }
+    // The repeat classification is PRINTED, not merely validated. A receipt can
+    // now pass while carrying `duplicates=12`, so a success line that reported
+    // only the headline would read as "twelve duplicates were fine" to anyone who
+    // did not know the rule. Same reasoning as the adapter list beside it: a
+    // field a verifier accepts and no consumer surfaces is how the last defect
+    // survived three published receipts.
+    let repeats = match receipt.delivery_identity.as_ref() {
+        Some(identity) => format!(
+            " repeats={} (replays={} recurrences={} indeterminate={} unidentified={})",
+            identity.classified(),
+            identity.replays,
+            identity.recurrences,
+            identity.indeterminate,
+            identity.unidentified,
+        ),
+        None => " repeats=0 (no delivery_identity block; permitted only at duplicates=0)".into(),
+    };
     Ok(format!(
         "JOURNEY VERIFIED platform={} commit={} steps={} submitted={} arrived={} unique={} \
-         duplicates={} losses={} adapters={}/{} exercised={}",
+         duplicates={} losses={} adapters={}/{} exercised={} verdict={}{}",
         receipt.platform,
         receipt.candidate_commit,
         receipt.steps.len(),
@@ -617,6 +939,11 @@ pub fn verify_receipt(
         exercised,
         receipt.adapter_coverage.registered_total,
         receipt.adapter_coverage.adapter_list(),
+        receipt
+            .delivery_identity
+            .as_ref()
+            .map_or(VERDICT_NO_REPEATS, DeliveryIdentity::verdict),
+        repeats,
     ))
 }
 
@@ -830,6 +1157,10 @@ mod tests {
                 duplicates: 0,
                 losses: 0,
             },
+            // A clean run has nothing to classify, and the receipt is allowed to
+            // be silent EXACTLY there. `duplicates == 0` implies `replays == 0`
+            // by construction, so the silence carries no claim.
+            delivery_identity: None,
             // Deliberately the historically-published shape: all 12 deliveries
             // carried by Slack alone, at Slack's endpoint. This fixture is the
             // one the old receipt could not distinguish from a ten-adapter run,
@@ -924,6 +1255,338 @@ mod tests {
             verify_structure(&r, "linux", &"a".repeat(40)),
             Err(JourneyError::NoDeliveries)
         );
+    }
+
+    // ── the repeat classification ───────────────────────────────────────────
+    //
+    // Before these, `verify_counts` refused any `duplicates != 0`. On Windows
+    // the Task Scheduler `PT1M` minimum repetition exceeds the 60 s rate floor
+    // that `every:15` is clamped to, so a Windows kill-and-recover leg ALWAYS
+    // crosses a period boundary and the gate had no reachable pass state.
+    //
+    // Each of the four quadrants below is one of the two directions
+    // LANE-BRIEF §3b-iii demands, and the pair of `..._is_refused` /
+    // `..._passes` tests is what proves the gate can do both.
+
+    /// A run that recurred: same bodies, all under fresh delivery identities.
+    fn recurred() -> JourneyReceipt {
+        let mut r = receipt();
+        r.counts = DeliveryCounts {
+            submitted: 12,
+            arrived: 24,
+            unique: 12,
+            duplicates: 12,
+            losses: 0,
+        };
+        r.delivery_identity = Some(DeliveryIdentity {
+            replays: 0,
+            recurrences: 12,
+            indeterminate: 0,
+            unidentified: 0,
+            unidentified_endpoints: vec![],
+        });
+        r.adapter_coverage.exercised[0].arrived = 24;
+        r
+    }
+
+    #[test]
+    fn quadrant_1_a_run_of_proven_recurrences_passes() {
+        // THE POINT OF THE WHOLE CHANGE. Twelve repeated bodies, every one under
+        // a distinct delivery identity, zero replays, zero unprovable repeats.
+        // The trigger fired again because it is a recurring trigger; the product
+        // delivered each occurrence exactly once.
+        assert_eq!(
+            verify_structure(&recurred(), "linux", &"a".repeat(40)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn quadrant_2_a_planted_replay_is_refused() {
+        // One of the twelve is moved from the recurrence bucket to the replay
+        // bucket and NOTHING else changes — same headline, same partition sum.
+        // So this test cannot pass for any reason other than the replay.
+        let mut r = recurred();
+        let id = r.delivery_identity.as_mut().expect("fixture has identity");
+        id.replays = 1;
+        id.recurrences = 11;
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::ExactlyOnceViolated {
+                replays: 1,
+                plural: "y"
+            })
+        );
+    }
+
+    #[test]
+    fn quadrant_3_an_indeterminate_repeat_is_refused() {
+        // A repeat that cannot be judged is not a clean one. Same discipline as
+        // quadrant 2: one bucket moved, the sum untouched.
+        let mut r = recurred();
+        let id = r.delivery_identity.as_mut().expect("fixture has identity");
+        id.recurrences = 4;
+        id.indeterminate = 8;
+        id.unidentified = 16;
+        id.unidentified_endpoints = vec!["twilio.messages".into(), "whatsapp.messages".into()];
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::UnprovenRepeats {
+                indeterminate: 8,
+                unidentified: 16,
+                endpoints: "twilio.messages,whatsapp.messages".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn quadrant_4_a_clean_run_with_no_repeats_still_passes() {
+        // The gate must not have become a gate that only knows how to pass runs
+        // WITH repeats. The unmodified fixture is `duplicates: 0` and no
+        // identity block, i.e. every receipt published before this change.
+        assert_eq!(
+            verify_structure(&receipt(), "linux", &"a".repeat(40)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_replay_outranks_an_indeterminate_in_the_refusal() {
+        // A run that is both violated and unproven must report the violation:
+        // "we found a duplicate" is strictly more serious than "we could not
+        // tell", and a reader who sees only NOT PROVEN would under-read it.
+        let mut r = recurred();
+        let id = r.delivery_identity.as_mut().expect("fixture has identity");
+        id.replays = 2;
+        id.recurrences = 4;
+        id.indeterminate = 6;
+        id.unidentified = 6;
+        assert!(matches!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::ExactlyOnceViolated { replays: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn repeats_with_no_classification_block_are_refused_not_waved_through() {
+        // The rule that stops the new pass state from being a hole: a receipt
+        // may only be silent about repeats when it has none. Silence beside
+        // `duplicates: 12` is the M1 defect wearing a new coat.
+        let mut r = recurred();
+        r.delivery_identity = None;
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::UnclassifiedRepeats {
+                duplicates: 12,
+                plural: "ies"
+            })
+        );
+    }
+
+    #[test]
+    fn a_classification_that_does_not_partition_the_repeats_is_refused() {
+        // Without this, a driver could pass any run by writing
+        // `recurrences: <duplicates>` — or, as here, by simply under-reporting.
+        let mut r = recurred();
+        r.delivery_identity
+            .as_mut()
+            .expect("fixture has identity")
+            .recurrences = 11;
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::RepeatClassificationUnreconciled {
+                duplicates: 12,
+                replays: 0,
+                recurrences: 11,
+                indeterminate: 0,
+                classified: 11,
+            })
+        );
+    }
+
+    #[test]
+    fn a_block_claiming_replays_beside_a_clean_headline_is_refused() {
+        // The partition check runs even at `duplicates == 0`, so the two halves
+        // of the receipt cannot describe different runs in either direction.
+        let mut r = receipt();
+        r.delivery_identity = Some(DeliveryIdentity {
+            replays: 3,
+            ..DeliveryIdentity::default()
+        });
+        assert!(matches!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::RepeatClassificationUnreconciled { classified: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn an_indeterminate_repeat_with_nothing_unidentified_is_incoherent() {
+        // A repeat is only indeterminate BECAUSE an arrival carried no identity.
+        // A receipt asserting the first while denying the second is describing
+        // an impossible run, and the likeliest cause is a hand-edited receipt.
+        let mut r = recurred();
+        let id = r.delivery_identity.as_mut().expect("fixture has identity");
+        id.recurrences = 11;
+        id.indeterminate = 1;
+        id.unidentified = 0;
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::IdentityIncoherent {
+                indeterminate: 1,
+                unidentified: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_loss_is_refused_whatever_the_classification_says() {
+        // Losses were folded into the old blanket refusal. Splitting the repeat
+        // half out must not have taken the loss half with it.
+        let mut r = recurred();
+        r.counts.unique = 11;
+        r.counts.losses = 1;
+        r.counts.duplicates = 13;
+        r.delivery_identity
+            .as_mut()
+            .expect("fixture has identity")
+            .recurrences = 13;
+        r.adapter_coverage.exercised[0].unique = 11;
+        assert_eq!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::DeliveryLoss {
+                losses: 1,
+                submitted: 12,
+                unique: 11
+            })
+        );
+    }
+
+    #[test]
+    fn the_arithmetic_check_still_runs_ahead_of_the_classification() {
+        // The classification must not have become a way to bypass the derived
+        // counts: a receipt whose headline is internally false is refused before
+        // anyone looks at what kind of repeat it claims to have had.
+        let mut r = recurred();
+        r.counts.duplicates = 11; // arrived - unique is 12
+        assert!(matches!(
+            verify_structure(&r, "linux", &"a".repeat(40)),
+            Err(JourneyError::CountsUnreconciled { .. })
+        ));
+    }
+
+    #[test]
+    fn the_verdict_names_all_four_states() {
+        let id = |replays, recurrences, indeterminate| DeliveryIdentity {
+            replays,
+            recurrences,
+            indeterminate,
+            unidentified: 0,
+            unidentified_endpoints: vec![],
+        };
+        assert_eq!(id(0, 0, 0).verdict(), VERDICT_NO_REPEATS);
+        assert_eq!(id(0, 3, 0).verdict(), VERDICT_RECURRENCE);
+        assert_eq!(id(0, 0, 3).verdict(), VERDICT_NOT_PROVEN);
+        assert_eq!(id(1, 0, 3).verdict(), VERDICT_EXACTLY_ONCE_VIOLATED);
+    }
+
+    #[test]
+    fn a_passing_receipt_with_repeats_says_so_on_the_success_line() {
+        // A pass at `duplicates=12` that printed only the headline would read as
+        // "twelve duplicates were acceptable". The verdict and the buckets are
+        // part of the success line for the same reason the adapter list is.
+        let r = recurred();
+        let line = format!(
+            "duplicates={} verdict={} repeats={}",
+            r.counts.duplicates,
+            r.delivery_identity
+                .as_ref()
+                .map_or(VERDICT_NO_REPEATS, DeliveryIdentity::verdict),
+            r.delivery_identity
+                .as_ref()
+                .map_or(0, DeliveryIdentity::classified),
+        );
+        assert_eq!(line, "duplicates=12 verdict=RECURRENCE repeats=12");
+    }
+
+    #[test]
+    fn every_delivery_leg_refusal_carries_exactly_one_known_verdict_token() {
+        // The cross-gate agreement test compares a `verdict=<TOKEN>` extracted
+        // from each side. That comparison is only meaningful if every refusal
+        // emits exactly one token from the shared vocabulary — a refusal with no
+        // token would make the extraction silently fall through to whatever
+        // matched next, which is the self-passing shape in a regex's clothing.
+        let mut clean = recurred();
+        clean.counts.duplicates = 11; // COUNTS-UNRECONCILED
+
+        let mut loss = recurred();
+        loss.counts.unique = 11;
+        loss.counts.duplicates = 13;
+        loss.counts.losses = 1;
+
+        let mut unclassified = recurred();
+        unclassified.delivery_identity = None;
+
+        let mut unpartitioned = recurred();
+        unpartitioned
+            .delivery_identity
+            .as_mut()
+            .expect("identity")
+            .recurrences = 11;
+
+        let mut incoherent = recurred();
+        {
+            let id = incoherent.delivery_identity.as_mut().expect("identity");
+            id.recurrences = 11;
+            id.indeterminate = 1;
+        }
+
+        let mut over = recurred();
+        over.delivery_identity.as_mut().expect("identity").unidentified = 999;
+
+        let mut replayed = recurred();
+        {
+            let id = replayed.delivery_identity.as_mut().expect("identity");
+            id.replays = 1;
+            id.recurrences = 11;
+        }
+
+        let mut unproven = recurred();
+        {
+            let id = unproven.delivery_identity.as_mut().expect("identity");
+            id.recurrences = 4;
+            id.indeterminate = 8;
+            id.unidentified = 16;
+        }
+
+        for (label, receipt, expected) in [
+            ("arithmetic", clean, VERDICT_COUNTS_UNRECONCILED),
+            ("loss", loss, VERDICT_DELIVERY_LOSS),
+            ("unclassified", unclassified, VERDICT_UNCLASSIFIED_REPEATS),
+            (
+                "partition",
+                unpartitioned,
+                VERDICT_CLASSIFICATION_UNRECONCILED,
+            ),
+            ("incoherent", incoherent, VERDICT_IDENTITY_INCOHERENT),
+            ("over", over, VERDICT_UNIDENTIFIED_EXCEEDS_ARRIVED),
+            ("replay", replayed, VERDICT_EXACTLY_ONCE_VIOLATED),
+            ("unproven", unproven, VERDICT_NOT_PROVEN),
+        ] {
+            let Err(error) = verify_counts(&receipt.counts, receipt.delivery_identity.as_ref())
+            else {
+                panic!("{label} must be refused, and was not");
+            };
+            let text = error.to_string();
+            let found: Vec<&str> = VERDICT_TOKENS
+                .iter()
+                .copied()
+                .filter(|token| text.contains(&format!("verdict={token}")))
+                .collect();
+            // Exactly one, not at-least-one: `NOT-PROVEN` is not a substring of
+            // any other token today, but a future token that contained another
+            // would make the extraction ambiguous without this.
+            assert_eq!(found, vec![expected], "{label}: {text}");
+        }
     }
 
     #[test]
