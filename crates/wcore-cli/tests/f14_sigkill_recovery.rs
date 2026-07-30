@@ -249,6 +249,77 @@ impl CoreProcess {
         }
     }
 
+    /// Wait for an `info` frame whose message contains `needle`.
+    ///
+    /// [`Self::next_type`] matches on the frame type alone, which is not enough
+    /// here: `info` is a general-purpose channel and other machinery emits on
+    /// it, so a type-only match could return an unrelated frame and pass. The
+    /// `stream_end` guard makes the wait bounded by the turn rather than only
+    /// by the clock — if the turn finishes without the notice, that is a
+    /// failure to report, not a slow report, and it should say so.
+    #[cfg(target_os = "linux")]
+    async fn next_info_containing(&mut self, needle: &str, msg_id: &str) -> Value {
+        let mut seen = Vec::new();
+        loop {
+            let frame = self.next_type_in(&["info", "stream_end"]).await;
+            match frame.get("type").and_then(Value::as_str) {
+                Some("info") => {
+                    let message = frame
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if message.contains(needle) {
+                        return frame;
+                    }
+                    seen.push(message.to_string());
+                }
+                _ => panic!(
+                    "turn {msg_id} ended without an info frame containing {needle:?}; \
+                     info frames seen: {seen:?}"
+                ),
+            }
+        }
+    }
+
+    /// `next_type`, widened to a set, so a caller can wait for one of several
+    /// frames and decide which arrived.
+    #[cfg(target_os = "linux")]
+    async fn next_type_in(&mut self, expected: &[&str]) -> Value {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        let label = expected.join("|");
+        let mut observed = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.panic_timeout(&label, &observed);
+            }
+            let line = match tokio::time::timeout(remaining, self.stdout.next_line()).await {
+                Ok(line) => line.expect("read Core protocol stdout"),
+                Err(_) => self.panic_timeout(&label, &observed),
+            };
+            let Some(line) = line else {
+                let stderr = self.stderr.lock().expect("lock Core stderr capture");
+                panic!(
+                    "Core exited while waiting for {label}; stderr:\n{}",
+                    String::from_utf8_lossy(&stderr)
+                );
+            };
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let event_type = event.get("type").and_then(Value::as_str);
+            if event_type.is_some_and(|ty| expected.contains(&ty)) {
+                return event;
+            }
+            observed.push(format!("type={event_type:?}"));
+            assert_ne!(
+                event_type,
+                Some("error"),
+                "Core refused the command while waiting for {label}: {event}"
+            );
+        }
+    }
+
     fn panic_timeout(&self, expected: &str, observed: &[String]) -> ! {
         let stderr = self.stderr.lock().expect("lock Core stderr capture");
         panic!(
@@ -1216,6 +1287,17 @@ fn profile_contents(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         .collect()
 }
 
+/// How many entries the profile's `sessions/` directory holds.
+///
+/// A missing directory counts as 0, so this is meaningful whether or not the
+/// harness pre-created it.
+#[cfg(target_os = "linux")]
+fn session_directory_entries(home: &Path) -> usize {
+    fs::read_dir(home.join("sessions"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
 /// Grade one profile for durable-session residue: how many artifacts of the
 /// journal family exist, and in how many files the prompt appears.
 ///
@@ -1396,10 +1478,13 @@ async fn without_secure_store_an_operator_who_requires_durability_gets_a_refusal
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable() {
-    let fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-DEGRADED-REPLY")])
-        .start()
-        .await
-        .expect("start degraded-run fixture");
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text("F14-DEGRADED-REPLY-1"),
+        OpenAiStep::text("F14-DEGRADED-REPLY-2"),
+    ])
+    .start()
+    .await
+    .expect("start degraded-run fixture");
     let env = environment(&fixture);
     let session_id = "f1400000000000000000000000000005";
     let prompt = "F14-DEGRADED-PROMPT-MUST-NOT-BECOME-DURABLE";
@@ -1417,17 +1502,30 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
          now carries one, the host-facing contract changed: {ready}"
     );
 
-    send_message(&mut process, "f14-degraded", prompt).await;
-    let terminal = process.next_type("stream_end").await;
-    assert_eq!(terminal["msg_id"], "f14-degraded");
-    assert_eq!(
-        terminal["finish_reason"], "stop",
-        "the degraded turn must actually complete: {terminal}"
-    );
+    // TWO turns, deliberately. A startup notice is indistinguishable from a
+    // per-turn notice if you only ever run one turn, and "the notice fired
+    // once, three weeks ago" is precisely the defect. The second turn is the
+    // only assertion that can tell them apart.
+    for (index, msg_id) in ["f14-degraded-1", "f14-degraded-2"].into_iter().enumerate() {
+        send_message(&mut process, msg_id, prompt).await;
+        let notice = process
+            .next_info_containing("this host has no usable OS keyring", msg_id)
+            .await;
+        assert_eq!(
+            notice["msg_id"], msg_id,
+            "the degraded notice must be correlated to the turn it concerns"
+        );
+        let terminal = process.next_type("stream_end").await;
+        assert_eq!(terminal["msg_id"], msg_id);
+        assert_eq!(
+            terminal["finish_reason"], "stop",
+            "degraded turn {index} must actually complete: {terminal}"
+        );
+    }
     assert_eq!(
         fixture.observation().requests.len(),
-        1,
-        "the degraded turn must reach the provider exactly once"
+        2,
+        "both degraded turns must reach the provider, exactly once each"
     );
 
     let stderr = String::from_utf8_lossy(&process.sigkill().await).into_owned();
@@ -1445,9 +1543,17 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
         leaked.is_empty(),
         "a degraded run persisted the prompt: {leaked:?}"
     );
-    assert!(
-        !env.home().join("sessions").exists(),
-        "a degraded run created a sessions directory"
+    // MEASURED CORRECTION to what the degrade fix claimed. Its commit message
+    // says a degraded run "creates no sessions/ directory at all". On a profile
+    // built by `tempenv::build` the directory already exists — the HARNESS
+    // creates it — so an `exists()` assertion reds for a reason that has
+    // nothing to do with the product. It did, on this test's second run. The
+    // durable property is that the directory stays EMPTY, which is what is
+    // asserted, with the control below proving the same count is not always 0.
+    assert_eq!(
+        session_directory_entries(env.home()),
+        0,
+        "a degraded run put entries in the sessions directory"
     );
 
     // KNOWN-POSITIVE CONTROL, in the same test, for the same walker.
@@ -1487,6 +1593,12 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
         !control_leaked.is_empty(),
         "CONTROL FAILED: the prompt sweep found nothing on a profile that journals, \
          so the prompt-absence assertions above are unproven"
+    );
+    assert_ne!(
+        session_directory_entries(control_env.home()),
+        0,
+        "CONTROL FAILED: the sessions-directory count is 0 even on a profile that \
+         journals, so the emptiness asserted above proves nothing"
     );
 }
 
