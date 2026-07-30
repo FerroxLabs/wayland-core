@@ -94,19 +94,49 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: `DiscordServerTool` passes the Discord API response
+    /// through verbatim (`discord_tool.rs`), so a posted message comes back
+    /// as a message object with `channel_id` and `content`.
     #[test]
-    fn discord_summary_format() {
+    fn discord_summary_reads_the_real_api_response() {
         let f = DiscordFormatter;
-        let payload = json!({ "channel_name": "general", "chars": 42 });
+        let payload = json!({
+            "id": "1234567890",
+            "channel_id": "9876543210",
+            "content": "hello there",
+        });
         let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Posted to #general · 42 chars");
+        assert!(s.contains("9876543210"), "channel lost: {s}");
+        assert!(s.contains("11 chars"), "wrong length: {s}");
     }
 
     #[test]
-    fn discord_summary_missing_channel() {
+    fn discord_surfaces_an_api_error_instead_of_claiming_a_post() {
         let f = DiscordFormatter;
-        let payload = json!({ "chars": 10 });
-        let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Posted to #? · 10 chars");
+        let s = f.summary_line(
+            &json!({ "error": "Missing Permissions" }),
+            Duration::from_secs(1),
+        );
+        assert_eq!(s, "Missing Permissions");
+        assert!(
+            !s.contains("Posted"),
+            "claimed a post that never happened: {s}"
+        );
+    }
+
+    /// INVERTED. Was `assert_eq!(s, "Posted to #? · 10 chars")`.
+    #[test]
+    fn discord_never_renders_a_question_mark_channel() {
+        let f = DiscordFormatter;
+        let s = f.summary_line(&json!({}), Duration::from_secs(1));
+        assert!(!s.contains('?'), "fabricated a channel: {s}");
+        assert!(!s.contains("Posted"), "claimed a post with no payload: {s}");
     }
 }

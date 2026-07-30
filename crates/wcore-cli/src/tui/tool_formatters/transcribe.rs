@@ -73,23 +73,51 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: `{success, transcript, mime, bytes, language, segments: [...]}`.
+    /// `segments` is an ARRAY — `as_u64` on it returned None, so the old code
+    /// rendered `0 segments` while the true count sat right there.
     #[test]
-    fn transcribe_summary_format() {
+    fn transcribe_summary_reads_the_real_payload() {
         let f = TranscribeFormatter;
         let payload = json!({
-            "seconds": 12.4,
-            "segments": 8,
+            "success": true,
+            "transcript": "hello world",
+            "mime": "audio/wav",
+            "bytes": 4096,
             "language": "en",
+            "segments": [{"text": "hello"}, {"text": "world"}],
         });
         let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Transcribed 12s · 8 segments · en");
+        assert!(s.contains("2 segments"), "segment count lost: {s}");
+        assert!(s.contains("en"), "language lost: {s}");
+        assert!(!s.contains("0 segments"), "still fabricating zero: {s}");
     }
 
     #[test]
-    fn transcribe_summary_handles_missing_fields() {
+    fn transcribe_detail_reads_transcript_not_text() {
         let f = TranscribeFormatter;
-        let payload = json!({});
-        let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Transcribed 0s · 0 segments · ?");
+        let payload = json!({ "transcript": "line one\nline two" });
+        let lines = f.detail_lines(&payload, &Theme::hearth());
+        assert_eq!(lines.len(), 2, "transcript was never displayed before");
+        let l0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(l0, "line one");
+    }
+
+    /// INVERTED. Was `assert_eq!(s, "Transcribed 0s · 0 segments · ?")` —
+    /// three fabrications asserted as the specification.
+    #[test]
+    fn transcribe_never_fabricates_missing_fields() {
+        let f = TranscribeFormatter;
+        let s = f.summary_line(&json!({}), Duration::from_secs(1));
+        assert!(!s.contains('?'), "fabricated a language: {s}");
+        assert!(!s.contains("0s"), "fabricated a duration: {s}");
+        assert!(!s.contains("0 segments"), "fabricated a segment count: {s}");
     }
 }

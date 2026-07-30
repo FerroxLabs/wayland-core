@@ -79,23 +79,55 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: every success is wrapped as
+    /// `{"success": true, "result": <payload>}` by `ok_result`.
     #[test]
-    fn ha_summary_format() {
+    fn ha_summary_reads_the_wrapped_result() {
         let f = HomeAssistantFormatter;
         let payload = json!({
-            "domain": "light",
-            "service": "turn_on",
-            "entities": ["light.kitchen", "light.den"],
+            "success": true,
+            "result": {
+                "service": "light.turn_on",
+                "affected_entities": ["light.kitchen", "light.den"],
+            }
         });
         let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Called light.turn_on on 2 entities");
+        assert!(s.contains("light.turn_on"), "service lost: {s}");
+        assert!(s.contains("2 entities"), "entity count lost: {s}");
     }
 
     #[test]
-    fn ha_summary_missing_entities() {
+    fn ha_detail_lines_read_the_wrapped_entities() {
         let f = HomeAssistantFormatter;
-        let payload = json!({ "domain": "automation", "service": "reload" });
-        let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Called automation.reload on 0 entities");
+        let payload = json!({
+            "success": true,
+            "result": { "affected_entities": ["light.kitchen"] }
+        });
+        let lines = f.detail_lines(&payload, &Theme::hearth());
+        assert_eq!(lines.len(), 1);
+        let l0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(l0, "light.kitchen");
+    }
+
+    /// INVERTED. Was `assert_eq!(s, "Called automation.reload on 0 entities")`
+    /// for a payload with no entities key — a `list_entities` call renders
+    /// through here too, and it calls no service at all.
+    #[test]
+    fn ha_never_claims_a_service_call_it_cannot_see() {
+        let f = HomeAssistantFormatter;
+        let s = f.summary_line(
+            &json!({ "success": true, "result": {} }),
+            Duration::from_secs(1),
+        );
+        assert!(!s.contains('?'), "fabricated a domain/service: {s}");
+        assert!(!s.contains("Called"), "claimed a service call: {s}");
+        assert!(!s.contains("0 entities"), "fabricated an entity count: {s}");
     }
 }

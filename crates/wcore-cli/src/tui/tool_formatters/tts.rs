@@ -88,23 +88,41 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: `{success, file_path, provider, format, bytes_written,
+    /// voice_compatible}`. The output path is `file_path`, not `path`.
     #[test]
-    fn tts_summary_format() {
+    fn tts_summary_reads_the_real_payload() {
         let f = TtsFormatter;
         let payload = json!({
-            "chars": 320,
+            "success": true,
+            "file_path": "/tmp/output/abc.wav",
             "provider": "elevenlabs",
-            "path": "/tmp/output/abc.wav",
+            "format": "wav",
+            "bytes_written": 40960,
         });
         let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Synthesized 320 chars · elevenlabs · → abc.wav");
+        assert!(s.contains("abc.wav"), "output path lost: {s}");
+        assert!(s.contains("elevenlabs"), "provider lost: {s}");
+        assert!(s.contains("40960 bytes"), "size lost: {s}");
     }
 
+    /// INVERTED. The old case was literally named
+    /// `tts_summary_missing_path_is_question_mark` and asserted
+    /// `"Synthesized 50 chars · openai · → ?"` — an arrow pointing at a file
+    /// that does not exist, plus a `chars` count the tool never emits.
     #[test]
-    fn tts_summary_missing_path_is_question_mark() {
+    fn tts_never_points_an_arrow_at_a_file_it_cannot_name() {
         let f = TtsFormatter;
-        let payload = json!({ "chars": 50, "provider": "openai" });
-        let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Synthesized 50 chars · openai · → ?");
+        let s = f.summary_line(&json!({ "provider": "openai" }), Duration::from_secs(1));
+        assert!(!s.contains('?'), "fabricated an output path: {s}");
+        assert!(!s.contains("\u{2192}"), "arrow with no destination: {s}");
+        assert!(!s.contains("0 chars"), "fabricated a character count: {s}");
     }
 }

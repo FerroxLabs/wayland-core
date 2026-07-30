@@ -209,8 +209,17 @@ pub(crate) fn opt_u64(payload: &Value, key: &str) -> Option<u64> {
 /// fallback is their normal path, not an error path. Formatters read the text
 /// through here instead of calling `.get(…)` and silently getting `None` for
 /// everything.
+/// Returns the text **verbatim**, not trimmed.
+///
+/// It did trim, briefly, and that was a real bug caught by the real-payload
+/// suite: `BashTool`'s result ends with the `\nSTDERR:\n` marker, so trimming
+/// the trailing newline destroyed the marker, the stdout/stderr split failed,
+/// and the byte count came back as 23 instead of 15. The emptiness check
+/// still uses `trim`, because a whitespace-only payload carries no
+/// information — but what is handed to the caller is exactly what the tool
+/// produced.
 pub(crate) fn raw_text(payload: &Value) -> Option<&str> {
-    payload.as_str().map(str::trim).filter(|s| !s.is_empty())
+    payload.as_str().filter(|s| !s.trim().is_empty())
 }
 
 /// Join the facts a formatter actually established into one summary line.

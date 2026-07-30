@@ -88,28 +88,48 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: `GitHubApiTool` is a passthrough of the GitHub REST
+    /// response. An issue object carries `number`, `title`, `state` and
+    /// `html_url` — and NOT `action` or `repo`.
     #[test]
-    fn github_summary_format() {
+    fn github_summary_reads_the_real_api_response() {
         let f = GithubFormatter;
         let payload = json!({
-            "action": "Created",
-            "repo": "FerroxLabs/wayland-core",
-            "id": 42,
+            "id": 2847362819_i64,
+            "number": 42,
+            "state": "open",
+            "title": "Tool card lies about exit status",
             "html_url": "https://github.com/FerroxLabs/wayland-core/issues/42",
+            "repository": { "full_name": "FerroxLabs/wayland-core" },
         });
         let s = f.summary_line(&payload, Duration::from_secs(1));
-        assert_eq!(s, "Created FerroxLabs/wayland-core #42");
+        assert!(s.contains("FerroxLabs/wayland-core"), "repo lost: {s}");
+        // `#42` is the human-facing number, NOT the internal `id`.
+        assert!(s.contains("#42"), "issue number lost: {s}");
+        assert!(!s.contains("2847362819"), "showed the internal db id: {s}");
+    }
+
+    /// INVERTED. The old case asserted the fabricated verb "Did" and repo "?"
+    /// by supplying keys the tool does not emit.
+    #[test]
+    fn github_never_fabricates_a_verb_or_a_repo() {
+        let f = GithubFormatter;
+        let s = f.summary_line(&json!({}), Duration::from_secs(1));
+        assert!(!s.contains('?'), "fabricated a repo: {s}");
+        assert!(!s.contains("Did"), "fabricated a verb: {s}");
     }
 
     #[test]
     fn github_extracts_html_url() {
         let f = GithubFormatter;
-        let payload = json!({
-            "action": "Merged",
-            "repo": "x/y",
-            "id": 1,
-            "html_url": "https://github.com/x/y/pull/1",
-        });
+        let payload = json!({ "html_url": "https://github.com/x/y/pull/1" });
         let urls = f.extract_urls(&payload);
         assert_eq!(urls, vec!["https://github.com/x/y/pull/1".to_string()]);
     }

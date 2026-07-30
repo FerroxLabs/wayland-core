@@ -64,32 +64,46 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // UAT-T3: these cases previously asserted payload shapes the tool has
+    // never emitted, and in several places asserted the FABRICATED output as
+    // though it were the specification. They are not weakened here — the
+    // fixtures are replaced with the shapes read out of the tool source, and
+    // every "renders `?` when the field is missing" case is INVERTED, because
+    // rendering `?` as though it were a fact is the defect.
+
+    /// The real shape: `{success, analysis, mime, bytes}` — there is no
+    /// `width`, `height` or `provider`, so the old summary rendered
+    /// `Analyzed image 0x0 · ? · 0.0s` on every successful call.
     #[test]
-    fn vision_summary_format() {
+    fn vision_summary_reads_the_real_payload() {
         let f = VisionFormatter;
         let payload = json!({
-            "width": 1024,
-            "height": 768,
-            "provider": "anthropic",
+            "success": true,
             "analysis": "A scenic view.",
+            "mime": "image/png",
+            "bytes": 20480,
         });
         let s = f.summary_line(&payload, Duration::from_secs_f64(1.4));
-        assert_eq!(s, "Analyzed image 1024x768 · anthropic · 1.4s");
+        assert!(s.contains("image/png"), "mime lost: {s}");
+        assert!(s.contains("20480 bytes"), "size lost: {s}");
+        assert!(!s.contains("0x0"), "fabricated dimensions: {s}");
+        assert!(!s.contains('?'), "fabricated a provider: {s}");
     }
 
     #[test]
     fn vision_detail_includes_analysis() {
         let f = VisionFormatter;
-        let payload = json!({
-            "width": 100,
-            "height": 100,
-            "provider": "openai",
-            "analysis": "Line one\nLine two",
-        });
-        let theme = Theme::hearth();
-        let lines = f.detail_lines(&payload, &theme);
+        let payload = json!({ "analysis": "Line one\nLine two" });
+        let lines = f.detail_lines(&payload, &Theme::hearth());
         assert_eq!(lines.len(), 2);
         let l0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(l0, "Line one");
+    }
+
+    #[test]
+    fn vision_never_renders_an_unmeasured_duration() {
+        let f = VisionFormatter;
+        let s = f.summary_line(&json!({ "analysis": "x" }), Duration::ZERO);
+        assert!(!s.contains("0.0s"), "rendered a placeholder duration: {s}");
     }
 }
