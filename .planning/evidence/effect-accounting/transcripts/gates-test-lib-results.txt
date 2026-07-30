@@ -1,0 +1,6 @@
+test cache_cmd::store_total_tests::an_empty_store_totals_to_unpriced_not_to_a_trustworthy_zero ... ok
+test cache_cmd::store_total_tests::incomplete_sessions_are_counted_separately_from_sessions ... ok
+test cache_cmd::store_total_tests::the_aggregate_grade_takes_the_worst_session_in_the_store ... ok
+test cache_cmd::store_total_tests::five_restart_fragments_sum_to_the_spend_no_single_session_can_show ... ok
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1923 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.87s

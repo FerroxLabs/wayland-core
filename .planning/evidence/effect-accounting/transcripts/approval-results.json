@@ -1,0 +1,128 @@
+[
+  {
+    "arm": "on",
+    "degrade_notice_run1": false,
+    "degrade_notice_run2": false,
+    "run1_round_trips": 1,
+    "run1_events": [
+      "ready",
+      "execution_policy",
+      "workspace_policy",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "stream_start",
+      "info",
+      "provider_attempt",
+      "info",
+      "tool_request",
+      "approval_required"
+    ],
+    "run1_approval_required": {
+      "type": "approval_required",
+      "call_id": "call_effacc_0001",
+      "resume_token": "",
+      "correlation_id": "call_effacc_0001",
+      "reason": "exec",
+      "context": "Execute: rm -rf /tmp/effacc-destructive-target"
+    },
+    "run1_kill": "SIGKILL",
+    "run2_events": [
+      "ready"
+    ],
+    "run2_stderr_tail": [
+      "wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/effacc-approval/home-on/.dirty-death.2359278)"
+    ],
+    "sessions_on_disk": [
+      "2026-07-30_cccccc-000003.json",
+      "cccccc-000003.journal",
+      "cccccc-000003.journal.authority",
+      "cccccc-000003.journal.snapshot",
+      "cccccc-000003.journal.writer.lock",
+      "index.json"
+    ]
+  },
+  {
+    "arm": "off",
+    "degrade_notice_run1": true,
+    "degrade_notice_run2": true,
+    "run1_round_trips": 1,
+    "run1_events": [
+      "ready",
+      "execution_policy",
+      "workspace_policy",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "capability_activation",
+      "stream_start",
+      "info",
+      "provider_attempt",
+      "info",
+      "tool_request",
+      "approval_required"
+    ],
+    "run1_approval_required": {
+      "type": "approval_required",
+      "call_id": "call_effacc_0001",
+      "resume_token": "",
+      "correlation_id": "call_effacc_0001",
+      "reason": "exec",
+      "context": "Execute: rm -rf /tmp/effacc-destructive-target"
+    },
+    "run1_kill": "SIGKILL",
+    "run2_events": [
+      "error"
+    ],
+    "run2_stderr_tail": [
+      "wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/effacc-approval/home-off/.dirty-death.2361033)",
+      "notice: durable session persistence is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and a durable session seals every provider request into its recovery journal, which cannot be done without one. Everything else works normally \u2014 prompts, channels, tools and replies \u2014 but conversation history is not saved to disk and an interrupted turn cannot be recovered. To turn durable sessions back on, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor \u2014 preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and silence the notice, set [session] enabled = false in config.toml.",
+      "Error: Session 'dddddd-000004' not found"
+    ],
+    "sessions_on_disk": [
+      "dddddd-000004.journal",
+      "dddddd-000004.journal.writer.lock"
+    ]
+  }
+]

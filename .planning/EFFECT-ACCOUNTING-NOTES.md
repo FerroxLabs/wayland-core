@@ -180,3 +180,41 @@ three assertions (known-positive, known-negative, and *arithmetic-usable* — th
 one the broken version would have failed). A second defect in the same script reported arm two's
 spend as 200000 by multiplying the *cumulative* round-trip count; repaired to a per-arm delta and
 re-run. Both figures above are from the repaired run.
+
+### t4 — the fix, cross-audited and live-proven in both directions
+
+Panel on *"what should this lane build — (a) a cross-session aggregate view, (b) a cross-session
+ceiling read from the ledger, (c) both, (d) nothing"*: **codex `a`, kimi `a`, gemini `c`.**
+Majority `a`, and the minority conceded the coupling risk in its own answer ("introduces a
+structural impurity… if an operator clears their cache, the daily budget resets"). Both `a` legs
+made the same argument independently: enforcement on a best-effort diagnostics store has two
+failure shapes and both are bad — fail-open silently restores the hole, fail-closed bricks every
+launch on a pruned or partially-written file. Internal adversarial pass argued *"an aggregate
+nobody runs is documentation, not a fix"*; answered by not claiming A fixed — the enforcement gap
+is reported below as an open HIGH with a named home, and the sum is the thing any future
+enforcement must first be able to compute correctly.
+
+Built: `crates/wcore-cli/src/cache_cmd.rs` — `cache list` now emits `F23_CACHE=total`.
+
+Live, on the binary built from this branch:
+
+```
+# PASS direction — the degraded arm's five restart-fragments
+F23_CACHE=total sessions=5 incomplete_sessions=0 round_trips=5 input_tokens=100000
+  output_tokens=500 cost_usd=0.000000 cost_truth=unpriced … unpriced_round_trips=5
+F23_CACHE=total_cost_warning text=total_usd_is_a_floor_not_spend cost_truth=unpriced
+
+# CONTROL — the journalled arm, which spent the same: byte-identical figures.
+
+# FAIL direction — an empty store must not read as a trustworthy zero
+F23_CACHE=total sessions=0 … cost_usd=0.000000 cost_truth=unpriced
+
+# USD axis on a CATALOG-PRICED model (gpt-4o-mini against the same loopback)
+F23_CACHE=total sessions=3 round_trips=3 input_tokens=60000 output_tokens=300
+  cost_usd=0.009180 cost_truth=priced catalog_priced_round_trips=3
+```
+
+Two independent cross-checks on that last line: the loopback's own meter logged exactly 3
+round-trips, and `60000 × $0.15/1M + 300 × $0.60/1M = $0.00918` reproduces the printed figure
+exactly. Three fresh sessions, 60000 input tokens, **0 refusals against a 25000-token cap** — the
+compounding shape, in dollars, on a real price.

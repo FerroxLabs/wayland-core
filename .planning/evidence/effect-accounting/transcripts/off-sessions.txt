@@ -1,0 +1,2 @@
+aaaaaa-000001.journal
+aaaaaa-000001.journal.writer.lock

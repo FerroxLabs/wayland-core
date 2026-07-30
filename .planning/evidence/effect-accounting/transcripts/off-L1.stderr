@@ -1,0 +1,6 @@
+warning: /root/effacc-out/home-off/config.toml has permissions 0o644; tightening to 0o600 on next write
+notice: durable session persistence is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and a durable session seals every provider request into its recovery journal, which cannot be done without one. Everything else works normally — prompts, channels, tools and replies — but conversation history is not saved to disk and an interrupted turn cannot be recovered. To turn durable sessions back on, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and silence the notice, set [session] enabled = false in config.toml.
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/effacc-out/home-off/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+Pricing unavailable for openai/mock-model; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+[turns: 1 | tokens: 20000 in / 100 out]

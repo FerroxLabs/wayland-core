@@ -1,0 +1,6 @@
+Resumed session aaaaaa-000001 (3 messages, mock-model model)
+Pricing unavailable for openai/mock-model; the call remains bounded by the token envelope and cost is unpriced, not $0.
+error: Provider call not started: budget cap 'per_session_input_tokens' would be exceeded (limit 25000 input tokens, reserved total 32082 input tokens). Continue with additional budget to authorize more work.
+
+[turns: 0 | tokens: 20000 in / 100 out]
+[truncated] response stopped at the max_tokens budget — visible output may be incomplete
