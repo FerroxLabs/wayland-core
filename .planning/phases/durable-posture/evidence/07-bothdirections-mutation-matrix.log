@@ -1,0 +1,212 @@
+===== BEGIN BASELINE_UNMUTATED =====
+--- BASELINE_UNMUTATED :: requiring_durability_refuses_exactly_where_accepting_it_would_degrade ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[BASELINE_UNMUTATED::requiring_durability_refuses_exactly_where_accepting_it_would_degrade]=0
+--- BASELINE_UNMUTATED :: an_untrusted_project_config_cannot_clear_a_global_durability_requirement ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[BASELINE_UNMUTATED::an_untrusted_project_config_cannot_clear_a_global_durability_requirement]=0
+--- BASELINE_UNMUTATED :: the_durability_refusal_names_its_cause_and_all_three_remedies ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[BASELINE_UNMUTATED::the_durability_refusal_names_its_cause_and_all_three_remedies]=0
+===== END BASELINE_UNMUTATED =====
+MUTATION_M1_APPLIED
+===== BEGIN MUTATED_M1 =====
+--- MUTATED_M1 :: requiring_durability_refuses_exactly_where_accepting_it_would_degrade ---
+   Compiling wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.68s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade ... FAILED
+
+failures:
+
+---- config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade stdout ----
+
+thread 'config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade' (2426341) panicked at crates/wcore-config/src/config.rs:5443:13:
+assertion `left == right` failed: enabled=true require_durability=true backend=Auto storage_available=false
+  left: Degrade
+ right: Refuse
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-config --lib`
+RC[MUTATED_M1::requiring_durability_refuses_exactly_where_accepting_it_would_degrade]=101
+--- MUTATED_M1 :: an_untrusted_project_config_cannot_clear_a_global_durability_requirement ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M1::an_untrusted_project_config_cannot_clear_a_global_durability_requirement]=0
+--- MUTATED_M1 :: the_durability_refusal_names_its_cause_and_all_three_remedies ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M1::the_durability_refusal_names_its_cause_and_all_three_remedies]=0
+===== END MUTATED_M1 =====
+RESTORED_M1 porcelain=[]
+MUTATION_M2_APPLIED
+===== BEGIN MUTATED_M2 =====
+--- MUTATED_M2 :: requiring_durability_refuses_exactly_where_accepting_it_would_degrade ---
+   Compiling wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.68s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M2::requiring_durability_refuses_exactly_where_accepting_it_would_degrade]=0
+--- MUTATED_M2 :: an_untrusted_project_config_cannot_clear_a_global_durability_requirement ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement ... FAILED
+
+failures:
+
+---- config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement stdout ----
+
+thread 'config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement' (2427257) panicked at crates/wcore-config/src/config.rs:5551:9:
+a project config that only changes the session directory must not clear the operator's global require_durability
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-config --lib`
+RC[MUTATED_M2::an_untrusted_project_config_cannot_clear_a_global_durability_requirement]=101
+--- MUTATED_M2 :: the_durability_refusal_names_its_cause_and_all_three_remedies ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M2::the_durability_refusal_names_its_cause_and_all_three_remedies]=0
+===== END MUTATED_M2 =====
+RESTORED_M2 porcelain=[]
+MUTATION_M3_APPLIED
+===== BEGIN MUTATED_M3 =====
+--- MUTATED_M3 :: requiring_durability_refuses_exactly_where_accepting_it_would_degrade ---
+   Compiling wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.69s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M3::requiring_durability_refuses_exactly_where_accepting_it_would_degrade]=0
+--- MUTATED_M3 :: an_untrusted_project_config_cannot_clear_a_global_durability_requirement ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[MUTATED_M3::an_untrusted_project_config_cannot_clear_a_global_durability_requirement]=0
+--- MUTATED_M3 :: the_durability_refusal_names_its_cause_and_all_three_remedies ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies ... FAILED
+
+failures:
+
+---- config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies stdout ----
+
+thread 'config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies' (2428540) panicked at crates/wcore-config/src/config.rs:5517:13:
+the durability refusal must mention "require_durability = false": [session] require_durability = true, but this host cannot protect a durable session: it has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than running with no recovery journal. Unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = "keyring" on a host that has one.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-config --lib`
+RC[MUTATED_M3::the_durability_refusal_names_its_cause_and_all_three_remedies]=101
+===== END MUTATED_M3 =====
+RESTORED_M3 porcelain=[]
+===== BEGIN RESTORED_FINAL =====
+--- RESTORED_FINAL :: requiring_durability_refuses_exactly_where_accepting_it_would_degrade ---
+   Compiling wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.71s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::requiring_durability_refuses_exactly_where_accepting_it_would_degrade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[RESTORED_FINAL::requiring_durability_refuses_exactly_where_accepting_it_would_degrade]=0
+--- RESTORED_FINAL :: an_untrusted_project_config_cannot_clear_a_global_durability_requirement ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::an_untrusted_project_config_cannot_clear_a_global_durability_requirement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[RESTORED_FINAL::an_untrusted_project_config_cannot_clear_a_global_durability_requirement]=0
+--- RESTORED_FINAL :: the_durability_refusal_names_its_cause_and_all_three_remedies ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/wcore_config-640f0fbaad7dc4f3)
+
+running 1 test
+test config::tests::the_durability_refusal_names_its_cause_and_all_three_remedies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 582 filtered out; finished in 0.00s
+
+RC[RESTORED_FINAL::the_durability_refusal_names_its_cause_and_all_three_remedies]=0
+===== END RESTORED_FINAL =====
+WLDONE
