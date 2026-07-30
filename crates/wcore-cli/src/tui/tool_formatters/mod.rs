@@ -286,16 +286,21 @@ mod tests {
         // confirm the summary diverges from the generic fallback on a
         // payload designed to trip the per-tool format string.
         let f = formatter_for("web");
+        // Two rows, so the assertion below is not coupled to whether the
+        // summary pluralises. (It now does: a one-row payload reads
+        // "Found 1 result", which broke this case when it asserted the
+        // literal substring "results".)
         let payload = json!({
             "results": [
-                { "title": "A", "url": "https://example.com", "domain": "example.com", "snippet": "s" }
+                { "title": "A", "url": "https://example.com", "domain": "example.com", "snippet": "s" },
+                { "title": "B", "url": "https://example.org", "domain": "example.org", "snippet": "t" }
             ]
         });
         let summary = f.summary_line(&payload, Duration::from_secs_f64(2.3));
         // Web formatter's idiom: "Found N results in X.Xs". Generic
         // would say nothing of the sort.
         assert!(summary.contains("Found"), "web summary was: {summary}");
-        assert!(summary.contains("results"), "web summary was: {summary}");
+        assert!(summary.contains("2 results"), "web summary was: {summary}");
     }
 
     /// v0.9.1.1 B3: regression — every actual backend tool name the
