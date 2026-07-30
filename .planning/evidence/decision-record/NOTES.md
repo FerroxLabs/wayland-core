@@ -107,3 +107,111 @@ So the degraded mode IS observable over the wire; it is just observable as a mis
 rather than as a declared state. That is the worst of both options — a silent contract change.
 `durable_sessions_disabled_by_host()` exists (per the same commit) with no consumer; this is the
 consumer-shaped hole it was created for.
+
+---
+
+## T+2 — the causation run (RESOLVED, measured)
+
+Ran on `hetzner-dsm` in a fresh worktree `/root/wayland-decision-record` at `b8311575`. Load at
+launch 5.78, 913G free — a single targeted `-p wcore-cli --test f14_sigkill_recovery` is within
+LANE-BRIEF §2. Full binary, **no name filter** (§3.2 flavour (c)).
+
+Anti-vacuity: 672 crates compiled from source including `wcore-cli` and `wcore-agent` from
+`/root/wayland-decision-record/crates/`; the script self-reports HEAD into the log; `WLRC`/`WLDONE`
+sentinels written and read back from a file; output copied locally and read with the Read tool,
+never through a Bash pipe (§3b).
+
+```
+=== HEAD self-report ===
+b831157508a2a0598d7a5f380cc49c4a9477f848
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 44s
+     Running tests/f14_sigkill_recovery.rs (target/debug/deps/f14_sigkill_recovery-0c2c7646b8296b33)
+running 12 tests
+test isolated_profile_without_secure_store_fails_before_turn_or_provider_intent ... ok
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.54s
+WLRC=0
+WLDONE
+```
+
+Against `lane/fix-tui-noise`'s AFTER run at `e7bc6d88` (fix present), same binary hash
+`0c2c7646b8296b33`: `FAILED. 10 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out`.
+
+**Exactly one test flipped, on a test file the fix did not modify. Causation established.**
+This also closes `lane/durable-posture`'s open item — their premise 5 was marked UNVERIFIED
+pending hetzner; it is now verified, and their worktree does not need to repeat it.
+
+## T+3 — the merge-cadence premise is FALSE as stated
+
+Brief: "the merge cadence gates on `fmt` + `metadata --locked` + `check --workspace --all-targets`
+and runs **no tests and no clippy**".
+
+Measured from `.planning/evidence/fix-headless-keyring/NOTES.md:177-186` — the keyring lane ran
+`test -p wcore-config --lib` (579 passed), `test -p wcore-agent` (2 targets), `test -p wcore-cli
+--test json_stream_startup_refusal` (6 passed), scoped clippy (0,0,0), and workspace clippy (101,
+proven pre-existing). **Tests ran. Clippy ran.**
+
+The real mechanism is finer and is what ADR 0004 §3 argues from:
+
+- every test that ran was scoped to a crate the author **changed** (`wcore-config`,
+  `wcore-agent`), plus one integration target hand-picked because the author knew it was about
+  refusal;
+- the broken test lives in `wcore-cli`, whose **source the change never touched**;
+- the only workspace-wide gate was `cargo check --workspace --all-targets`, which **compiles
+  everything and runs nothing**. The test compiled perfectly.
+
+Also note `.gate.sh` in the repo root *does* run fmt + clippy + nextest, but its `BRANCH` is
+hardcoded to `feat/issue-158-plan-tier` — a stale artifact of a different branch, not the current
+cadence.
+
+## T+4 — Tier-2 discovery mechanism, executed against the real case
+
+```
+$ git log -S "isolated_profile_without_secure_store_fails_before_turn_or_provider_intent" \
+      --format='%h %ad %s' --date=short -- crates/wcore-cli/tests/f14_sigkill_recovery.rs
+906287e1 2026-07-16 feat(recovery): seal interrupted turn state
+```
+
+One line, the exact introducing commit, reasoning in its body. The proposed rule is tested, not
+aspirational.
+
+False-negative surface, measured (`/usr/bin/grep -rn` over `crates/`, control-negative 0,
+control-positive 5035): **250** `#[ignore]` occurrences, **13819** test attributes, **552**
+integration test files. Plus the specific trap in this case — the test is
+`#[cfg(target_os = "linux")]`, so a macOS-only gate would never have compiled it.
+
+---
+
+# OUTCOME
+
+**All three tasks landed.** Lane branch `lane/decision-record`, HEAD
+`5825807e1969129784a19f0d103a9b775e8dd583`, pushed to `gh` (remote SHA asserted equal).
+
+| # | deliverable | state |
+|---|---|---|
+| 1 | `docs/decisions/0003-durable-sessions-without-a-secure-store.md` — the merged ADR | landed |
+| 2 | Doc-comment anchor on `RecoveryConfidentialError`, `crates/wcore-agent/src/recovery_confidential.rs` | landed |
+| 3 | `docs/decisions/0004-cross-audit-panels-must-see-prior-decisions.md` — the process fix | landed |
+
+**ADR location:** the brief suggested `docs/design/`. The repo's actual ADR convention is
+`docs/decisions/NNNN-*.md` (`0001-binary-size-v0.2.0-vs-v0.2.1.md`,
+`0002-performance-baseline-v0.2.1.md`). Used that; mine are 0003 and 0004.
+
+**Gates.** `cargo fmt --all -- --check` on the Mac → **rc=0** (permitted by §0).
+`cargo clippy -p wcore-agent --lib -- -D warnings` on hetzner at HEAD `5825807e` → **rc=0**,
+with `Checking wcore-agent` present in the log so the crate genuinely recompiled. No test run
+was needed for a doc-comment change; the causation run above is the lane's substantive measurement.
+
+**Deviations.** My first two commits carry author `ci <ci@ferroxlabs.dev>` because I passed `-c`
+explicitly; the repo default is `ci <sean@seandonahoe.com>`, which the third commit uses. Not
+corrected — `rebase`/`reset` are forbidden by §0 and the cost of the inconsistency is zero.
+
+**Verdict: criteria met.** The causation claim is measured on both sides rather than taken on
+trust, and three of the brief's premises were refuted with evidence.
+
+**Still open (carried into ADR 0003 §7, not resolved here):**
+- the `ready` frame silently dropping `session_id` is unassigned and needs a seam request;
+- `durable_sessions_disabled_by_host()` still has no consumer;
+- `switch_active_session` (journal writer #3) is still unguarded;
+- the second panel's transcript is not committed anywhere in the repo — ADR 0003 §5 records that
+  caveat rather than presenting relayed content as measured.
