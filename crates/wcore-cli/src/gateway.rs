@@ -908,7 +908,9 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
         })?;
 
     let (channel_name, text) = match &job.target {
-        wcore_cron::Target::Channel { channel_name, text } => (channel_name.clone(), text.clone()),
+        wcore_cron::Target::Channel {
+            channel_name, text, ..
+        } => (channel_name.clone(), text.clone()),
         other => bail!(
             "job {} no longer targets a channel ({other:?}), so {id} cannot be re-sent",
             job.id

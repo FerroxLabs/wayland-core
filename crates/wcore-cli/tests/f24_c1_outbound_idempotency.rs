@@ -540,6 +540,7 @@ async fn the_bool_the_delivery_spine_reads_is_false_for_every_adapter_but_slack(
     let chan = |name: &str| Target::Channel {
         channel_name: name.to_string(),
         text: "f24c1".to_string(),
+        conversation_id: None,
     };
 
     assert!(

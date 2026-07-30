@@ -218,6 +218,10 @@ fn spec_to_target(spec: &CreateJobSpec) -> CronTarget {
         return CronTarget::Channel {
             channel_name: channel.clone(),
             text: spec.prompt.clone(),
+            // The cron tool surface exposes no destination field, so this
+            // defers to the adapter's configured default rather than
+            // re-introducing F-ML-5's channel-name-as-room-id.
+            conversation_id: None,
         };
     }
     // Skill route — first skill is the entry point; remaining skills +

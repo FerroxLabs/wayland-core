@@ -521,6 +521,7 @@ mod tests {
         Target::Channel {
             channel_name: "sink".into(),
             text: "body".into(),
+            conversation_id: None,
         }
     }
 
@@ -663,7 +664,8 @@ mod tests {
         // on work that has no sink to duplicate at.
         assert!(is_delivery(&Target::Channel {
             channel_name: "team".into(),
-            text: "hi".into()
+            text: "hi".into(),
+            conversation_id: None
         }));
         assert!(!is_delivery(&Target::Slash {
             command: "/brief".into()
