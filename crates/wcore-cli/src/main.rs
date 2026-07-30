@@ -7688,7 +7688,9 @@ mod tests {
     #[test]
     fn danger_spellings_never_change_tier() {
         use clap::Parser as _;
-        use wcore_types::execution_policy::{MAX_DANGEROUS_SESSION_TTL_SECS, SandboxPolicy};
+        use wcore_types::execution_policy::{
+            EffectiveExecutionPolicy, MAX_DANGEROUS_SESSION_TTL_SECS, SandboxPolicy,
+        };
 
         // (argv spelling, does this spelling bypass the OS sandbox?)
         let cases: [(&str, bool); 5] = [
@@ -7732,10 +7734,34 @@ mod tests {
             // The baseline is Required for BOTH tiers; only a resolver-minted
             // lease may override it. This catches a change that weakened the
             // baseline itself rather than the tier wiring.
+            //
+            // NOTE this assertion ALONE would be a permanently-green gate:
+            // `BaselineExecutionPolicy::smart()` hardcodes `Required`, so it
+            // can never redden for a tier change. The authoritative assertion
+            // is the EFFECTIVE posture below — the same projection the protocol
+            // emits to hosts, and the one that actually moves between tiers.
             assert_eq!(
                 selection.baseline().sandbox(),
                 SandboxPolicy::Required,
                 "{spelling}: the baseline sandbox must stay Required"
+            );
+
+            let effective = match selection.dangerous_grant() {
+                Some(grant) => EffectiveExecutionPolicy::dangerous(grant),
+                None => EffectiveExecutionPolicy::baseline(selection.baseline()),
+            };
+            let expected_sandbox = if expect_sandbox_bypass {
+                SandboxPolicy::Bypass
+            } else {
+                SandboxPolicy::Required
+            };
+            assert_eq!(
+                effective.sandbox(),
+                expected_sandbox,
+                "{spelling}: TIER CHANGE. The EFFECTIVE OS-sandbox posture for this \
+                 spelling moved. If deliberate, every existing caller of {spelling} \
+                 just gained or lost containment — that is a privilege change, not \
+                 a rename."
             );
 
             match selection.dangerous_grant() {
@@ -7771,7 +7797,27 @@ mod tests {
                     Cli::try_parse_from(["wayland-core", tier1, tier2]).is_err(),
                     "{tier1} {tier2} must be refused: the tiers do not stack"
                 );
+                // Both orders — a one-sided `conflicts_with` that only fired
+                // in one direction would pass the check above.
+                assert!(
+                    Cli::try_parse_from(["wayland-core", tier2, tier1]).is_err(),
+                    "{tier2} {tier1} must be refused too (reversed order)"
+                );
             }
+            // CONTROL IN THE PASS DIRECTION. Without this, every assertion
+            // above would also be satisfied by a spelling that simply does not
+            // parse at all — a gate that cannot pass proves as little as one
+            // that cannot fail.
+            assert!(
+                Cli::try_parse_from(["wayland-core", tier1]).is_ok(),
+                "{tier1} alone must still parse"
+            );
+        }
+        for tier2 in ["--dangerously-skip-permissions-and-sandbox", "--dangerous"] {
+            assert!(
+                Cli::try_parse_from(["wayland-core", tier2]).is_ok(),
+                "{tier2} alone must still parse"
+            );
         }
     }
 
@@ -7803,146 +7849,6 @@ mod tests {
         let alone =
             Cli::try_parse_from(["wayland-core", "--auto-approve"]).expect("parses standalone");
         assert_eq!(danger_tiers(&alone), (false, false));
-    }
-
-    /// THE tier guard. Every danger spelling is pinned to the OS-sandbox
-    /// posture it has today, per spelling.
-    ///
-    /// WHY THIS EXISTS, because a future edit could delete it as redundant:
-    /// `--force` and `--yolo` are approval-only. If either is ever re-aliased
-    /// onto the sandbox flag, every existing script and CI job using them
-    /// SILENTLY LOSES ITS OS SANDBOX on upgrade — a privilege escalation
-    /// delivered by a rename, invisible in the caller's diff. This test makes
-    /// that mistake impossible to land quietly.
-    ///
-    /// It derives BOTH tier arguments from the parsed `Cli` through
-    /// `danger_tiers` — the same single wiring point `run()` uses — so it
-    /// observes the real wiring rather than a restatement of it. A test that
-    /// passes `resolve_local_execution(.., true, false, ..)` literally, as the
-    /// pre-rename `foreign_dangerous_alias_is_approval_only` does, stays green
-    /// through exactly the rewiring this catches.
-    #[test]
-    fn danger_spellings_never_change_tier() {
-        use clap::Parser as _;
-        use wcore_types::execution_policy::{EffectiveExecutionPolicy, SandboxPolicy};
-
-        // (spelling, sandbox stays Required, a dangerous lease is minted)
-        const TIER_MAP: &[(&str, bool, bool)] = &[
-            // Tier 1 — approvals only. The sandbox MUST stay on.
-            ("--dangerously-skip-permissions", true, false),
-            ("--force", true, false),
-            ("--yolo", true, false),
-            // Not a tier-1 alias, deliberately: reaches Bypass through
-            // `tools.auto_approve`. Pinned here so a future lane cannot fold
-            // it in without reddening this test.
-            ("--auto-approve", true, false),
-            // Tier 2 — approvals AND sandbox, under a lease.
-            ("--dangerously-skip-permissions-and-sandbox", false, true),
-            ("--dangerous", false, true),
-        ];
-
-        for (spelling, sandbox_required, expect_lease) in TIER_MAP {
-            let cli = Cli::try_parse_from(["wayland-core", spelling])
-                .unwrap_or_else(|e| panic!("{spelling} must remain accepted: {e}"));
-            let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
-
-            // `--auto-approve` never reaches `danger_tiers`; it travels through
-            // the config, so model it the way `run()` does.
-            let mut config = Config::default();
-            if cli.auto_approve {
-                config.tools.auto_approve = true;
-            }
-
-            let selection = resolve_local_execution(
-                &config,
-                approval_bypass,
-                dangerous_launch,
-                DEFAULT_DANGEROUS_SESSION_TTL_SECS,
-                false,
-            )
-            .unwrap_or_else(|e| panic!("{spelling} must resolve an execution policy: {e}"));
-
-            // Every spelling in the map bypasses approvals. That is precisely
-            // what makes the SANDBOX column the only thing distinguishing the
-            // tiers, and therefore the only thing worth guarding.
-            assert_eq!(
-                selection.approvals(),
-                ApprovalPolicy::Bypass,
-                "{spelling}: expected approvals to be bypassed"
-            );
-
-            // Read the posture off the EFFECTIVE policy — the same projection
-            // the protocol emits to hosts. `baseline().sandbox()` is hardcoded
-            // to Required for every baseline, so asserting on it could never
-            // fail and would be a permanently-green gate.
-            let effective = match selection.dangerous_grant() {
-                Some(grant) => EffectiveExecutionPolicy::dangerous(grant),
-                None => EffectiveExecutionPolicy::baseline(selection.baseline()),
-            };
-            let expected_sandbox = if *sandbox_required {
-                SandboxPolicy::Required
-            } else {
-                SandboxPolicy::Bypass
-            };
-            assert_eq!(
-                effective.sandbox(),
-                expected_sandbox,
-                "{spelling}: TIER CHANGE. This spelling's OS-sandbox posture moved. \
-                 If deliberate, every existing caller of {spelling} just gained or \
-                 lost containment — that is a privilege change, not a rename."
-            );
-            assert_eq!(
-                selection.dangerous_grant().is_some(),
-                *expect_lease,
-                "{spelling}: dangerous-lease presence must not change"
-            );
-        }
-    }
-
-    /// The two tiers must keep refusing to stack, in EITHER order, under every
-    /// spelling — and `--auto-approve` must keep having no conflict
-    /// relationship at all, because `--dangerous --auto-approve` parses today
-    /// and a rename must not start rejecting a working invocation.
-    #[test]
-    fn tier_one_and_tier_two_refuse_to_stack_but_auto_approve_stays_free() {
-        use clap::Parser as _;
-
-        const TIER1: &[&str] = &["--dangerously-skip-permissions", "--force", "--yolo"];
-        const TIER2: &[&str] = &["--dangerously-skip-permissions-and-sandbox", "--dangerous"];
-
-        for one in TIER1 {
-            for two in TIER2 {
-                assert!(
-                    Cli::try_parse_from(["wayland-core", one, two]).is_err(),
-                    "{one} {two} must not stack"
-                );
-                assert!(
-                    Cli::try_parse_from(["wayland-core", two, one]).is_err(),
-                    "{two} {one} must not stack (reversed order)"
-                );
-            }
-            // Control in the PASS direction: each tier-1 spelling alone parses,
-            // proving the assertions above fail on the conflict and not because
-            // the spelling itself is unparseable.
-            assert!(
-                Cli::try_parse_from(["wayland-core", one]).is_ok(),
-                "{one} alone must parse"
-            );
-            assert!(
-                Cli::try_parse_from(["wayland-core", one, "--auto-approve"]).is_ok(),
-                "--auto-approve must not acquire a conflict with {one}"
-            );
-        }
-        for two in TIER2 {
-            assert!(
-                Cli::try_parse_from(["wayland-core", two]).is_ok(),
-                "{two} alone must parse"
-            );
-            assert!(
-                Cli::try_parse_from(["wayland-core", two, "--auto-approve"]).is_ok(),
-                "--auto-approve must not acquire a conflict with {two}"
-            );
-        }
     }
 
     /// The lease lifetime attaches to tier 2 under BOTH spellings, and still
