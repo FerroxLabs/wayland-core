@@ -146,9 +146,88 @@ known-negative `GLIBC_9.99` → **0** hits. The grep was alive in both direction
 glibc >= 2.39, i.e. Ubuntu 24.04 / Debian 13 or newer. Ubuntu 22.04 LTS is supported until
 2027 and cannot run either binary. Recording it; it is out of this lane's scope to fix.
 
-## 8. Log
+## 8. Both directions of the gate, established ON aarch64 (LANE-BRIEF §3b-iii)
+
+The corpus's falsifier `ollama_hint_is_honest` is RED on **every** packaged artifact ever
+smoked. On aarch64 alone it would therefore be indistinguishable from a permanently-red gate
+— the precise defect that mis-graded `22-C3`. So I constructed its pass state on the aarch64
+binary itself (`probe9-both-directions-on-aarch64.txt`, one capture, same binary, same guest):
+
+| Direction | State | Engine output | Matcher renders |
+|---|---|---|---|
+| **Can fail** | no credential | contains `No API key found` **and** `Provider 'anthropic' requires an API key` | **FAIL** |
+| **Can pass** | credential present | contains **neither** string | **PASS** |
+
+Plus, within the single graded run, the corpus produced **8 PASS and 1 FAIL on aarch64
+hardware** — both grades reached on the target, in one run, with `total=9` and no skipped
+cell.
+
+Instrument known-positive: the same harness re-run on native aarch64 macOS reproduced the
+grade already on record (8 PASS / 1 RED), so the harness is alive on this hardware rather
+than inherited from x86_64.
+
+## 9. RESULT — `aarch64-pc-windows-msvc` = **NOT MEASURED**, impossibility proven
+
+No Windows-on-ARM host exists in this program's reach, and I measured that rather than
+assuming it:
+
+| Host | Probe | Result |
+|---|---|---|
+| `SeanD@seandesktop` | `Win32_Processor`, `PROCESSOR_ARCHITECTURE` | i9-13900KF, **AMD64**, Windows 11 Pro |
+| `hetzner-dsm` | `uname -m` | x86_64 Linux |
+| This Mac | `ls /Applications`, `which` | **no VM software at all** — no UTM, Parallels, VMware, VirtualBox, qemu |
+
+`SeanD@seandesktop` connected fine with `BatchMode=yes`; this is not an access blocker.
+
+Then, rather than assert "x64 Windows cannot execute an ARM64 PE", I ran it
+(`windows-aarch64-NOT-MEASURED-proof.txt`). Both published archives were copied to
+`D:\lane-27c5` (never `C:\` root), digest-verified **on the Windows side**, and launched by
+the same script in the same session:
+
+```
+SHA256_aarch64=282cd3f309e17a62e712a97caab7b95050bc2fca9158b6b4a2b28a3f7d546c85   (matches published)
+SHA256_x86_64 =e9cf6650a47a8f3340a25d720ab6ed032e1fa41da0d1171ccb87337fd542947a   (matches published)
+
+PE_MACHINE_aarch64=0xAA64
+LAUNCH_EXCEPTION_aarch64=This version of %1 is not compatible with the version of Windows
+                          you're running.            <- ERROR_BAD_EXE_FORMAT
+EXITCODE_aarch64=NOLAUNCH                            <- the process never started
+
+PE_MACHINE_x86_64=0x8664
+EXITCODE_x86_64=0
+OUTPUT_x86_64=wayland-core 0.12.25                   <- KNOWN-POSITIVE, same script/session
+WLDONE
+```
+
+**The x86_64 leg is the control that makes this a measurement and not a self-passing
+negative.** It proves the path, the launcher, the redirection and the ssh transport were all
+alive; the ARM64 failure is the architecture and nothing else.
+
+No result here depends on an exit status crossing ssh+PowerShell — the status file was read
+back by a **separate** ssh call and keyed on `WLDONE` (LANE-BRIEF §3.2).
+
+**Recorded as NOT MEASURED. Not zero, not passing, not faked.** Closing it needs a
+Windows-on-ARM host, which is the same "parked self-hosted ARM runner" `release.yml:515-516`
+already names.
+
+## 10. Out-of-scope extra attempted: an aarch64 Linux *candidate* build
+
+C5 also distinguishes shipped release from candidate. Attempted a cross-build of the lane
+candidate for `aarch64-unknown-linux-gnu` on hetzner.
+
+**Attempt 1 FAILED, and the cause was mine, not the repo's.** I pinned `cross` 0.2.5, whose
+default aarch64 image carries OpenSSL 1.0.2 (`cargo:version_number=1000207f`), and
+`openssl-sys 0.9.116` aborts on it. `release.yml:136` installs `cross` from **git main**, whose
+image has OpenSSL 1.1.1. Re-running matched to CI. Recording the misstep because a reader
+should not conclude the repo's cross setup is broken — it is not; my invocation deviated
+from CI.
+
+## 11. Log
 
 - Notes committed before any measurement, per §6b-i.
 - `aarch64-unknown-linux-gnu` smoked: 8 PASS / 1 RED. Evidence committed.
+- Both-direction control established on aarch64. Evidence committed.
+- `aarch64-pc-windows-msvc`: NOT MEASURED, impossibility proven with a live control.
+- Candidate cross-build attempt 1 failed (my pin); attempt 2 running.
 </content>
 </invoke>
