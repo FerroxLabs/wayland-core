@@ -41,8 +41,54 @@ production call sites** — only tests.
 So the boot cost is paid on **first boot in an untrusted directory**, which is also the worst first
 impression the product can make. That is worth fixing, but it is one walk, not two.
 
+## MEASURED DECOMPOSITION (hetzner, debug build, controlled probe tree)
+
+Probe tree ground truth (written to `/root/lane-boot-walk-groundtruth.txt`, read with the Read
+tool, never `wc`): `DIRS_TOTAL=10013`, `DIRS_VIS=2001`, `DIRS_IGN=8001` (`node_modules/`, listed
+in `.gitignore`), `FILES_TOTAL=30020`, plus a planted `node_modules/d1/hidden.env`.
+Small probe: `SMALL_DIRS=162`, 150 of them ignored.
+
+**There ARE two full no-prune traversals. Neither is repomap.** Proven at path level: the
+directory `node_modules` itself is opened exactly **2** times, and `node_modules/dN` is opened
+**16,000** times against a ground truth of 8,000 ignored dirs. A gitignore-respecting walker
+(repomap) would open none of them.
+
+Attribution, by PID + instrumentation in a SINGLE process:
+
+| Walk | Thread | Evidence | On boot path? |
+|------|--------|----------|---------------|
+| `wcore_tools::workspace_policy::project_committed_secrets` | bootstrap thread | `Backtrace::force_capture()` says `project_committed_secrets` ← `compute_secret_deny` ← `WorkspacePolicy::contained` ← `bootstrap::build_scoped` ← **`wcore_cli::tui::splash_while`** ← `wayland_core::run`. Called **exactly once** (static counter), **294–367 ms** for 10k dirs / 30k files. | **YES — inside `splash_while`, so it blocks first paint** |
+| `notify` recursive watcher (`wcore-agent/src/watch.rs:127`, `RecursiveMode::Recursive`, armed from `engine.rs:4888 install_file_watcher_eventually`) | detached `wcore-filewatcher-init` std::thread | second PID in the same trace does 300 dir opens AND **all 164** `inotify_add_watch` calls (ground truth 162 dirs). Zero `inotify_add_watch` on any other thread. | **NO — detached thread, does not block first paint, but contends for the same IO** |
+
+Single-run correlation (`/root/lane-boot-walk-ino-result.txt`):
+`pid 207654 → 150 node_modules opens, 0 inotify`; `pid 208193 → 300 node_modules opens, 164 inotify`;
+`WLPROBE_ENTER count = 1`.
+
+## Premises graded
+
+| Brief claim | Verdict |
+|---|---|
+| "two full recursive walks of cwd" | **TRUE** (and I proved it at path level, which the brief did not) |
+| "walk 1 = `wcore_repomap::scope::scope_files`" | **FALSE.** Not on the boot path, and a gitignore-respecting walker cannot produce the observed ignored-subtree opens. |
+| "walk 2 = `project_committed_secrets`" | **TRUE**, and it is the one that actually blocks first paint. |
+| walk 2's missing prune is deliberate and load-bearing | **TRUE** — comment at `workspace_policy.rs:828-836`, pinned by `workspace_policy/tests.rs:548-562`. |
+| scoping agent: "3,649 `inotify_add_watch` comes from the recursive notify watch" | **TRUE**, and stronger than stated: that watcher is not just syscall noise, it is the *entire second traversal*. |
+| scoping agent: the walk is posture-dependent (`Contained` only) | **TRUE in source** (`workspace_policy.rs:805`), and my instrumented run confirms the boot path reaches it via `WorkspacePolicy::contained`. |
+
+## Instrument defects found (all repaired in-lane)
+1. `wc -l` fabricated `0` for a 12-line file → all counts now read from files with the Read tool.
+2. zsh ate an unquoted `--include=*.rs` → all globs quoted.
+3. **`--trust-workspace --version` silently never grants** — `--version` returns before the grant
+   at `main.rs:1811`. My first posture differential was therefore two *identical untrusted* runs
+   reported as a trusted-vs-untrusted comparison, and it "showed no difference" for that reason.
+   Caught by checking that `workspace-trust.json` existed; it did not. This is the
+   "a participant never started" self-pass. Repaired: the grant is now asserted by the presence of
+   the store file AND the `Trusted workspace executable fingerprint` line before any differential.
+4. `strace -k` cannot reach the walk — 1,429 openat in 120 s (5.5 MB of stack text). Dead
+   instrument for whole-boot attribution; replaced with in-process `Backtrace::force_capture()`
+   plus PID correlation.
+
 ## Still to establish
-- [ ] Re-measure the boot decomposition on hetzner with instrumentation, not strace attribution.
-- [ ] Identify what the second walk actually is (if there is one).
+- [ ] First-paint cost attributable to each walk at realistic scale.
 - [ ] 4-way cross-audit of the remedy.
 - [ ] Both-directions proof of whatever lands.
