@@ -460,6 +460,62 @@ impl Channel for DiscordChannel {
         .map_err(ChannelError::from)
     }
 
+    /// Discord implements all four: `PATCH`/`DELETE` on the message resource,
+    /// `PUT …/reactions/{emoji}/@me`, and `POST /channels/{id}/typing`.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::Implemented;
+        wcore_channels::NativeActions::none()
+            .edit(Implemented)
+            .delete(Implemented)
+            .react(Implemented)
+            .typing(Implemented)
+    }
+
+    /// `PATCH /channels/{id}/messages/{msg}` — see [`rest::edit_message`].
+    async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        let msg = rest::edit_message(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+            new_text,
+        )
+        .await
+        .map_err(ChannelError::from)?;
+        Ok(MessageReceipt {
+            id: msg.id,
+            conversation_id: msg
+                .channel_id
+                .unwrap_or_else(|| conversation_id.to_string()),
+            ts_secs: 0,
+        })
+    }
+
+    /// `DELETE /channels/{id}/messages/{msg}` — see [`rest::delete_message`].
+    async fn delete_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        rest::delete_message(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+        )
+        .await
+        .map_err(ChannelError::from)
+    }
+
     async fn fetch_media(
         &self,
         attachment: &wcore_channels::Attachment,
@@ -1043,5 +1099,124 @@ heartbeat_grace_ms = 8000
             !json.contains(CANARY),
             "the probe leaked the bot token into its report: {json}"
         );
+    }
+
+    // ---- native actions: edit / delete (Phase 24 C3) ----------------------
+
+    /// The edit is a `PATCH` on the MESSAGE resource, not a `POST` to the
+    /// collection. The mock matches the method and the exact path, so an edit
+    /// that accidentally posted a new message would redden here — which is the
+    /// worst possible edit bug and the easiest one to write.
+    #[tokio::test]
+    async fn edit_patches_the_message_resource_with_the_new_content() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "PATCH",
+                format!("/api/v10/channels/{TEST_CHANNEL}/messages/9001").as_str(),
+            )
+            .match_header("authorization", format!("Bot {TEST_TOKEN}").as_str())
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "content": "edited body"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"9001","channel_id":"424242"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = start_channel_with_rest_only(&server).await;
+        let receipt = ch
+            .edit_message(TEST_CHANNEL, "9001", "edited body")
+            .await
+            .expect("edit succeeds");
+        assert_eq!(receipt.id, "9001");
+        assert_eq!(receipt.conversation_id, TEST_CHANNEL);
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// The delete is a `DELETE` on the message resource and Discord answers
+    /// `204 No Content` — no body to parse.
+    #[tokio::test]
+    async fn delete_hits_the_message_resource_and_accepts_204() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "DELETE",
+                format!("/api/v10/channels/{TEST_CHANNEL}/messages/9001").as_str(),
+            )
+            .match_header("authorization", format!("Bot {TEST_TOKEN}").as_str())
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = start_channel_with_rest_only(&server).await;
+        ch.delete_message(TEST_CHANNEL, "9001")
+            .await
+            .expect("delete succeeds");
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// **The failing direction.** `404 Unknown Message` must surface as an
+    /// error, not as a success. A delete that reports `Ok` for a message that
+    /// is still there is the single worst outcome this operation has.
+    #[tokio::test]
+    async fn a_404_on_delete_is_an_error_not_a_silent_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "DELETE",
+                format!("/api/v10/channels/{TEST_CHANNEL}/messages/nope").as_str(),
+            )
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":10008,"message":"Unknown Message"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = start_channel_with_rest_only(&server).await;
+        let err = ch.delete_message(TEST_CHANNEL, "nope").await.unwrap_err();
+        assert!(
+            !matches!(err, ChannelError::Unsupported { .. }),
+            "got Unsupported — the delete override is missing: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("404"),
+            "the platform status must reach the operator, got {err}"
+        );
+
+        ch.stop().await.unwrap();
+    }
+
+    /// Declaration ↔ behaviour, both directions, for this adapter.
+    #[tokio::test]
+    async fn native_action_declaration_matches_behaviour() {
+        use wcore_channels::ActionSupport;
+        let creds = InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN);
+        let ch = DiscordChannel::with_bases(
+            "test",
+            cfg(),
+            creds,
+            "https://unused.example".to_string(),
+            "ws://127.0.0.1:1".to_string(),
+        );
+        let a = ch.native_actions();
+        assert_eq!(a.edit, ActionSupport::Implemented);
+        assert_eq!(a.delete, ActionSupport::Implemented);
+        assert_eq!(a.react, ActionSupport::Implemented);
+        assert_eq!(a.typing, ActionSupport::Implemented);
+
+        // Unstarted → NotStarted, which proves an override ran. The trait
+        // default would have answered Unsupported instead.
+        let e = ch.edit_message("C", "1", "x").await.unwrap_err();
+        assert!(matches!(e, ChannelError::NotStarted), "got {e:?}");
+        let d = ch.delete_message("C", "1").await.unwrap_err();
+        assert!(matches!(d, ChannelError::NotStarted), "got {d:?}");
     }
 }
