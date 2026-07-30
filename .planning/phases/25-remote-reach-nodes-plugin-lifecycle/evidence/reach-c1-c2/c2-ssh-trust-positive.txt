@@ -1,0 +1,11 @@
+=== MAC -> hetzner ===
+Ubuntu-2404-noble-amd64-base
+RC=0
+rc_mac_hz=0
+=== MAC -> seandesktop ===
+SeanDesktop
+rc_mac_win=0
+=== hetzner -> seandesktop (C2 CRITICAL) ===
+SeanDesktop
+INNER_RC=0
+rc_hz_win=0
