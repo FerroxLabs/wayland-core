@@ -1,0 +1,68 @@
+BINARY=/root/dp-wayland-core-56d6ff89
+wayland-core 0.12.25
+SEEDER=/root/wayland-durable-posture/target/debug/deps/f14_sigkill_recovery-0c2c7646b8296b33
+HOSTNAME=Ubuntu-2404-noble-amd64-base
+
+########## ARM degrade-default (require=no vault=no) ##########
+ARM_RC[degrade-default]=0
+FRAME_TYPES[degrade-default]: ['ready(session_id=None)'] ... 1 frames
+REACHED_CODE_UNDER_TEST[degrade-default]: yes(ready)
+NOTICE[degrade-default]=1
+SESSION_ENTRIES[degrade-default]=0
+
+########## ARM require-refuses (require=yes vault=no) ##########
+ARM_RC[require-refuses]=1
+ERROR_MESSAGE[require-refuses]: Engine failed to start during init: [session] require_durability = true, but this host cannot protect a durable session: it has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than running with no recovery journal. Unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = "keyring" on a host that has one. To accept running without durable sessions on this host, set [session] require_durability = false.
+FRAME_TYPES[require-refuses]: ["error(code='init_failed',retryable=False)"] ... 1 frames
+REACHED_CODE_UNDER_TEST[require-refuses]: yes(refused before ready)
+NOTICE[require-refuses]=0
+SESSION_ENTRIES[require-refuses]=0
+
+########## ARM vault-control (require=no vault=yes) ##########
+ARM_RC[vault-control]=0
+FRAME_TYPES[vault-control]: ["ready(session_id='da00000000000000000000000000003')"] ... 1 frames
+REACHED_CODE_UNDER_TEST[vault-control]: yes(ready)
+NOTICE[vault-control]=0
+SESSION_ENTRIES[vault-control]=4
+    da00000000000000000000000000003.journal.snapshot
+    da00000000000000000000000000003.journal.writer.lock
+    da00000000000000000000000000003.journal
+    da00000000000000000000000000003.journal.authority
+
+########## ARM require-with-vault (require=yes vault=yes) ##########
+ARM_RC[require-with-vault]=0
+FRAME_TYPES[require-with-vault]: ["ready(session_id='da00000000000000000000000000004')"] ... 1 frames
+REACHED_CODE_UNDER_TEST[require-with-vault]: yes(ready)
+NOTICE[require-with-vault]=0
+SESSION_ENTRIES[require-with-vault]=4
+    da00000000000000000000000000004.journal.authority
+    da00000000000000000000000000004.journal
+    da00000000000000000000000000004.journal.snapshot
+    da00000000000000000000000000004.journal.writer.lock
+
+########## SEED: build a real journal under a vault ##########
+SEED_RC=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.93s
+SEEDED_ENTRIES=6
+    2026-07-30_da00000000000000000000000000005.json
+    da00000000000000000000000000005.journal
+    da00000000000000000000000000005.journal.writer.lock
+    da00000000000000000000000000005.journal.snapshot
+    da00000000000000000000000000005.journal.authority
+    index.json
+
+########## ARM journal-exists-key-gone (relaunch WITHOUT the vault) ##########
+ARM_RC[journal-exists-key-gone]=0
+FRAME_TYPES[journal-exists-key-gone]: ["ready(session_id='da00000000000000000000000000005')"] ... 1 frames
+REACHED_CODE_UNDER_TEST[journal-exists-key-gone]: yes(ready)
+NOTICE[journal-exists-key-gone]=1
+SESSION_ENTRIES[journal-exists-key-gone]=6
+    2026-07-30_da00000000000000000000000000005.json
+    da00000000000000000000000000005.journal
+    da00000000000000000000000000005.journal.writer.lock
+    da00000000000000000000000000005.journal.snapshot
+    da00000000000000000000000000005.journal.authority
+    index.json
+
+ROOT=/root/dp-live2-3135616
+WLDONE

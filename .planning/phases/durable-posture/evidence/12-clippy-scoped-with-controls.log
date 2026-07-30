@@ -1,0 +1,637 @@
+SHA=56d6ff8960abf06df6ba71545b96046c7d5bcf0e
+===== clippy wcore-config-all-targets =====
+    Checking smallvec v1.15.1
+    Checking memchr v2.8.1
+    Checking libc v0.2.186
+    Checking lock_api v0.4.14
+    Checking typenum v1.20.1
+    Checking subtle v2.6.1
+    Checking serde_core v1.0.228
+    Checking futures-io v0.3.32
+    Checking hashbrown v0.17.1
+    Checking tracing v0.1.44
+    Checking bitflags v2.11.1
+    Checking num-traits v0.2.19
+    Checking zerocopy v0.8.50
+    Checking linux-raw-sys v0.12.1
+    Checking icu_normalizer v2.2.0
+    Checking futures-util v0.3.32
+    Checking aho-corasick v1.1.4
+    Checking rustix v1.1.4
+    Checking idna_adapter v1.2.2
+    Checking indexmap v2.14.0
+    Checking idna v1.1.0
+    Checking generic-array v0.14.7
+    Checking url v2.5.8
+    Checking getrandom v0.2.17
+    Checking parking_lot_core v0.9.12
+    Checking errno v0.3.14
+    Checking mio v1.2.1
+    Checking signal-hook-registry v1.4.8
+    Checking rand_core v0.6.4
+    Checking parking_lot v0.12.5
+    Checking socket2 v0.6.4
+    Checking block-buffer v0.10.4
+    Checking ring v0.17.14
+    Checking crypto-common v0.1.7
+    Checking regex-automata v0.4.14
+    Checking inout v0.1.4
+    Checking dbus v0.9.11
+    Checking password-hash v0.5.0
+    Checking rtoolbox v0.0.5
+    Checking digest v0.10.7
+    Checking cipher v0.4.4
+    Checking universal-hash v0.5.1
+    Checking tokio v1.52.3
+    Checking sha2 v0.10.9
+    Checking poly1305 v0.8.0
+    Checking blake2 v0.10.6
+    Checking chacha20 v0.9.1
+    Checking aead v0.5.2
+    Checking dirs-sys v0.5.0
+    Checking num_cpus v1.17.0
+    Checking getrandom v0.4.2
+    Checking fd-lock v4.0.4
+    Checking chacha20poly1305 v0.10.1
+    Checking dirs v6.0.0
+    Checking argon2 v0.5.3
+    Checking tempfile v3.27.0
+    Checking rpassword v7.5.2
+    Checking serde v1.0.228
+    Checking serde_json v1.0.150
+    Checking serde_spanned v1.1.1
+    Checking toml_datetime v1.1.1+spec-1.1.0
+    Checking serde_ignored v0.1.14
+    Checking toml v1.1.2+spec-1.1.0
+    Checking rustls-webpki v0.103.13
+    Checking chrono v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking serde_yaml v0.9.34+deprecated
+    Checking dbus-secret-service v4.1.0
+    Checking assert-json-diff v2.0.2
+    Checking rustls v0.23.40
+    Checking futures-executor v0.3.32
+    Checking keyring v3.6.3
+    Checking futures v0.3.32
+    Checking serial_test v3.5.0
+    Checking wcore-types v0.12.25 (/root/wayland-durable-posture/crates/wcore-types)
+    Checking wcore-budget v0.12.25 (/root/wayland-durable-posture/crates/wcore-budget)
+    Checking regex v1.12.3
+    Checking matchers v0.2.0
+    Checking tracing-subscriber v0.3.23
+    Checking wcore-compact v0.12.25 (/root/wayland-durable-posture/crates/wcore-compact)
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.6
+    Checking tokio-util v0.7.18
+    Checking tower v0.5.3
+    Checking deadpool v0.12.3
+    Checking tokio-stream v0.1.18
+    Checking tokio-rustls v0.26.4
+    Checking tokio-test v0.4.5
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.9
+    Checking wiremock v0.6.5
+    Checking reqwest v0.12.28
+    Checking wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.03s
+RC[wcore-config-all-targets]=0
+===== clippy wcore-agent-lib =====
+    Checking log v0.4.30
+    Checking crypto-common v0.1.7
+    Checking tracing-core v0.1.36
+    Checking parking_lot_core v0.9.12
+    Checking getrandom v0.4.2
+    Checking ring v0.17.14
+    Checking regex-automata v0.4.14
+    Checking rand_chacha v0.3.1
+    Checking password-hash v0.5.0
+    Checking time v0.3.47
+    Checking filetime v0.2.29
+    Checking libseccomp v0.4.0
+    Checking digest v0.10.7
+    Checking mio v1.2.1
+    Checking tempfile v3.27.0
+    Checking parking_lot v0.12.5
+    Checking cipher v0.4.4
+    Checking rand v0.8.6
+    Checking universal-hash v0.5.1
+    Checking sha2 v0.10.9
+    Checking tracing v0.1.44
+    Checking blake2 v0.10.6
+    Checking aead v0.5.2
+    Checking wcore-budget v0.12.25 (/root/wayland-durable-posture/crates/wcore-budget)
+    Checking poly1305 v0.8.0
+    Checking tokio v1.52.3
+    Checking chacha20 v0.9.1
+    Checking keyring v3.6.3
+    Checking uuid v1.23.2
+    Checking argon2 v0.5.3
+    Checking wcore-types v0.12.25 (/root/wayland-durable-posture/crates/wcore-types)
+    Checking tar v0.4.46
+    Checking chacha20poly1305 v0.10.1
+    Checking hmac v0.12.1
+    Checking getrandom v0.3.4
+    Checking rand v0.10.1
+   Compiling crossbeam-utils v0.8.21
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-api)
+    Checking rand_core v0.9.5
+    Checking crypto-bigint v0.4.9
+    Checking rand_chacha v0.9.0
+    Checking ff v0.12.1
+    Checking group v0.12.1
+    Checking rand v0.9.4
+    Checking rustls-webpki v0.103.13
+    Checking zopfli v0.8.3
+    Checking ecb v0.1.2
+    Checking aes v0.8.4
+    Checking cbc v0.1.2
+    Checking crossbeam-epoch v0.9.20
+    Checking elliptic-curve v0.12.3
+    Checking rfc6979 v0.3.1
+    Checking md-5 v0.10.6
+    Checking signature v1.6.4
+    Checking regalloc2 v0.12.2
+    Checking pulley-interpreter v36.0.12
+    Checking zip v8.6.0
+    Checking zip v2.4.2
+    Checking crossbeam-deque v0.8.6
+    Checking rustls v0.23.40
+    Checking ecdsa v0.14.8
+    Checking lopdf v0.42.0
+    Checking rand_distr v0.5.1
+    Checking regex v1.12.3
+    Checking globset v0.4.18
+    Checking p256 v0.11.1
+    Checking wcore-compact v0.12.25 (/root/wayland-durable-posture/crates/wcore-compact)
+    Checking wcore-safety v0.12.25 (/root/wayland-durable-posture/crates/wcore-safety)
+    Checking ignore v0.4.25
+    Checking sha1 v0.10.6
+    Checking crypto-bigint v0.5.5
+    Checking calamine v0.36.1
+    Checking wasmtime-environ v36.0.12
+    Checking simple_asn1 v0.6.4
+    Checking openssl-sys v0.9.116
+    Checking inotify-sys v0.1.5
+    Checking wcore-repomap v0.12.25 (/root/wayland-durable-posture/crates/wcore-repomap)
+    Checking wasmtime-internal-fiber v36.0.12
+    Checking inotify v0.11.2
+    Checking jsonwebtoken v10.3.0
+    Checking openssl v0.10.80
+    Checking wasmtime-internal-jit-icache-coherence v36.0.12
+    Checking postgres-protocol v0.6.12
+    Checking notify v8.2.0
+    Checking signal-hook v0.3.18
+    Checking postgres-types v0.2.14
+    Checking cap-rand v3.4.5
+    Checking whoami v2.1.2
+    Checking signal-hook-mio v0.2.5
+    Checking curve25519-dalek v4.1.3
+    Checking axum-core v0.4.5
+    Checking open v5.3.5
+    Checking crossterm v0.29.0
+    Checking wcore-permissions v0.12.25 (/root/wayland-durable-posture/crates/wcore-permissions)
+    Checking is-terminal v0.4.17
+    Checking tokio-util v0.7.18
+    Checking tower v0.5.3
+    Checking aws-smithy-async v1.2.14
+    Checking wcore-protocol v0.12.25 (/root/wayland-durable-posture/crates/wcore-protocol)
+    Checking wcore-user-model v0.12.25 (/root/wayland-durable-posture/crates/wcore-user-model)
+    Checking ed25519-dalek v2.2.0
+    Checking wcore-cron v0.12.25 (/root/wayland-durable-posture/crates/wcore-cron)
+    Checking tower-http v0.6.11
+    Checking tokio-rustls v0.26.4
+    Checking tungstenite v0.24.0
+    Checking h2 v0.4.14
+    Checking aws-smithy-types v1.4.9
+    Checking wcore-sandbox v0.12.25 (/root/wayland-durable-posture/crates/wcore-sandbox)
+    Checking pdf-extract v0.12.0
+    Checking lettre v0.11.22
+    Checking tokio-tungstenite v0.24.0
+    Checking tokio-postgres v0.7.18
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking native-tls v0.2.18
+    Checking imap v2.4.1
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-smithy-http v0.63.6
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-observability v0.2.6
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking tokio-postgres-rustls v0.13.0
+    Checking cranelift-codegen v0.123.12
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-durable-posture/crates/wcore-egress)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-durable-posture/crates/wcore-agents-pack)
+    Checking wayland-honcho v0.12.25 (/root/wayland-durable-posture/crates/wayland-honcho)
+    Checking wcore-dispatch v0.12.25 (/root/wayland-durable-posture/crates/wcore-dispatch)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-durable-posture/crates/wcore-honcho-adapter)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-sdk-sso v1.98.0
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-durable-posture/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-durable-posture/crates/wcore-pricing)
+    Checking wcore-memory v0.12.25 (/root/wayland-durable-posture/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-durable-posture/crates/wcore-providers)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-sms)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-msteams)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-whatsapp)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-discord)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-matrix)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-email)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-telegram)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-slack)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-signal)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (/root/wayland-durable-posture/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-durable-posture/crates/wcore-swarm)
+    Checking cranelift-frontend v0.123.12
+    Checking cranelift-native v0.123.12
+    Checking wasmtime-internal-unwinder v36.0.12
+    Checking wasmtime-internal-cranelift v36.0.12
+    Checking wasmtime v36.0.12
+    Checking wasmtime-wasi-io v36.0.12
+    Checking wasmtime-wasi v36.0.12
+    Checking wcore-mcp v0.12.25 (/root/wayland-durable-posture/crates/wcore-mcp)
+    Checking wcore-cua v0.12.25 (/root/wayland-durable-posture/crates/wcore-cua)
+    Checking wcore-browser v0.12.25 (/root/wayland-durable-posture/crates/wcore-browser)
+    Checking wcore-skills v0.12.25 (/root/wayland-durable-posture/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-durable-posture/crates/wcore-evolve)
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-wasm)
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 49.17s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-agent-lib]=0
+===== clippy wcore-agent-e2e =====
+    Checking tokio v1.52.3
+    Checking ignore v0.4.25
+    Checking serial_test v3.5.0
+    Checking criterion v0.5.1
+    Checking wcore-repomap v0.12.25 (/root/wayland-durable-posture/crates/wcore-repomap)
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking aws-smithy-async v1.2.14
+    Checking wcore-protocol v0.12.25 (/root/wayland-durable-posture/crates/wcore-protocol)
+    Checking wcore-user-model v0.12.25 (/root/wayland-durable-posture/crates/wcore-user-model)
+    Checking wasmtime-wasi v36.0.12
+    Checking wcore-cron v0.12.25 (/root/wayland-durable-posture/crates/wcore-cron)
+    Checking deadpool v0.12.3
+    Checking tokio-stream v0.1.18
+    Checking tokio-tungstenite v0.24.0
+    Checking lettre v0.11.22
+    Checking tokio-test v0.4.5
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking aws-smithy-types v1.4.9
+    Checking wcore-sandbox v0.12.25 (/root/wayland-durable-posture/crates/wcore-sandbox)
+    Checking tokio-postgres v0.7.18
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-http v0.63.6
+    Checking aws-smithy-observability v0.2.6
+    Checking tokio-postgres-rustls v0.13.0
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking wcore-plugin-api v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-api)
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking wiremock v0.6.5
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-durable-posture/crates/wcore-egress)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-durable-posture/crates/wcore-agents-pack)
+    Checking wayland-ijfw v0.12.25 (/root/wayland-durable-posture/crates/wayland-ijfw)
+    Checking wayland-honcho v0.12.25 (/root/wayland-durable-posture/crates/wayland-honcho)
+    Checking wcore-dispatch v0.12.25 (/root/wayland-durable-posture/crates/wcore-dispatch)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-durable-posture/crates/wcore-honcho-adapter)
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-wasm)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-sdk-sso v1.98.0
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-durable-posture/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-durable-posture/crates/wcore-pricing)
+    Checking wcore-memory v0.12.25 (/root/wayland-durable-posture/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-durable-posture/crates/wcore-providers)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-email)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-signal)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-discord)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-telegram)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-slack)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-msteams)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-matrix)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-sms)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-whatsapp)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (/root/wayland-durable-posture/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-durable-posture/crates/wcore-swarm)
+    Checking wayland-ollama v0.12.25 (/root/wayland-durable-posture/crates/wayland-ollama)
+    Checking wcore-mcp v0.12.25 (/root/wayland-durable-posture/crates/wcore-mcp)
+    Checking wcore-cua v0.12.25 (/root/wayland-durable-posture/crates/wcore-cua)
+    Checking wcore-browser v0.12.25 (/root/wayland-durable-posture/crates/wcore-browser)
+    Checking wcore-skills v0.12.25 (/root/wayland-durable-posture/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-durable-posture/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 54.40s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-agent-e2e]=0
+===== clippy wcore-agent-acceptance =====
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.91s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-agent-acceptance]=0
+===== clippy wcore-agent-engine_test =====
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.87s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-agent-engine_test]=0
+===== clippy wcore-cli-f14 =====
+    Checking tokio v1.52.3
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking wcore-protocol v0.12.25 (/root/wayland-durable-posture/crates/wcore-protocol)
+    Checking aws-smithy-async v1.2.14
+    Checking wcore-user-model v0.12.25 (/root/wayland-durable-posture/crates/wcore-user-model)
+    Checking wcore-cron v0.12.25 (/root/wayland-durable-posture/crates/wcore-cron)
+    Checking wasmtime-wasi v36.0.12
+    Checking deadpool v0.12.3
+    Checking tokio-tungstenite v0.24.0
+    Checking lettre v0.11.22
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking wcore-sandbox v0.12.25 (/root/wayland-durable-posture/crates/wcore-sandbox)
+    Checking aws-smithy-types v1.4.9
+    Checking tokio-postgres v0.7.18
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-smithy-http v0.63.6
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-observability v0.2.6
+    Checking tokio-postgres-rustls v0.13.0
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking wcore-plugin-api v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-api)
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking wiremock v0.6.5
+    Checking mockito v1.7.2
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-durable-posture/crates/wcore-egress)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-durable-posture/crates/wcore-agents-pack)
+    Checking wayland-cua v0.12.25 (/root/wayland-durable-posture/crates/wayland-cua)
+    Checking wcore-pluginsrc v0.12.25 (/root/wayland-durable-posture/crates/wcore-pluginsrc)
+    Checking wayland-browser v0.12.25 (/root/wayland-durable-posture/crates/wayland-browser)
+    Checking wcore-dispatch v0.12.25 (/root/wayland-durable-posture/crates/wcore-dispatch)
+    Checking wayland-honcho v0.12.25 (/root/wayland-durable-posture/crates/wayland-honcho)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-durable-posture/crates/wcore-honcho-adapter)
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-wasm)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-sso v1.98.0
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-durable-posture/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-durable-posture/crates/wcore-pricing)
+    Checking wcore-gateway v0.12.25 (/root/wayland-durable-posture/crates/wcore-gateway)
+    Checking wcore-acp v0.12.25 (/root/wayland-durable-posture/crates/wcore-acp)
+    Checking wcore-replay v0.12.25 (/root/wayland-durable-posture/crates/wcore-replay)
+    Checking wcore-exec-backend v0.12.25 (/root/wayland-durable-posture/crates/wcore-exec-backend)
+    Checking wcore-eval-scenarios v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval-scenarios)
+    Checking wcore-memory v0.12.25 (/root/wayland-durable-posture/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-durable-posture/crates/wcore-providers)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-sms)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-telegram)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-slack)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-email)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-signal)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-whatsapp)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-discord)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-matrix)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-msteams)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (/root/wayland-durable-posture/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-durable-posture/crates/wcore-swarm)
+    Checking wayland-ollama v0.12.25 (/root/wayland-durable-posture/crates/wayland-ollama)
+    Checking wcore-mcp v0.12.25 (/root/wayland-durable-posture/crates/wcore-mcp)
+    Checking wcore-cua v0.12.25 (/root/wayland-durable-posture/crates/wcore-cua)
+    Checking wcore-browser v0.12.25 (/root/wayland-durable-posture/crates/wcore-browser)
+    Checking wcore-skills v0.12.25 (/root/wayland-durable-posture/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-durable-posture/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Checking wcore-cli v0.12.25 (/root/wayland-durable-posture/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 01s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-cli-f14]=0
+===== clippy wcore-cli-lib =====
+    Checking mio v1.2.1
+    Checking parking_lot v0.12.5
+    Checking rustls v0.23.40
+    Checking time v0.3.47
+    Checking lopdf v0.42.0
+    Checking wcore-repomap v0.12.25 (/root/wayland-durable-posture/crates/wcore-repomap)
+    Checking wasmtime v36.0.12
+    Checking native-tls v0.2.18
+    Checking self-replace v1.5.0
+    Checking sysinfo v0.33.1
+    Checking wcore-budget v0.12.25 (/root/wayland-durable-posture/crates/wcore-budget)
+    Checking nucleo v0.5.0
+    Checking imap v2.4.1
+    Checking tokio v1.52.3
+    Checking signal-hook-mio v0.2.5
+    Checking notify v8.2.0
+    Checking crossterm v0.29.0
+    Checking ratatui-crossterm v0.1.0
+    Checking simple_asn1 v0.6.4
+    Checking ratatui-widgets v0.3.0
+    Checking plist v1.10.0
+    Checking tracing-appender v0.2.5
+    Checking jsonwebtoken v10.3.0
+    Checking syntect v5.3.0
+    Checking ratatui-macros v0.7.0
+    Checking tui-tree-widget v0.24.0
+    Checking ratatui v0.30.0
+    Checking tui-input v0.15.3
+    Checking tungstenite v0.24.0
+    Checking pdf-extract v0.12.0
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking wcore-protocol v0.12.25 (/root/wayland-durable-posture/crates/wcore-protocol)
+    Checking aws-smithy-async v1.2.14
+    Checking wcore-user-model v0.12.25 (/root/wayland-durable-posture/crates/wcore-user-model)
+    Checking wcore-cron v0.12.25 (/root/wayland-durable-posture/crates/wcore-cron)
+    Checking tokio-tungstenite v0.24.0
+    Checking lettre v0.11.22
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking wcore-sandbox v0.12.25 (/root/wayland-durable-posture/crates/wcore-sandbox)
+    Checking aws-smithy-types v1.4.9
+    Checking tokio-postgres v0.7.18
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-smithy-http v0.63.6
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-observability v0.2.6
+    Checking tokio-postgres-rustls v0.13.0
+    Checking wasmtime-wasi-io v36.0.12
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking wasmtime-wasi v36.0.12
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking wcore-plugin-api v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-api)
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-durable-posture/crates/wcore-egress)
+    Checking wcore-agents-pack v0.12.25 (/root/wayland-durable-posture/crates/wcore-agents-pack)
+    Checking wayland-browser v0.12.25 (/root/wayland-durable-posture/crates/wayland-browser)
+    Checking wcore-pluginsrc v0.12.25 (/root/wayland-durable-posture/crates/wcore-pluginsrc)
+    Checking wayland-cua v0.12.25 (/root/wayland-durable-posture/crates/wayland-cua)
+    Checking wcore-dispatch v0.12.25 (/root/wayland-durable-posture/crates/wcore-dispatch)
+    Checking wayland-honcho v0.12.25 (/root/wayland-durable-posture/crates/wayland-honcho)
+    Checking wcore-honcho-adapter v0.12.25 (/root/wayland-durable-posture/crates/wcore-honcho-adapter)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-sso v1.98.0
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-wasm)
+    Checking aws-config v1.8.16
+    Checking wcore-observability v0.12.25 (/root/wayland-durable-posture/crates/wcore-observability)
+    Checking wcore-channels v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels)
+    Checking wcore-pricing v0.12.25 (/root/wayland-durable-posture/crates/wcore-pricing)
+    Checking wcore-exec-backend v0.12.25 (/root/wayland-durable-posture/crates/wcore-exec-backend)
+    Checking wcore-gateway v0.12.25 (/root/wayland-durable-posture/crates/wcore-gateway)
+    Checking wcore-acp v0.12.25 (/root/wayland-durable-posture/crates/wcore-acp)
+    Checking wcore-replay v0.12.25 (/root/wayland-durable-posture/crates/wcore-replay)
+    Checking wcore-memory v0.12.25 (/root/wayland-durable-posture/crates/wcore-memory)
+    Checking wcore-providers v0.12.25 (/root/wayland-durable-posture/crates/wcore-providers)
+    Checking wcore-channel-telegram v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-telegram)
+    Checking wcore-channel-matrix v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-matrix)
+    Checking wcore-channel-email v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-email)
+    Checking wcore-channel-signal v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-signal)
+    Checking wcore-channel-msteams v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-msteams)
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-whatsapp)
+    Checking wcore-channel-discord v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-discord)
+    Checking wcore-channel-sms v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-sms)
+    Checking wcore-channel-slack v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-slack)
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (/root/wayland-durable-posture/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-durable-posture/crates/wcore-swarm)
+    Checking wayland-ollama v0.12.25 (/root/wayland-durable-posture/crates/wayland-ollama)
+    Checking wcore-mcp v0.12.25 (/root/wayland-durable-posture/crates/wcore-mcp)
+    Checking wcore-browser v0.12.25 (/root/wayland-durable-posture/crates/wcore-browser)
+    Checking wcore-cua v0.12.25 (/root/wayland-durable-posture/crates/wcore-cua)
+    Checking wcore-skills v0.12.25 (/root/wayland-durable-posture/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-durable-posture/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+    Checking wcore-cli v0.12.25 (/root/wayland-durable-posture/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 00s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+RC[wcore-cli-lib]=0
+===== clippy CONTROL-known-failing-cache_ledger =====
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+error: struct update has no effect, all the fields in the struct have already been specified
+  --> crates/wcore-agent/tests/cache_ledger_engine_test.rs:82:11
+   |
+82 |         ..Default::default()
+   |           ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_update
+   = note: `-D clippy::needless-update` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: could not compile `wcore-agent` (test "cache_ledger_engine_test") due to 1 previous error
+RC[CONTROL-known-failing-cache_ledger]=101
+===== clippy CONTROL-known-failing-user_model =====
+    Checking wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:229:40
+    |
+229 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+    = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:337:40
+    |
+337 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:396:40
+    |
+396 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> crates/wcore-agent/tests/user_model_identity_wire.rs:472:40
+    |
+472 |         LocalBackend::with_persistence(&user_model_path(cwd)).expect("open user-model store");
+    |                                        ^^^^^^^^^^^^^^^^^^^^^ help: change this to: `user_model_path(cwd)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#needless_borrows_for_generic_args
+
+error: could not compile `wcore-agent` (test "user_model_identity_wire") due to 4 previous errors
+RC[CONTROL-known-failing-user_model]=101
+WLDONE

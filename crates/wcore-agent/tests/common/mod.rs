@@ -419,6 +419,7 @@ pub fn test_config() -> Config {
                 .to_string_lossy()
                 .into_owned(),
             max_sessions: 5,
+            ..Default::default()
         },
         ..Default::default()
     }

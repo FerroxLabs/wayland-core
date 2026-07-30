@@ -1,0 +1,15 @@
+=== files I changed vs BASE ===
+crates/wcore-agent/src/engine.rs
+crates/wcore-agent/tests/acceptance/helpers.rs
+crates/wcore-agent/tests/common/mod.rs
+crates/wcore-agent/tests/e2e/anthropic.rs
+crates/wcore-agent/tests/e2e/compaction.rs
+crates/wcore-agent/tests/e2e/openai.rs
+crates/wcore-cli/tests/f14_sigkill_recovery.rs
+crates/wcore-config/src/config.rs
+=== are the two clippy-failing files touched? ===
+(empty above == untouched)
+=== sha256 control: same two files at BASE vs HEAD ===
+crates/wcore-agent/tests/cache_ledger_engine_test.rs base=5635034052ce3ca8 head=5635034052ce3ca8
+crates/wcore-agent/tests/user_model_identity_wire.rs base=03ba694d77e2b7ab head=03ba694d77e2b7ab
+crates/wcore-config/src/config.rs base=a82f375b3502b394 head=a5ec900d0b29e0dc

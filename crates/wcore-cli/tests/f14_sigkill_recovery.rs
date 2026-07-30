@@ -106,15 +106,6 @@ impl CoreProcess {
         Self::launch_with_secure_store(env, fixture, Some(vault), session_id, resume).await
     }
 
-    #[cfg(target_os = "linux")]
-    async fn launch_without_secure_store(
-        env: &TempEnv,
-        fixture: &RunningOpenAiFixture,
-        session_id: &str,
-    ) -> Self {
-        Self::launch_with_secure_store(env, fixture, None, session_id, false).await
-    }
-
     async fn launch_with_secure_store(
         env: &TempEnv,
         fixture: &RunningOpenAiFixture,
@@ -254,6 +245,77 @@ impl CoreProcess {
                 event.get("type").and_then(Value::as_str),
                 Some("error"),
                 "Core refused the command while waiting for {expected}: {event}"
+            );
+        }
+    }
+
+    /// Wait for an `info` frame whose message contains `needle`.
+    ///
+    /// [`Self::next_type`] matches on the frame type alone, which is not enough
+    /// here: `info` is a general-purpose channel and other machinery emits on
+    /// it, so a type-only match could return an unrelated frame and pass. The
+    /// `stream_end` guard makes the wait bounded by the turn rather than only
+    /// by the clock — if the turn finishes without the notice, that is a
+    /// failure to report, not a slow report, and it should say so.
+    #[cfg(target_os = "linux")]
+    async fn next_info_containing(&mut self, needle: &str, msg_id: &str) -> Value {
+        let mut seen = Vec::new();
+        loop {
+            let frame = self.next_type_in(&["info", "stream_end"]).await;
+            match frame.get("type").and_then(Value::as_str) {
+                Some("info") => {
+                    let message = frame
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if message.contains(needle) {
+                        return frame;
+                    }
+                    seen.push(message.to_string());
+                }
+                _ => panic!(
+                    "turn {msg_id} ended without an info frame containing {needle:?}; \
+                     info frames seen: {seen:?}"
+                ),
+            }
+        }
+    }
+
+    /// `next_type`, widened to a set, so a caller can wait for one of several
+    /// frames and decide which arrived.
+    #[cfg(target_os = "linux")]
+    async fn next_type_in(&mut self, expected: &[&str]) -> Value {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        let label = expected.join("|");
+        let mut observed = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.panic_timeout(&label, &observed);
+            }
+            let line = match tokio::time::timeout(remaining, self.stdout.next_line()).await {
+                Ok(line) => line.expect("read Core protocol stdout"),
+                Err(_) => self.panic_timeout(&label, &observed),
+            };
+            let Some(line) = line else {
+                let stderr = self.stderr.lock().expect("lock Core stderr capture");
+                panic!(
+                    "Core exited while waiting for {label}; stderr:\n{}",
+                    String::from_utf8_lossy(&stderr)
+                );
+            };
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let event_type = event.get("type").and_then(Value::as_str);
+            if event_type.is_some_and(|ty| expected.contains(&ty)) {
+                return event;
+            }
+            observed.push(format!("type={event_type:?}"));
+            assert_ne!(
+                event_type,
+                Some("error"),
+                "Core refused the command while waiting for {label}: {event}"
             );
         }
     }
@@ -1101,59 +1163,678 @@ fn packaged_local_surfaces_pin_distinct_policy_provenance() {
     );
 }
 
+/// Declare `[session] require_durability = true` in a hermetic profile.
+///
+/// The key is inserted INTO the existing `[session]` table rather than appended
+/// as a new one: `tempenv::build` already emits `[session]`, and a second table
+/// with the same name is a TOML duplicate-key error, which the product reports
+/// as a config-parse refusal. That refusal is indistinguishable at the exit
+/// code from the policy refusal under test, so appending would have produced a
+/// test that passed for the wrong reason — it did, on the first run.
+#[cfg(target_os = "linux")]
+fn require_durability(env: &TempEnv) {
+    let path = env.home().join("config.toml");
+    let config = fs::read_to_string(&path).expect("read seeded profile config");
+    assert!(
+        config.contains("[session]\n"),
+        "the seeded profile no longer has a [session] table to extend:\n{config}"
+    );
+    let patched = config.replacen("[session]\n", "[session]\nrequire_durability = true\n", 1);
+    assert_ne!(patched, config, "durability policy was not inserted");
+    fs::write(&path, patched).expect("write durability policy into profile config");
+}
+
+/// Launch packaged Core with no secure store and return its `ready` frame
+/// WITHOUT asserting a session identity.
+///
+/// [`CoreProcess::launch_without_secure_store`] asserts that `ready` names the
+/// requested session. A degraded launch cannot satisfy that, and finding out
+/// why is a result in itself: `ProtocolEvent::Ready.session_id` is
+/// `Option<String>` with `skip_serializing_if = "Option::is_none"`
+/// (`wcore-protocol/src/events.rs:559-562`), so the degraded `ready` simply
+/// OMITS the field. A `--json-stream` host therefore receives a frame that is
+/// byte-identical in shape to a legacy producer's and is told nothing at all.
+#[cfg(target_os = "linux")]
+async fn launch_degraded(
+    env: &TempEnv,
+    fixture: &RunningOpenAiFixture,
+    session_id: &str,
+) -> (CoreProcess, Value) {
+    let mut command = Command::new(binary());
+    command
+        .arg("--json-stream")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--model")
+        .arg(FIXTURE_MODEL)
+        .arg("--base-url")
+        .arg(fixture.base_url())
+        .arg("--session-id")
+        .arg(session_id)
+        .current_dir(env.path())
+        .env("HOME", env.path())
+        .env("WAYLAND_HOME", env.home())
+        .env("OPENAI_API_KEY", FIXTURE_KEY)
+        .env_remove("WAYLAND_VAULT_PASSPHRASE")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!(
+                "unix:path={}",
+                env.path().join("missing-secret-service-bus").display()
+            ),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("spawn degraded wayland-core");
+    let stdin = child.stdin.take().expect("Core stdin pipe");
+    let stdout = BufReader::new(child.stdout.take().expect("Core stdout pipe")).lines();
+    let mut child_stderr = child.stderr.take().expect("Core stderr pipe");
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_capture = Arc::clone(&stderr);
+    let stderr_task = tokio::spawn(async move {
+        let mut chunk = [0_u8; 4096];
+        while let Ok(read) = child_stderr.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            let mut output = stderr_capture.lock().expect("lock Core stderr capture");
+            let remaining = 128 * 1024_usize - output.len().min(128 * 1024);
+            output.extend_from_slice(&chunk[..read.min(remaining)]);
+        }
+    });
+    let mut process = CoreProcess {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        stderr_task,
+    };
+    let ready = process.next_type("ready").await;
+    (process, ready)
+}
+
+/// Every file under a profile home, relative to it, with its bytes.
+///
+/// Deliberately NOT a glob for `sessions/*.journal`. A degraded run must leave
+/// no durable trace of ANY kind, and the journal family is six artifacts, not
+/// one: `<id>.journal`, `<id>.wal`, `<id>.journal.snapshot`,
+/// `<id>.journal.authority`, the `.<id>.journal.effects/` checkpoint directory
+/// and the `.<digest>.<pid>.<seq>.tmp` files inside it
+/// (`session_journal.rs:1075`, `snapshot.rs:262`/`:334`,
+/// `session_journal.rs:1172`/`:735`). A test that asserted only the first would
+/// pass on a degrade that still wrote the other five.
+#[cfg(target_os = "linux")]
+fn profile_contents(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    if !home.exists() {
+        return Vec::new();
+    }
+    let mut relative = Vec::new();
+    collect_profile_files(home, home, &mut relative);
+    relative.sort();
+    relative
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(home.join(&path)).unwrap_or_default();
+            (path, bytes)
+        })
+        .collect()
+}
+
+/// How many entries the profile's `sessions/` directory holds.
+///
+/// A missing directory counts as 0, so this is meaningful whether or not the
+/// harness pre-created it.
+#[cfg(target_os = "linux")]
+fn session_directory_entries(home: &Path) -> usize {
+    fs::read_dir(home.join("sessions"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+/// Grade one profile for durable-session residue: how many artifacts of the
+/// journal family exist, and in how many files the prompt appears.
+///
+/// Returns `(artifact paths, files containing the prompt)` so a caller can
+/// assert an exhaustive zero AND a control caller can prove the same walker
+/// returns non-zero on a profile that really did journal. Without that control
+/// every "zero" below is also what a broken walker, a wrong path, or a home
+/// that never existed would return.
+#[cfg(target_os = "linux")]
+fn durable_residue(home: &Path, prompt: &str) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    const FAMILY: &[&str] = &[
+        ".journal",
+        ".wal",
+        ".snapshot",
+        ".authority",
+        ".effects",
+        ".tmp",
+    ];
+    let contents = profile_contents(home);
+    let artifacts = contents
+        .iter()
+        .filter(|(path, _)| {
+            let text = path.to_string_lossy();
+            text.starts_with("sessions/") || FAMILY.iter().any(|suffix| text.contains(suffix))
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    let leaked = contents
+        .iter()
+        .filter(|(_, bytes)| !byte_offsets(bytes, prompt.as_bytes()).is_empty())
+        .map(|(path, _)| path.clone())
+        .collect();
+    (artifacts, leaked)
+}
+
+/// DEGRADE FORBIDDEN. An operator who declared this deployment requires durable
+/// sessions gets the July-2026 posture back, unchanged where it matters: the
+/// provider is never reached and no turn is ever started.
+///
+/// This is the half of the pair that must NOT be allowed to erode. The
+/// host-forced degrade that shipped on 2026-07-30 reversed the decision
+/// `906287e1` took, and the natural repair — rewrite the old test to assert the
+/// new behaviour — would have widened the degrade path silently and left
+/// nothing asserting that refusing is still reachable at all.
+///
+/// What it deliberately does NOT preserve: the old test also read the session
+/// journal back and asserted it contained no `turn_started`. Under the policy
+/// the refusal happens during config resolution, upstream of every engine, so
+/// there is no journal to read. That is a stronger property than the one it
+/// replaces — nothing at all was written — and it is asserted below rather
+/// than dropped.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn isolated_profile_without_secure_store_fails_before_turn_or_provider_intent() {
+async fn without_secure_store_an_operator_who_requires_durability_gets_a_refusal() {
     let fixture = OpenAiFixtureScript::new([OpenAiStep::text("MUST-NOT-DISPATCH")])
         .start()
         .await
-        .expect("start secure-storage preflight fixture");
+        .expect("start secure-storage policy fixture");
     let env = environment(&fixture);
+    require_durability(&env);
     let session_id = "f1400000000000000000000000000000";
     let prompt = "F14-UNPROTECTED-PROMPT-MUST-NOT-BECOME-DURABLE";
 
-    let mut process = CoreProcess::launch_without_secure_store(&env, &fixture, session_id).await;
-    send_message(&mut process, "f14-no-secure-store", prompt).await;
+    let mut command = Command::new(binary());
+    command
+        .arg("--json-stream")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--model")
+        .arg(FIXTURE_MODEL)
+        .arg("--base-url")
+        .arg(fixture.base_url())
+        .arg("--session-id")
+        .arg(session_id)
+        .current_dir(env.path())
+        .env("HOME", env.path())
+        .env("WAYLAND_HOME", env.home())
+        .env("OPENAI_API_KEY", FIXTURE_KEY)
+        .env_remove("WAYLAND_VAULT_PASSPHRASE")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        // Make the Linux Secret Service probe deterministically unavailable
+        // rather than depending on the worker's desktop/session state.
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!(
+                "unix:path={}",
+                env.path().join("missing-secret-service-bus").display()
+            ),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn packaged wayland-core");
+    drop(child.stdin.take());
+    let output = tokio::time::timeout(EVENT_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("required-durability launch terminated")
+        .expect("collect required-durability launch output");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    let error = process.next_type("error").await;
-    assert_eq!(error["error"]["code"], "engine_error");
-    assert_eq!(error["error"]["retryable"], false);
-    let message = error["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("secure-storage error lacks a message: {error}"));
-    assert!(
-        message.contains("secure recovery storage is unavailable")
-            && message.contains("OS keyring")
-            && message.contains("encrypted credentials vault"),
-        "secure-storage error is not actionable: {message}"
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a host that cannot deliver required durability must not start. \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    let terminal = process.next_type("stream_end").await;
-    assert_eq!(terminal["msg_id"], "f14-no-secure-store");
-    assert_eq!(terminal["finish_reason"], "error");
+    // THE ASSERTION CARRIED FORWARD FROM 906287e1, VERBATIM IN MEANING: the
+    // provider is never reached.
     assert!(
         fixture.observation().requests.is_empty(),
-        "secure-storage preflight failure reached the provider"
+        "a required-durability refusal reached the provider: {:?}",
+        fixture.observation().requests
     );
 
-    let journal = env
-        .home()
-        .join("sessions")
-        .join(format!("{session_id}.journal"));
-    let journal_bytes = fs::read(&journal).expect("read preflight-failed session journal");
-    let events = journal_frames(&journal_bytes);
+    let frames: Vec<Value> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
     assert!(
-        events.iter().all(|(_, envelope)| {
-            envelope.pointer("/event/type").and_then(Value::as_str) != Some("turn_started")
-        }),
-        "secure-storage preflight failure durably started a turn: {events:?}"
+        !frames
+            .iter()
+            .any(|frame| frame.get("type").and_then(Value::as_str) == Some("ready")),
+        "a refused start must not claim ready: {stdout}"
+    );
+    let errors: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| frame.get("type").and_then(Value::as_str) == Some("error"))
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "the host must receive exactly one refusal frame on stdout: {stdout}"
+    );
+    assert_eq!(errors[0]["error"]["retryable"], false);
+    let message = errors[0]["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("refusal frame lacks a message: {}", errors[0]));
+    for needle in [
+        "require_durability",
+        "OS keyring",
+        "credentials vault",
+        "WAYLAND_VAULT_PASSPHRASE",
+    ] {
+        assert!(
+            message.contains(needle),
+            "the refusal must tell the host {needle:?}; got: {message}"
+        );
+    }
+
+    // Stronger than the journal check it replaces: nothing durable exists.
+    let (artifacts, leaked) = durable_residue(env.home(), prompt);
+    assert!(
+        artifacts.is_empty(),
+        "a refused start left durable session artifacts: {artifacts:?}"
     );
     assert!(
-        byte_offsets(&journal_bytes, prompt.as_bytes()).is_empty(),
-        "preflight-failed prompt became durable"
+        leaked.is_empty(),
+        "a refused start persisted the prompt: {leaked:?}"
+    );
+}
+
+/// DEGRADE ALLOWED. The default: the turn runs, the operator is told, and
+/// NOTHING durable is written.
+///
+/// The second half of the pair. Its zero-residue assertion is the invariant the
+/// whole degrade posture rests on — if a degraded run can leave even a partial
+/// record, then "no journal" is a lie and a restart forks from state nobody can
+/// read. So it walks the entire profile home rather than globbing for one
+/// filename, and it proves the walker alive on a profile that DID journal
+/// before believing the zero.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable() {
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text("F14-DEGRADED-REPLY-1"),
+        OpenAiStep::text("F14-DEGRADED-REPLY-2"),
+    ])
+    .start()
+    .await
+    .expect("start degraded-run fixture");
+    let env = environment(&fixture);
+    let session_id = "f1400000000000000000000000000005";
+    let prompt = "F14-DEGRADED-PROMPT-MUST-NOT-BECOME-DURABLE";
+
+    let (mut process, ready) = launch_degraded(&env, &fixture, session_id).await;
+
+    // MEASURED, and worth pinning: the degraded `ready` omits `session_id`
+    // entirely. That is the whole of what a Desktop host is told. Asserting it
+    // here means a later change that starts naming the degraded state in-band
+    // reds this line and gets read, rather than passing silently.
+    assert_eq!(
+        ready.get("session_id"),
+        None,
+        "the degraded ready frame is expected to omit session_id today; if it \
+         now carries one, the host-facing contract changed: {ready}"
     );
 
+    // TWO turns, deliberately. A startup notice is indistinguishable from a
+    // per-turn notice if you only ever run one turn, and "the notice fired
+    // once, three weeks ago" is precisely the defect. The second turn is the
+    // only assertion that can tell them apart.
+    for (index, msg_id) in ["f14-degraded-1", "f14-degraded-2"].into_iter().enumerate() {
+        send_message(&mut process, msg_id, prompt).await;
+        let notice = process
+            .next_info_containing("this host has no usable OS keyring", msg_id)
+            .await;
+        assert_eq!(
+            notice["msg_id"], msg_id,
+            "the degraded notice must be correlated to the turn it concerns"
+        );
+        let terminal = process.next_type("stream_end").await;
+        assert_eq!(terminal["msg_id"], msg_id);
+        assert_eq!(
+            terminal["finish_reason"], "stop",
+            "degraded turn {index} must actually complete: {terminal}"
+        );
+    }
+    assert_eq!(
+        fixture.observation().requests.len(),
+        2,
+        "both degraded turns must reach the provider, exactly once each"
+    );
+
+    let stderr = String::from_utf8_lossy(&process.sigkill().await).into_owned();
+    assert!(
+        stderr.contains("durable session persistence is OFF"),
+        "a degraded run must tell the operator; stderr was:\n{stderr}"
+    );
+
+    let (artifacts, leaked) = durable_residue(env.home(), prompt);
+    assert!(
+        artifacts.is_empty(),
+        "a degraded run wrote durable session artifacts: {artifacts:?}"
+    );
+    assert!(
+        leaked.is_empty(),
+        "a degraded run persisted the prompt: {leaked:?}"
+    );
+    // MEASURED CORRECTION to what the degrade fix claimed. Its commit message
+    // says a degraded run "creates no sessions/ directory at all". On a profile
+    // built by `tempenv::build` the directory already exists — the HARNESS
+    // creates it — so an `exists()` assertion reds for a reason that has
+    // nothing to do with the product. It did, on this test's second run. The
+    // durable property is that the directory stays EMPTY, which is what is
+    // asserted, with the control below proving the same count is not always 0.
+    assert_eq!(
+        session_directory_entries(env.home()),
+        0,
+        "a degraded run put entries in the sessions directory"
+    );
+
+    // KNOWN-POSITIVE CONTROL, in the same test, for the same walker.
+    //
+    // Every assertion above is an ABSENCE, and an absence is what a walker
+    // pointed at the wrong path, a home that was never created, or a silently
+    // failing `read_dir` also returns. So run the identical arm WITH vault
+    // unlock material and require the same functions to find artifacts and the
+    // prompt. Without this, deleting the degrade entirely would still pass.
+    let control_fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-DURABLE-REPLY")])
+        .start()
+        .await
+        .expect("start durable control fixture");
+    let control_env = environment(&control_fixture);
+    let control_vault = VaultSecret::new();
+    let control_prompt = "F14-DURABLE-PROMPT-MUST-BECOME-DURABLE";
+    let mut control = CoreProcess::launch(
+        &control_env,
+        &control_fixture,
+        &control_vault,
+        "f1400000000000000000000000000006",
+        false,
+    )
+    .await;
+    send_message(&mut control, "f14-durable-control", control_prompt).await;
+    let control_terminal = control.next_type("stream_end").await;
+    assert_eq!(control_terminal["finish_reason"], "stop");
+    let _ = control.sigkill().await;
+
+    let (control_artifacts, control_leaked) = durable_residue(control_env.home(), control_prompt);
+    assert!(
+        !control_artifacts.is_empty(),
+        "CONTROL FAILED: the residue walker found no artifacts on a profile that \
+         journals, so every zero asserted above is unproven"
+    );
+    assert!(
+        !control_leaked.is_empty(),
+        "CONTROL FAILED: the prompt sweep found nothing on a profile that journals, \
+         so the prompt-absence assertions above are unproven"
+    );
+    assert_ne!(
+        session_directory_entries(control_env.home()),
+        0,
+        "CONTROL FAILED: the sessions-directory count is 0 even on a profile that \
+         journals, so the emptiness asserted above proves nothing"
+    );
+}
+
+/// The crash boundaries a degraded run is killed at.
+///
+/// A degraded run that completes cleanly and leaves nothing proves very little:
+/// a completed turn has nothing half-written by construction. The invariant the
+/// whole degrade posture rests on is that a run killed MID-EFFECT leaves
+/// nothing either — because if it can leave a partial record, then "no journal"
+/// is false and a restart forks from state nobody can read.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DegradedCrashBoundary {
+    /// Ready, no message yet. The floor: opening a degraded session must not
+    /// itself create anything.
+    BeforeAnyTurn,
+    /// The provider request has left, no response headers have arrived. The
+    /// worst case for ambiguity — the effect may or may not have landed.
+    ProviderRequestSentNoHeaders,
+    /// Response headers arrived and the stream is partially consumed.
+    ProviderStreamPartiallyConsumed,
+    /// The model asked for a tool and the approval gate is open.
+    AwaitingToolApproval,
+    /// The tool was approved and its child process is running.
+    ToolExecuting,
+}
+
+#[cfg(target_os = "linux")]
+impl DegradedCrashBoundary {
+    fn label(self) -> &'static str {
+        match self {
+            Self::BeforeAnyTurn => "before-any-turn",
+            Self::ProviderRequestSentNoHeaders => "provider-request-sent-no-headers",
+            Self::ProviderStreamPartiallyConsumed => "provider-stream-partially-consumed",
+            Self::AwaitingToolApproval => "awaiting-tool-approval",
+            Self::ToolExecuting => "tool-executing",
+        }
+    }
+}
+
+/// Drive a degraded run to `boundary`, SIGKILL it there, and return the profile
+/// residue plus the number of provider requests the fixture observed.
+///
+/// The request count is returned so the caller can assert the run REACHED the
+/// boundary it named. Without that, a boundary whose setup silently failed
+/// would produce an empty profile and read as a pass — the same shape as a
+/// concurrency test in which a participant never started.
+#[cfg(target_os = "linux")]
+async fn crash_degraded_at(boundary: DegradedCrashBoundary) -> (Vec<PathBuf>, Vec<PathBuf>, usize) {
+    let label = boundary.label();
+    let prompt = format!("F14-CRASH-{label}-PROMPT-MUST-NOT-BECOME-DURABLE");
+
+    let seed = OpenAiFixtureScript::new([OpenAiStep::text("unused")])
+        .start()
+        .await
+        .expect("start crash-boundary seed fixture");
+    let env = environment(&seed);
+    let marker = env.path().join(format!("f14-crash-{label}.log"));
+    let pid_file = env.path().join(format!("f14-crash-{label}.pid"));
+    let tool_command = format!(
+        "printf '%s\\n' \"$$\" > {} && printf 'started\\n' >> {} && exec sleep 60",
+        shell_quote(&pid_file),
+        shell_quote(&marker),
+    );
+    seed.shutdown().await.expect("stop crash-boundary seed");
+
+    let steps = match boundary {
+        DegradedCrashBoundary::BeforeAnyTurn => vec![OpenAiStep::text("MUST-NOT-DISPATCH")],
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders => {
+            vec![OpenAiStep::stall_before_headers(60_000)]
+        }
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed => {
+            vec![OpenAiStep::text_then_stall(
+                "F14-CRASH-PARTIAL-DELTA",
+                60_000,
+            )]
+        }
+        DegradedCrashBoundary::AwaitingToolApproval | DegradedCrashBoundary::ToolExecuting => {
+            vec![
+                OpenAiStep::tool_call(
+                    "f14-crash-bash",
+                    "Bash",
+                    json!({"command": tool_command, "timeout": 120_000}),
+                ),
+                OpenAiStep::text("MUST-NOT-DISPATCH-AGAIN"),
+            ]
+        }
+    };
+    let fixture = OpenAiFixtureScript::new(steps)
+        .start()
+        .await
+        .expect("start crash-boundary fixture");
+    let _tool_guard = ToolProcessGuard {
+        pid_file: pid_file.clone(),
+    };
+
+    let (mut process, _ready) =
+        launch_degraded(&env, &fixture, "f1400000000000000000000000000007").await;
+    let msg_id = format!("f14-crash-{label}");
+    if boundary != DegradedCrashBoundary::BeforeAnyTurn {
+        send_message(&mut process, &msg_id, &prompt).await;
+    }
+    match boundary {
+        DegradedCrashBoundary::BeforeAnyTurn => {}
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders => {
+            wait_for_requests(&fixture, 1).await;
+        }
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed => {
+            wait_for_requests(&fixture, 1).await;
+            let delta = process.next_type("text_delta").await;
+            assert_eq!(
+                delta["text"], "F14-CRASH-PARTIAL-DELTA",
+                "{label}: the stream did not reach the partial-consumption boundary"
+            );
+        }
+        DegradedCrashBoundary::AwaitingToolApproval => {
+            wait_for_requests(&fixture, 1).await;
+            let approval = process.next_type("approval_required").await;
+            assert_eq!(approval["call_id"], "f14-crash-bash", "{label}");
+        }
+        DegradedCrashBoundary::ToolExecuting => {
+            wait_for_requests(&fixture, 1).await;
+            let approval = process.next_type("approval_required").await;
+            assert_eq!(approval["call_id"], "f14-crash-bash", "{label}");
+            process
+                .send(json!({"type": "tool_approve", "call_id": "f14-crash-bash"}))
+                .await;
+            let running = process.next_type("tool_running").await;
+            assert_eq!(running["call_id"], "f14-crash-bash", "{label}");
+            // The tool's own marker file, not a protocol event: the child must
+            // genuinely be executing, or this boundary is a different one.
+            wait_for_file(&marker).await;
+        }
+    }
+    let observed = fixture.observation().requests.len();
     let _diagnostics = process.sigkill().await;
+
+    // Read the profile AFTER the kill, with no clean shutdown having run, so
+    // any temp file, WAL or partially-renamed artifact is still on disk.
+    let (artifacts, leaked) = durable_residue(env.home(), &prompt);
+    let entries = session_directory_entries(env.home());
+    assert_eq!(
+        entries, 0,
+        "{label}: a degraded crash left {entries} entries in the sessions directory"
+    );
+    (artifacts, leaked, observed)
+}
+
+/// TASK: SIGKILL before and after each effect boundary; ZERO residue of any
+/// kind, not merely no `sessions/*.journal`.
+///
+/// Five boundaries run here. The unrun cells are named in the SUMMARY rather
+/// than quietly omitted — outbound channel delivery is the notable one, because
+/// this harness has no channel and inventing one would prove less than saying
+/// so.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
+    let boundaries = [
+        DegradedCrashBoundary::BeforeAnyTurn,
+        DegradedCrashBoundary::ProviderRequestSentNoHeaders,
+        DegradedCrashBoundary::ProviderStreamPartiallyConsumed,
+        DegradedCrashBoundary::AwaitingToolApproval,
+        DegradedCrashBoundary::ToolExecuting,
+    ];
+    let mut graded = 0usize;
+    let mut dispatched = 0usize;
+    for boundary in boundaries {
+        let label = boundary.label();
+        let (artifacts, leaked, observed) = crash_degraded_at(boundary).await;
+        assert!(
+            artifacts.is_empty(),
+            "{label}: a degraded crash left durable artifacts: {artifacts:?}"
+        );
+        assert!(
+            leaked.is_empty(),
+            "{label}: a degraded crash persisted the prompt into: {leaked:?}"
+        );
+        // Prove the run REACHED its boundary. A boundary whose setup silently
+        // failed leaves an empty profile too, which is the same evidence as a
+        // pass.
+        let expected_requests = usize::from(boundary != DegradedCrashBoundary::BeforeAnyTurn);
+        assert_eq!(
+            observed, expected_requests,
+            "{label}: the run did not reach the boundary it claims to test"
+        );
+        dispatched += observed;
+        graded += 1;
+    }
+    assert_eq!(graded, boundaries.len(), "every boundary must be graded");
+    assert_eq!(
+        dispatched, 4,
+        "four of the five boundaries must have dispatched to the provider; a total \
+         of 0 would mean nothing was ever exercised"
+    );
+
+    // KNOWN-POSITIVE CONTROL for the crash path specifically. The five zeroes
+    // above are absences, and a harness that crashed before Core ever wrote
+    // anything would produce them for free. This kills a DURABLE run at the
+    // same partial-stream boundary and requires residue to exist.
+    let fixture = OpenAiFixtureScript::new([OpenAiStep::text_then_stall(
+        "F14-CRASH-CONTROL-DELTA",
+        60_000,
+    )])
+    .start()
+    .await
+    .expect("start crash-control fixture");
+    let env = environment(&fixture);
+    let vault = VaultSecret::new();
+    let control_prompt = "F14-CRASH-CONTROL-PROMPT-MUST-BECOME-DURABLE";
+    let mut control = CoreProcess::launch(
+        &env,
+        &fixture,
+        &vault,
+        "f1400000000000000000000000000008",
+        false,
+    )
+    .await;
+    send_message(&mut control, "f14-crash-control", control_prompt).await;
+    wait_for_requests(&fixture, 1).await;
+    let delta = control.next_type("text_delta").await;
+    assert_eq!(delta["text"], "F14-CRASH-CONTROL-DELTA");
+    let _ = control.sigkill().await;
+
+    let (control_artifacts, _control_leaked) = durable_residue(env.home(), control_prompt);
+    assert!(
+        !control_artifacts.is_empty(),
+        "CONTROL FAILED: killing a DURABLE run at the same partial-stream boundary \
+         left no artifacts either, so the five zeroes above prove nothing about the \
+         degrade — they only prove the walker returns empty"
+    );
+    assert_ne!(
+        session_directory_entries(env.home()),
+        0,
+        "CONTROL FAILED: the sessions directory is empty after killing a durable run"
+    );
 }
 
 #[tokio::test]

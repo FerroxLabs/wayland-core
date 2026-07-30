@@ -6261,6 +6261,7 @@ impl AgentEngine {
         }
 
         if self.session_journal.is_none() {
+            self.announce_host_forced_degrade_for_this_turn();
             let result = self
                 .run_inner(
                     UserTurnInput::new(user_input, Some(additional_content)),
@@ -8811,6 +8812,42 @@ impl AgentEngine {
             return Ok(());
         };
         self.sync_journal_conversation(turn_id).await
+    }
+
+    /// Tell whoever is watching THIS turn that it is not being recorded.
+    ///
+    /// The host-forced degrade already announces itself once, on stderr, during
+    /// config resolution. That is the right place to explain the situation and
+    /// the wrong place to be the only mention of it: a channel gateway resolves
+    /// its config when the daemon starts and then serves turns for weeks, so
+    /// the notice reaches whoever ran `systemctl start` and nobody after. Every
+    /// person whose message went unrecorded arrived long after that line
+    /// scrolled away, and the `--json-stream` `ready` frame does not carry the
+    /// state either — it simply omits `session_id`, which is also what a legacy
+    /// producer looks like.
+    ///
+    /// So say it per turn, on the surface the turn is observable on:
+    /// [`OutputSink::emit_info`] reaches the terminal for a TUI/CLI run and a
+    /// `ProtocolEvent::Info` for a protocol host, and `Info` is already in the
+    /// pinned contract, so no host has to learn a new frame to receive it.
+    ///
+    /// Deliberately conditioned on `durable_sessions_disabled_by_host()`, not
+    /// on `session_journal.is_none()`. The two causes need opposite treatment:
+    /// an operator who wrote `[session] enabled = false` asked for this and
+    /// must not be nagged once per message; an operator whose HOST took the
+    /// capability away never agreed to anything.
+    fn announce_host_forced_degrade_for_this_turn(&self) {
+        if !wcore_config::config::durable_sessions_disabled_by_host() {
+            return;
+        }
+        self.output.emit_info(
+            "durable session persistence is OFF for this run: this host has no usable OS \
+             keyring and no unlocked credentials vault. This turn is not being recorded, so \
+             if it is interrupted there will be no way to tell whether its effects already \
+             happened. Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE to restore \
+             durability, [session] enabled = false to accept it silently, or \
+             [session] require_durability = true to refuse to run this way at all.",
+        );
     }
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that

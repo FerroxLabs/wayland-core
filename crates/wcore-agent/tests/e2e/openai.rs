@@ -49,6 +49,7 @@ fn openai_config(api_key: &str) -> Config {
             enabled: false,
             directory: "/tmp".to_string(),
             max_sessions: 1,
+            ..Default::default()
         },
         ..Default::default()
     }
