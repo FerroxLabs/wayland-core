@@ -53,13 +53,74 @@ being unset, returning a typed `UnsupportedPlatform`. `xvfb-run` sets `DISPLAY`.
 3. **Reaper / process count** — `crates/wcore-browser/src/supervisor.rs`:
    `start_reaper` (`:185`), `SupervisorConfig::reaper_interval` default 1s (`:37,:53`).
 
-## Open questions being worked
+## UPDATE 1 — the browser blocker is fully falsified: the REAL Camoufox sidecar runs on hetzner
 
-- Can a standalone Chrome-for-Testing / `chrome-headless-shell` zip be fetched to
-  hetzner (no root install, no snap) to give the browser leg a REAL backend?
-- Does the reaper leg need a browser at all, or can the supervisor be driven against an
-  arbitrary real child process? (`reaper_terminates_orphans_with_dead_parent`,
-  `supervisor.rs:646`, suggests it can.)
+`@askjo/camofox-browser` — the exact package `supervisor.rs:309` tells operators to install —
+**exists on npm at 1.13.0 and runs on `hetzner-dsm`.**
+
+```
+npm install --prefix /root/27c2c-tools @askjo/camofox-browser@1.13.0   # added 194 packages in 22s, rc=0
+/root/27c2c-tools/node_modules/.bin/camofox-browser --port 9377
+curl -s -w "HTTP=%{http_code}" http://127.0.0.1:9377/health
+  HTTP=200
+  {"ok":true,"engine":"camoufox","browserConnected":true,"browserRunning":true,
+   "activeTabs":0,"activeSessions":0,"consecutiveFailures":0,...}
+```
+
+Its own log: `"xvfb virtual display started","display":":99"` then
+`"camoufox launched" ... "browser pre-warmed","ms":1153`. Process table shows a real tree:
+
+```
+3811470 3778830 Xvfb
+3811471 3778830 camoufox-bin
+```
+
+So **neither leg of the parked blocker survives.** hetzner can host a display (Xvfb+XTest,
+verified above) *and* the real primary browser backend. This is the production topology, not
+a stand-in — `SupervisorConfig::local_camoufox` (`supervisor.rs:66`) spawns exactly this
+program and health-gates it on exactly this `/health`.
+
+## UPDATE 2 — a finding that reshapes baseline 1: NO backend implements `BrowserOp::Download`
+
+Measured, with a known-positive control on the instrument in the same invocation.
+
+- **Chromium** — explicit: `backends/chromium.rs:332-338` returns
+  `Unsupported("chromium: Download requires Browser.downloadProgress event handling; not in
+  chromiumoxide v0.7 public surface. Use Camoufox.")`. `Upload` likewise at `:327`.
+- **Camoufox** — falls through the catch-all. Enumerating the arms of
+  `backends/camoufox.rs:240-425 dispatch()` gives exactly: `Navigate`, `Snapshot`,
+  `Read`(→Unsupported), `GetState`, `Click`, `Fill`, `Press`, `Screenshot`, `Back`/`Forward`,
+  then `unsupported => Err(Unsupported("{op} does not have a truthful Camoufox API mapping"))`.
+  **`Download` and `Upload` are not among them.** `op_name()` maps `Download => "download"`
+  (`:503`) *only to name it in that error string*.
+  Instrument control: the same `sed|grep` finds `BrowserOp::Navigate` (count 1), so it is alive.
+
+**Consequence for the criterion.** *"A browser download must land inside the configured
+downloads root and must not escape it"* splits into two halves with different fates:
+
+- **"must not escape"** — fully measurable. The gate is `validate_local_path`, invoked at
+  `tool.rs:471` **before any backend dispatch**, so it is reachable and decisive today.
+- **"must land inside"** — **NOT measurable end-to-end in the product as shipped**, because no
+  shipped backend can perform a download at all. I will measure the tool-layer half (the
+  normalized in-root path is what reaches the provider, and a write to it lands in-root) and
+  I will **not** claim the end-to-end half. This is reported, not papered over.
+
+## Plan (all three, both directions)
+
+1. **Downloads-root** — `crates/wcore-browser/tests/downloads_root_baseline_test.rs`, recording
+   provider that really writes bytes. Escape arms (absolute, `..`, dotfile, **symlink**) must
+   redden AND reach the provider 0 times; in-root arm must green AND reach the provider once
+   with a normalized path. **The discrimination control:** the *same* target path is REFUSED
+   under root A and ADMITTED under root B (= its own parent) — proving the verdict is caused by
+   the root boundary, not by an unrelated shape check.
+2. **CUA approval** — `crates/wcore-cua/tests/approval_gate_baseline_test.rs`, feature
+   `x11-test`, under `xvfb-run`. Observable is the **real X11 pointer position** read back with
+   `query_pointer`, not the Rust return value. Withheld ⇒ `PolicySuspended` AND pointer
+   unmoved; granted ⇒ `Ok` AND pointer at the requested coordinate. The granted arm is the
+   known-positive that makes "unmoved" mean something.
+3. **Process count + reaper** — driven against the **real Camoufox sidecar** through the real
+   `BrowserSupervisor`. before / during / after by real PIDs in `/proc`, plus an orphan arm
+   (dead parent ⇒ reaped within one interval) and a live-parent control arm (⇒ NOT reaped).
 
 ## Standard I am holding myself to
 
