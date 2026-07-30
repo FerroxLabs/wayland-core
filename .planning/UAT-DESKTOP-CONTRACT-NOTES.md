@@ -72,11 +72,60 @@ Inside `capabilities`, the fixture carries `memory_enabled`, `online_evolution`
 and `user_model_backend`; Desktop's `WCoreCapabilities` declares none of those
 three.
 
+## T+1 — derivation complete, both directions (VERIFIED)
+
+Filename == `type` field for **all 75 fixtures** (52 events, 23 commands) —
+checked by parsing content, so the earlier filename shortcut is now retired
+rather than merely lucky.
+
+Desktop `index.ts` has **two** switches, correctly separated:
+`switch#1 on event.type` = 33 arms (L674–L1135); `switch#2 on tool.category` =
+4 arms (`edit`/`exec`/`mcp`/`info`, L1194–L1216). Only switch#1 is the decoder.
+`default:` arms at L1152 and L1217.
+
+Authoritative Core side read from Rust, not the corpus:
+`ProtocolEvent` (events.rs L558–1314) = **62 variants → 59 distinct wire tags**.
+Three variants deliberately share a tag via `#[serde(rename)]`:
+`CorrelatedSubAgentEvent`→`sub_agent_event`, `CorrelatedWorkflowStarted`→
+`workflow_started`, `CorrelatedWorkflowFinished`→`workflow_finished`.
+`ProtocolCommand` (commands.rs L262–403) = **24 tags**, no dupes.
+(Extractor self-test: 3/3 — known-positive parses, known-negative enum yields
+None, repaired version carries line numbers so a dupe is explainable.)
+
+### Cardinalities
+
+| set | n |
+|---|---|
+| Core distinct event wire tags | **59** |
+| Corpus event fixtures | 52 |
+| Desktop handled event types | **33** |
+| Core command tags | 24 |
+| Corpus command fixtures | 23 |
+| Desktop declared command types | 11 |
+
+### Differentials
+
+- **A. Core emits, corpus does NOT cover — 7**: `capability_activation`,
+  `compact_offload`, `mid_flight_monitor_decision`, `provider_attempt`,
+  `provider_failure`, `provider_retry`, `workspace_policy`.
+- **B. Corpus covers, Core does not emit — 0** (no dead fixtures).
+- **C. Core emits, Desktop does NOT handle — 26** (44% of Core's surface).
+- **D. Desktop handles, Core does not emit — 0** (no dead arms).
+- **E. Corpus covers, Desktop does not handle — 19.**
+- **F. Core accepts, corpus does not cover (command) — 1**:
+  `grant_workspace_capability`.
+- **G. Desktop sends, Core does NOT accept — 0.**
+- **H. Core accepts, Desktop never sends — 13.**
+
+Whole-tree absence sweep over **1866** Desktop `.ts/.tsx/.js` files (node_modules
+and vendor excluded): all 19 set-E names return **0 files**. Instrument controls
+in the same invocation: `browser_policy_denied` 3 files, `host_send_message_request`
+4 files, sentinel `zzz_wayland_uat_sentinel_absent_zzz` 0 files. So the absence
+is measured, not assumed — these types are not handled elsewhere in Desktop.
+
 ## Still to establish
 
-1. Re-derive handled/emitted sets from actual `type` fields, both directions.
-2. Grep whole Desktop tree per missing name (known-positive control required).
-3. Command direction: does Core accept every command Desktop can send?
+3. Field-level: `set_mode` value set, `tool_approve.answer`, unknown-field policy.
 4. Drive the real `wcore-cli` binary on hetzner, capture a real session stream,
    diff its event types against both the corpus and Desktop's handled set.
    This is the leg that breaks the corpus's self-referential circularity.
