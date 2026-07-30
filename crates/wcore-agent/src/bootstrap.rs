@@ -4481,7 +4481,9 @@ mod fallback_pricing_identity_tests {
         fallback.resolved_fallbacks.clear();
         config.resolved_fallbacks = vec![fallback];
 
-        let fallbacks = build_fallback_providers(&config).unwrap();
+        let mut pricing_refresher_constructed = false;
+        let fallbacks =
+            build_fallback_providers(&config, &mut pricing_refresher_constructed).unwrap();
 
         assert_eq!(fallbacks.len(), 1);
         let (metadata, _) = &fallbacks[0];
@@ -4497,7 +4499,8 @@ mod fallback_pricing_identity_tests {
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
 
-        let error = build_fallback_providers(&config)
+        let mut pricing_refresher_constructed = false;
+        let error = build_fallback_providers(&config, &mut pricing_refresher_constructed)
             .err()
             .expect("unresolved fallback must be rejected");
 
@@ -4505,6 +4508,61 @@ mod fallback_pricing_identity_tests {
             error
                 .to_string()
                 .contains("fallback configuration resolution mismatch")
+        );
+        // The construction fact must record what actually ran. The mismatch
+        // check fires BEFORE the refresher is built, so a run that failed there
+        // never constructed one — and a report claiming otherwise would be the
+        // "configured implies ready" error this out-param exists to prevent.
+        assert!(
+            !pricing_refresher_constructed,
+            "a run that failed before constructing the refresher still reported \
+             it constructed"
+        );
+    }
+
+    /// F05-TRUTH-1: the construction fact, in BOTH directions, one variable.
+    ///
+    /// The old code read `config.provider_chain.enabled` at the report site.
+    /// That is a second copy of the predicate, not a record of the event, and
+    /// it would keep reporting `ready` if the construction ever moved behind a
+    /// further condition. These two halves share an instrument, so neither is
+    /// self-passing.
+    #[test]
+    fn pricing_refresher_construction_is_recorded_in_both_directions() {
+        let base = || {
+            let mut config = Config {
+                provider_label: "anthropic".into(),
+                compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
+                ..Default::default()
+            };
+            config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+            let mut fallback = config.clone();
+            fallback.model = "claude-haiku-4-5".into();
+            fallback.resolved_fallbacks.clear();
+            config.resolved_fallbacks = vec![fallback];
+            config
+        };
+
+        // ---- CAN-PASS: the chain is on, so the refresher is built. ----
+        let mut on = base();
+        on.provider_chain.enabled = true;
+        let mut constructed_on = false;
+        build_fallback_providers(&on, &mut constructed_on).unwrap();
+        assert!(
+            constructed_on,
+            "the chain is enabled and fallbacks resolved, so a PricingRefresher was \
+             built and the fact must say so"
+        );
+
+        // ---- CAN-FAIL: one variable, the chain flag. ----
+        let mut off = base();
+        off.provider_chain.enabled = false;
+        let mut constructed_off = false;
+        build_fallback_providers(&off, &mut constructed_off).unwrap();
+        assert!(
+            !constructed_off,
+            "the early return ran, so nothing was constructed, yet the fact claimed \
+             it was. `disabled_by_config` is the honest report here."
         );
     }
 }
