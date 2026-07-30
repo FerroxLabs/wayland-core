@@ -321,12 +321,18 @@ fn protocol_event_wire_types() -> BTreeSet<String> {
     let mut wire_types = BTreeSet::new();
     let mut rename: Option<String> = None;
     let mut depth = 0usize;
-    let bytes = body.as_bytes();
     let mut index = 0usize;
 
-    while index < bytes.len() {
+    // NOTE: `index` is a BYTE offset into `body`, but `body` is not ASCII — the doc
+    // comments carry em-dashes and other multi-byte characters. The first cut of this
+    // loop advanced `index` by 1 unconditionally and panicked with "byte index 3618 is
+    // not a char boundary; it is inside '—'". Every step below therefore advances by a
+    // whole character (`len_utf8`) or by an offset returned from a search for an ASCII
+    // needle, both of which are guaranteed char-aligned.
+    while index < body.len() {
         let rest = &body[index..];
-        if depth == 0 && bytes[index] == b'}' {
+        let character = rest.chars().next().expect("index is a char boundary");
+        if depth == 0 && character == '}' {
             break;
         }
         if depth == 0 && rest.starts_with("//") {
@@ -345,25 +351,24 @@ fn protocol_event_wire_types() -> BTreeSet<String> {
             index += end;
             continue;
         }
-        let byte = bytes[index];
-        if depth == 0 && (byte.is_ascii_uppercase()) {
+        if depth == 0 && character.is_ascii_uppercase() {
             let end = rest
                 .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .unwrap_or(rest.len());
             let identifier = &rest[..end];
-            let follows = rest[end..].trim_start().as_bytes().first().copied();
-            if matches!(follows, Some(b'{') | Some(b'(') | Some(b',')) {
+            let follows = rest[end..].trim_start().chars().next();
+            if matches!(follows, Some('{') | Some('(') | Some(',')) {
                 wire_types.insert(rename.take().unwrap_or_else(|| snake_case(identifier)));
             }
             index += end;
             continue;
         }
-        match byte {
-            b'{' | b'(' | b'[' => depth += 1,
-            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+        match character {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        index += 1;
+        index += character.len_utf8();
     }
     wire_types
 }
@@ -432,6 +437,30 @@ fn protocol_event_source_parser_is_alive_in_both_directions() {
     assert!(
         !wire_types.contains("__variant_that_does_not_exist__"),
         "parser invents variants, so its inventory cannot be trusted"
+    );
+    // Third assertion — the one that proves the UTF-8 repair is load-bearing rather
+    // than cosmetic (LANE-BRIEF §6b-ii). The first cut of this parser advanced by one
+    // BYTE at a time and panicked on the em-dash in `Ready`'s doc comment, ~3.6 KB
+    // into the enum body, so it never reached anything declared after it. Assert both
+    // that the hazard is genuinely present in the source and that parsing survives it.
+    const SOURCE: &str = include_str!("../src/events.rs");
+    let enum_body = &SOURCE[SOURCE.find("pub enum ProtocolEvent {").unwrap()..];
+    assert!(
+        enum_body.chars().any(|character| !character.is_ascii()),
+        "no non-ASCII character remains in the ProtocolEvent body, so this assertion \
+         no longer exercises the multi-byte hazard it was written for — replace it \
+         rather than letting it pass vacuously"
+    );
+    let first_non_ascii = enum_body
+        .char_indices()
+        .find(|(_, character)| !character.is_ascii())
+        .map(|(offset, _)| offset)
+        .unwrap();
+    let declared_after_hazard = enum_body[first_non_ascii..].contains("CompactOffload");
+    assert!(
+        declared_after_hazard && wire_types.contains("compact_offload"),
+        "`CompactOffload` is declared after the first multi-byte character yet the \
+         parser did not report it — the byte-at-a-time scan is back"
     );
     assert!(
         wire_types.len() >= 52,
