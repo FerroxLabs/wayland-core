@@ -21,7 +21,37 @@ pub enum Target {
     /// Run a slash command (e.g. "/memory show working").
     Slash { command: String },
     /// Send a message through a registered channel.
-    Channel { channel_name: String, text: String },
+    ///
+    /// # `conversation_id` — F-ML-5, found live on 2026-07-30
+    ///
+    /// This variant carried only `{ channel_name, text }`, and the dispatcher
+    /// (`wcore-agent/src/cron.rs`) passed the **channel name** as the outgoing
+    /// message's `conversation_id` for want of anything better. So every
+    /// scheduled channel delivery addressed a conversation named after the
+    /// channel, and could only arrive where those two strings happened to be
+    /// equal. Measured against a real homeserver:
+    ///
+    /// ```text
+    /// PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:…
+    /// 403 M_FORBIDDEN "User @… not in room mxlive"     <- `mxlive` is the CHANNEL NAME
+    /// ```
+    ///
+    /// It is not Matrix-specific. Slack (`lib.rs:416`), WhatsApp (`:238`) and
+    /// SMS (`:250`) each fall back to a configured default destination — but
+    /// only when `conversation_id` **is empty**, which cron never produced. So
+    /// no adapter's configured default was reachable from a scheduled delivery.
+    ///
+    /// `None` now means "the adapter's own default", which is what those three
+    /// fallbacks were written for and what an adapter with no default should
+    /// refuse rather than guess at.
+    Channel {
+        channel_name: String,
+        text: String,
+        /// Destination conversation / room / chat id. `None` defers to the
+        /// adapter's configured default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+    },
     /// Invoke a skill by name (engine routes it).
     Skill {
         name: String,
@@ -43,6 +73,8 @@ enum TargetRepr {
     Channel {
         channel_name: String,
         text: String,
+        #[serde(default)]
+        conversation_id: Option<String>,
     },
     Skill {
         name: String,
@@ -55,7 +87,15 @@ impl From<TargetRepr> for Target {
     fn from(r: TargetRepr) -> Self {
         match r {
             TargetRepr::Slash { command } => Target::Slash { command },
-            TargetRepr::Channel { channel_name, text } => Target::Channel { channel_name, text },
+            TargetRepr::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            },
             TargetRepr::Skill { name, args } => Target::Skill { name, args },
         }
     }
@@ -335,10 +375,51 @@ mod tests {
         let t = Target::Channel {
             channel_name: "team-slack".into(),
             text: "status check".into(),
+            conversation_id: None,
         };
         let s = serde_json::to_string(&t).unwrap();
         let back: Target = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    /// F-ML-5 back-compat and forward-compat, in one test.
+    ///
+    /// Every job already on disk was written WITHOUT `conversation_id`. If it
+    /// failed to load, the fix would silently disable every existing schedule,
+    /// which is a worse outcome than the defect. And a job that DOES carry one
+    /// must round-trip it, or the flag is decorative.
+    #[test]
+    fn a_channel_target_written_before_conversation_id_existed_still_loads() {
+        let legacy = r#"{"kind":"channel","channel_name":"team-slack","text":"status check"}"#;
+        let back: Target = serde_json::from_str(legacy).expect("legacy records must still load");
+        assert_eq!(
+            back,
+            Target::Channel {
+                channel_name: "team-slack".into(),
+                text: "status check".into(),
+                conversation_id: None,
+            }
+        );
+        // …and a legacy record must not GAIN the field when rewritten, so a
+        // downgrade reads what it wrote.
+        assert!(
+            !serde_json::to_string(&back)
+                .unwrap()
+                .contains("conversation_id"),
+            "an absent destination must not be serialized as null"
+        );
+
+        // Known-positive in the same test: a destination that IS set survives
+        // the round trip. Without this the assertion above passes on a field
+        // that is never written under any circumstances.
+        let addressed = Target::Channel {
+            channel_name: "mxlive".into(),
+            text: "status check".into(),
+            conversation_id: Some("!kntRqkQCkPjhPvMMvf:matrix.org".into()),
+        };
+        let s = serde_json::to_string(&addressed).unwrap();
+        assert!(s.contains("!kntRqkQCkPjhPvMMvf:matrix.org"), "got {s}");
+        assert_eq!(serde_json::from_str::<Target>(&s).unwrap(), addressed);
     }
 
     #[test]
@@ -443,6 +524,7 @@ mod tests {
             Target::Channel {
                 channel_name: "team-slack".into(),
                 text: "hi".into(),
+                conversation_id: None,
             }
         );
     }

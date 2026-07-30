@@ -36,7 +36,7 @@ relying on it, because that scope is narrower than "one message".
 | Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
 |---|---|---|---|---|---|
 | **Slack** | `Idempotency-Key` HTTP header on the send | **exactly-once** | **retried** with the same key | one message | **Yes** — real HTTP; the key was present on both attempts |
-| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes** — replay driven against a real, fresh Synapse |
+| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`.** See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **Yes** — a replayed key produced **two** messages, no dedupe token on the wire |
 | **Twilio SMS** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **Yes** — a replayed key produced **two** messages |
@@ -53,9 +53,12 @@ and the spine's behaviour follow mechanically. That is real evidence about *our*
 *platform's* behaviour. It is weaker than the four rows above it and is labelled rather than
 filled in optimistically.
 
-The live rows (Slack, Matrix, Telegram, Twilio, WhatsApp and now Discord) come from runs in which a single
-delivery key was replayed twice through real adapters over real HTTP, built by the production
-factory. That run is what makes the other rows interpretable: it is the known-positive proving
+The four rows measured before 2026-07-30 (Slack, Telegram, Twilio, WhatsApp) come from one run
+in which a single delivery key was replayed twice through real adapters over real HTTP, built by
+the production factory. Two more have since been driven end to end by the shipped binary against
+the real platform: Discord, which turned out to be wrong — [§8](#8-discord-was-wrong-and-how-it-was-found) —
+and Matrix, which held — [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). That original run is
+what makes the other rows interpretable: it is the known-positive proving
 a duplicate is genuinely produced when no key is honoured, rather than a duplicate being merely
 theorised.
 
@@ -64,7 +67,7 @@ theorised.
 | Adapter | Capability declared at | Key reaches the wire at |
 |---|---|---|
 | Slack | `wcore-channel-slack/src/lib.rs:249` | `idempotency-key` request header (`lib.rs:338`, `:371`); bound by tests `lib.rs:489` (header present when keyed) and `lib.rs:521` (header **absent** when unkeyed) |
-| Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539` |
+| Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539`, and by the live wire capture in [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
 | Discord | **`false`**, overridden explicitly in `wcore-channel-discord/src/lib.rs` | `rest::nonce_for_key` IS still sent as `nonce` (`lib.rs:170-172`), and Discord ignores it for deduplication — see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | the other seven | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
 
@@ -284,6 +287,60 @@ so in its own last column. **A "NOT MEASURED" cell is a prediction, and predicti
 have now been wrong once.** The other four unmeasured rows — Email, Signal, iMessage, MS Teams —
 predict `at-most-once`, which is the safe direction to be wrong in; Discord predicted
 `exactly-once`, which is not.
+
+
+---
+
+## 9. The Matrix row, driven end to end (2026-07-30)
+
+Every other exactly-once row in §2 rests on a key being *present on the wire*. The Matrix row
+now rests on something stronger: the shipped `wayland-core` binary crashed mid-send against
+`matrix.org` and the replay was collapsed by the homeserver.
+
+Measured by `lane/matrix-live` on `hetzner-dsm`, room `!kntRqkQCkPjhPvMMvf:matrix.org`. The
+product spoke to the real homeserver through a recording forwarder
+(`scripts/matrix-live-proxy.mjs`) which forwarded the first send upstream **for real** and then
+withheld the response, so the event landed while the product's outcome stayed unknown. The room
+was then read by a separate process talking directly to matrix.org.
+
+| | txn id on the wire | homeserver's `event_id` |
+|---|---|---|
+| process life 1 (pid 3132637), response withheld, then `kill -9` | `cron:bf4c989c-…:1785385265000` | `$BAnrbBtxNCqVOn0q…` |
+| process life 2 (pid 3138250), `carried=1 (unknown-outcome 1)` | `cron:bf4c989c-…:1785385265000` — **identical** | `$BAnrbBtxNCqVOn0q…` — **identical** |
+| control: same body, **different** delivery id | `cron:99a26815-…:1785385376000` | `$8rWWSSH7nc9lgq3F…` — different |
+
+Independent read of the room: **2 events**, not 3.
+
+**The control is the point.** A count of one would have been equally explained by
+exactly-once working and by the replay never being attempted. Two — with one of them
+demonstrably produced by a *different* delivery id — distinguishes them, and is the live
+demonstration of [§4](#4-what-the-guarantee-is-scoped-to): a different key is not a replay.
+
+### The row was true and unreachable at the same time
+
+This run also found the reason no one had ever driven it: `Target::Channel` carried no
+destination, and the dispatcher passed the **channel name** as the outgoing `conversation_id`.
+The first attempt produced
+
+```text
+PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:…    <- `mxlive` is the CHANNEL NAME
+403 M_FORBIDDEN "User @… not in room mxlive"
+```
+
+Not Matrix-specific: the per-adapter default-destination fallbacks (`slack lib.rs:416`,
+`whatsapp :238`, `sms :250`) are all gated on an **empty** conversation id, which cron never
+produced, so none of them was reachable from a scheduled delivery. `cron add --conversation`
+and `Target::Channel::conversation_id` close it. Until then, the exactly-once guarantee in
+§2 described a path that could not address a Matrix room at all.
+
+### One thing a redaction does NOT tell you
+
+`Channel::delete_message` reports success when the homeserver accepts the redaction, and
+`rest.rs:342-349` calls that "the strongest guarantee the protocol offers". Measured the same
+night: **matrix.org answers `200 {"event_id": …}` to a redaction of an event id that never
+existed**, and to one with an empty event id. Acceptance is therefore compatible with nothing
+having been redacted. Grade a delete by reading the event back and checking that `content.body`
+is gone — never by the status code.
 
 <!-- DELIVERY-SEMANTICS-MACHINE-READABLE
 Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires

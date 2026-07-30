@@ -1,0 +1,9 @@
+=== repaired instrument: CAN IT PASS? (edit target, which really has one) ===
+http_status=200
+replacement_count=1
+  replacement id=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 rel_type=m.replace new_body="wayland-core live probe mlact-1785383837 edit-target EDITED" fallback_body="* wayland-core live probe mlact-1785383837 edit-target EDITED"
+=== CAN IT FAIL? (delete target, which has none) ===
+http_status=200
+replacement_count=0
+=== and the OLD broken matcher (v3) would have missed it ===
+v3_path_http=404

@@ -84,6 +84,17 @@ pub enum CronCmd {
         #[arg(long, requires = "channel", value_name = "TEXT")]
         text: Option<String>,
 
+        /// Destination conversation for `--channel`: a Matrix room id, a Slack
+        /// channel id, a Telegram chat id.
+        ///
+        /// Omit it to use the adapter's own configured default. Before F-ML-5
+        /// there was no way to say this at all and the CHANNEL NAME was sent as
+        /// the destination, which meant a scheduled message could only arrive
+        /// where the two strings happened to match — measured live against
+        /// matrix.org as `403 M_FORBIDDEN "User ... not in room mxlive"`.
+        #[arg(long, requires = "channel", value_name = "ID")]
+        conversation: Option<String>,
+
         /// Skill-invocation target: invoke the named skill on fire.
         #[arg(long, conflicts_with_all = ["slash", "channel"], value_name = "NAME")]
         skill: Option<String>,
@@ -213,6 +224,7 @@ async fn run_inner(
             slash,
             channel,
             text,
+            conversation,
             skill,
             args,
         } => {
@@ -226,6 +238,7 @@ async fn run_inner(
                 slash,
                 channel,
                 text,
+                conversation,
                 skill,
                 args,
                 store,
@@ -369,6 +382,7 @@ async fn add_cmd(
     slash: Option<String>,
     channel: Option<String>,
     text: Option<String>,
+    conversation: Option<String>,
     skill: Option<String>,
     args: Option<String>,
     store: &FileCronStore,
@@ -378,6 +392,7 @@ async fn add_cmd(
         (None, Some(ch), Some(body), None, None) => Target::Channel {
             channel_name: ch,
             text: body,
+            conversation_id: conversation,
         },
         (None, Some(_), None, None, None) => {
             bail!("`--channel` requires `--text \"...\"`");
@@ -709,9 +724,19 @@ fn parse_clock(s: &str) -> Option<(u32, u32)> {
 fn render_target(t: &Target) -> String {
     match t {
         Target::Slash { command } => format!("slash    {command}"),
-        Target::Channel { channel_name, text } => {
+        Target::Channel {
+            channel_name,
+            text,
+            conversation_id,
+        } => {
             let preview = preview(text, 40);
-            format!("channel  {channel_name} :: {preview}")
+            // The destination is rendered because "which room does this go to"
+            // is the question F-ML-5 made unanswerable from this surface.
+            let dest = conversation_id
+                .as_deref()
+                .map(|c| format!(" -> {c}"))
+                .unwrap_or_else(|| " -> (adapter default)".to_string());
+            format!("channel  {channel_name}{dest} :: {preview}")
         }
         Target::Skill { name, args } => format!("skill    {name} {args}"),
     }
@@ -1241,6 +1266,7 @@ mod tests {
                 slash: Some("/morning".into()),
                 channel: None,
                 text: None,
+                conversation: None,
                 skill: None,
                 args: None,
             },
@@ -1266,6 +1292,7 @@ mod tests {
                 slash: None,
                 channel: Some("team".into()),
                 text: None,
+                conversation: None,
                 skill: None,
                 args: None,
             },
@@ -1288,6 +1315,7 @@ mod tests {
                 slash: None,
                 channel: Some("team-slack".into()),
                 text: Some("status check".into()),
+                conversation: None,
                 skill: None,
                 args: None,
             },
@@ -1297,6 +1325,58 @@ mod tests {
         .unwrap();
         let jobs = s.list().await.unwrap();
         assert!(matches!(jobs[0].target, Target::Channel { .. }));
+    }
+
+    /// F-ML-5: `--conversation` must reach the persisted target.
+    ///
+    /// The assertion that matters is the second one. Before the fix there was
+    /// no destination on the job at all and the dispatcher substituted the
+    /// CHANNEL NAME, so `conversation_id == Some("!room:matrix.org")` is a
+    /// state the old code could not produce — and `add_channel_ok` above pins
+    /// the other direction, that omitting the flag yields `None` rather than
+    /// the channel name sneaking back in.
+    #[tokio::test]
+    async fn add_channel_carries_the_destination_conversation() {
+        let dir = tempdir().unwrap();
+        let s = store(dir.path());
+        run_with_store(
+            CronCmd::Add {
+                expression: Some("*/15 * * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
+                slash: None,
+                channel: Some("mxlive".into()),
+                text: Some("status check".into()),
+                conversation: Some("!kntRqkQCkPjhPvMMvf:matrix.org".into()),
+                skill: None,
+                args: None,
+            },
+            &s,
+        )
+        .await
+        .unwrap();
+        let jobs = s.list().await.unwrap();
+        match &jobs[0].target {
+            Target::Channel {
+                channel_name,
+                conversation_id,
+                ..
+            } => {
+                assert_eq!(channel_name, "mxlive");
+                assert_eq!(
+                    conversation_id.as_deref(),
+                    Some("!kntRqkQCkPjhPvMMvf:matrix.org"),
+                    "the destination must be the room, never the channel name"
+                );
+                assert_ne!(
+                    conversation_id.as_deref(),
+                    Some(channel_name.as_str()),
+                    "F-ML-5 regression: the destination is the channel name again"
+                );
+            }
+            other => panic!("expected a channel target, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1312,6 +1392,7 @@ mod tests {
                 slash: None,
                 channel: None,
                 text: None,
+                conversation: None,
                 skill: Some("morning-brief".into()),
                 args: None,
             },
@@ -1342,6 +1423,7 @@ mod tests {
                 slash: None,
                 channel: None,
                 text: None,
+                conversation: None,
                 skill: None,
                 args: None,
             },
@@ -1364,6 +1446,7 @@ mod tests {
                 slash: Some("/x".into()),
                 channel: None,
                 text: None,
+                conversation: None,
                 skill: None,
                 args: None,
             },

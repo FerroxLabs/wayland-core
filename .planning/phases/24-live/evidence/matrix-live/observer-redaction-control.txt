@@ -1,0 +1,18 @@
+=== F. read-back BEFORE redaction: must be NOT-REDACTED (the check can fail) ===
+http_status=200
+event=$QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A state=NOT-REDACTED body_present=true redacted_because=false
+body="wayland-core live probe mlpre-1785383759 observer-preflight"
+bundled_replacement=null
+=== G. an event id that never existed: must be NOT-FOUND, not REDACTED ===
+http_status=404
+event=$this-event-id-was-never-created-by-anyone state=NOT-FOUND raw={"errcode":"M_NOT_FOUND","error":"Event not found."}
+=== H. redact it ===
+redact $QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A http_status=200 event_id=$zFd6IXBS2KHM5vcCHbWYslTsVlpuEdou4FbT9pM-OMc
+=== I. read-back AFTER: must be REDACTED, graded from the BODY not the status ===
+http_status=200
+event=$QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A state=REDACTED body_present=false redacted_because=true
+body=null
+bundled_replacement=null
+=== J. timeline count after cleanup ===
+timeline_events=10
+nonce=mlpre-1785383759 originals=0 all_bodies=0 ids=[]

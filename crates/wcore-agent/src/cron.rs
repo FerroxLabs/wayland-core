@@ -121,6 +121,7 @@ impl EngineJobHandler {
         &self,
         channel_name: &str,
         text: &str,
+        conversation_id: Option<&str>,
         key: Option<&str>,
     ) -> Result<(), CronError> {
         let Some(mgr) = &self.channels else {
@@ -134,7 +135,17 @@ impl EngineJobHandler {
             // sent; advancing the clock would make the job look healthy.
             return Err(CronError::Dispatch("no channel sink available".to_string()));
         };
-        let msg = OutgoingMessage::text(channel_name.to_string(), text.to_string());
+        // F-ML-5. This was `channel_name.to_string()` — the channel's own NAME
+        // used as the destination conversation id, which produced
+        // `PUT /rooms/mxlive/…` and a 403 against a real homeserver. An empty
+        // string is the value every adapter's default-destination fallback
+        // (`slack lib.rs:416`, `whatsapp :238`, `sms :250`) tests for, so
+        // omitting `--conversation` now reaches the configured default instead
+        // of addressing a conversation that was never named.
+        let msg = OutgoingMessage::text(
+            conversation_id.unwrap_or_default().to_string(),
+            text.to_string(),
+        );
         let guard = mgr.read().await;
         guard
             .send_to_keyed(channel_name, msg, key)
@@ -191,9 +202,18 @@ impl JobHandler for EngineJobHandler {
         target: &Target,
     ) -> Result<(), CronError> {
         match target {
-            Target::Channel { channel_name, text } => {
-                self.send_channel(channel_name, text, Some(&fire.delivery_id()))
-                    .await
+            Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => {
+                self.send_channel(
+                    channel_name,
+                    text,
+                    conversation_id.as_deref(),
+                    Some(&fire.delivery_id()),
+                )
+                .await
             }
             other => self.dispatch(other).await,
         }
@@ -226,12 +246,18 @@ impl JobHandler for EngineJobHandler {
                 }
                 Ok(())
             }
-            // Convention: when bootstrap-side cron fires, the `channel_name`
-            // doubles as the conversation_id of the channel's default room.
-            // Per-platform overrides live on the cron job's text or as a future
-            // `conversation_id` field; v0.8.1 uses one-room semantics.
-            Target::Channel { channel_name, text } => {
-                self.send_channel(channel_name, text, None).await
+            // The "channel_name doubles as the conversation_id" convention that
+            // used to live here was measured against a real homeserver on
+            // 2026-07-30 and does not hold: it produced `PUT /rooms/mxlive/…`
+            // and `403 M_FORBIDDEN`. The `conversation_id` field this comment
+            // called "future" now exists (F-ML-5).
+            Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => {
+                self.send_channel(channel_name, text, conversation_id.as_deref(), None)
+                    .await
             }
             Target::Skill { name, args } => {
                 if let Some(sink) = &self.skill {
@@ -544,6 +570,7 @@ mod tests {
             .dispatch(&Target::Channel {
                 channel_name: "no-such".into(),
                 text: "hi".into(),
+                conversation_id: None,
             })
             .await;
         assert!(
@@ -567,6 +594,7 @@ mod tests {
         h.dispatch(&Target::Channel {
             channel_name: "alpha".into(),
             text: "ping".into(),
+            conversation_id: Some("alpha-room".into()),
         })
         .await
         .unwrap();
@@ -591,6 +619,7 @@ mod tests {
             .dispatch(&Target::Channel {
                 channel_name: "desktop".into(),
                 text: "ping".into(),
+                conversation_id: None,
             })
             .await;
         match result {

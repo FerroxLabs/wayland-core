@@ -1,0 +1,61 @@
+token_len=41
+############ LEG 1 — the BINARY sends to a real Matrix room ############
+binary: wayland-core 0.12.25
+167da934
+  proxy wait 1
+MXPROXY_READY port=18790 upstream=https://matrix.org
+PROXY_LIVENESS_versions_http=200
+scheduled_for=2026-07-30T04:02:18Z nonce=mlsend-1785384109
+next[0]: 2026-07-30T04:02:18+00:00
+added bd8831fa-547b-4a8f-a9b4-ad7399887d70
+on  bd8831fa-547b-4a8f-a9b4-ad7399887d70  [once      ] @once 2026-07-30T04:02:18+00:00  channel  mxlive :: wayland-core live probe mlsend-17853841...  last_fired=never
+gateway_pid=2853869
+  t=3s wire_send_lines=0 alive=yes
+  t=6s wire_send_lines=0 alive=yes
+  t=9s wire_send_lines=0 alive=yes
+  t=12s wire_send_lines=0 alive=yes
+  t=15s wire_send_lines=0 alive=yes
+  t=18s wire_send_lines=0 alive=yes
+  t=21s wire_send_lines=0 alive=yes
+  t=24s wire_send_lines=0 alive=yes
+  t=27s wire_send_lines=0 alive=yes
+  t=30s wire_send_lines=1 alive=yes
+  t=33s wire_send_lines=1 alive=yes
+  t=36s wire_send_lines=1 alive=yes
+  t=39s wire_send_lines=1 alive=yes
+  t=42s wire_send_lines=1 alive=yes
+  t=45s wire_send_lines=1 alive=yes
+  t=48s wire_send_lines=1 alive=yes
+  t=51s wire_send_lines=1 alive=yes
+  t=54s wire_send_lines=1 alive=yes
+  t=57s wire_send_lines=1 alive=yes
+  t=60s wire_send_lines=1 alive=yes
+  t=63s wire_send_lines=1 alive=yes
+  t=66s wire_send_lines=1 alive=yes
+  t=69s wire_send_lines=1 alive=yes
+  t=72s wire_send_lines=1 alive=yes
+  t=75s wire_send_lines=1 alive=yes
+  t=78s wire_send_lines=1 alive=yes
+  t=81s wire_send_lines=1 alive=yes
+  t=84s wire_send_lines=1 alive=yes
+  t=87s wire_send_lines=1 alive=yes
+  t=90s wire_send_lines=1 alive=yes
+--- gateway log tail ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /dev/shm/matrix-live-secure/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T04:01:53.301936Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mmxlive [3mplatform[0m[2m=[0mmatrix
+[gateway] channels registered=1
+[2m2026-07-30T04:01:53.302129Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — vision tool will be hidden
+[2m2026-07-30T04:01:53.302139Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-30T04:01:53.302272Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m2853869 [3mdir[0m[2m=[0m/dev/shm/matrix-live-secure/home/channels
+[2m2026-07-30T04:01:53.302428Z[0m [32m INFO[0m no persisted /sync cursor (first start for this account); seeding from an initial sync — existing room backlog will NOT be replayed
+[2m2026-07-30T04:01:53.302519Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=2853869 role=Owner profile=mxlive carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-30T04:02:18.396146Z[0m [33m WARN[0m handler dispatch failed; will retry on next tick [3mid[0m[2m=[0mbd8831fa-547b-4a8f-a9b4-ad7399887d70 [3merror[0m[2m=[0mdispatch error: channel send: transport: HTTP error 403: {"errcode":"M_FORBIDDEN","error":"User @seandonahoe:matrix.org not in room mxlive"}
+--- wire journal (send routes only) ---
+{"ts":"2026-07-30T04:02:18.306Z","ev":"request","n":7,"method":"PUT","path":"/_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","txn":"cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","route":"send","body_bytes":81,"will_stall":false,"headers":["accept","content-length","content-type","host","user-agent"]}
+--- ledger ---
+{"id":"cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","state":"accepted","at":"2026-07-30T04:02:18.304323635+00:00","destination":"mxlive"}
+{"id":"cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","state":"attempted","at":"2026-07-30T04:02:18.304356414+00:00","destination":"mxlive"}
+{"id":"cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","state":"settled","at":"2026-07-30T04:02:18.395811523+00:00","delivered":false,"destination":"mxlive"}
+MATRIX_LIVE_SEND_DONE

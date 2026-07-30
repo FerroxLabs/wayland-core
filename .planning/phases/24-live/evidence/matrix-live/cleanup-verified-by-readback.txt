@@ -1,0 +1,21 @@
+=== CLEANUP VERIFIED BY READ-BACK, not by the 200s above (F-ML-3: a 200 means nothing) ===
+event=$8rWWSSH7nc9lgq3FJBV_B3bLXkhNS3cWx0p6nodLxuA state=REDACTED body_present=false redacted_because=true
+event=$BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ state=REDACTED body_present=false redacted_because=true
+event=$lCEFaNP1q7qxwphX4QBfHPXr2kUONF94PkHROqhhYaQ state=REDACTED body_present=false redacted_because=true
+event=$P0bacHeMO1F-326a7BnvUb-2JSL7H24PHa9rnbsKpfI state=REDACTED body_present=false redacted_because=true
+event=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 state=REDACTED body_present=false redacted_because=true
+event=$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA state=REDACTED body_present=false redacted_because=true
+event=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0 state=REDACTED body_present=false redacted_because=true
+event=$QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A state=REDACTED body_present=false redacted_because=true
+
+=== zero probe bodies remain, and the observer is proven alive by the count of timeline events ===
+timeline_events=24
+nonce=wayland-core live probe originals=0 all_bodies=0 ids=[]
+
+=== INSTRUMENT ALIVE CHECK for that zero: post, count 1, redact, count 0 ===
+http_status=200 event_id=$9ztFiaA0bfjPy8iXgAgR5rtt6JAyxR2kmXkqJPWb02A
+nonce=wayland-core live probe originals=1 all_bodies=1 ids=["$9ztFiaA0bfjPy8iXgAgR5rtt6JAyxR2kmXkqJPWb02A"]
+sed: 2: "s/.*ids=\["([^"]+)"\].* ...": undefined label ';d'
+control_event=
+redact  http_status=200 event_id=$v8FysLoYHSz-PEOiaSI2vg3HB5D9_OV39hHofCoXnBQ
+nonce=wayland-core live probe originals=1 all_bodies=1 ids=["$9ztFiaA0bfjPy8iXgAgR5rtt6JAyxR2kmXkqJPWb02A"]
