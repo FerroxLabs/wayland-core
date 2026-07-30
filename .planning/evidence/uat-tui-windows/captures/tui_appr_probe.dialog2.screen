@@ -1,0 +1,42 @@
+=== SNAPSHOT at 30203 bytes, 120x40 ===
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ Use the Write tool to create a file named uat-approve.txt in the current      ┌ Activity ──────────────────────┐
+   directory containing exactly HELLO_UAT                                          │ ⊘ Pending(1)  press y          │
+                                                                                   │ awaiting Write · D:\lane-…     │
+   ⚙ Pricing unavailable for flux-router/flux-standard; the call remains bounded   │ Pricing unavailable for f…     │
+   by the token envelope and cost is unpriced, not $0.                             │                                │
+                                                                                   │                                │
+     This looks high-stakes — /crucible convenes a cross-vendor council to         │                                │
+   cross-check it (you approve the cost first).                                    │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+   ─────────────────────────────────────────────────────────────────────────────── │                                │
+    ⬇ Write uat-approve.txt  uat-approve.txt                                       │                                │
+    + HELLO_UAT                                                                    │                                │
+                                                                                   │                                │
+    [enter/y] approve   [a] always for this tool   [n] deny   [esc] cancel         │                                │
+   [ctrl+f] expand                                                                 │                                │
+                                                                                   │                                │
+     ⊘ Awaiting your approval: Write                                               │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  ⊘ press [y] approve · [a] always · [n] deny · [esc] cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-standard │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 28s
+
+=== CURSOR x=4 y=34 hidden=False ===

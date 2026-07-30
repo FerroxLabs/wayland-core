@@ -1,0 +1,43 @@
+=== RENDERED SCREEN 120x40 ===
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ What is 17 multiplied by 23? Reply with just the number.                      ┌ Activity ──────────────────────┐
+                                                                                   │ Pricing unavailable for f…     │
+   ⚙ Pricing unavailable for flux-router/flux-standard; the call remains bounded   │                                │
+   by the token envelope and cost is unpriced, not $0.                             │                                │
+                                                                                   │                                │
+     391                                                                           │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Press Ctrl+C again to exit
+
+=== CURSOR x=4 y=34 hidden=False ===
+=== BYTES 19116  MARKS [[8779, "snapshot:boot"], [8839, "send:type-prompt"], [9465, "snapshot:typed"], [9465, "send:submit"], [16771, "snapshot:streaming"], [17627, "snapshot:answered"], [17689, "send:ctrl-c-1"], [18014, "send:ctrl-c-2"], [18066, "EOF"], [18066, "EOF"], [18066, "EOF"], [18066, "EOF"], [18066, "EOF"], [18066, "CHILD_EXITED_before:after-exit"]] ===
