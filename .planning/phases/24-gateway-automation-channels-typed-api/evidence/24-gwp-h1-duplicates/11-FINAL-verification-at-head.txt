@@ -1,0 +1,11 @@
+EXPECTED=58e98835b9c315aa907f468f6da1122a99892274
+ACTUAL=58e98835b9c315aa907f468f6da1122a99892274
+CARGO_RC=0
+test runner::tests::every_15_is_floored_to_60s_and_each_occurrence_has_its_own_delivery_id ... ok
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+SSH_RC=0
+--- node driver suite at the same SHA ---
+283:# tests 30
+285:# pass 30
+286:# fail 0
+291:NODE_RC=0
