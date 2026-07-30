@@ -1,8 +1,7 @@
 //! OpenClaw → wayland-core source loader + mappers (F26-01).
 //!
-//! The reciprocal of [`super::hermes`], closing the Core direction of the
-//! competitive ledger's `PORT-*` gap: both peers ship migration paths from each
-//! other, and Core was the only party with none.
+//! The reciprocal of [`super::hermes`]: the second supported import source, so
+//! a user arriving from either tool has a path in.
 //!
 //! Pure reconnaissance — nothing here writes. Same idiom as the Hermes source:
 //! permissive deserialization that ignores unknown keys, a deterministic total
