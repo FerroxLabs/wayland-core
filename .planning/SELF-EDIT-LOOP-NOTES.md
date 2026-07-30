@@ -156,6 +156,41 @@ is independent of this lane's change and is why the Direction-2 assertions
 need a deadline-bounded wait rather than a fixed 600 ms sleep — the same
 "budget, not a deadline" defect as `await_session_switch`, in my own harness.
 
+## ID-4 — my own poll loop was a self-passing gate
+
+`grep -c WLDONE "$f" || echo 0` prints `0` **and exits 1**, so `$D` became the
+two-line string `"0\n0"`, which `!= "0"` — the loop declared DONE on iteration
+1 every time, regardless of the run's state. Repaired to
+`if grep -q …; then echo yes; else echo no; fi`, with the three-assertion
+self-test: known-positive `yes`, known-negative `no`, and the old matcher
+proven to return not-`0` on a file containing no marker.
+
+Earlier polls used the broken matcher, but every result was validated by
+READING the log file and confirming it contained `WLDONE` plus a complete
+`test result:` line, so no reported figure rests on it.
+
+## ID-5 — `cargo test` stops at the first failing BINARY (unrun cells)
+
+The first full-suite capture reported `wcore-agent binaries=1`. That is not a
+one-binary crate — cargo aborted after `--lib` failed, so every integration
+binary after it never ran. Same for `wcore-cli`, which stopped at
+`f14_sigkill_recovery`. Those were unrun cells being silently counted as
+nothing rather than as skips. Re-run with `--no-fail-fast`.
+
+Also: a `test result: FAILED. 0 passed; 1 failed` line in the `wcore-cli`
+section came from `failing_fixture`, a DELIBERATE fixture that
+`plugin/scaffold.rs:314` generates as
+`#[test] fn always_fails() { panic!("deliberate"); }` and runs in a nested
+cargo subprocess. Counting it as a real failure would have been wrong.
+
+## Attribution of the suite failures — measured, not assumed
+
+| Failure | Verdict | Evidence |
+|---|---|---|
+| `wcore-cli` `isolated_profile_without_secure_store_fails_before_turn_or_provider_intent` | **PRE-EXISTING** | fails identically at base `c9ab048b` in a dedicated worktree (`BASECTL.log`) |
+| `wcore-agent --lib` failures (4 / 13 / 17 depending on run) | **PRE-EXISTING AND FLAKY, no regression** | apples-to-apples `--lib` alone: **BASE = 18 failed then 17 failed** on two runs at the same commit; **HEAD = 17 failed**. HEAD is no worse than base. The failing NAMES differ between the two base runs, which is the flake signature. Filtered subset is `78 passed; 0 failed` at both base and HEAD. No `watch::` test failed in any run. |
+| `clippy -p wcore-agent` errors in `user_model_identity_wire.rs`, `cache_ledger_engine_test.rs` | **NOT MINE** | `git diff base..HEAD` on both files = 0 lines (control: `watch.rs` = 2 lines, non-empty). `clippy -p wcore-agent --lib --test watch_self_edit_loop_test -D warnings` = **RC 0** |
+
 ## Open questions to measure, not assume
 
 1. What path does `notify` ACTUALLY surface when `.wayland-core/` is created
