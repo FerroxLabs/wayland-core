@@ -49,7 +49,7 @@
 # fail-fast list. Same family as the `--no-fail-fast` drift `ci.yml` documents at its
 # nextest step.
 #
-# ── WHY THE TOOLCHAIN IS PINNED BY HAND AND THEN ASSERTED ───────────────────
+# ── WHY THIS WORKFLOW DOES NOT USE vx, AND ASSERTS THE TOOLCHAIN ────────────
 #
 # The first cut of this workflow used `loonghao/vx@v0.9.17` with `setup: 'true'`
 # and ran `vx cargo clippy`, on the strength of AGENTS.md's claim that "the
@@ -65,23 +65,27 @@
 #     info: default toolchain set to stable-x86_64-unknown-linux-gnu
 #     stable-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
 #
-# and the lint it then reported cites `rust-clippy/rust-1.97.0`, against a vx.toml
-# that pins `rust = "1.95.0"`. So the action installed floating `stable`, not the
-# pin. `ci.yml`'s clippy step is unaffected only because it runs inside a
+# and the lint it then reported cites `rust-clippy/rust-1.97.0`. Note that this
+# repo ALSO carries a `rust-toolchain.toml` pinning `channel = "1.95.0"` with the
+# clippy and rustfmt components, and rustup honours it — that is why a plain
+# `cargo clippy` on the build host resolves 1.95.0 without anyone asking. vx
+# defeats it: the setup action prepends its own store to `PATH`, and the `cargo`
+# found there is a real toolchain binary rather than the rustup shim, so
+# `rust-toolchain.toml` is never consulted. The pin loses silently, and the
+# workflow lints against whatever `stable` happens to be that week.
+#
+# `ci.yml`'s clippy step is unaffected only because it runs inside a
 # `rust:1.95-slim-bookworm` container and never touches vx — but every `ci.yml` job
 # that DOES use the vx setup action (the native `ci` matrix, `build`, eval-gate) is
 # on floating stable for the same reason. That is reported separately; it is not
 # this workflow's to fix.
 #
 # Left alone it would have made this gate PERMANENTLY RED — the §3b-iii failure
-# mode, worth exactly as little as a gate that cannot fail. So the pin is read out
-# of `vx.toml` (never hardcoded, so a future bump carries this gate with it), the
-# toolchain is installed by that exact version, and BOTH lint invocations name it
-# with `cargo +<pin>`. That removes the drift structurally instead of asserting
-# against it after the fact — there is no default toolchain for the environment to
-# substitute. The resolved `rustc`, `clippy` and `rustfmt` versions are printed in
-# the install step so a reader of the log can see the toolchain rather than infer
-# it, and the step hard-fails if the pin cannot be read out of `vx.toml` at all.
+# mode, worth exactly as little as a gate that cannot fail. So this workflow drops
+# vx, lets `rust-toolchain.toml` do its job, and then ASSERTS that the toolchain
+# which actually resolved is the pinned one. It also cross-checks the two pin
+# files against each other, because nothing else in the repo does and a divergence
+# would put the lint verdict and local dev on different compilers.
 
 name: Lint
 
@@ -134,32 +138,58 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
 
-      # Read the pin out of vx.toml rather than hardcoding it, so a future bump of
-      # the pin moves this gate with it and cannot silently diverge.
-      - name: Install and pin the Rust from vx.toml
+      # Two files in this repo claim to pin the Rust version — `rust-toolchain.toml`
+      # (which rustup obeys, and which already carries the clippy + rustfmt
+      # components) and `vx.toml` (which vx claims to obey and, in CI, does not).
+      # They agree today at 1.95.0. Nothing was checking that they keep agreeing,
+      # and a divergence would mean the lint verdict and the local dev experience
+      # came from different compilers. This step reads both and refuses to lint if
+      # they disagree — a control that can genuinely fail, and whose passing state
+      # is the current tree.
+      - name: Cross-check the two Rust pins
         id: pin
         run: |
           set -euo pipefail
-          PINNED=$(sed -n 's/^rust[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' vx.toml | head -1)
-          if [ -z "$PINNED" ]; then
-            echo "could not read the rust pin out of vx.toml" >&2
+          RT=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          VX=$(sed -n 's/^rust[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' vx.toml | head -1)
+          echo "rust-toolchain.toml channel : ${RT:-<unreadable>}"
+          echo "vx.toml rust                : ${VX:-<unreadable>}"
+          [ -n "$RT" ] || { echo "could not read the channel out of rust-toolchain.toml" >&2; exit 1; }
+          [ -n "$VX" ] || { echo "could not read the rust pin out of vx.toml" >&2; exit 1; }
+          if [ "$RT" != "$VX" ]; then
+            echo "PIN DRIFT: rust-toolchain.toml pins $RT but vx.toml pins $VX" >&2
             exit 1
           fi
-          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
-          rustup toolchain install "$PINNED" \
-            --profile minimal --component clippy --component rustfmt
-          # Print what actually landed, so a reader of the log can see the
-          # toolchain rather than infer it. Both invocations below use the
-          # `+<toolchain>` form, so the DEFAULT toolchain is irrelevant to this
-          # job — the drift that reddened run 30548558624 is removed structurally
-          # rather than merely asserted against.
-          rustc "+$PINNED" --version
-          cargo "+$PINNED" clippy --version
-          cargo "+$PINNED" fmt --version
+          echo "pinned=$RT" >> "$GITHUB_OUTPUT"
+
+      # No `+toolchain` and no manual install: `rust-toolchain.toml` is the repo's
+      # own mechanism and rustup auto-installs from it, components included. What
+      # DOES need asserting is that the toolchain actually resolved is the pinned
+      # one — because run 30548558624 proved the resolution can be hijacked. vx put
+      # its own cargo (from a floating `stable`, rustc 1.97.1) ahead of the rustup
+      # shim on PATH, and a non-shim cargo does not read `rust-toolchain.toml` at
+      # all, so the pin was bypassed in silence and the gate went red on a clean
+      # tree citing `rust-clippy/rust-1.97.0`. This assertion is what turns that
+      # from an invisible red into a named one.
+      - name: Assert the resolved toolchain IS the pin
+        run: |
+          set -euo pipefail
+          PINNED='${{ steps.pin.outputs.pinned }}'
+          which cargo
+          rustup show active-toolchain
+          ACTUAL=$(rustc --version)
+          echo "expected rustc $PINNED"
+          echo "actual   $ACTUAL"
+          case "$ACTUAL" in
+            "rustc $PINNED "*|"rustc $PINNED") ;;
+            *) echo "TOOLCHAIN DRIFT: the pin is $PINNED but rustc resolves to '$ACTUAL'" >&2; exit 1 ;;
+          esac
+          cargo clippy --version
+          cargo fmt --version
 
       - name: Check formatting
-        run: cargo "+${{ steps.pin.outputs.pinned }}" fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       # `--keep-going` so the report is an inventory, not a lower bound. See header.
       - name: Clippy (warnings = errors, workspace, all targets)
-        run: cargo "+${{ steps.pin.outputs.pinned }}" clippy --workspace --all-targets --keep-going -- -D warnings
+        run: cargo clippy --workspace --all-targets --keep-going -- -D warnings
