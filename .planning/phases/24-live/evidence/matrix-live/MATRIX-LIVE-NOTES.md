@@ -139,3 +139,18 @@ fixture sink that accepts any channel id. A real Slack would have answered
 to the delivery id `cron:{job}:{scheduled_millis}`, and cron is the only production
 minter of those ids. So the exactly-once row for Matrix describes a path that, as
 shipped, cannot address a Matrix room at all.
+
+---
+
+## 6. Final log
+
+- **T+70** F-ML-5 fixed (`Target::Channel::conversation_id` + `cron add --conversation`).
+  Binary rebuilt. LEG 1 re-run: `delivered:true`, room count 1, pre-fix nonce 0.
+- **T+80** LEG 5 **PASS**: identical txn id across `kill -9`, identical `event_id` back,
+  control under a different delivery id produced a second event, room = 2 not 3.
+- **T+90** cleanup: 9 events redacted, all verified by read-back; `originals=0` with a
+  live positive control. Secret sweep 0/0 with known-positive 1/1.
+- **T+95** `cargo test -p wcore-cli --lib cron::` found five `cfg(test)` initializers the
+  release build never compiled. Fixed; 7 passed 0 failed.
+
+See `MATRIX-LIVE-SUMMARY.md` for the full result.
