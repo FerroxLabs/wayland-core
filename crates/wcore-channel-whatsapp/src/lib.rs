@@ -20,6 +20,7 @@
 //! handles only.
 
 pub mod api;
+pub mod bridge;
 pub mod config;
 pub mod error;
 pub mod inbound;
@@ -51,6 +52,7 @@ use wcore_channels::{
 };
 use wcore_config::credentials::CredentialsStore;
 
+pub use bridge::{WhatsappBackend, WhatsappBridgeChannel, WhatsappBridgeConfig};
 pub use config::WhatsappConfig;
 pub use error::WhatsappError;
 

@@ -141,11 +141,39 @@ fn make_sms(
     )))
 }
 
+/// WhatsApp has two transports behind one platform string.
+///
+/// The `backend` key selects. Absent or `meta-business` → the native Cloud API
+/// adapter over HTTPS, which is the default and needs no Node. `baileys` or
+/// `whatsapp-web` → the OPT-IN Node bridge subprocess. Anything else is
+/// REJECTED here rather than defaulted: `bridge.js` itself falls back to
+/// `baileys` on an unrecognised `--backend`, so a typo that reached the
+/// subprocess would put an operator's personal WhatsApp number on the wire.
 fn make_whatsapp(
     name: String,
     options: &toml::Table,
     credentials: Arc<dyn CredentialsStore>,
 ) -> Result<Box<dyn Channel>, ChannelLoadError> {
+    use std::str::FromStr;
+    use wcore_channel_whatsapp::WhatsappBackend;
+
+    let backend = match options.get("backend") {
+        Some(v) => {
+            let raw = v.as_str().ok_or_else(|| {
+                ChannelLoadError::Config("whatsapp `backend` must be a string".to_string())
+            })?;
+            WhatsappBackend::from_str(raw).map_err(|e| ChannelLoadError::Config(e.to_string()))?
+        }
+        None => WhatsappBackend::default(),
+    };
+
+    if backend.is_bridged() {
+        let cfg: wcore_channel_whatsapp::WhatsappBridgeConfig = parse_options(options)?;
+        return Ok(Box::new(
+            wcore_channel_whatsapp::WhatsappBridgeChannel::new(name, cfg),
+        ));
+    }
+
     let cfg: wcore_channel_whatsapp::WhatsappConfig = parse_options(options)?;
     Ok(Box::new(wcore_channel_whatsapp::WhatsappChannel::new(
         name,
@@ -562,6 +590,105 @@ mod tests {
                 "missing factory for {platform}"
             );
         }
+    }
+
+    /// Build the options table a whatsapp channel is constructed from.
+    /// `backend` is inserted only when `Some`, so the absent case is testable.
+    fn whatsapp_options(backend: Option<&str>) -> toml::Table {
+        let mut t = toml::Table::new();
+        if let Some(b) = backend {
+            t.insert("backend".into(), toml::Value::String(b.into()));
+        }
+        match backend {
+            Some("baileys") | Some("whatsapp-web") => {
+                t.insert(
+                    "bridge_path".into(),
+                    toml::Value::String("/definitely/not/here/bridge.js".into()),
+                );
+            }
+            _ => {
+                t.insert("workspace_name".into(), toml::Value::String("acme".into()));
+                t.insert("phone_number_id".into(), toml::Value::String("1".into()));
+                t.insert(
+                    "credential_handle_access_token".into(),
+                    toml::Value::String("k1".into()),
+                );
+                t.insert(
+                    "credential_handle_app_secret".into(),
+                    toml::Value::String("k2".into()),
+                );
+            }
+        }
+        t
+    }
+
+    /// The whatsapp backend selector must actually SELECT — three positive
+    /// cases and one rejection, so neither direction is assumed.
+    #[test]
+    fn whatsapp_backend_selector_routes_and_rejects() {
+        let factory = channel_factory_for("whatsapp").expect("whatsapp factory");
+        let creds = creds();
+
+        // Absent `backend` → the Cloud API adapter. This is the opt-in
+        // guarantee: every config written before the bridge existed keeps
+        // working with no Node installed.
+        let ch = factory(
+            "wa-cloud".into(),
+            &whatsapp_options(None),
+            Arc::clone(&creds),
+        )
+        .expect("a backend-less whatsapp config must still construct");
+        assert_eq!(ch.platform(), "whatsapp");
+
+        // Explicit `meta-business` → the same adapter.
+        factory(
+            "wa-cloud2".into(),
+            &whatsapp_options(Some("meta-business")),
+            Arc::clone(&creds),
+        )
+        .expect("meta-business must construct the Cloud API adapter");
+
+        // `baileys` → the bridge adapter. Construction must SUCCEED even
+        // though the bridge is absent: the failure belongs at start()/probe(),
+        // named, not at boot.
+        factory(
+            "wa-personal".into(),
+            &whatsapp_options(Some("baileys")),
+            Arc::clone(&creds),
+        )
+        .expect("baileys must construct even with no bridge on disk");
+
+        // An unknown backend is REJECTED, not defaulted.
+        let err = factory(
+            "wa-typo".into(),
+            &whatsapp_options(Some("baileyz")),
+            Arc::clone(&creds),
+        )
+        .expect_err("an unknown backend must be rejected, never defaulted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("baileyz"),
+            "the rejection must echo the typo: {msg}"
+        );
+        assert!(
+            msg.contains("meta-business"),
+            "the rejection must name the valid options: {msg}"
+        );
+    }
+
+    /// A bridged whatsapp config missing its required key must fail to
+    /// construct — the control proving the bridge arm parses its own schema
+    /// rather than accepting anything.
+    #[test]
+    fn whatsapp_bridge_config_requires_a_bridge_path() {
+        let factory = channel_factory_for("whatsapp").expect("whatsapp factory");
+        let mut opts = toml::Table::new();
+        opts.insert("backend".into(), toml::Value::String("baileys".into()));
+        let err = factory("wa".into(), &opts, creds()).expect_err("bridge_path is required");
+        assert!(
+            err.to_string().contains("bridge_path"),
+            "the error must name the missing key: {err}"
+        );
     }
 
     /// F-045 (W7-M): verify the 3 new platforms are registered.
