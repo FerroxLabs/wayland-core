@@ -685,7 +685,6 @@ mod tests {
         assert!(matches!(r.outcome, Outcome::Fail { .. }));
     }
 
-    #[test]
     /// The whole point of `durable_sessions_disabled_by_host()`: a host-forced
     /// degrade must NOT be reported as an operator choice.
     ///
