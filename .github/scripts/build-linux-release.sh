@@ -38,13 +38,27 @@ TARGET="${2:?usage: build-linux-release.sh <image> <target-triple>}"
 WORKDIR="${GITHUB_WORKSPACE:-$PWD}"
 RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' "${WORKDIR}/rust-toolchain.toml")"
 
-echo "building ${TARGET} in ${IMAGE} (rust ${RUST_VERSION})"
+# crates/wcore-cli/build.rs REFUSES a release build with no attributable source
+# identity, and resolves it from `git rev-parse HEAD` when
+# WAYLAND_BUILD_SOURCE_SHA is unset. That git call CANNOT work from inside this
+# container: the container runs as root over a workspace owned by the runner
+# user, and git rejects that with "detected dubious ownership". Measured
+# 2026-07-30 — both targets failed at build.rs:11 before this was passed in.
+# So the SHA is resolved on the HOST, where git works, and injected.
+SOURCE_SHA="${WAYLAND_BUILD_SOURCE_SHA:-${GITHUB_SHA:-$(git -C "${WORKDIR}" rev-parse HEAD)}}"
+if ! printf '%s' "${SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "::error::WAYLAND_BUILD_SOURCE_SHA must be 40 lowercase hex chars, got '${SOURCE_SHA}'" >&2
+  exit 1
+fi
+
+echo "building ${TARGET} in ${IMAGE} (rust ${RUST_VERSION}, source ${SOURCE_SHA})"
 
 docker run --rm \
   -v "${WORKDIR}":"${WORKDIR}" \
   -w "${WORKDIR}" \
   -e TARGET="${TARGET}" \
   -e RUST_VERSION="${RUST_VERSION}" \
+  -e WAYLAND_BUILD_SOURCE_SHA="${SOURCE_SHA}" \
   -e CARGO_TERM_COLOR=never \
   -e CARGO_NET_RETRY=10 \
   -e CARGO_HTTP_TIMEOUT=600 \
