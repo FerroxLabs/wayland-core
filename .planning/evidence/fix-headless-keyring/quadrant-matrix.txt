@@ -1,0 +1,18 @@
+================ QUADRANT-4 NOTICE PRESENCE MATRIX ================
+q2-prefix-novault | WLRC=1 | notice_lines=0 | turn_ok_lines=0 | old_error_lines=1 | SESSION_FILES=0
+q3-prefix-vault | WLRC=0 | notice_lines=0 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=2
+q1-postfix-novault | WLRC=0 | notice_lines=1 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=0
+q3-postfix-vault | WLRC=0 | notice_lines=0 | turn_ok_lines=1 | old_error_lines=0 | SESSION_FILES=2
+=== CONTROL: instrument alive — a string known to be in EVERY log ===
+q2-prefix-novault egress_lines=2
+q3-prefix-vault egress_lines=2
+q1-postfix-novault egress_lines=2
+q3-postfix-vault egress_lines=2
+=== CONTROL: a string known to be in NO log ===
+q2-prefix-novault impossible_lines=0
+q3-prefix-vault impossible_lines=0
+q1-postfix-novault impossible_lines=0
+q3-postfix-vault impossible_lines=0
+=== post-fix vault build identity ===
+BIN_SHA256=cad46008fb467d19ebaf90ab4f03b8636fde41acd0ad1b1b126c5d36ad924fc3
+  wayland-core 0.12.25 (source d51287b1b20de2c78334a2813d0b5c88541bec65)
