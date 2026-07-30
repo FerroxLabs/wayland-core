@@ -39,13 +39,31 @@
 //! and are **not** covered by an executed-tool case — their key-shape fixes
 //! are asserted in their own modules against shapes read out of the tool
 //! source. That is weaker, and is called out rather than papered over.
+//!
+//! # Why this is an integration binary, not a unit-test module
+//!
+//! It started life inside the lib test binary. Executing the real `BashTool`
+//! spawns sandboxed child processes, and that extra load made
+//! `tui::surfaces::tests::*_f14` fail intermittently (3-4 of them per run,
+//! varying) while the same commit with this module disabled was green 2/2 and
+//! the lane base was green 3/3. The cause is in those tests' own helper:
+//! `await_session_switch` bounds its wait with `for _ in 0..100 { …
+//! yield_now().await }` — a budget in scheduler yields, not in time or in a
+//! completion signal — so a loaded machine exhausts it before the background
+//! session I/O finishes and the helper panics "session switch did not
+//! complete". It cannot distinguish broken from busy.
+//!
+//! That latent fragility is NOT this lane's to fix and is reported separately.
+//! Living in a separate binary keeps these process-spawning cases out of that
+//! binary's scheduler entirely.
 
 use std::time::Duration;
 
 use serde_json::Value;
 use wcore_tools::Tool;
 
-use super::formatter_for;
+use wcore_cli::tui::theme::Theme;
+use wcore_cli::tui::tool_formatters::formatter_for;
 
 /// The TUI's own payload fallback, reproduced exactly.
 ///
@@ -71,7 +89,7 @@ fn render_real(tool: &dyn Tool, input: Value) -> (String, Vec<String>) {
     let f = formatter_for(tool.name());
     let summary = f.summary_line(&payload, Duration::ZERO);
     let detail = f
-        .detail_lines(&payload, &crate::tui::theme::Theme::hearth())
+        .detail_lines(&payload, &Theme::hearth())
         .iter()
         .map(|l| {
             l.spans

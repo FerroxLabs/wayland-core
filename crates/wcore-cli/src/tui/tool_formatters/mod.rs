@@ -16,11 +16,14 @@
 //! references; the dispatcher returns a static singleton so callers
 //! never own one.
 //!
-//! Each per-tool file documents its expected payload shape — those
-//! shapes are read from the actual `*ToolDef` outputs in W1, and the
-//! formatters degrade gracefully (missing fields collapse to `?` or are
-//! omitted) so a payload-schema drift in a future wcore version cannot
-//! crash the TUI.
+//! Each per-tool file documents the payload shape its tool ACTUALLY emits,
+//! cited to the producing source file. That wording is deliberate: the shapes
+//! were previously documented from intent rather than measurement, and 11 of
+//! the 12 formatters were reading keys no tool has ever produced (UAT-T3).
+//!
+//! A formatter degrades by OMITTING what it could not read — never by
+//! substituting a placeholder that reads like a fact. `?` is not a command
+//! and `0` is not an exit code.
 
 use std::time::Duration;
 
@@ -42,11 +45,9 @@ pub mod vision;
 pub mod web;
 pub mod web_fetch;
 
-/// UAT-T3: the regression suite that drives the REAL tools instead of
-/// hand-built payloads. See its module docs for why the previous suite could
-/// not fail.
-#[cfg(test)]
-mod real_payload_tests;
+// UAT-T3: the regression suite that drives the REAL tools instead of
+// hand-built payloads lives in `tests/tool_formatter_real_payloads.rs`, not
+// here — see that file's docs for why it needs its own process.
 
 /// Render one tool's JSON result payload into UI lines.
 ///
@@ -152,38 +153,23 @@ pub(crate) fn fmt_duration(d: Duration) -> String {
     format!("{:.1}s", d.as_secs_f64())
 }
 
-/// Read `payload[key]` as a string, returning `default` if absent or
-/// not a string. Used everywhere — kept as a small helper so the
-/// per-tool files stay readable.
-pub(crate) fn str_or<'a>(payload: &'a Value, key: &str, default: &'a str) -> &'a str {
-    payload.get(key).and_then(Value::as_str).unwrap_or(default)
-}
-
-/// Read `payload[key]` as a u64, returning `default` if absent or not
-/// numeric.
-pub(crate) fn u64_or(payload: &Value, key: &str, default: u64) -> u64 {
-    payload.get(key).and_then(Value::as_u64).unwrap_or(default)
-}
-
-/// Read `payload[key]` as an i64, returning `default` if absent or not
-/// numeric.
-pub(crate) fn i64_or(payload: &Value, key: &str, default: i64) -> i64 {
-    payload.get(key).and_then(Value::as_i64).unwrap_or(default)
-}
-
 // ── UAT-T3: making "unknown" expressible ───────────────────────────────────
 //
-// The helpers above take a `default`, and every caller passed a *plausible
-// looking* one — `"?"` for a command, `0` for an exit code, `0` for a byte
-// count. When the payload did not carry the key (which, measured across all
-// 12 formatters, was the normal case and not the exception) the card rendered
-// those defaults as though they were facts. A shell command that failed with
-// exit 1 was reported as `exit 0`.
+// There used to be three readers here — `str_or`, `u64_or`, `i64_or` — each
+// taking a `default`, and every caller passed a *plausible looking* one:
+// `"?"` for a command, `0` for an exit code, `0` for a byte count. When the
+// payload did not carry the key (which, measured across all 12 formatters,
+// was the normal case and not the exception) the card rendered those defaults
+// as though they were facts. A shell command that failed with exit 1 was
+// reported as `exit 0`.
 //
-// A default is only safe when it is *true* for a missing field. `0` is not a
-// true exit code and `"?"` is not a true command. The `opt_*` readers below
-// return `None` instead, so a formatter has to decide what to do about not
-// knowing — and `join_facts` makes omission the easy path.
+// They are DELETED rather than left unused, which is the point: a default is
+// only safe when it is *true* for a missing field, `0` is not a true exit
+// code, and `"?"` is not a true command. With no defaulting reader in scope a
+// future formatter cannot reintroduce the defect by reaching for the
+// convenient helper. The `opt_*` readers return `None` instead, so a
+// formatter has to decide what to do about not knowing — and `join_facts`
+// makes omission the easy path.
 //
 // Rule for every formatter in this module: **never render a value you did not
 // read.** If the field is absent, leave it out.

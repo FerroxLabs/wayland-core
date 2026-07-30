@@ -58,7 +58,14 @@ pub mod surfaces;
 mod terminal_guard;
 pub mod theme;
 pub mod theme_detect; // W8 — terminal background detection
-mod tool_formatters;
+// UAT-T3: made `pub` so the real-tool regression suite can live in its own
+// integration binary (`tests/tool_formatter_real_payloads.rs`) instead of
+// inside the lib test binary. Those cases execute the real `BashTool`, which
+// spawns sandboxed child processes; running them alongside the lib tests
+// starved `tui::surfaces::tests::*_f14`, whose helper bounds its wait by 100
+// cooperative `yield_now()` calls rather than by a deadline, so it fails under
+// load regardless of correctness. Separate binary = separate process.
+pub mod tool_formatters;
 mod turn_element;
 mod widgets;
 
