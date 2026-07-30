@@ -28,9 +28,8 @@ impl ToolResultFormatter for VisionFormatter {
     // successful call. Only `analysis` was ever real. Report what exists.
     fn summary_line(&self, payload: &Value, duration: Duration) -> String {
         let mut facts = vec!["Analyzed image".to_string()];
-        match (opt_u64(payload, "width"), opt_u64(payload, "height")) {
-            (Some(w), Some(h)) => facts.push(format!("{w}x{h}")),
-            _ => {}
+        if let (Some(w), Some(h)) = (opt_u64(payload, "width"), opt_u64(payload, "height")) {
+            facts.push(format!("{w}x{h}"));
         }
         if let Some(m) = opt_str(payload, "mime") {
             facts.push(m.to_string());
