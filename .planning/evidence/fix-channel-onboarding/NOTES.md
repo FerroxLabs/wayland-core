@@ -67,11 +67,86 @@ Real schema, from source:
 
 ---
 
+---
+
+## Measurement 2 — the credential idioms that ALREADY work (three, not one)
+
+The brief says "design it consistently with the existing provider-credential path rather
+than inventing a second idiom — find that path first." There is not one path. There are
+three, and only two work:
+
+| # | idiom | where | resolved by | status |
+|---|---|---|---|---|
+| 1 | `credential_handle*` key in `[options]`, value = a `CredentialsStore` key | all 10 channel adapters | adapter `start()` via `creds.get(handle)` | **WORKS** |
+| 2 | `${cred:KEY}` embedded in an MCP header string | `config.toml` `[mcp.servers.*]` | `wcore-config/src/mcp_cred_refs.rs` at the connect boundary | **WORKS** |
+| 3 | `[secrets] k = "keychain:<svc>:<acct>"` | channel config | **nothing** | **INERT** |
+
+And separately, `auth add <provider> <key>` writes `config.toml`
+`[providers.<slug>].api_key` — **plaintext in config.toml, not the credentials store at
+all.** So `auth` is NOT the precedent for a channel credential; idiom 1 is, and the
+`CredentialsStore::put` mechanics come from idiom 2 (`store_and_persist_forge`,
+`engine_bridge.rs:2390` — the single `.put(` in the CLI).
+
+### Consequence for the keychain: decision
+
+Implementing idiom 3 would mean a **fourth** reference syntax reaching the **same** OS
+keychain that `KeyringCredentialsStore` (the backend behind idiom 1) already reaches, and
+would require editing all 10 adapters to read `cfg.secrets`. That is duplicate machinery for
+an existing capability. **Decision: remove idiom 3.** Detail + cross-audit below.
+
+## Measurement 3 — handle discovery must match a SUBSTRING and must RECURSE
+
+Counted with `/usr/bin/grep -rhno '[a-z_]*credential_handle[a-z_]*' crates/wcore-channel-*/src/*.rs`:
+
+```
+ 48 credential_handle                  20 user_credential_handle
+ 20 password_credential_handle         19 credential_handle_access_token
+ 10 credential_handle_app_id            9 credential_handle_auth_token
+  9 credential_handle_app_secret        9 credential_handle_account_sid
+  8 credential_handle_bot_token         8 credential_handle_app_password
+  7 credential_handle_signing_secret
+```
+
+Two traps for anything that enumerates handles:
+
+1. **Email breaks the prefix convention** — `user_credential_handle` /
+   `password_credential_handle` are *suffixed*. A `starts_with("credential_handle")` scan
+   silently misses email entirely. Must match *contains*.
+2. **Email nests** — `EmailConfig` has `[options.smtp]` and `[options.imap]` sub-tables
+   (`wcore-channel-email/src/config.rs:33,64`), each with its own pair. A flat scan of
+   `[options]` misses all four. Must recurse.
+
+This is the LANE-BRIEF §3b-i "search for the CONCEPT, not one keyword" trap, hit for real.
+
+## Measurement 4 — `[secrets]` removal blast radius
+
+`secrets` / `secret_keys` consumers, full list:
+- `wcore-channels/src/config.rs` — the field + doc comments + 1 test fixture
+- `wcore-channels-registry/src/lib.rs:459-467` — `ChannelSummary.secret_keys` (key names only)
+- `wcore-cli/src/channel.rs:457` — `channel list --json` emits `"secret_keys"`
+- `wcore-cli/src/tui/surfaces/diagnostics.rs:1758-1761` — TUI display
+
+**No wire-contract fixture exposure**: `/usr/bin/grep -rn 'secret_keys' --include='*.json'`
+over the tree returns 0. So no `wcore-contract generate` is implicated (LANE-BRIEF §0).
+
+## Measurement 5 — the doc-honesty test has a usable seam
+
+`channel_factory_for(platform)` (`registry/src/lib.rs:46`) returns a factory that runs
+`parse_options::<PlatformConfig>()` and constructs the adapter **offline** (no network until
+`start()`). So a test can take a TOML block straight out of `docs/channels.md`, parse it as
+`ChannelConfig`, then hand `[options]` to the real factory with an in-memory
+`CredentialsStore` — and a doc block missing `workspace_name` reddens. That is exactly the
+drift the UAT hit.
+
+Precedent to mirror: `tests/readme_live_evidence_agreement.rs`, which already structures
+itself as a pure comparator plus doctored-input tests proving it fails AND a changed-world
+test proving it can still pass.
+
+---
+
 ## Open questions / next steps
 
 1. Reproduce the ORIGINAL failure on hetzner with the release binary before changing docs.
-2. Decide implement-vs-remove on `keychain:`; cross-audit.
-3. Design the credential verb against the existing provider-credential idiom (`auth` /
-   `provider_keys.rs`) — find it first.
-4. Doc-honesty test: candidate precedent
-   `wcore-channels-registry/tests/delivery_semantics_declaration.rs`.
+2. Cross-audit the remove-vs-implement decision on `keychain:`.
+3. Build `channel credential set|list|remove`, stdin-only for the value.
+4. Doc-honesty test per Measurement 5, with a can-fail proof.
