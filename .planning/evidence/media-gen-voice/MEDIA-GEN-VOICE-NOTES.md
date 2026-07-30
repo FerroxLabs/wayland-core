@@ -143,6 +143,126 @@ remaining blocker named by `27-GAPS-SUMMARY.md:140-143` — **no local
 speech-to-text path exists in the tree** — is untouched by me and is the thing
 that would make a default-on voice mode useful rather than merely present.
 
+## 27-C3 — cost-record coverage per shape (measured at base)
+
+`MediaCostLedger` existed and was wired into **exactly one** production tool.
+Per-backend scan of `crates/wcore-agent/src/tool_backends/`, counting
+`MediaCostRecord|media_cost|ReportedCost` references against outbound HTTP
+calls (`image_gen` is the known-positive that proves the matcher alive):
+
+| backend | billable? | cost refs | HTTP call sites | covered |
+|---|---|---|---|---|
+| `image_gen` | yes | **5** | 10 | **YES** (the control) |
+| `openai_compat_whisper` | yes — and the provider **returns a price** | 0 | 8 | no → **fixed here** |
+| `tts` | yes (OpenAI $15/M chars, ElevenLabs) | 0 | 6 | **no** |
+| `video_analyze` | yes, and it **fans out to N+1 vision calls** (default 8 frames + 1 synthesis) | 0 | 2 | **no** |
+| `anthropic_vision` | yes | 0 | 2 | **no** |
+| `openai_vision` | yes | 0 | 2 | **no** |
+| `gemini_vision` | yes | 0 | 2 | **no** |
+| `piper` | no — local synthesis | 0 | 2 | n/a |
+| `voice_mode` | no direct call — delegates to transcription | 0 | 0 | n/a |
+
+**1 of 8 billable media backends recorded cost at base; 2 of 8 after this
+lane.** These calls bypass the only cost sink in the product
+(`ProviderBudgetReservation::settle`, which is keyed to a provider dispatch
+with token counts), so they were invisible to accounting entirely.
+
+### What I fixed: transcription (`269d4f3a`, `f4bc7fb3`)
+
+Chosen because it is the one shape where a **real provider-reported dollar
+figure exists** — Phase 27 measured `x-flux-cost-usd` present on a live
+FluxRouter transcription and absent in every channel for an image. That number
+was being read by nobody: `resp.headers()` was dropped on the floor, and
+`verbose_json`'s `duration` — the unit transcription is billed on — was parsed
+for nothing.
+
+Records on every exit where the provider was **reached**: success, HTTP
+failure, unreadable body, and empty-transcript (a product-side rejection of
+work the provider already performed and billed for, so it keeps its resolved
+price via `with_outcome`). A request that never left the process records
+nothing, because nothing was billed.
+
+**Latent `$0.00` bug found and fixed in existing code.** `for_success` priced a
+call as `usd_per_image * units.images`. A duration-billed call has
+`images == 0`, so **any operator with a matching rate-card entry would have
+recorded `$0.00` for a transcription that cost real money** — the precise lie
+`media_cost.rs` was written to prevent, arriving through the pricing path
+instead of the reporting path. Latent at base (no caller passed `images: 0`);
+my change made it reachable, so it is fixed in the same commit. A per-image
+card now declines to price a zero-image call and the record falls through to
+`unpriced` while keeping its billed seconds.
+
+`MediaCostSummary` gains `billed_seconds` / `duration_billed_calls`, and
+`calls_of_unknown_size` no longer absorbs audio calls — that figure means "we
+produced pixels but could not measure them", and an audio call has no
+dimensions to report and never will.
+
+### Gate results — every number read from a file, unproxied
+
+| suite | result |
+|---|---|
+| `cargo test -p wcore-tools --lib media_cost` | **11 passed; 0 failed; 0 ignored; 0 measured; 1007 filtered out**, rc=0 |
+| `cargo test -p wcore-agent --lib openai_compat_whisper` | see below |
+
+Both-direction controls are built **into** the tests rather than run as
+separate mutations:
+- `rate_card_never_prices_a_duration_billed_call_as_zero` asserts the audio
+  call is unpriced **and** that the *same card, same backend id* still prices
+  an image call — so it cannot pass on a rate card that has simply died.
+- `absent_or_unparseable_cost_header_yields_no_figure_not_zero` asserts three
+  no-figure cases **and** that the same helper does find `x-cost-usd: 1.5` —
+  a dead matcher would satisfy all three negatives for free.
+- `summary_keeps_audio_and_image_units_separate` asserts audio does not raise
+  `calls_of_unknown_size` **and** that a genuinely unsized *image* call still
+  does.
+- `unbound_backend_records_nothing_but_still_builds_the_record` is the
+  known-negative for the ledger wiring.
+
+### Not done, and I am not claiming them
+
+**TTS, `video_analyze` and the three vision backends remain unaccounted.**
+`video_analyze` is the largest exposure by far — one tool call is 9 billable
+provider calls at the default frame count, all invisible. I did not wire them,
+and I did not live-prove transcription against the real FluxRouter endpoint
+either: the SSRF-safe client (`SsrfSafeResolver`) dials **only validated public
+IPs**, so a loopback `wiremock` test cannot exercise this backend at all, and a
+real-endpoint proof needs the burn key on hetzner plus an audio fixture that
+transcribes to non-empty text. The logic is therefore unit-proven, not
+live-proven. **The `27-C3` late-MCP shape is likewise untouched.**
+
+## Instrument defect found in MY OWN harness — repaired, not just noted
+
+My hetzner poll was:
+
+```bash
+OUT=$(grep -c WLDONE "$f" 2>/dev/null || echo 0); [ "$OUT" != "0" ] && break
+```
+
+`grep -c` on a no-match file prints `0` **and exits 1**, so `|| echo 0` fires
+*as well*. `$OUT` is the two-line string `"0\n0"`, which `!= "0"` compares
+**true**, so the loop breaks immediately. **The poll reported "DONE after 60s"
+while `wcore-agent` was still compiling** — and it hid a genuine
+`error[E0521]` compile failure (`AGENT_RC=101`) that I would otherwise have
+reported as a pass.
+
+This is LANE-BRIEF §3.2's family arriving inside my own tooling, and §6b-ii
+says repair it in the same lane rather than write it up. Repaired to
+`if grep -q WLDONE "$f"; then`. Self-test with the required **three**
+assertions (`/tmp/lane-media-gen-voice-polltest.sh`):
+
+```
+A1 repaired, known-positive (has WLDONE) -> SAYS_DONE  [expect SAYS_DONE]
+A2 repaired, known-negative (empty)      -> SAYS_WAIT  [expect SAYS_WAIT]
+A3 OLD matcher, same empty file          -> SAYS_DONE  [expect SAYS_DONE = the bug]
+A3b OLD matcher raw output was: [0
+0]
+```
+
+A3 is the assertion that proves the repair does something; A1+A2 alone pass on
+the broken matcher too.
+
 ## Open / next
 
-- Enumerate every billable media call site and grade cost coverage per shape.
+- TTS / `video_analyze` / vision cost records (unstarted, named above).
+- Live FluxRouter transcription proof (blocked on an audio fixture, not on the
+  credential).
