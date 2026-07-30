@@ -1,0 +1,21 @@
+=== release.yml line count ===
+868
+
+=== 'contract' case-insensitive (ABSENCE claim) ===
+0
+=== CONTROL known-positives ===
+  manifest lines: 58
+  sign lines: 18
+  sigstore lines: 4
+  cosign lines: 0
+=== CONTROL known-negative ===
+  zzz_no_such_token: 0
+
+=== job names ===
+4:  push:
+27:  contents: write
+36:  prepare-release:
+55:  build:
+209:  github-release:
+555:  post-tag-smoke:
+768:  publish-npm:

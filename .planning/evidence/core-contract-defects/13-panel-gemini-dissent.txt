@@ -1,0 +1,9 @@
+CHOICE=A
+
+In a serial merge train, any commit that breaks an existing CI pipeline derails the entire train, as all subsequent parallel lanes will fail against the newly broken base branch. Option B intentionally breaks the existing byte-drift CI step. Because the orchestrator explicitly reserves the regeneration step for the very end of the release process, choosing B would leave the integration branch broken and block the other four lanes from merging. 
+
+Furthermore, Option B directly violates your explicit brief: "If your change requires regeneration, say so loudly and stop." Modifying the generator inherently requires a regeneration to pass the byte-drift CI.
+
+Option A strictly obeys the directive. You stop, hand over the generator fix as a seam request, and prove your solution works using a completely GREEN test on an in-memory copy. The new RED regression gates act as tracked markers for the defect. Because you did not touch the generator itself, the existing byte-drift CI remains green, allowing the serial merge train to proceed smoothly for everyone else.
+Hook system message: [ijfw] Session 17 complete (0 memory entries).
+gemini rc=0

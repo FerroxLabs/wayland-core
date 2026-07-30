@@ -1,0 +1,34 @@
+=== INSTRUMENT SELF-TEST: repaired events.rs field parser (3 assertions) ===
+  (1) known-POSITIVE  CorrelatedSubAgentEvent -> ['parent_call_id', 'agent_name', 'inner', 'run_id', 'child_run_id', 'parent_child_run_id', 'child_sequence', 'event_id', 'terminal_state']
+  (2) known-NEGATIVE  'child_run_id' in ApprovalResume ['resume_token', 'approved']: False
+  (3) OLD parser on the same input -> []
+  all three assertions hold: the repair is load-bearing, not cosmetic.
+
+=== What makes duplicate top-level branches mutually exclusive? ===
+  core.oneOf[26] additionalProperties=True required=8 props=10
+  core.oneOf[27] additionalProperties=True required=4 props=6
+
+  Cross-probe: does a CORRELATED sub_agent_event frame match the LEGACY branch?
+    correlated fixture vs core.oneOf[26]: 0 err []
+    correlated fixture vs core.oneOf[27]: 1 err [['not']]
+  Cross-probe: a synthetic LEGACY frame (correlated fields stripped):
+    legacy frame vs core.oneOf[26]: 4 err
+    legacy frame vs core.oneOf[27]: 0 err
+    legacy frame vs WHOLE core-event.schema.json: 0 err -> ACCEPTED
+
+=== approval_resume: are producer-complete anyOf[4] and anyOf[59] identical? ===
+  identical: False
+  anyOf[4]  title=None addlProps=True
+  anyOf[59] title=None addlProps=True
+  keys differ: []
+
+=== additionalProperties census: top-level branches vs nested inferred objects ===
+  core-event TOP-LEVEL branches: additionalProperties==false -> 4, otherwise -> 49
+  core-event NESTED object schemas: additionalProperties==false -> 17, otherwise -> 36
+
+=== every nested `oneOf` in core-event.schema.json (the C5 class, swept) ===
+  nested oneOf sites (excluding the root): 10
+    UNSATISFIABLE-BY-CONSTRUCTION: /oneOf/50/properties/goal/properties/tasks/items (2 permissive object branches)
+  unsatisfiable-by-construction nested oneOf sites: 1
+    producer-complete UNSATISFIABLE: /anyOf/73/properties/goal/properties/tasks/items (2 branches)
+  producer-complete nested oneOf sites: 11, unsatisfiable: 1

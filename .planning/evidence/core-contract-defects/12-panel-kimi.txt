@@ -1,0 +1,20 @@
+• This is a reasoning question, not a code task. Answer with CHOICE=A or B plus justification ≤180 words.
+
+  The question: serial merge train, regeneration reserved to orchestrator as last action. Which choice?
+
+  Choice A: red gates staying red through the whole merge train is bad — red CI on mainline integration branch blocks everyone / normalizes red. Also gates red until orchestrator regenerates anyway.
+
+  Choice B: one-line fix landed; new gates green; exactly the byte-drift check goes red with a message saying "run generate" — which is precisely the mechanism designed to catch stale artifacts, and the orchestrator is scheduled to run generate last. In a serial merge train, lanes land without regenerating; drift check red is expected and designed-in state, resolved once by orchestrator before tag. A leaves permanently-red new gates that pollute the train and hide real failures.
+
+  Actually wait — with A, the red gates would fail CI on every lane's merge, blocking the train. B keeps everything green except the intended drift sentinel. B is correct.
+
+  Word count ≤180. Answer text only.
+
+• CHOICE=B
+
+  In a serial merge train, the integration branch must stay green per lane, or every subsequent lane inherits a red baseline and CI stops meaning anything. Choice A deliberately lands permanently-RED gates: each of the four later merges now lands on a failing branch, gets blocked or forced to ignore red, and the red signals get normalized — real regressions hide inside expected ones. "Land red tests, fix later" only works when the fix lands in the same train quickly; here it is explicitly deferred to the orchestrator's final step, i.e. the entire train runs red.
+
+  Choice B leaves the repo in a self-consistent state: generator, new gates, and the in-memory regeneration in `check_contract` all agree, so they're green. The only red is the byte-drift check — and red is that check's correct, designed output when committed artifacts lag the generator. Its failure message literally names the remedy, which is the orchestrator's reserved, scheduled, final action. Nothing is ambiguous, nobody has to bypass CI mid-train, and the defect is fixed in the earliest lane instead of riding as a known-unfixable failure. The seam request still documents the regeneration dependency.
+
+To resume this session: kimi -r session_8189249f-4cb9-4207-a4c5-642066c2c599
+kimi rc=0

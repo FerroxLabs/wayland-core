@@ -1,0 +1,36 @@
+=== all 10 nested oneOf sites in core-event.schema.json ===
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/cooldown_reason
+     [0] {"enum": ["auth", "auth_permanent", "format", "rate_limit", "overloaded", "billing", "timeout", "model_not_found", "session_expired", "context_overflo
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/disposition
+     [0] {"additionalProperties": false, "properties": {"Ok": {"type": "null"}}, "required": ["Ok"], "type": "object"}
+     [1] {"additionalProperties": false, "properties": {"Err": {"enum": ["provider_not_allowed", "provider_denied", "region_not_allowed", "organization_mismatc
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/failure_reason
+     [0] {"enum": ["auth", "auth_permanent", "format", "rate_limit", "overloaded", "billing", "timeout", "model_not_found", "session_expired", "context_overflo
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/pricing/properties/age_seconds
+     [0] {"minimum": 0, "type": "integer"}
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/pricing/properties/estimated_microcents
+     [0] {"minimum": 0, "type": "integer"}
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/region
+     [0] {"type": "string"}
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/candidates/items/properties/retry_after_ms
+     [0] {"minimum": 0, "type": "integer"}
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/selected_model
+     [0] {"type": "string"}
+     [1] {"type": "null"}
+  /oneOf/33/properties/receipt/properties/selected_provider
+     [0] {"type": "string"}
+     [1] {"type": "null"}
+  /oneOf/50/properties/goal/properties/tasks/items
+     [0] {"additionalProperties": true, "properties": {"attempts": {"type": "integer"}, "dependency_releases": {"type": "integer"}, "epoch": {"type": "integer"
+     [1] {"additionalProperties": true, "properties": {"attempts": {"type": "integer"}, "dependency_releases": {"type": "integer"}, "depends_on": {"items": {"t
+
+=== producer-complete anyOf[4] vs anyOf[59] structural diff ===
+  key properties
+    [4]  {"approved": {"type": "boolean"}, "modifications": {"additionalProperties": true, "properties": {"answer": {"type": "string"}}, "type": "object"}, "resume_token": {"type": "string"}, "type": {"const": "approval_resume"}}
+    [59] {"approved": {"type": "boolean"}, "resume_token": {"type": "string"}, "type": {"const": "approval_resume"}}
