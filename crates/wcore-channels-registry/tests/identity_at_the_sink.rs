@@ -110,11 +110,10 @@ fn creds() -> Arc<dyn CredentialsStore> {
 struct Sink {
     child: Child,
     url: String,
-    journal: PathBuf,
 }
 
 impl Sink {
-    fn start(journal: PathBuf) -> Self {
+    fn start(journal: &Path) -> Self {
         let script = repo_root().join("scripts").join("f24-sink.mjs");
         assert!(
             script.is_file(),
@@ -127,7 +126,7 @@ impl Sink {
             .arg("--port")
             .arg("0")
             .arg("--journal")
-            .arg(&journal)
+            .arg(journal)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -152,11 +151,7 @@ impl Sink {
                 panic!("sink did not announce a url; it printed {line:?}");
             })
             .to_string();
-        Self {
-            child,
-            url,
-            journal,
-        }
+        Self { child, url }
     }
 }
 
@@ -203,7 +198,7 @@ const TO: &str = "+15551234567";
 async fn twilio_and_whatsapp_arrivals_now_carry_a_delivery_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let journal = dir.path().join("arrivals.jsonl");
-    let sink = Sink::start(journal.clone());
+    let sink = Sink::start(&journal);
     println!("SINK url={} journal={}", sink.url, journal.display());
 
     for platform in ["sms", "whatsapp"] {
