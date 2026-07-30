@@ -3342,6 +3342,29 @@ impl AgentEngine {
             None
         };
 
+        // An engine whose durable sessions are OFF must not hold a journal.
+        //
+        // This is the resume-side half of the headless-keyring fix. `session
+        // .enabled = false` was already the documented remedy for a host that
+        // cannot protect a durable session, but it only ever removed the
+        // session MANAGER — a journal handed in from outside survived it, and
+        // `run_with_content` gates the per-turn confidential preflight on the
+        // journal, not on the manager. So a resumed conversation stayed
+        // journaled and kept failing every turn while a fresh one worked.
+        //
+        // `channel_dispatch` reaches exactly this: it builds its own
+        // `SessionManager`, calls `load_for_run_if_exists`, and passes the
+        // resulting `ActiveSession` to `AgentBootstrap::resume`, so every
+        // channel conversation that already exists on disk arrives here with a
+        // live journal regardless of the setting. Dropping the handle also
+        // releases its writer lease, which an engine that will never write to
+        // it has no business holding.
+        let session_journal = if config.session.enabled {
+            session_journal
+        } else {
+            None
+        };
+
         let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
         // M3.1 (M3.2 follow-up): seed throttle from cfg so resume paths
@@ -3648,6 +3671,19 @@ impl AgentEngine {
     /// Get the current session ID (if sessions are enabled and initialized)
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// Does this engine hold a durable journal writer lease?
+    ///
+    /// Test surface for the invariant "durable sessions off ⇒ no journal". The
+    /// field is private, and every *behavioural* probe of it is host-dependent
+    /// — holding a journal only changes an outcome on a host where confidential
+    /// recovery storage is unavailable, so the same assertion would pass
+    /// vacuously on a developer machine with a working OS keyring.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn has_durable_journal(&self) -> bool {
+        self.session_journal.is_some()
     }
 
     /// Transfer this long-running engine to another persisted session.

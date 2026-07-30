@@ -1439,19 +1439,19 @@ pub fn open_store(
     }
 }
 
-/// Open a credentials store for material that must never be written in
-/// plaintext.
+/// The confidential-backend decision inputs for one profile: the absolute
+/// credentials path and the [`ConfidentialBackendMode`] its configured backend
+/// implies.
 ///
-/// Unlike [`open_store`], `Auto` is fail-closed: it selects the OS keyring when
-/// it is usable, using a stable profile-namespaced service for isolated
-/// `WAYLAND_HOME` profiles. Otherwise it selects the encrypted-file vault only
-/// when unlock material is available.
-/// It never constructs [`PlaintextCredentialsStore`] or
-/// [`FallbackCredentialsStore`].
-pub fn open_confidential_store(
+/// Extracted so [`open_confidential_store`] and [`confidential_backend_available`]
+/// derive the mode from ONE piece of code. They answer the same question and
+/// must never be able to disagree about which backends are candidates.
+///
+/// Pure: reads config and the environment, writes nothing.
+fn confidential_backend_plan(
     cfg: &CredentialsStorageConfig,
     plaintext_path: &Path,
-) -> Result<ConfidentialCredentialsStore, CredentialsError> {
+) -> Result<(PathBuf, ConfidentialBackendMode), CredentialsError> {
     if !cfg.backend.supports_confidential_material() {
         return Err(CredentialsError::BackendUnavailable(
             "plaintext credentials are not permitted for confidential material".to_string(),
@@ -1479,6 +1479,60 @@ pub fn open_confidential_store(
         }),
         CredentialsBackend::Plaintext => unreachable!("handled above"),
     };
+    Ok((credentials_path, mode))
+}
+
+/// Read-only twin of [`open_confidential_store`]: can this profile reach a
+/// confidential-capable backend *right now*?
+///
+/// This exists so a caller can decide at STARTUP whether a capability that
+/// requires confidential storage is supportable, instead of promising it and
+/// discovering the answer on the user's first turn. It creates no directory,
+/// takes no lock, pins no backend marker and migrates nothing, so it is safe
+/// to call on every launch and cannot itself change the answer.
+///
+/// It routes through the same [`confidential_backend_plan`] and
+/// [`select_confidential_backend`] the opener uses, so the two cannot drift.
+///
+/// Returns `false` for `backend = "plaintext"`. That is correct but is NOT the
+/// headless case: a caller that must tell "the operator configured something
+/// that cannot work" apart from "this host has no secure store at all" has to
+/// consult [`CredentialsBackend::supports_confidential_material`] first.
+#[must_use]
+pub fn confidential_backend_available(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+) -> bool {
+    let Ok((credentials_path, mode)) = confidential_backend_plan(cfg, plaintext_path) else {
+        return false;
+    };
+    let marker_path = credentials_path.with_file_name(".credentials.confidential-backend.json");
+    // A marker that cannot be read is treated as absent: this is a query, and
+    // the opener holds the lock that makes marker reads authoritative.
+    let pinned = load_confidential_backend_marker(&marker_path).unwrap_or_default();
+    select_confidential_backend(
+        pinned.as_ref(),
+        &mode,
+        &keyring_available,
+        vault_unlock_material_present(),
+    )
+    .is_ok()
+}
+
+/// Open a credentials store for material that must never be written in
+/// plaintext.
+///
+/// Unlike [`open_store`], `Auto` is fail-closed: it selects the OS keyring when
+/// it is usable, using a stable profile-namespaced service for isolated
+/// `WAYLAND_HOME` profiles. Otherwise it selects the encrypted-file vault only
+/// when unlock material is available.
+/// It never constructs [`PlaintextCredentialsStore`] or
+/// [`FallbackCredentialsStore`].
+pub fn open_confidential_store(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+) -> Result<ConfidentialCredentialsStore, CredentialsError> {
+    let (credentials_path, mode) = confidential_backend_plan(cfg, plaintext_path)?;
     let selected = resolve_confidential_backend_with_availability(
         &mode,
         &credentials_path,
@@ -1898,6 +1952,93 @@ pub fn warn_if_world_readable(path: &Path) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// The startup availability probe must agree with the opener and must
+    /// change nothing while answering.
+    ///
+    /// Both arms are host-independent on purpose. An explicitly configured
+    /// encrypted-file backend is available on every host (interactive unlock is
+    /// retained, so selection never rejects it) and the plaintext backend is
+    /// refused on every host — so this gate has a reachable pass state AND a
+    /// reachable fail state everywhere it runs, including a machine that does
+    /// have an OS keyring.
+    ///
+    /// The `Auto`-with-no-keyring-and-no-vault case — the actual headless-server
+    /// defect — cannot be asserted here, because a developer machine WITH a
+    /// keyring would legitimately answer `true`. It is proven live on a
+    /// keyring-less host instead; see
+    /// `.planning/evidence/fix-headless-keyring/`.
+    #[test]
+    fn the_availability_probe_agrees_with_the_opener_and_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let marker_path = dir.path().join(".credentials.confidential-backend.json");
+        let cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::EncryptedFile {
+                cipher_path: dir.path().join("vault.enc"),
+                key_params_path: dir.path().join("vault.params.json"),
+            },
+            service_name: None,
+        };
+
+        assert!(
+            confidential_backend_available(&cfg, &plaintext_path),
+            "an explicitly configured encrypted-file backend is reachable on every host"
+        );
+        assert!(
+            !marker_path.exists(),
+            "the probe pinned a backend; it must be read-only"
+        );
+
+        // Known-positive for the assertion above: the opener DOES write that
+        // exact marker path. Without this, `!marker_path.exists()` would also
+        // pass on a typo'd path, i.e. for free.
+        assert!(
+            open_confidential_store(&cfg, &plaintext_path).is_ok(),
+            "opener and probe must agree"
+        );
+        assert!(
+            marker_path.exists(),
+            "the opener must write the marker the probe deliberately skipped — \
+             otherwise the read-only assertion above is vacuous"
+        );
+
+        // The other direction, on the same host, in the same test.
+        let plaintext_cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::Plaintext,
+            service_name: None,
+        };
+        assert!(
+            !confidential_backend_available(&plaintext_cfg, &plaintext_path),
+            "plaintext can never hold confidential material"
+        );
+        assert!(
+            open_confidential_store(&plaintext_cfg, &plaintext_path).is_err(),
+            "opener and probe must agree in this direction too"
+        );
+    }
+
+    /// `WAYLAND_VAULT_PASSPHRASE` was the workaround one live UAT lane found for
+    /// the headless failure. This pins the mechanism it works by: with unlock
+    /// material present, the `Auto` backend is reachable on ANY host, keyring or
+    /// no keyring — which is why supplying it makes a default install able to
+    /// hold a durable session again.
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn vault_unlock_material_makes_the_auto_backend_reachable_on_any_host() {
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::Auto,
+            service_name: None,
+        };
+
+        let _guard = EnvPassphraseGuard::set("probe-pass-1");
+        assert!(
+            confidential_backend_available(&cfg, &plaintext_path),
+            "an unlocked vault satisfies Auto even where no OS keyring exists"
+        );
+    }
 
     #[test]
     fn plaintext_round_trip() {
