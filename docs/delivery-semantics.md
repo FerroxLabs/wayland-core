@@ -18,10 +18,10 @@ the table below disagrees with the adapter's actual capability. See
 
 | | |
 |---|---|
-| **3 of 10** adapters | exactly-once — Slack, Matrix, Discord |
-| **7 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
+| **2 of 10** adapters | exactly-once — Slack, Matrix |
+| **8 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
 | **0 of 10** adapters | at-least-once (the gateway never automatically re-sends to a destination that cannot recognise a replay) |
-| **On Windows** | a known defect can produce a duplicate on **any** adapter, including the three above — see [§5](#5-windows-f24-gwp-h1) |
+| **On Windows** | a known defect can produce a duplicate on **any** adapter, including the two above — see [§5](#5-windows-f24-gwp-h1) |
 
 Nothing is ever silently dropped. An abandoned delivery is recorded, listed by
 `wayland-core gateway abandoned`, and re-sendable by an operator.
@@ -37,7 +37,7 @@ relying on it, because that scope is narrower than "one message".
 |---|---|---|---|---|---|
 | **Slack** | `Idempotency-Key` HTTP header on the send | **exactly-once** | **retried** with the same key | one message | **Yes** — real HTTP; the key was present on both attempts |
 | **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes** — replay driven against a real, fresh Synapse |
-| **Discord** | `nonce` field on message create | **exactly-once**, *within Discord's dedup window* | **retried** with the same key | one message **if** the replay lands inside Discord's dedup window; the window's length is unknown | **No — mock only.** Key-on-wire is bound by a mockito test; no real Discord destination has been driven. Window length open as `BL-24C1-DISCORD-WINDOW` |
+| **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **Yes** — a replayed key produced **two** messages, no dedupe token on the wire |
 | **Twilio SMS** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **Yes** — a replayed key produced **two** messages |
 | **WhatsApp** (Meta Graph) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Meta | **Yes** — a replayed key produced **two** messages |
@@ -46,15 +46,14 @@ relying on it, because that scope is narrower than "one message".
 | **iMessage** (AppleScript) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Messages.app. **macOS only** — on Linux and Windows the adapter is not compiled in and cannot be constructed at all | **NOT MEASURED** |
 | **MS Teams** (Bot Framework) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Teams | **NOT MEASURED** |
 
-**"NOT MEASURED" means not measured, and it is not a pass.** Five of the ten — Discord, Email,
-Signal, iMessage, MS Teams — have never had a replay driven at a real destination. Their rows
-are derived from source: the adapter transmits no key the destination honours (or, for Discord,
-transmits one whose window nobody has bounded), so the capability bit and the spine's behaviour
-follow mechanically. That is real evidence about *our* code and no evidence at all about the
+**"NOT MEASURED" means not measured, and it is not a pass.** Four of the ten — Email, Signal,
+iMessage, MS Teams — have never had a replay driven at a real destination. Their rows are
+derived from source: the adapter transmits no key the destination honours, so the capability bit
+and the spine's behaviour follow mechanically. That is real evidence about *our* code and no evidence at all about the
 *platform's* behaviour. It is weaker than the four rows above it and is labelled rather than
 filled in optimistically.
 
-The four live rows (Slack, Telegram, Twilio, WhatsApp) come from one run in which a single
+The live rows (Slack, Matrix, Telegram, Twilio, WhatsApp and now Discord) come from runs in which a single
 delivery key was replayed twice through real adapters over real HTTP, built by the production
 factory. That run is what makes the other rows interpretable: it is the known-positive proving
 a duplicate is genuinely produced when no key is honoured, rather than a duplicate being merely
@@ -66,7 +65,7 @@ theorised.
 |---|---|---|
 | Slack | `wcore-channel-slack/src/lib.rs:249` | `idempotency-key` request header (`lib.rs:338`, `:371`); bound by tests `lib.rs:489` (header present when keyed) and `lib.rs:521` (header **absent** when unkeyed) |
 | Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539` |
-| Discord | `wcore-channel-discord/src/lib.rs:344` | `rest::nonce_for_key`, used `lib.rs:170-172`; bound by test `lib.rs:583` |
+| Discord | **`false`**, overridden explicitly in `wcore-channel-discord/src/lib.rs` | `rest::nonce_for_key` IS still sent as `nonce` (`lib.rs:170-172`), and Discord ignores it for deduplication — see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | the other seven | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
 
 ---
@@ -89,7 +88,7 @@ Two consequences worth stating plainly:
 - **A send that fails for a known reason is not retried by the delivery spine** (`:227-231`
   settles both arms). Conflating a known failure with an unknown outcome is what turns one
   failed send into a retry storm; the code deliberately does not.
-- **The gateway never guesses.** For the seven at-most-once adapters it will not re-send, because
+- **The gateway never guesses.** For the eight at-most-once adapters it will not re-send, because
   re-sending to a destination that cannot recognise the replay *is* the duplicate. It records the
   delivery instead and hands the decision to you.
 
@@ -146,7 +145,7 @@ distinct delivery ids, each settled exactly once**: the spine did its job perfec
 duplicate was created *above* it, as a second delivery id.
 
 **So on Windows the exactly-once rows in §2 are conditional on timing, for all three of them.**
-A different key is not a replay, and Slack, Matrix and Discord will each post the second copy.
+A different key is not a replay, and Slack and Matrix will each post the second copy.
 This applies to every adapter, not to a subset.
 
 It is intermittent — a second Windows run that finished before crossing a boundary was clean.
@@ -162,7 +161,7 @@ Linux and macOS show no such defect in the same journey.
 
 ---
 
-## 6. Why the seven cannot simply be fixed
+## 6. Why the eight cannot simply be fixed
 
 `supports_outbound_idempotency` is a **capability declaration, not a preference**
 (`wcore-channels/src/lib.rs:131-138`). An adapter that returns `true` without transmitting a key
@@ -178,6 +177,13 @@ POSTs as explicitly non-idempotent; RFC 5321 §6.1 permits duplicate delivery an
 makes `Message-ID` an identifier, not a dedup contract; signal-cli's JSON-RPC `id` only
 correlates the response; the Bot Framework `activity.id` is channel-assigned and senders are
 told not to deduplicate on it.
+
+**Discord is the eighth, and it fails for a different and more instructive reason.** The other
+seven expose no token to send. Discord exposes one — `nonce` — and *accepts* it, echoing the
+value straight back in the create response. It simply never deduplicates on it. A token that is
+accepted and ignored is strictly more dangerous than no token at all, because the adapter can
+truthfully say "the key is on the wire" and be wrong about the only thing that matters. See
+[§8](#8-discord-was-wrong-and-how-it-was-found).
 
 One nuance, because "the platform" and "the API we use" are not the same thing: **Telegram's
 lower-level MTProto API does have a `random_id` dedup token — the Bot API's `sendMessage` does
@@ -211,12 +217,80 @@ A declaration that drifts from the code is worse than no declaration. This one i
 
 If you change an adapter's capability, this file is part of the change.
 
+---
+
+## 8. Discord was wrong, and how it was found
+
+Until 2026-07-30 this document put Discord in the exactly-once column. **It was wrong**, and the
+row said why it might be: *"No — mock only. Key-on-wire is bound by a mockito test; no real
+Discord destination has been driven."* A mockito test can only ever prove that we **send** a
+stable token. Everything after that — that Discord would **honour** it — was inference, and the
+inference was false.
+
+Measured by `lane/discord-live` against a real bot, a real guild and a real channel.
+
+### The platform does not deduplicate on `nonce`. There is no window.
+
+Same channel, same author, byte-identical nonce, replayed at four delays:
+
+| delay | first id | second id | result |
+|---|---|---|---|
+| 0 s | 1532233150594289704 | 1532233156847992891 | **two messages** |
+| 5 s | 1532233158874108034 | 1532233181867278427 | **two messages** |
+| 30 s | 1532233187801960489 | 1532233320211943434 | **two messages** |
+| 90 s | 1532233322401370353 | 1532233706088038480 | **two messages** |
+
+`BL-24C1-DISCORD-WINDOW` asked how long the dedup window is. The answer is that there isn't one.
+
+Three controls, because a verdict that can only ever read "duplicate" would be a
+permanently-red gate and worth nothing:
+
+1. **The nonce is accepted, not rejected.** `POST` returns 200 and Discord echoes the value back
+   (`nonce_sent == nonce_echoed`), so the token is well-formed and inside the 25-char cap.
+2. **The comparator can report identity** — two GETs of one message compare equal.
+3. **A same-id outcome is reachable through this very API** — `PATCH` returns the same id as the
+   `POST`. So "deduplicated" was an achievable result; it just never happened.
+
+### End to end through the gateway, one delivery id, two messages
+
+Outcome-unknown was produced honestly rather than simulated: the adapter's own `api_base_url`
+seam pointed at a proxy that forwards the create to real Discord and then never responds, so the
+message lands and the product never learns the outcome — the `F24-C-H1` shape exactly.
+
+| step | evidence |
+|---|---|
+| `once:` trigger — structurally cannot fire twice | job `97ce67c3-52f0-48da-92e1-80692363a555` |
+| attempt 1 reached Discord, key on the wire | `FORWARDED id=1532234475344498829 nonce=wle82e6651cfa60bb8` |
+| the nonce IS the derivation of the delivery id | `nonce_for_key("cron:97ce67c3-…:1785383566000") = wle82e6651cfa60bb8`; `millis+1` correctly differs |
+| gateway killed `-9`, then restarted | gateway 2's own banner: `carried=1 (unattempted 0 / unknown-outcome 1)` |
+| arrivals at Discord, baseline 0 | **2** |
+
+Because the adapter declared `true`, the spine took the re-attempt arm at `automation.rs:216-220`
+instead of the abandon arm at `:201-215`, and `wayland-core gateway abandoned` was empty before
+and after. The product did not fail to notice a duplicate; **it created one on purpose**, on the
+strength of a guarantee the platform does not provide.
+
+### What changed
+
+`supports_outbound_idempotency()` now returns `false` for Discord. The nonce is still sent —
+it is useful to clients for optimistic reconciliation — but the spine no longer treats it as a
+replay guard, so an outcome-unknown Discord delivery is abandoned, recorded and nameable, like
+every other at-most-once adapter.
+
+### The lesson worth keeping
+
+The row that was wrong is the row that had never been driven at a real destination, and it said
+so in its own last column. **A "NOT MEASURED" cell is a prediction, and predictions in this table
+have now been wrong once.** The other four unmeasured rows — Email, Signal, iMessage, MS Teams —
+predict `at-most-once`, which is the safe direction to be wrong in; Discord predicted
+`exactly-once`, which is not.
+
 <!-- DELIVERY-SEMANTICS-MACHINE-READABLE
 Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires
 them to agree, so a table edit that misses this block fails, and vice versa.
 slack = exactly-once
 matrix = exactly-once
-discord = exactly-once
+discord = at-most-once
 telegram = at-most-once
 sms = at-most-once
 whatsapp = at-most-once

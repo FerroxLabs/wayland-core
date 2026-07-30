@@ -289,8 +289,15 @@ fn declaration_matches_every_adapter() {
 /// The ratio itself is the headline of the document and of criterion 24-C1.
 /// Asserting it separately means a change to it fails with a message that says
 /// what actually changed, rather than as one line inside a diff.
+///
+/// **Was `exactly_three` until 2026-07-30.** Discord was removed after a live
+/// replay at the real platform produced a duplicate: it accepts the `nonce` and
+/// echoes it back but never deduplicates on it, at any delay including zero.
+/// See `docs/delivery-semantics.md` §8. The lesson this assertion should carry
+/// forward is that Discord was in this list on the strength of a mockito test,
+/// which can only prove what we SEND — never what the platform HONOURS.
 #[test]
-fn exactly_three_adapters_are_exactly_once() {
+fn exactly_two_adapters_are_exactly_once() {
     let measured = measured_capabilities();
     let mut idempotent: Vec<&str> = measured
         .iter()
@@ -301,10 +308,12 @@ fn exactly_three_adapters_are_exactly_once() {
 
     assert_eq!(
         idempotent,
-        vec!["discord", "matrix", "slack"],
+        vec!["matrix", "slack"],
         "the set of exactly-once adapters changed. This is a customer-facing guarantee: update \
          docs/delivery-semantics.md (both the table and the machine-readable block) in the same \
-         commit, and check that the platform really honours a replayed key before adding one."
+         commit, and PROVE AT THE REAL PLATFORM that it honours a replayed key before adding \
+         one. Discord was in this list for months on the strength of a mockito test and was \
+         wrong; a mock proves what we send, not what the destination does with it."
     );
 }
 

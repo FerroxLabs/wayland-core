@@ -11,10 +11,17 @@
 //! `wcore-channels/src/lib.rs:139` is `false`).
 //!
 //! **That is no longer true and this header is corrected rather than left to
-//! rot (2026-07-30, `lane/24c1-declaration`).** Three adapters now override it:
-//! Slack (`wcore-channel-slack/src/lib.rs:249`), Matrix
-//! (`wcore-channel-matrix/src/lib.rs:294`) and Discord
-//! (`wcore-channel-discord/src/lib.rs:344`). Seven inherit `false`, not nine.
+//! rot (2026-07-30, `lane/24c1-declaration`).** Two adapters override it to
+//! `true`: Slack (`wcore-channel-slack/src/lib.rs:249`) and Matrix
+//! (`wcore-channel-matrix/src/lib.rs:294`). Eight are `false`.
+//!
+//! **Discord was the third until later the same day** (`lane/discord-live`).
+//! It overrides the method too, but to `false`: driven at real Discord, an
+//! identical `nonce` replayed after a genuine gateway restart produced a
+//! SECOND message. The token is accepted and echoed and simply not honoured.
+//! See `docs/delivery-semantics.md` §8. Discord is the reason this file's
+//! own header warns that a four-adapter subset is not a census: it carried a
+//! false `true` for months and nothing here could have caught it.
 //!
 //! **This file measures a FOUR-adapter subset** (Slack, Telegram, Twilio SMS,
 //! WhatsApp) — the four that can be driven over real HTTP at a local fixture.
@@ -477,7 +484,8 @@ async fn slack_is_the_known_positive_and_puts_the_same_key_on_the_wire_both_time
 /// ten adapters, so it would have passed unchanged after Matrix and Discord
 /// gained the capability — a name claiming a census the body does not perform.
 /// The census is
-/// `wcore-channels-registry::delivery_semantics_declaration::exactly_three_adapters_are_exactly_once`.
+/// `wcore-channels-registry::delivery_semantics_declaration::exactly_two_adapters_are_exactly_once`
+/// (renamed from `exactly_three_` when Discord was removed on live evidence).
 async fn slack_declares_the_capability_and_the_three_http_fixture_adapters_do_not() {
     let mut server = mockito::Server::new_async().await;
     telegram_background_mocks(&mut server).await;
