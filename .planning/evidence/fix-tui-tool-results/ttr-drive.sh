@@ -87,6 +87,67 @@ extract_card() {
   ' "$1"
 }
 
+# ── grading, isolated so it can be self-tested and re-run over old captures ──
+#
+# INSTRUMENT DEFECT #2, found on the AFTER run and repaired rather than noted
+# (LANE-BRIEF §6b-ii). The first grader treated the substring "0 bytes" as a
+# defect signature. That was right for the BEFORE state, where the literal card
+# read `Ran `?` · exit 0 · 0 bytes` and every one of those zeros was invented.
+# It is WRONG for the AFTER state, where `ls /no-such-dir` legitimately writes
+# nothing to stdout and `0 bytes stdout` is a MEASUREMENT. The grader scored a
+# correct card as PARTIAL — a false red, which is as misleading as a false
+# green and would have understated the fix.
+#
+# The signature that actually distinguishes the two states is the FABRICATION,
+# not the zero: a `?` standing in for a command the formatter never had, and an
+# `exit 0` on a call the engine itself marked as an error.
+grade_card() {
+  # $1 = header line, $2 = body line
+  local hdr="$1" body="$2" hdr_status=unknown fab has_exit0 zero_bytes contradiction
+  say "CARD_HEADER=[${hdr}]"
+  say "CARD_BODY=[${body}]"
+  case "$hdr" in *'\xc2\xb7 error'*) hdr_status=error ;; *'\xc2\xb7 done'*) hdr_status=done ;; esac
+  case "$hdr" in *"· error"*) hdr_status=error ;; *"· done"*) hdr_status=done ;; esac
+  say "CARD_HEADER_STATUS=${hdr_status}"
+
+  fab=NO;        case "$body" in *'Ran `?`'*) fab=YES ;; esac
+  has_exit0=NO;  case "$body" in *"exit 0"*)  has_exit0=YES ;; esac
+  zero_bytes=NO; case "$body" in *"0 bytes"*) zero_bytes=YES ;; esac
+  say "FABRICATED_CMD_QUESTION_MARK=${fab}"
+  say "BODY_SHOWS_EXIT_0=${has_exit0}"
+  say "BODY_SHOWS_A_ZERO_BYTE_COUNT=${zero_bytes}  # informational only: after the"
+  say "#   fix a zero here can be a real measurement (a command that printed nothing),"
+  say "#   so it is NOT a defect signature on its own."
+
+  contradiction=NO
+  if [ "$hdr_status" = "error" ] && [ "$has_exit0" = "YES" ]; then contradiction=YES; fi
+  say "SELF_CONTRADICTION=${contradiction}"
+
+  # The defect is the FABRICATION. Either symptom alone is conclusive:
+  #   * a `?` rendered where the command should be, or
+  #   * `exit 0` on a card the engine marked `error`.
+  if [ "$fab" = "YES" ] || [ "$contradiction" = "YES" ]; then
+    say "VERDICT=DEFECT_PRESENT"
+  else
+    say "VERDICT=DEFECT_ABSENT"
+  fi
+}
+
+# ── re-grade an existing capture, so one grader can score every run ──────────
+if [ -n "${GRADE_FILE:-}" ]; then
+  RESULT="${GRADE_FILE}.regrade"
+  : > "$RESULT"
+  say() { echo "$*"; echo "$*" >> "$RESULT"; }
+  say "REGRADED_FILE=${GRADE_FILE}"
+  C=$(extract_card "$GRADE_FILE")
+  if [ -z "$C" ]; then
+    say "ASSERT_TOOLCARD=FAIL reason=no-bash-tool-card-in-capture"
+    say "VERDICT=EXPERIMENT_DID_NOT_RUN"; exit 0
+  fi
+  grade_card "${C%% || *}" "${C#* || }"
+  exit 0
+fi
+
 # ── self-test: THREE assertions, not two (LANE-BRIEF §6b-ii) ─────────────────
 #   (1) known-positive: a real card line is extracted verbatim.
 #   (2) known-negative: a pane with no card yields the empty string.
@@ -288,35 +349,8 @@ say "TOOLCARD_LINE=[${CARD}]"
 # The defect signature is the formatter's fabricated triple. Report each
 # component separately so a PARTIAL fix cannot read as a full one.
 HDR="${CARD%% || *}"; BODY="${CARD#* || }"
-say "CARD_HEADER=[${HDR}]"
-say "CARD_BODY=[${BODY}]"
-# The header's status chip is the engine's own is_error verdict and is CORRECT.
-# The body is the formatter's. Recording both separately is what makes the
-# self-contradiction ("error" above, "exit 0" below) machine-visible instead of
-# a thing a human has to notice.
-HDR_STATUS=unknown
-case "$HDR" in *'· error'*) HDR_STATUS=error ;; *'· done'*) HDR_STATUS=done ;; esac
-say "CARD_HEADER_STATUS=${HDR_STATUS}"
+grade_card "$HDR" "$BODY"
 
-FAB_CMD=NO;  case "$BODY" in *'Ran `?`'*) FAB_CMD=YES ;; esac
-HAS_EXIT0=NO; case "$BODY" in *'exit 0'*)  HAS_EXIT0=YES ;; esac
-ZERO_BYTES=NO; case "$BODY" in *'0 bytes'*) ZERO_BYTES=YES ;; esac
-say "FABRICATED_CMD_QUESTION_MARK=${FAB_CMD}"
-say "BODY_SHOWS_EXIT_0=${HAS_EXIT0}"
-say "BODY_SHOWS_0_BYTES=${ZERO_BYTES}"
-if [ "$HDR_STATUS" = "error" ] && [ "$HAS_EXIT0" = "YES" ]; then
-  say "SELF_CONTRADICTION=YES header=error body=exit-0"
-else
-  say "SELF_CONTRADICTION=NO"
-fi
-
-if [ "$FAB_CMD" = "YES" ] && [ "$ZERO_BYTES" = "YES" ]; then
-  say "VERDICT=DEFECT_PRESENT"
-elif [ "$FAB_CMD" = "NO" ] && [ "$ZERO_BYTES" = "NO" ]; then
-  say "VERDICT=DEFECT_ABSENT"
-else
-  say "VERDICT=PARTIAL"
-fi
 say "WLRC=0"; say "WLDONE"
 tmux -L "$SOCK" kill-server 2>/dev/null
 exit 0

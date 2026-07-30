@@ -162,3 +162,74 @@ here; it is reported as a finding.
 
 Note also `[memory] enabled = false` did not stop `.wayland-core/memory/memory.db{,-wal,-shm}`
 from being created — recorded, not investigated.
+
+---
+
+## FINAL RECORD
+
+**Verdict: goal achieved.** Root-caused, fixed, class-audited, live-proven both directions.
+
+### Contract decision — option D, panel unanimous 3/3 + own adversarial pass
+Tools keep emitting what they emit (the model's view is untouched, zero wire risk); the
+display layer parses it and never invents. (A) rejected on blast radius — `content` IS the
+model's context. (C) needs a forbidden contract-fixture regeneration.
+Panel verbatim: `panel-{codex,gemini,kimi}.txt`. All three legs probed alive with a real
+question first; the initial attempt returned 0 bytes from all three (a redirect artefact)
+and was discarded as a dead instrument rather than recorded as silence.
+My adversarial pass dissented on one point the others under-weighted — D leaves the
+coupling implicit and able to drift silently — and the amendment was adopted: the
+regression test DERIVES its input from the producer (executes the real `BashTool`) instead
+of pasting its format string, so a pasted fixture cannot become a second invented shape.
+
+### Audit result: 11 of 12 formatters mismatched their real tool (full table in the report)
+Beyond bash: every successful **web search** rendered `Found 0 results` and contributed
+nothing to the Sources block (rows live at `data.web`, not `results`); `image_gen` never
+surfaced the generated image URL for the same reason.
+
+### Live proof (hetzner, real pty, real provider, real approval flow)
+BEFORE `6b9b14fd…`:  `Ran ? · exit 0 · 0 bytes`  (both success AND failure; the failure
+card's header said `error` while its body said `exit 0` — SELF_CONTRADICTION=YES)
+AFTER  `6cd48e52…`:  `exit 0 · 15 bytes stdout`  /  `exit 2 · 0 bytes stdout · 64 bytes
+stderr` + `ls: cannot access '/no-such-dir-9F3A': No such file or directory`
+All four captures re-graded through ONE repaired grader: BEFORE=DEFECT_PRESENT ×2,
+AFTER=DEFECT_ABSENT ×2.
+
+### Can-fail proof, both directions on the real document
+Fix reverted -> `FAILED. 2 passed; 4 failed`, messages printing the real defect string from
+an actual BashTool execution. Restored via `git checkout -- <path>` -> `ok. 6 passed; 0
+failed; 0 ignored; 0 filtered out`; tree clean, HEAD unchanged.
+
+### Gates
+fmt --check 0 | metadata --locked 0 | check --workspace --all-targets 0 |
+clippy -p wcore-cli --all-targets -D warnings 0 |
+test -p wcore-cli --no-fail-fast: 60 binaries, lib 1930 passed / 0 failed / 1 ignored /
+0 filtered out; new binary 6 passed / 0 failed / 0 ignored / 0 filtered out.
+3 failures, ALL pre-existing — the lane base `--no-fail-fast` yields the identical three
+names. Zero new failures.
+
+### Second instrument defect, repaired in-lane
+The grader treated `0 bytes` as a defect signature. True BEFORE, FALSE AFTER — a command
+that legitimately prints nothing scored as PARTIAL, a false red. Re-keyed on the
+fabrication itself. (First defect: the extractor read the header, not the body, and would
+have graded a totally unfixed build as CLEAN.)
+
+### Unrun cells — a skip is not a pass
+Windows 0 of everything (hetzner cannot reach seandesktop). macOS 0 of everything (Mac
+cannot build; not Darwin-specific so the narrow exception does not apply) — **the live
+proof is Linux only**. 1 pre-existing binary runs 0 of 10 tests (all `#[ignore]`d);
+2 pre-existing binaries have 0 tests. 9 of 12 formatters have no executed-tool case.
+
+### Findings handed off, NOT fixed here
+1. MEDIUM `surfaces/mod.rs::await_session_switch` bounds its wait in 100 `yield_now()`
+   calls, not a deadline — it cannot distinguish broken from busy. Measured: 4 then 3
+   `*_f14` failures under subprocess load; base green 3/3, module-disabled green 2/2.
+2. MEDIUM `bootstrap.rs:3139` — the engine reports its OWN writes to the model as user
+   edits. Creating `.wayland-core/` bumps cwd's mtime; the surfaced event path is the
+   PARENT, which has no `.wayland-core` component, so `is_wcore_internal_path` never
+   filters it. The model answers the injected notice instead of the prompt. 8/2/3
+   injections across three configs including a chmod-555 cwd. Cost this lane ~1 hour.
+3. LOW/open — no tool card appeared under `--dangerously-skip-permissions` across ~90
+   frames; with the approval flow it appears at once. Those turns were also looping, so
+   this is NOT established. Stated as an open question.
+4. LOW — `[memory] enabled = false` did not stop `.wayland-core/memory/memory.db` being
+   created. Observed, not investigated.
