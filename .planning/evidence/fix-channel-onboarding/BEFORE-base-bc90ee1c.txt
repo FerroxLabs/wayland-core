@@ -1,0 +1,77 @@
+WLRC=0
+WLDONE
+=====OUTPUT=====
+=== BINARY IDENTITY ===
+path=/root/wayland-chanonb/target/release/wayland-core
+wayland-core 0.12.25
+sha256=b137b1d3735e328a21f4c367fe86a0281b54bd27e377ee1259f7f5ff5955442d
+commit=bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+WAYLAND_HOME=/root/chanonb-home-base
+
+=== ROUND TRIP 1: docs/channels.md 'Recommended deployment baseline', VERBATIM ===
+--- config on disk ---
+[inbound]
+dm = "allowlist"
+dm_allowlist = ["<your-platform-user-id>"]
+group = "disabled"
+require_mention = true
+tools = "conversational"
+--- channel list ---
+channels in /root/chanonb-home-base/channels:
+  slack                             UNKNOWN PLATFORM
+      config error: TOML parse error at line 1, column 1
+  |
+1 | [inbound]
+  | ^
+missing field `name`
+
+RT1_RC=0
+
+=== ROUND TRIP 2: add the field the error named (name) ===
+channels in /root/chanonb-home-base/channels:
+  slack                             UNKNOWN PLATFORM
+      config error: TOML parse error at line 1, column 1
+  |
+1 | name = "slack"
+  | ^
+missing field `platform`
+
+RT2_RC=0
+
+=== ROUND TRIP 3: add the next field the error named (platform) ===
+channels in /root/chanonb-home-base/channels:
+  slack                slack        enabled
+RT3_RC=0
+
+=== ROUND TRIP 4: channel probe — the adapter's own required options ===
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-base/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:03:25.350707Z[0m [33m WARN[0m channel construction failed; skipping [3mchannel[0m[2m=[0mslack [3mplatform[0m[2m=[0mslack [3merror[0m[2m=[0mconfig parse: missing field `workspace_name`
+
+wayland-core channel: no channels could be constructed from /root/chanonb-home-base/channels — nothing to probe
+RT4_RC=1
+
+=== CONTROL: is there ANY verb that writes a channel credential? ===
+--- channel --help ---
+F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+
+Usage: wayland-core channel <COMMAND>
+
+Commands:
+  list     List configured channels from the on-disk config directory
+  probe    Ask each configured channel's platform whether its setup is complete, whether its credential authenticates, and what identity it authenticated as. Sends no message
+  health   Show the per-adapter health a RUNNING gateway has observed
+  reload   Ask the running gateway to re-read the channel config directory
+  actions  Print the native-action matrix: for each configured channel, whether edit / delete / react / typing are implemented, permanently absent from the platform, or simply not built yet
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+--- top-level --help (auth line) ---
+  auth             CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow
+  channel          F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+
+=== CONTROL: the inert [secrets] table is ACCEPTED at base ===
+channels in /root/chanonb-home-base/channels:
+  inert                slack        enabled
+  slack                slack        enabled
+SECRETS_ACCEPTED_RC=0

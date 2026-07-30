@@ -1,0 +1,364 @@
+WLRC=0
+WLDONE
+=====LIVE=====
+=== BINARY ===
+path=/root/wayland-chanonb/target/release/wayland-core
+wayland-core 0.12.25
+sha256=ed0c8f378daf198c2f4d45123d2819c6cf4d77c9973fc0f819be12d0f0668e8f
+commit=8893b946c241dcbb1b0eb83381f950a65f494482
+WAYLAND_HOME=/root/chanonb-home-after
+
+########## QUADRANT 1 — the documented config LOADS ##########
+
+--- the two files on disk (verbatim from docs/channels.md) ---
+# ~/.wayland/channels/slack.toml
+name = "slack"
+platform = "slack"
+
+[options]
+workspace_name = "acme"
+default_channel_id = "C0123456789"
+credential_handle_bot_token = "slack.acme.bot_token"
+credential_handle_signing_secret = "slack.acme.signing_secret"
+
+[inbound]
+dm = "allowlist"
+dm_allowlist = ["U0123456789"]
+group = "disabled"
+require_mention = true
+tools = "conversational"
+
+# ~/.wayland/channels/discord.toml
+name = "discord"
+platform = "discord"
+
+[options]
+credential_handle = "discord.acme.bot_token"
+
+[inbound]
+dm = "allowlist"
+dm_allowlist = ["123456789012345678"]
+group = "disabled"
+require_mention = true
+tools = "conversational"
+
+--- channel list — the documented configs must parse ---
+channels in /root/chanonb-home-after/channels:
+  discord              discord      enabled
+      credential: credential_handle -> discord.acme.bot_token
+  slack                slack        enabled
+      credential: credential_handle_bot_token -> slack.acme.bot_token
+      credential: credential_handle_signing_secret -> slack.acme.signing_secret
+RC=0
+
+########## QUADRANT 3a — handles MISSING before anything is stored ##########
+
+--- channel credential list — must report MISSING and exit 1 ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+credential handles referenced by /root/chanonb-home-after/channels:
+  discord          credential_handle                  discord.acme.bot_token           MISSING
+  slack            credential_handle_bot_token        slack.acme.bot_token             MISSING
+  slack            credential_handle_signing_secret   slack.acme.signing_secret        MISSING
+
+3 handle(s) have no value. Store each with:
+  printf %s "$SECRET" | wayland-core channel credential set <handle>
+RC=1
+
+--- channel credential list --json ---
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/chanonb-home-after/.dirty-death.1565328)
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[
+  {
+    "channel": "discord",
+    "handle": "discord.acme.bot_token",
+    "option": "credential_handle",
+    "stored": false
+  },
+  {
+    "channel": "slack",
+    "handle": "slack.acme.bot_token",
+    "option": "credential_handle_bot_token",
+    "stored": false
+  },
+  {
+    "channel": "slack",
+    "handle": "slack.acme.signing_secret",
+    "option": "credential_handle_signing_secret",
+    "stored": false
+  }
+]
+RC=1
+
+########## QUADRANT 3b — store via the new verb, on stdin ##########
+
+--- printf %s "$TOKEN" | wayland-core channel credential set discord.acme.bot_token ---
+RC=0
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/chanonb-home-after/.dirty-death.1565427)
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+stored credential under handle "discord.acme.bot_token"
+
+--- channel credential list — must now report stored and exit 0 ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+credential handles referenced by /root/chanonb-home-after/channels:
+  discord          credential_handle                  discord.acme.bot_token           stored
+  slack            credential_handle_bot_token        slack.acme.bot_token             stored
+  slack            credential_handle_signing_secret   slack.acme.signing_secret        stored
+RC=0
+
+--- empty stdin must be REFUSED, not stored as an empty value ---
+RC=1
+wayland-core channel: no credential value arrived on stdin — pipe the secret in, e.g. `printf %s "$TOKEN" | wayland-core channel credential set discord.acme.empty_probe`. There is deliberately no --value flag: an argument would be visible in shell history and in `ps`.
+
+########## QUADRANT 3c — the VALUE round-trips, proven at the real platform ##########
+
+channel probe asks Discord to identify the bot. An 'identity:' line can
+only appear if the exact bytes stored above were read back and accepted
+by Discord — the CLI never prints a stored value, so this is the
+read-back.
+--- channel probe ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:14.242392Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:14.242440Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mslack [3mplatform[0m[2m=[0mslack
+discord (discord)
+  outcome:  Ok
+  config:   complete
+  auth:     authenticated
+  identity: 1532224324075913297
+slack (slack)
+  outcome:  Unsupported
+  config:   INCOMPLETE
+  auth:     NOT authenticated
+  identity: -
+  finding:  adapter implements no setup probe
+wayland-core channel: 1 of 2 channels are not ready: slack
+RC=1
+
+########## QUADRANT 3d — a handle that was NEVER stored fails cleanly ##########
+
+--- channel credential list — the never-stored handle must read MISSING ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+credential handles referenced by /root/chanonb-home-after/channels:
+  discord          credential_handle                  discord.acme.NEVER_STORED        MISSING
+  slack            credential_handle_bot_token        slack.acme.bot_token             stored
+  slack            credential_handle_signing_secret   slack.acme.signing_secret        stored
+
+1 handle(s) have no value. Store each with:
+  printf %s "$SECRET" | wayland-core channel credential set <handle>
+RC=1
+
+--- channel probe — must name the handle, never a value ---
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/chanonb-home-after/.dirty-death.1566125)
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:14.581269Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:14.581314Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mslack [3mplatform[0m[2m=[0mslack
+discord (discord)
+  outcome:  Incomplete
+  config:   INCOMPLETE
+  auth:     NOT authenticated
+  identity: -
+  finding:  credential "discord.acme.NEVER_STORED" is not present in the credentials store
+slack (slack)
+  outcome:  Unsupported
+  config:   INCOMPLETE
+  auth:     NOT authenticated
+  identity: -
+  finding:  adapter implements no setup probe
+wayland-core channel: 2 of 2 channels are not ready: discord, slack
+RC=1
+
+########## QUADRANT 2 — a config missing a required field NAMES that field ##########
+
+===== removed required field: name =====
+--- channel list ---
+channels in /root/chanonb-home-after/channels:
+  discord              discord      enabled
+      credential: credential_handle -> discord.acme.bot_token
+  slack                             UNKNOWN PLATFORM
+      config error: config: slack: TOML parse error at line 1, column 1
+  |
+1 | # ~/.wayland/channels/slack.toml
+  | ^
+missing field `name`
+
+RC=0
+
+--- channel probe ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:14.692067Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:14.692116Z[0m [33m WARN[0m channel config parse failed; skipping [3mfile[0m[2m=[0m/root/chanonb-home-after/channels/slack.toml [3merror[0m[2m=[0mTOML parse error at line 1, column 1
+  |
+1 | # ~/.wayland/channels/slack.toml
+  | ^
+missing field `name`
+
+discord (discord)
+  outcome:  Ok
+  config:   complete
+  auth:     authenticated
+  identity: 1532224324075913297
+RC=0
+
+===== removed required field: platform =====
+--- channel list ---
+channels in /root/chanonb-home-after/channels:
+  discord              discord      enabled
+      credential: credential_handle -> discord.acme.bot_token
+  slack                             UNKNOWN PLATFORM
+      config error: config: slack: TOML parse error at line 1, column 1
+  |
+1 | # ~/.wayland/channels/slack.toml
+  | ^
+missing field `platform`
+
+RC=0
+
+--- channel probe ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:14.987411Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:14.987462Z[0m [33m WARN[0m channel config parse failed; skipping [3mfile[0m[2m=[0m/root/chanonb-home-after/channels/slack.toml [3merror[0m[2m=[0mTOML parse error at line 1, column 1
+  |
+1 | # ~/.wayland/channels/slack.toml
+  | ^
+missing field `platform`
+
+discord (discord)
+  outcome:  Ok
+  config:   complete
+  auth:     authenticated
+  identity: 1532224324075913297
+RC=0
+
+===== removed required field: workspace_name =====
+--- channel list ---
+channels in /root/chanonb-home-after/channels:
+  discord              discord      enabled
+      credential: credential_handle -> discord.acme.bot_token
+  slack                slack        enabled
+      credential: credential_handle_bot_token -> slack.acme.bot_token
+      credential: credential_handle_signing_secret -> slack.acme.signing_secret
+RC=0
+
+--- channel probe ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:15.283935Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:15.283984Z[0m [33m WARN[0m channel construction failed; skipping [3mchannel[0m[2m=[0mslack [3mplatform[0m[2m=[0mslack [3merror[0m[2m=[0mconfig parse: missing field `workspace_name`
+
+discord (discord)
+  outcome:  Ok
+  config:   complete
+  auth:     authenticated
+  identity: 1532224324075913297
+RC=0
+
+########## QUADRANT 4 — the removed [secrets] table gets a NAMED migration ##########
+
+--- channel list — [secrets] must be rejected by name, not silently accepted ---
+channels in /root/chanonb-home-after/channels:
+  discord              discord      enabled
+      credential: credential_handle -> discord.acme.bot_token
+  legacy                            UNKNOWN PLATFORM
+      config error: config: legacy: the `[secrets]` table is no longer accepted, and never had any effect — no code ever read its values, so this channel has not been authenticating. Move each secret into the credentials store with `wayland-core channel credential set <handle>`, then reference it from `[options]` by this platform's `*credential_handle*` key. Run `wayland-core channel credential list` to see the handles your configs expect. See docs/channels.md.
+  slack                slack        enabled
+      credential: credential_handle_bot_token -> slack.acme.bot_token
+      credential: credential_handle_signing_secret -> slack.acme.signing_secret
+RC=0
+
+########## THE CHANNEL STARTS — gateway run with the documented config ##########
+
+gateway pid=1567057 (killed by PID only — never pkill -f, which has
+matched a sibling lane's process and the remote shell's own cmdline)
+--- gateway log ---
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/chanonb-home-after/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T12:20:15.657288Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mdiscord [3mplatform[0m[2m=[0mdiscord
+[2m2026-07-30T12:20:15.657339Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mslack [3mplatform[0m[2m=[0mslack
+[gateway] channels registered=2
+[2m2026-07-30T12:20:15.657551Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — vision tool will be hidden
+[2m2026-07-30T12:20:15.657565Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=2
+[2m2026-07-30T12:20:15.662306Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m1567057 [3mdir[0m[2m=[0m/root/chanonb-home-after/channels
+[2m2026-07-30T12:20:15.858111Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=1567057 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+
+--- process still alive? ---
+GATEWAY_ALIVE=yes
+--- proof this is MY process (cwd + WAYLAND_HOME from /proc) ---
+WAYLAND_HOME=/root/chanonb-home-after
+
+--- channel health — what the RUNNING gateway observed ---
+configured: 2   registered: 2
+discord (discord)
+  state:      Healthy
+  reason:     -
+  errors:     0
+  reconnects: 0
+slack (slack)
+  state:      Healthy
+  reason:     -
+  errors:     0
+  reconnects: 0
+RC=0
+
+gateway stopped
+
+########## HELP SURFACE ##########
+--- channel --help ---
+F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+
+Usage: wayland-core channel <COMMAND>
+
+Commands:
+  list        List configured channels from the on-disk config directory
+  probe       Ask each configured channel's platform whether its setup is complete, whether its credential authenticates, and what identity it authenticated as. Sends no message
+  health      Show the per-adapter health a RUNNING gateway has observed
+  reload      Ask the running gateway to re-read the channel config directory
+  actions     Print the native-action matrix: for each configured channel, whether edit / delete / react / typing are implemented, permanently absent from the platform, or simply not built yet
+  credential  Store, list and remove the credentials a channel config refers to
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+RC=0
+
+--- channel credential --help ---
+Store, list and remove the credentials a channel config refers to
+
+Usage: wayland-core channel credential <COMMAND>
+
+Commands:
+  set     Store a credential under `handle`, reading the value from stdin
+  list    List every handle the on-disk channel configs refer to and whether the store currently has a value for it
+  remove  Delete the value stored under `handle`
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+RC=0
+
+--- channel credential set --help ---
+Store a credential under `handle`, reading the value from stdin.
+
+The value is whatever arrives on stdin with one trailing newline stripped, so both `printf %s "$tok" | … set h` and `echo "$tok" | … set h` store the same bytes. An empty stdin is rejected rather than stored: a channel whose handle resolves to "" fails later, further from the cause.
+
+Usage: wayland-core channel credential set <HANDLE>
+
+Arguments:
+  <HANDLE>
+          The credentials-store key, e.g. `slack.acme.bot_token`. Get the exact spelling from `channel credential list`
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+RC=0
+
+=== SWEEP: occurrences of the live Discord token ===
+capture /root/chanonb-live.txt: 0
+0
+gateway log: 0
+0
+this script: 0
+0
+worktree (tracked+untracked, recursive): 0
+KNOWN-POSITIVE (the store must contain it, else the sweep is dead):
+  credentials store hits: 1
+  files:
+    /root/chanonb-home-after/credentials.toml

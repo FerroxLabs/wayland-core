@@ -1755,14 +1755,22 @@ impl DiagnosticsSurface {
                     } else {
                         format!(" · opts: {}", ch.option_keys.join(", "))
                     };
-                    let secrets = if ch.secret_keys.is_empty() {
+                    // Handles, not secret key names: the handle is what the
+                    // operator has to have stored for this channel to work,
+                    // and it is not itself a secret.
+                    let creds = if ch.credential_handles.is_empty() {
                         String::new()
                     } else {
-                        format!(" · secrets: {}", ch.secret_keys.join(", "))
+                        let names: Vec<&str> = ch
+                            .credential_handles
+                            .iter()
+                            .map(|(_, handle)| handle.as_str())
+                            .collect();
+                        format!(" · creds: {}", names.join(", "))
                     };
                     (
                         HealthState::Ok,
-                        format!("{} · enabled{opts}{secrets}", ch.platform),
+                        format!("{} · enabled{opts}{creds}", ch.platform),
                     )
                 };
                 push_wrapped_status_rows(&mut lines, state, &ch.name, &detail, t, avail_status);
@@ -3078,7 +3086,10 @@ mod tests {
                 enabled: true,
                 known_platform: true,
                 option_keys: vec!["channel".to_string()],
-                secret_keys: vec!["bot_token".to_string()],
+                credential_handles: vec![(
+                    "credential_handle_bot_token".to_string(),
+                    "slack.myslack.bot_token".to_string(),
+                )],
                 parse_error: None,
             },
             wcore_channels_registry::ChannelSummary {
@@ -3087,7 +3098,7 @@ mod tests {
                 enabled: true,
                 known_platform: false,
                 option_keys: vec![],
-                secret_keys: vec![],
+                credential_handles: vec![],
                 parse_error: None,
             },
         ];
