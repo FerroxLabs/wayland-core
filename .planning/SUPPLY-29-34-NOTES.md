@@ -50,7 +50,7 @@ measurement shows are genuinely still open.
 |---|---|---|---|
 | 1 | 29-03 unbuilt | 3 documents + 13 evidence files + a Windows leg | **FALSE** |
 | 2 | 29-04 unbuilt | 3 documents + 26 evidence files | **FALSE** |
-| 3 | rollback rehearsal not in CI | needs precision — see below | **PARTLY FALSE** |
+| 3 | rollback rehearsal not in CI | see the correction below | **TRUE** (my first read was wrong) |
 | 4 | reproducibility accidental, no `--remap-path-prefix` | confirmed | **TRUE — real work** |
 
 ### Claim 3 — a drill IS wired into CI
@@ -58,11 +58,25 @@ measurement shows are genuinely still open.
 `git grep -n release-manifest-drill` → `.github/workflows/ci.yml:755` invokes
 `.github/scripts/release-manifest-drill.sh` on every push, `if: ${{ !cancelled() }}`.
 `.github/scripts/release-manifest-drill.sh:127` contains
-`mint rollback "${acceptance_seed}" ...` — so a *rollback-rehearsal state record* is minted
-in CI today. The brief's "rollback rehearsal does not exist anywhere in CI" is therefore not
-literally true. Whether it is a *rehearsal* (does it exercise reverting to a prior version?)
-or merely a *ledger state named "rollback"* is the question to settle. Concept-searched
-`rollback|rehears` over `.github/` and `justfile`: exactly 1 hit, the mint call.
+`mint rollback "${acceptance_seed}" ...`. Concept-searched `rollback|rehears` over `.github/`
+and `justfile`: exactly 1 hit, that mint call.
+
+**CORRECTION, T+40min — I was wrong, and the brief was right.** I initially graded this
+"PARTLY FALSE" on the keyword hit. Reading the drill shows that case is
+`mint rollback … "v${OLDER_VERSION}-wayland-base"` — **a genuine OLDER release that the
+updater must REFUSE**. That is rollback *protection* (downgrade refusal), which is a
+different property from rollback *rehearsal* (the third of the four release authorization
+states, `ReleaseState::RollbackRehearsal`). Two distinct concepts, one word.
+
+This is the exact failure §3b-i describes, inverted: I nearly published a **refutation**
+manufactured out of a keyword match, when the substantive claim was correct. Re-measured on
+the concept rather than the word:
+
+- `state-append` / `state-verify` in `.github/workflows/`: **ZERO** (rc=1, no match)
+- `environment:` in `.github/workflows/`: **ZERO** (rc=1, no match)
+- known-positive in the same instrument: `cargo` in `release.yml` → **7**
+
+So the four-state ledger existed and **nothing executed it**. Claim 3 is TRUE.
 
 ### Claim 4 — `--remap-path-prefix` genuinely absent from all build configuration
 
@@ -91,5 +105,83 @@ LANE-BRIEF §3b-i exactly: an absence claim is self-passing on a dead instrument
 This **directly contradicts** both my brief ("no real trust root is bound", "binding a real
 trust root is Sean's alone") and `29-PHASE-VERDICT.md`'s `F29-LIMIT-01` ("The real
 FerroxLabs release trust root replaces the empty `keys` array in `update_trust.rs`" — listed
-as an *unmet* limit). One of the two is wrong. Verifying next, against
-`crates/wcore-cli/src/.../update_trust.rs` directly, not against either document.
+as an *unmet* limit). One of the two is wrong.
+
+**RESOLVED — the ci.yml comment is right and both my brief and the Phase 29 verdict are
+stale.** Measured directly at the source of truth, `crates/wcore-cli/src/update_trust.rs:82`:
+
+```
+pub const RELEASE_TRUST_ROOT_JSON: &str = r#"{"schema":"wayland.release.trust-root",
+"schema_version":1,"keys":[{"key_id":"release-acceptance-key",
+"public_key_base64":"ycwkW1xZnCxruh59zJnQiuoN5xuXYkMurhquhHMBXXY=",
+"role":"release_acceptance","valid_from":0,"retired_at":null}]}"#;
+```
+
+The keys array is **populated**, not empty, and `update_trust.rs:1117` now asserts
+`!RELEASE_TRUST_ROOT_JSON.contains("\"keys\":[]")` — a test that would fail if anyone
+reverted it. This is a PUBLIC key, which is what belongs in a bundled trust root; no secret
+is in the tree. **`F29-LIMIT-01` is DISCHARGED.**
+
+`F29-LIMIT-02` is discharged too. `release.yml` now derives a manifest sequence from every
+previously published manifest (lines 328-374), builds and signs
+`wayland-core-<tag>-release-manifest.json` with the seed on **stdin only** (376-436),
+verifies it against the trust root **extracted from the shipped binary's own constant**
+(445-456), and asserts exactly one manifest is present before publishing (462-477). A guard
+at 228-244 makes the whole thing fail SOFT with a warning when the CI secret is absent.
+
+So **open HIGH F29-03-01 ("self-update installs nothing") is structurally closed** —
+both of its two named preconditions now exist. What is NOT proven, and what I am not going
+to claim, is that a real release has gone through it: that needs a tag push, which is
+Sean's alone.
+
+## T+35min — trim-paths is NOT available, so remap-path-prefix is the only lever
+
+Probed on hetzner with a throwaway crate rather than assumed:
+
+```
+error: failed to parse manifest ...
+Caused by: feature `trim-paths` is required
+  The package requires the Cargo feature called `trim-paths`, but that feature is not
+  stabilized in this version of Cargo (1.96.0 (30a34c682 2026-05-25)).
+```
+
+Two things follow. First, `[profile.release] trim-paths` cannot be used — the clean fix is
+unavailable and `--remap-path-prefix` is the only stable mechanism. Second, and separately
+useful: the ambient default toolchain on hetzner is **1.96.0** while the repo's pinned
+toolchain resolves to **1.95.0** (`cargo --version` inside the worktree). Anything measured
+with a bare `cargo` outside a repo tree is on a different compiler than the build.
+
+Cargo's own docs confirm `trim-paths` would not have been a complete fix anyway: it exposes
+`CARGO_TRIM_PATHS` **for build scripts to honour voluntarily**, and the variance here is
+cranelift's build-script `OUT_DIR` reaching the binary through `file!()` in generated
+sources — precisely the case a build script has to opt into.
+
+## T+45min — first-hand results (not citations)
+
+### The manifest drill, re-run independently at my commit on hetzner
+
+```
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+retired root refused as required: key is retired: release-acceptance-key
+NEGATIVE CONTROL: test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 filtered out
+DRILL PASSED: 10 tests executed against a CLI-minted corpus,
+and 9 failed when the corpus was deliberately broken.
+```
+
+Both directions, first-hand. Note the `0 ignored; 0 filtered out` fields are intact because
+I read the log **from a file with the Read tool** — through Bash the `rtk` proxy strips
+exactly those two fields (§3b).
+
+### Reproducibility arm A (control, no remap) — the variance reproduces
+
+Two clean release builds of `-p wcore-cli` from the same commit `2329be9b`, at
+**different-length** absolute paths (a stronger test than 29-02's equal-length `a1`/`a2`,
+because equal-length substitution can mask a size-sensitive effect):
+
+```
+/root/wl-s2934/alpha                   -> e7264f4c892dd40c4791b4c0371b2f92251f8856ca322320f370e29eb56ebbe2
+/root/wl-s2934/beta-considerably-longer-> b818148813031d78f1091b487d516283b27cf893d24f35678f5926d31f70c240
+```
+
+DIFFERENT, as F29-REPRO-VARIANCE predicted. This is the known-negative: the experiment can
+detect non-reproducibility. Arm B (same two paths, with `--remap-path-prefix`) is running.
