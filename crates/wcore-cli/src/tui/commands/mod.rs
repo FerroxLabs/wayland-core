@@ -37,6 +37,11 @@ mod at_ref_resolve;
 mod at_ref_send;
 pub mod at_refs;
 
+// F22-C1: the `/goal` parse half. `pub` so the router's slash dispatcher can
+// call `goal::parse_goal_line` — the surface that finally gives
+// `issue_goal_control` a caller a real user can reach.
+pub mod goal;
+
 use crate::tui::theme::ThemeMode;
 
 /// Parse the argument of a `/theme <light|dark|auto>` line into a
@@ -191,6 +196,17 @@ impl CommandRegistry {
                 Session,
                 "restore files to an earlier snapshot",
                 true,
+            ),
+            // F22-C1: the terminal's Goal CONTROL surface. Registered here so
+            // it is discoverable from the palette and `/help` — a control verb
+            // no listing mentions is one nobody finds. Non-destructive as a
+            // whole (`/goal` alone lists; `/goal cancel` is the one terminal
+            // verb, and it terminates a Goal, not the user's files).
+            Command::new(
+                "/goal",
+                Session,
+                "list durable Goals; open, advance or cancel one",
+                false,
             ),
             Command::new("/new", Session, "start fresh, keep this provider", false),
             Command::new(
@@ -587,10 +603,15 @@ mod tests {
         // `/effective` is the 29th — S9 redacted effective-config preview.
         // `/crucible` is the 30th — Crucible Stage 4a cross-vendor council.
         // `/recover` is the 31st — cursor-bound interrupted-turn recovery.
-        assert_eq!(reg.len(), 31);
+        // `/goal` is the 32nd — F22-C1 durable-Goal control. It MUST be in the
+        // registry: `/` on an empty composer opens the palette, and the palette
+        // is filtered from this table, so a Goal verb absent here is a Goal
+        // verb no user can type.
+        assert_eq!(reg.len(), 32);
         for name in [
             "/resume",
             "/recover",
+            "/goal",
             "/rewind",
             "/new",
             "/compact",
