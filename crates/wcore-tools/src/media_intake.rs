@@ -393,6 +393,50 @@ fn is_unc_path(path: &Path) -> bool {
     wcore_config::network_path::has_unc_prefix(path)
 }
 
+/// Resolve symlinked ANCESTORS, keeping the caller's leaf name verbatim.
+///
+/// The `openat(O_NOFOLLOW)` walk below refuses a symlink at every level. That
+/// is correct for the leaf and unsatisfiable for the ancestors on macOS, where
+/// `$TMPDIR` is `/var/folders/...` and `/var` is a symlink to `/private/var`
+/// shipped by the OS. Refusing it meant every media and document surface
+/// refused every temp path on macOS (issue #937) — a whole platform's intake,
+/// closed, because of a symlink no attacker put there.
+///
+/// So the ancestors are canonicalised ONCE here and the walk then runs over a
+/// symlink-free chain. The module's actual threat — "a raced parent rename
+/// cannot redirect the final open" — is untouched: the walk still opens every
+/// resolved component with `O_NOFOLLOW`, so a component swapped for a symlink
+/// AFTER this call still fails the walk. What is given up is the blanket
+/// refusal of a caller-named path that merely traverses a symlink, which
+/// `admit_open` compensates for by re-running the deny-list over the resolved
+/// path — a symlinked ancestor therefore cannot smuggle a denied target past a
+/// check that only ever saw the pre-resolution name.
+///
+/// The leaf is deliberately NOT canonicalised: resolving it would defeat the
+/// leaf refusal, which is the half that stops an attacker swapping the file
+/// itself for a link to something they want read.
+#[cfg(unix)]
+fn resolve_ancestor_symlinks(path: &Path, noun: &'static str) -> Result<PathBuf, IntakeError> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(IntakeError::Path(format!(
+            "{noun} path has no file name: {}",
+            path.display()
+        )));
+    };
+    let canonical = std::fs::canonicalize(parent).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            IntakeError::NotFound(path.to_path_buf())
+        } else {
+            IntakeError::OpenComponent {
+                noun,
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            }
+        }
+    })?;
+    Ok(canonical.join(name))
+}
+
 /// Open a media file without following a symlink/reparse point.
 ///
 /// `O_NONBLOCK` prevents a hostile FIFO from hanging before the regular-file
@@ -546,6 +590,26 @@ pub fn admit_open(path: &Path, policy: &IntakePolicy) -> Result<AdmittedHandle, 
     if is_unc_path(&validated) {
         return Err(IntakeError::NetworkPath(validated));
     }
+
+    // Ancestors are resolved AFTER `validate_user_path`, never before. Order is
+    // load-bearing: canonicalising first would silently collapse a `..`
+    // traversal that the validator is there to refuse.
+    //
+    // No second deny-check is added here, and that is deliberate rather than an
+    // omission. `validate_user_path` already canonicalises the longest existing
+    // prefix — following symlinks — and re-runs the deny-list against the
+    // canonical target precisely so a symlinked ancestor cannot smuggle one
+    // past (see `path_validation.rs`, the M-8 / tools-io-17 block). Adding a
+    // second call here would look like the thing protecting that boundary while
+    // contributing nothing, which is worse than not adding it.
+    #[cfg(unix)]
+    let validated = {
+        let resolved = resolve_ancestor_symlinks(&validated, policy.noun)?;
+        if is_unc_path(&resolved) {
+            return Err(IntakeError::NetworkPath(resolved));
+        }
+        resolved
+    };
 
     // THE ONLY resolution of this name that the admitted bytes depend on.
     let mut file = open_once(&validated, policy.noun)?;
@@ -995,28 +1059,68 @@ mod tests {
         assert!(admit_path(&traversal, &any()).is_err());
     }
 
-    /// The open must refuse a symlinked LEAF and a symlinked PARENT. This is
-    /// the discipline the image path already had and the audio path did not;
-    /// unification moves it under every surface.
+    /// The open must refuse a symlinked LEAF. That is the half that stops an
+    /// attacker swapping the named file for a link to something they want read,
+    /// and it is unconditional.
     #[cfg(unix)]
     #[test]
-    fn refuses_a_symlinked_leaf_and_a_symlinked_parent() {
+    fn refuses_a_symlinked_leaf() {
         use std::os::unix::fs::symlink;
         let dir = tempdir().unwrap();
         let target = write(dir.path(), "target.png", PNG);
         let link = dir.path().join("link.png");
         symlink(&target, &link).unwrap();
         assert!(admit_path(&link, &any()).is_err(), "symlinked leaf");
+    }
 
+    /// A symlinked ANCESTOR is resolved, not refused — and resolving it still
+    /// does not reach a denied target.
+    ///
+    /// This reverses the older `refuses_a_symlinked_leaf_and_a_symlinked_parent`
+    /// on its second half, deliberately. Blanket ancestor refusal is not
+    /// satisfiable on macOS: `$TMPDIR` is `/var/folders/...` and `/var` is an
+    /// OS-shipped symlink, so the rule closed every media and document surface
+    /// on the platform (issue #937) while defending against a symlink no
+    /// attacker placed. The threat the module actually names — a raced parent
+    /// rename redirecting the final open — is still held by the `O_NOFOLLOW`
+    /// walk over the resolved chain.
+    ///
+    /// HONESTY NOTE, because the first version of this test lied. Arm 2 is a
+    /// regression guard, NOT a proof that this module closes the hole. It was
+    /// originally written to demonstrate that a deny-list re-check added in
+    /// `admit_open` was load-bearing; ablating that re-check left arm 2 GREEN,
+    /// which showed the re-check contributed nothing — `validate_user_path`
+    /// already canonicalises through symlinks and applies the deny-list to the
+    /// target. The redundant call was removed and this comment records why arm
+    /// 2 cannot fail by ablating anything in THIS file: the property it asserts
+    /// is owned by `path_validation.rs`. Arm 1 is the arm that can fail, and it
+    /// does fail without `resolve_ancestor_symlinks`.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ancestor_resolves_but_cannot_smuggle_a_denied_target() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+
+        // Arm 1 — benign ancestor symlink is now ADMITTED. Without the fix this
+        // is the exact shape every macOS temp path has.
         let actual_parent = dir.path().join("actual-parent");
         fs::create_dir(&actual_parent).unwrap();
         write(&actual_parent, "nested.png", PNG);
         let linked_parent = dir.path().join("linked-parent");
         symlink(&actual_parent, &linked_parent).unwrap();
-        let err = admit_path(&linked_parent.join("nested.png"), &any()).unwrap_err();
+        admit_path(&linked_parent.join("nested.png"), &any())
+            .expect("a benign symlinked ancestor must be admitted");
+
+        // Arm 2 — an ancestor symlink pointing into a denied location is still
+        // refused, because the deny-list runs again over the RESOLVED path.
+        let secrets = dir.path().join(".ssh");
+        fs::create_dir(&secrets).unwrap();
+        write(&secrets, "id_rsa", PNG);
+        let linked_secrets = dir.path().join("innocuous");
+        symlink(&secrets, &linked_secrets).unwrap();
         assert!(
-            err.to_string().contains("path component"),
-            "symlinked parent, got: {err}"
+            admit_path(&linked_secrets.join("id_rsa"), &any()).is_err(),
+            "a symlinked ancestor must not smuggle a denied target past the deny-list"
         );
     }
 

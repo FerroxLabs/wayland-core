@@ -718,7 +718,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn local_image_loader_rejects_symlink_components_and_fifo() {
+    fn local_image_loader_rejects_a_symlink_leaf_and_a_fifo_but_resolves_ancestors() {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::fs::symlink;
@@ -730,18 +730,22 @@ mod tests {
         symlink(&target, &link).expect("create symlink");
         assert!(load_local_image(link.to_str().unwrap()).is_err());
 
+        // A symlinked ANCESTOR is resolved, not refused. This arm used to
+        // assert the opposite; it was changed with the same reasoning as
+        // `media_intake::tests::a_symlinked_ancestor_resolves_but_cannot_smuggle_a_denied_target`,
+        // which carries the full rationale. Short version: macOS `$TMPDIR` is
+        // `/var/folders/...` and `/var` is an OS-shipped symlink, so refusing
+        // ancestors closed every image, audio and document surface on the
+        // platform (issue #937). The leaf refusal above is the half that
+        // carries the security property, and it is untouched.
         let actual_parent = dir.path().join("actual-parent");
         let linked_parent = dir.path().join("linked-parent");
         fs::create_dir(&actual_parent).expect("create actual parent");
         let nested_target = actual_parent.join("nested.png");
         fs::write(&nested_target, png_bytes()).expect("write nested target");
         symlink(&actual_parent, &linked_parent).expect("create parent symlink");
-        let error =
-            load_local_image(linked_parent.join("nested.png").to_str().unwrap()).unwrap_err();
-        assert!(
-            error.contains("open image path component"),
-            "unexpected error: {error}"
-        );
+        load_local_image(linked_parent.join("nested.png").to_str().unwrap())
+            .expect("a benign symlinked ancestor must be admitted");
 
         let fifo = dir.path().join("pipe.png");
         let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
