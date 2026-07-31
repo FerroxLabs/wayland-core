@@ -101,9 +101,14 @@ fn onboarding_persists_across_relaunch() {
 #[test]
 fn connect_all_env_keys_persists_across_relaunch() {
     let session = Session::new();
-    ConfigState::MultiEnvKeys.materialize(session.home()); // OPENAI + ANTHROPIC keys in env, no config.toml
+    ConfigState::MultiEnvKeys.materialize(session.home()); // OPENAI + GROQ keys in env, no config.toml
 
     // First launch: connect all detected env keys at once (press 'a').
+    //
+    // Reaching the Connect card at all is a precondition, not the subject: the
+    // first-run gate hands a user whose DEFAULT-provider key is already
+    // exported straight to the Workspace. `MultiEnvKeys` therefore exports two
+    // NON-default providers on purpose — see its doc comment.
     let mut p1 = session.launch();
     p1.wait_for(
         |t| t.contains("Detected in your environment"),
@@ -150,8 +155,8 @@ fn connect_all_env_keys_persists_across_relaunch() {
         "connect-all must write openai to config.toml; got: {cfg}"
     );
     assert!(
-        cfg.contains("anthropic"),
-        "connect-all must write anthropic to config.toml; got: {cfg}"
+        cfg.contains("groq"),
+        "connect-all must write groq to config.toml; got: {cfg}"
     );
 
     // Second launch (same home): MUST land on Workspace, not Onboarding.
