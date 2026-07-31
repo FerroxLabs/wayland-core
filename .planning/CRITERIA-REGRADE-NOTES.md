@@ -141,3 +141,127 @@ baseline 3 but only **1** is an attribute; the other is prose inside a doc comme
   `:295`/`:329`; `attachments.rs:71` calls `admit_local_image`. Known-negative `admit_zzqq` → 0.
 - **27-C4** `voice` still absent from `default` (`wcore-cli/Cargo.toml:31`), defined only at
   `:58`. Not in the shipped artifact. Grade holds.
+
+---
+
+# PASS 2 — 2026-07-31, re-graded at `659fa492`
+
+Everything above this line was measured at `570056c1` and is retained as the record of that
+pass. This section supersedes it.
+
+## Measured SHA
+
+`659fa4922a62ca9657c600938c6313d017fb859f` (`docs: handoff rev 3 — RC status, and the two Grok
+gaps that are not code`, 2026-07-31 13:33:06 +0700).
+
+Verified: worktree toplevel is the lane path; `/usr/bin/git status --porcelain` returned **0
+lines** before any edit. Branch fast-forwarded to the integration head with `merge --ff-only`
+(`9fc9a2ff` is a verified ancestor), never `reset --hard`.
+
+**`659fa492` is docs-only.** Single parent `58aa0267`;
+`git diff --name-only 58aa0267 659fa492 -- crates/` → **0 files**. The code tree graded here is
+the tree the five merge gates passed on.
+
+## Premise check on the orchestrator brief — done FIRST
+
+| Brief claim | Verdict | Evidence |
+|---|---|---|
+| header claims all grades measured at `570056c1` | **TRUE** | the header did say that, and it was honest for its pass |
+| "87 commits and 14 lane merges" since | **TRUE relative to rev 2's `674b72c8`, not to `570056c1`** | `570056c1..659fa492` is **228 commits, 32 merges**. Both anchors are real; the brief mixed them |
+| "the 24 criterion rows" | **FALSE — there are 18** | the table has 18 rows and the ledger has 18 `####` criterion headings |
+| "current tallies: 7 MET / 11 PARTIAL / 6 NOT MET" | **FALSE — it was 5 / 10 / 3** | counted off the table at `570056c1`; `HANDOFF-2026-07-30-EVENING.md:113` independently says *"was 5 MET / 10 PARTIAL / 3 NOT MET"*. 7+11+6=24 matches the row-count error, so the two are one mistake |
+| "22-C5, 27-C2 (macOS), 22-C1, 27-C4 have moved" | **ALL FOUR TRUE** | and two more moved that the brief did not name: `24-C3` and `27-C1` |
+| "the Mac compiles this repo" | **TRUE, and I used it** | built `wcore-cli` and ran the 22-C1 PTY suite locally |
+
+## New measurement taken by this lane
+
+`cargo test -p wcore-cli --test goal_control_tui_pty -- --test-threads=1` on this Mac
+(Darwin 25.3.0 arm64), tree at `659fa492`, lane-private `CARGO_TARGET_DIR`:
+
+```
+running 13 tests
+test goal_open_is_accepted_by_core_on_a_durable_host ... ok
+test advance_without_a_projection_produces_no_goal_on_the_status_line ... ok
+test a_near_miss_command_does_not_reach_the_goal_surface ... ok
+test goal_open_names_the_cause_on_a_degraded_host ... ok
+test a_bare_goal_is_reachable_from_the_palette ... ok
+(+8 harness self-tests)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.25s
+CARGO_RC=0
+```
+
+Under the LANE-BRIEF §0 Darwin exception: single crate, single test target, on a cell hetzner
+structurally cannot produce (`#![cfg(unix)]`, and Linux says nothing about Darwin's PTY path).
+Raw capture: `.planning/evidence/criteria-regrade-659fa492/22-c1-macos-pty.txt`.
+
+**The row said this leg was NOT MEASURED because "the PTY harness is `#![cfg(unix)]`".** macOS
+*is* unix. The real obstacle was the inherited "this Mac cannot compile Rust" belief, refuted
+on 2026-07-30. An unmeasured cell should be re-probed when the reason it was unmeasured changes.
+
+## Grade changes
+
+| Row | was | now | what moved it |
+|---|---|---|---|
+| `22-C5` | PARTIAL | **MET-WITH-STATED-EXCEPTIONS** | M0–M5 + NC1 + XP taken on real Windows (`a787f6de`); the row's two lease premises measured FALSE |
+| `24-C3` | NOT MET | **PARTIAL** | its named unmet clause — the end-to-end inbound matrix at a real destination — was driven (`4476b151`); plus config/credential/probe/health/reconnect repairs across five merges |
+| `27-C4` | NOT MET | **PARTIAL, release-blocking** | `voice` added to `default` (`8c826c8f`); the ledger pre-registered this exact transition at `CRITERIA-GAP-LEDGER.md:1340` |
+
+## Justification changed, grade held
+
+`22-C1` (macOS leg closed by me) · `24-C1` (Matrix exactly-once now cap-conditional, `810b5f73`) ·
+`24-C2` (all three absent legs driven on macOS, `e89356c0`) · `27-C1` (PTY drive + macOS artifact
+taken, and the artifact is HIGH #937) · `27-C2` (macOS exception spent) · `27-C3` (both supporting
+sentences wrong, in opposite directions).
+
+## Defective criterion found: 24-C3's `idempotency` clause
+
+24-C3's reference adapters are **Discord and email** (`24-03-SUMMARY.md:115`). ADR 0005 records
+that Discord does not dedupe on `nonce` (a replayed key produced two messages at the real API)
+and that email/SMTP is one of seven platforms exposing no dedup slot at all — *"No amount of
+engineering makes option 3 reachable."*
+
+**So neither of 24-C3's own reference adapters can ever prove idempotency.** ADR 0005 re-scoped
+24-C1 and stopped. The identical defect in 24-C3 went unnoticed because 24-C3 sat at NOT MET for
+unrelated reasons — **an honest NOT MET can hide a permanently-red clause**, which is the general
+lesson: ask the reachability question of every row, not only the ones that look stuck.
+
+## Rows re-measured and CONFIRMED unchanged (justification still true at `659fa492`)
+
+- **21-C3** `SubAgentConfig|ForkOverrides` under `wcore-protocol/` → **0 files**; known-positive
+  same needle repo-wide → **34 files**. `Spawn` in `commands.rs` → **0**, known-positive `Goal`
+  in that same file → **33**. `spawn_host_child_with_overrides` at `spawner.rs:101,1142`.
+- **22-C3** dead gate still dead: `GoalTerminalState` under `orchestration/` → **0**;
+  known-positive `ClimbOutcome` there → **21**. `wcore-agent/src` → **88**.
+  `GoalKernel::terminate` still `pub`, **line moved `:146` → `:174`**. Crate-external production
+  callers → **0** of 28 repo-wide; known-positive `.terminate_verified(` → 1.
+- **22-C4** `start_iteration` production callers: **2** (`control.rs:431`, `fleet.rs:475`) of 21
+  refs. Unchanged; the re-scope holds.
+- **23A-C1** four verbs at `skill_govern.rs:96/212/238/256`; known-negative `fn run_zzqq` → 0;
+  `run_skills_promote` delegates (`main.rs:1690`, defined `:2768`).
+- **24-C1** only production `true` is `matrix/lib.rs:294`; slack `:361`, discord `:368`,
+  sms `:338`, whatsapp `:384` all `false`; trait default `wcore-channels/src/lib.rs:144`. The
+  one other `true` is a test double at `manager.rs:1301` — which is what makes the sweep
+  discriminate. Known-positive `fn send_message` → 34 files.
+- **24-C4** no REST resume route (`approval_resume` and `execution_policy::resume` only, both
+  unrelated); known-positive `idempotency` in `wcore-protocol/src` → **5**.
+- **24-C5** `journey_receipt_contract.rs` → **39** tests, **0** ignored. Crate untouched in range.
+- **25-C2 / 25-C4** no node, `wcore-exec-backend` or `wcore-egress` file changed in the range, so
+  neither row could have moved. `--i-accept-exfil-risk` → **3** refs against a known-positive of
+  **161** `exfil` hits: the concept is present, the interlock is not.
+- **27-C1 (gate half)** `channel_media.rs:41` imports `admit_bytes`, calls `:295`/`:329`;
+  `attachments.rs:71` calls `admit_local_image`; known-negative `admit_zzqq` → 0.
+- **27-C3 (late-MCP)** `f27_media_generation.rs` → **12 tests, 0 ignored**: 7 built-in, 3
+  MCP-only, 1 combined, 1 honest-negative, **0 late-MCP**. The `integrate_deferred_mcp` test at
+  `main.rs:7372` predates `570056c1` (`838c4d97`, ancestry verified) and is a NoopTransport unit
+  test about tool discovery, not media generation.
+- **27-C5** `release.yml:129,139` `glibc_floor: "2.34"`; `:654` ELF-header check; `:772` PE COFF
+  check. Unchanged, plus a **new unsmoked release asset** (the desktop contract bundle).
+
+## Cross-cutting, not a row: CI is a self-passing gate
+
+`lane/fix-clippy-gate` (`61a561be`, in range): 100 integration runs → **91 cancelled, 5 failure,
+2 success, 1 pending, 1 queued**; every sampled cancelled run has `jobs=0`. The `report` job
+concluded **SUCCESS on zero tests** — every completed Windows self-hosted job in the last 40 runs
+(5 of 5) read green having run nothing. Hard assertion now added to `ci.yml`. Also: the `vx`
+toolchain pin does not hold — a clean run came back on rustc 1.97.1 against two files pinning
+1.95.0. **No GitHub verdict exists for anything in this range (#158).**
