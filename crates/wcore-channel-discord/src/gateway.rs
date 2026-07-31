@@ -567,18 +567,62 @@ pub(crate) enum ReconnectReason {
 /// reconnectable.
 pub(crate) const CLOSE_AUTHENTICATION_FAILED: u16 = 4004;
 
+/// Discord's gateway close code for an intent value the API does not know.
+///
+/// Documented as "Invalid intent(s) — you sent an invalid intent for a Gateway
+/// Intent. You may have incorrectly calculated the bitwise value", and marked
+/// **not** reconnectable.
+pub(crate) const CLOSE_INVALID_INTENTS: u16 = 4013;
+
+/// Discord's gateway close code for an intent this bot is not approved for.
+///
+/// Documented as "Disallowed intent(s) — you sent a disallowed intent for a
+/// Gateway Intent. You may have tried to specify an intent that you have not
+/// enabled or are not approved for", and marked **not** reconnectable.
+pub(crate) const CLOSE_DISALLOWED_INTENTS: u16 = 4014;
+
 /// Classify a gateway close code as a credential rejection.
 ///
-/// `Some(label)` means the platform rejected the token itself, so reconnecting
-/// can only re-send the same rejected token. Everything else — including a
-/// close frame with NO code — stays `None` and takes the ordinary resumable
-/// reconnect path, because "the socket shut" and "the token is wrong" are
-/// different operator actions and only one of them is fixed by waiting.
+/// `Some(label)` means the platform refused this bot's identity or the scope it
+/// asked for, so reconnecting can only re-send the same refused handshake.
+/// Everything else — including a close frame with NO code — stays `None` and
+/// takes the ordinary resumable reconnect path, because "the socket shut" and
+/// "the token is wrong" are different operator actions and only one of them is
+/// fixed by waiting.
+///
+/// # Why 4013 and 4014 are in here alongside 4004
+///
+/// All three are marked non-reconnectable by Discord, and all three are fixed
+/// by an operator editing the bot's identity — rotating the token (4004) or
+/// changing the intents on the same credential in the Developer Portal
+/// (4013/4014). Leaving 4013/4014 on the `None` arm meant the gateway
+/// re-IDENTIFYed forever against a handshake the platform will refuse every
+/// time, with the surface reporting a transport fault ("wait") for a condition
+/// waiting cannot clear.
+///
+/// `HealthState` draws no line between "unauthenticated" and "unauthorized", so
+/// all three land on `Unauthenticated`. That label is coarse for an intents
+/// failure; the terminality and the reason string are the load-bearing parts,
+/// and both are correct. 4010 / 4011 / 4012 (invalid shard, sharding required,
+/// invalid API version) are ALSO non-reconnectable but are client bugs rather
+/// than operator-fixable credential state, so they deliberately stay on the
+/// reconnect path — see the lane summary.
 pub(crate) fn auth_rejection_for_close_code(code: Option<u16>) -> Option<String> {
     match code {
         Some(CLOSE_AUTHENTICATION_FAILED) => Some(
             "discord gateway closed with 4004 (authentication failed): the bot token was \
              rejected at IDENTIFY"
+                .to_string(),
+        ),
+        Some(CLOSE_INVALID_INTENTS) => Some(
+            "discord gateway closed with 4013 (invalid intents): the intents bitfield sent at \
+             IDENTIFY is not a value Discord recognises — fix `intents` in the channel config"
+                .to_string(),
+        ),
+        Some(CLOSE_DISALLOWED_INTENTS) => Some(
+            "discord gateway closed with 4014 (disallowed intents): this bot is not approved for \
+             a privileged intent it requested — enable it in the Discord Developer Portal or \
+             drop it from `intents` in the channel config"
                 .to_string(),
         ),
         _ => None,
@@ -834,6 +878,33 @@ fn invalid_session_backoff() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Announce that Discord ACCEPTED this handshake.
+///
+/// One function with one call shape so the READY arm and the RESUMED arm can
+/// never drift apart: the whole defect this replaced was one publish site
+/// standing in for two different platform verdicts.
+///
+/// It is logged at `info` deliberately. `Connected` is the event that decides
+/// whether `channel health` reads Healthy, and until this line existed there was
+/// no way to tell from OUTSIDE the process whether a Healthy reading came from
+/// the adapter's own verdict or from somewhere else in the manager — which is
+/// exactly the ambiguity that made the first measurement of this lane
+/// unfalsifiable, because `record_health` blanks the `reason` field for
+/// `Healthy` (wcore-channels/src/manager.rs:59) and the published health file
+/// therefore attributes nothing.
+async fn publish_connected(inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>) {
+    tracing::info!(
+        target: "wcore_channel_discord::gateway",
+        "published Connected (discord accepted the handshake)"
+    );
+    inbox
+        .lock()
+        .await
+        .push_back(ChannelEvent::ConnectionStateChanged {
+            state: ConnectionState::Connected,
+        });
+}
+
 enum SessionExit {
     /// `shutdown` watch flipped — exit the outer loop.
     Shutdown,
@@ -982,14 +1053,60 @@ async fn run_one_session(
         }
     }
 
-    // Push Connected once we've handed the handshake off; READY / RESUMED
-    // landing is the formal "live" moment but for routing it's close
-    // enough — the manager dedupes state-changes anyway.
+    // The handshake is IN FLIGHT, not accepted. Publish `Connecting`
+    // (→ `HealthState::Degraded`), never `Connected`. `Connected` is published
+    // when Discord ACCEPTS — on READY (fresh IDENTIFY) or RESUMED (replay) — in
+    // the OP_DISPATCH arm below.
+    //
+    // # Why this is not "close enough"
+    //
+    // This arm used to push `ConnectionState::Connected` here, which
+    // `HealthState::from_connection_state` maps straight to `Healthy`. At this
+    // point we have written IDENTIFY (or RESUME) to the socket and read nothing
+    // back — Discord has not accepted anything. Every failed handshake
+    // therefore reported `Healthy` on its way down: with a rejected token the
+    // observable sequence was `Connected` → close 4004 → `AuthExpired`, so a
+    // health poll landing in that window saw a channel that was already dead
+    // report itself live.
+    //
+    // Two independent live measurements against REAL Discord on 2026-07-31, both
+    // through `gateway run` and the shipped `channel health` verb:
+    //
+    //   * rejected token, 45 samples over 90s -> healthy 2/45.
+    //   * VALID token with an undefined intent bit, so Discord answers close
+    //     4013, 46 samples over 92s -> **healthy 13/46, flapping
+    //     healthy<->degraded 40 times, permanently**. A non-4004 close was not
+    //     classified as terminal, so the outer loop reconnected forever and
+    //     every lap re-announced Connected between the IDENTIFY and the close.
+    //     An operator saw a healthy Discord about a third of the time on a
+    //     channel that had never once completed a handshake. (4013 and 4014 are
+    //     now terminal — see `auth_rejection_for_close_code` — so that storm no
+    //     longer happens either; the 13/46 is what the publish alone was worth.)
+    //
+    // The acceptance half follows the Slack adapter's `start()`
+    // (`wcore-channel-slack/src/lib.rs`): put the credential in front of the
+    // PLATFORM and publish `Connected` only on the platform's acceptance,
+    // publishing `AuthExpired` and no `Connected` on its rejection. Slack took
+    // that shape for UAT-C2, the same defect on a different transport.
+    //
+    // `Connecting` is required rather than merely tidier: the manager stamps
+    // `HealthState::Healthy` unconditionally the moment `start()` returns Ok
+    // (`wcore-channels/src/manager.rs:215`), so simply DELETING the push would
+    // have left the same false `Healthy` standing, sourced from the manager
+    // instead of from here. The adapter has to say `Degraded` out loud to
+    // displace it. That was measured too: on a build carrying ONLY the
+    // READY/RESUMED move, a 50ms watcher still saw a ~1s `healthy` window at
+    // process start with zero `Connected` published by the adapter.
+    //
+    // HEARTBEATS ARE UNAFFECTED. Discord requires heartbeating from HELLO, which
+    // arrives BEFORE READY, and the timer below is keyed off `interval_ms` — read
+    // from the HELLO payload above — not off any published state. Nothing in the
+    // heartbeat path ever consulted the publish, so moving it cannot starve it.
     inbox
         .lock()
         .await
         .push_back(ChannelEvent::ConnectionStateChanged {
-            state: ConnectionState::Connected,
+            state: ConnectionState::Connecting,
         });
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -1101,18 +1218,31 @@ async fn run_one_session(
                                 resume_gateway_url: ready.resume_gateway_url,
                                 seq: last_seq.unwrap_or(0),
                             });
+                            // READY is Discord ACCEPTING the IDENTIFY. This —
+                            // not the send — is the first moment the channel is
+                            // entitled to report Healthy.
                             tracing::debug!(
                                 target: "wcore_channel_discord::gateway",
                                 "READY received; session captured for resume"
                             );
+                            publish_connected(inbox).await;
                         } else if is_resumed(&payload) {
                             // RESUME succeeded: buffered events follow as
                             // normal MESSAGE_CREATE dispatches through the
-                            // mapping below — nothing else to do here.
+                            // mapping below.
                             tracing::debug!(
                                 target: "wcore_channel_discord::gateway",
                                 "RESUMED received; replayed events will flow as dispatches"
                             );
+                            // RESUMED is an acceptance exactly as much as READY
+                            // is, and it is reached by a DIFFERENT arm: an
+                            // INVALID_SESSION that Discord marks resumable, or a
+                            // dropped socket, both send RESUME rather than
+                            // IDENTIFY. Publishing only on READY would leave a
+                            // perfectly recovered channel stuck in
+                            // `Connecting`/Degraded for the rest of the
+                            // process's life while working fine.
+                            publish_connected(inbox).await;
                         }
                         // F24-C3: observability for the inbound half.
                         //
@@ -1379,6 +1509,40 @@ mod tests {
         assert!(
             reason.contains("4004"),
             "the reason an operator reads must name the code: {reason}"
+        );
+    }
+
+    #[test]
+    fn intent_close_codes_are_classified_as_credential_rejections() {
+        // 4013/4014 are marked non-reconnectable by Discord, so the `None` arm
+        // (ordinary resumable reconnect) made the gateway re-IDENTIFY forever
+        // against a handshake the platform refuses deterministically. Both must
+        // be terminal, and both must name their code and the operator's fix —
+        // "authentication failed" would be the wrong instruction for an intents
+        // problem even though the health label is the same.
+        let invalid = auth_rejection_for_close_code(Some(CLOSE_INVALID_INTENTS))
+            .expect("4013 is Discord's invalid-intents code and must be terminal");
+        assert!(
+            invalid.contains("4013") && invalid.contains("intents"),
+            "the reason must name the code and the surface at fault: {invalid}"
+        );
+        let disallowed = auth_rejection_for_close_code(Some(CLOSE_DISALLOWED_INTENTS))
+            .expect("4014 is Discord's disallowed-intents code and must be terminal");
+        assert!(
+            disallowed.contains("4014") && disallowed.contains("Developer Portal"),
+            "4014 is fixed in the Developer Portal, not by rotating a token: {disallowed}"
+        );
+        assert_ne!(
+            invalid, disallowed,
+            "4013 and 4014 have different operator fixes and must not share one message"
+        );
+        // 4012 is ALSO non-reconnectable but is a client bug, not operator
+        // credential state — it is deliberately left resumable, and this pins
+        // that decision so a later widening has to be deliberate.
+        assert!(
+            auth_rejection_for_close_code(Some(4012)).is_none(),
+            "4012 (invalid API version) is a client bug and is intentionally not classified \
+             as a credential rejection"
         );
     }
 
