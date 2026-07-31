@@ -76,24 +76,67 @@ wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
 # NOT thereby accepted: 4 and 5 are blinded regression detectors, and 6 is a real
 # data-loss defect. Each has an owner named below.
 
-# 4/5. TWO REGRESSION DETECTORS BLINDED BY LOG SILENCING.
-#    Both assert on stderr content:
-#      R-011 expects one of ["start_all() complete", "channel_manager",
-#            "inbound polling active"]  (harness_regression.rs:1053, guards F-014
-#            channel bootstrap)
-#      R-012 expects one of ["local backend", "HONCHO_API_KEY", "user-model:
-#            using local", "honcho"]    (harness_regression.rs:1129, guards F-093
-#            user-model fallback)
-#    Observed stderr now contains only the config-permission warning. The
-#    stderr-noise reduction (41 lines -> 2, issue #147) removed the lines these
-#    two tests read. The product behaviour they guard was NOT shown to be broken —
-#    what broke is the tests' ability to SEE it, which is the more dangerous of
-#    the two because it is silent. Do not "fix" these by loosening the assertion
-#    to something that always matches; point them at wherever the bootstrap and
-#    fallback events actually go now, or restore the events at a level the test
-#    can observe. Owner: issue #147 (same change that caused it).
-wcore-cli::harness_regression r011_channels_auto_register_logs
-wcore-cli::harness_regression r012_honcho_fallback_on_no_key
+# 4/5. REMOVED 2026-07-31 -- FIXED, and proved fixed in BOTH directions.
+#    The two entries read:
+#      wcore-cli::harness_regression r011_channels_auto_register_logs
+#      wcore-cli::harness_regression r012_honcho_fallback_on_no_key
+#    They were TWO REGRESSION DETECTORS BLINDED BY LOG SILENCING: both asserted
+#    on stderr, and observed stderr carried only the config-permission warning.
+#
+#    DIAGNOSIS -- measured on the shipped binary, not inferred from the diff.
+#    The events never stopped firing; #147 moved the sink and the tests were not
+#    moved with it. The eval harness spawns every engine through
+#    `ChildEnvironment::apply_tokio`, which calls `env_clear()` and rebuilds the
+#    environment from a fixed allowlist that does NOT contain RUST_LOG. So a
+#    harness child always boots with RUST_LOG unset however the test process is
+#    configured -- the old tests' `set_var("RUST_LOG", "info")` was a no-op, and
+#    their failure text ("RUST_LOG did not propagate") was pointing at the right
+#    fact for the wrong reason. With RUST_LOG unset, #147's subscriber tees the
+#    whole INFO record into $WAYLAND_HOME/logs/wayland-core.log and admits only
+#    ERROR to stderr. Probed directly, two arms, same binary:
+#      RUST_LOG unset -> both lines in the log file, neither on stderr
+#      RUST_LOG=info  -> both lines on stderr, no log file written
+#
+#    FIX. Both tests now read that record through the existing artifact
+#    assertion (`Assertion::FileContains` against
+#    <workdir>/.wayland-core/logs/wayland-core.log -- tempenv points
+#    WAYLAND_HOME there, so it is an ordinary workdir-relative artifact), via
+#    `run_with_binary_in_environment` with a test-owned TempEnv so the evidence
+#    outlives the run. The needles were NARROWED, not widened:
+#      R-011 "channel_manager.start_all() complete"
+#      R-012 "user-model: using local backend"
+#    The old R-012 list contained the bare substring "honcho", which also
+#    matches the OPPOSITE branch ("auto-selecting honcho user-model backend").
+#    R-012's ready-event layer was also hardened from `if let` to a hard assert;
+#    it had never once executed, because the credential it relied on came from
+#    `seed_json_stream_env`, which writes `[provider.<name>]` while the schema
+#    declares `providers` -- so the engine refused with init_failed before
+#    `ready` and the layer passed by never running. It now supplies the fake key
+#    via the environment. That helper's inert table is documented in place and
+#    deliberately NOT corrected here; nine call sites depend on current
+#    behaviour and that is a separate change.
+#
+#    BOTH DIRECTIONS, measured on hetzner-dsm, `cargo nextest run -p wcore-cli
+#    --profile ci`, non-vacuous counts quoted verbatim:
+#      fixed tree    "2 tests run: 2 passed, 2543 skipped"
+#      ablation A+B  "2 tests run: 0 passed, 2 failed, 2543 skipped"
+#        A: bootstrap.rs `if poll_lease.is_owner()` -> `if false && ...`, so
+#           start_all is never called. R-011 FAILS -- and fails on "needle not
+#           found in <path> (5982 bytes)", i.e. the record exists and the event
+#           does not, so the detector discriminates rather than merely erroring.
+#        B: bootstrap.rs `if std::env::var("HONCHO_API_KEY").is_ok()` ->
+#           `if true || ...`, so honcho is selected with no key present.
+#           R-012 FAILS on the same evidence shape.
+#      ablation C    "2 tests run: 1 passed, 1 failed, 2543 skipped"
+#        C: main.rs `set_user_model_backend` suppressed, so the ready event
+#           drops capabilities.user_model_backend. R-012 FAILS at its
+#           ready-event layer while R-011 PASSES -- the two detectors are
+#           independent, and neither fails indiscriminately.
+#    Ablations were applied to the hetzner worktree only and reverted; the tree
+#    was confirmed clean (`git status --porcelain` empty) before the final run.
+#
+#    Removed in the SAME commit as the fix, per the resolution documented on
+#    entries 1 and 2 above.
 
 # 6. REFUSED RESTORE MUTATES THE TARGET — data loss, not a test artifact.
 #    portability_hostile_corpus.rs:1242. The test digests an occupied target
