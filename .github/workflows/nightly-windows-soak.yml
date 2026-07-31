@@ -144,7 +144,12 @@ jobs:
           name: windows-soak-logs-${{ github.run_id }}
           path: windows-soak-results/
           retention-days: 14
-          if-no-files-found: warn
+          # `error`, not `warn`. A soak that produced no logs at all did not
+          # soak anything, and `warn` is how that stays invisible: run
+          # 30193657704 went green having uploaded exactly two files
+          # (0-versions.log, F-build.log) with no G-nextest.log and no
+          # H-mutants.log, and nothing in the run said so.
+          if-no-files-found: error
 
       # Open (or update) a GitHub issue when the soak fails. Mirrors
       # mutants-nightly.yml so a failure shows up in the tracker the next
@@ -338,7 +343,9 @@ jobs:
           name: windows-live-acceptance-logs-${{ github.run_id }}
           path: windows-live-acceptance-results/
           retention-days: 14
-          if-no-files-found: warn
+          # See the rationale on the windows-soak job's upload above: no logs
+          # means PHASE L produced no evidence, which is a failure, not a warn.
+          if-no-files-found: error
 
   # --------------------------------------------------------------------------
   # Candidate-mode F20 native UAT jobs.
