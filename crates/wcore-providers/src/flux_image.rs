@@ -312,9 +312,11 @@ mod tests {
     #[test]
     fn together_flux_keeps_response_format() {
         let body = ImageRequest::new("x")
-            // A non-default arm on purpose: if this were the default, the test could
-            // not tell `with_model` from doing nothing at all.
-            .with_model(Some("gpt-image-1-mini"))
+            // Non-default (the default is now `flux-image`), so this still tells
+            // `with_model` apart from doing nothing — and deliberately NOT a
+            // `gpt-image-*` arm, because those are the ones whose `response_format`
+            // is stripped, which is the very field this test asserts is kept.
+            .with_model(Some("flux-image-together-flux"))
             .with_response_format(Some("url".into()))
             .with_size(Some("1024x1024".into()))
             .to_body();
