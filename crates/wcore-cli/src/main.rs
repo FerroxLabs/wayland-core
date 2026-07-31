@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
 use wcore_cli::budget_grants::BudgetGrantLedger;
 use wcore_cli::doctor;
+use wcore_cli::log_rotate;
 use wcore_cli::packaged_runtime::{
     LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
 };
@@ -853,12 +854,16 @@ fn print_known_models(provider: Option<&str>) {
     }
 }
 
-/// v0.9.1 W2 cycle-2 HIGH 2: open the TUI-mode tracing log file in
-/// append mode. Lives under `$WAYLAND_HOME/logs/wayland-core.log`, with
-/// `~/.wayland/logs/` as the platform default. The parent directory is
-/// created lazily; any error is surfaced to the caller which falls back
-/// to stderr (better than no traces at all).
-fn open_tui_log_file() -> std::io::Result<std::fs::File> {
+/// v0.9.1 W2 cycle-2 HIGH 2: open the tracing log file in append mode.
+/// Lives under `$WAYLAND_HOME/logs/wayland-core.log`, with `~/.wayland/logs/`
+/// as the platform default. The parent directory is created lazily; any error
+/// is surfaced to the caller, which prints
+/// [`log_rotate::LOG_FALLBACK_NOTICE`] and falls back to stderr (better than
+/// no traces at all).
+///
+/// The writer is size-bounded — see [`log_rotate`]. It was not, and on a
+/// gateway host that is a file which grows for as long as the host runs.
+fn open_tui_log_file() -> std::io::Result<log_rotate::RotatingLog> {
     let base = if let Some(home) = std::env::var_os("WAYLAND_HOME") {
         std::path::PathBuf::from(home)
     } else if let Some(home) = std::env::var_os("HOME") {
@@ -869,12 +874,10 @@ fn open_tui_log_file() -> std::io::Result<std::fs::File> {
             "no $WAYLAND_HOME or $HOME for log file",
         ));
     };
-    let log_dir = base.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("wayland-core.log"))
+    log_rotate::RotatingLog::open(
+        base.join("logs").join("wayland-core.log"),
+        log_rotate::MAX_LOG_BYTES,
+    )
 }
 
 /// 3A / D3 fail-closed guard for `--json-stream` host mode.
@@ -1183,10 +1186,46 @@ async fn run() -> anyhow::Result<ExitCode> {
     //
     // No new flag is introduced. `RUST_LOG` already existed, already worked and
     // is already the documented lever.
+    //
+    // ── B2.2: should a one-shot headless run write a trace file at all? ─────
+    // DECISION: yes, it keeps writing one, and the defect was the missing
+    // bound, not the file. `log_rotate` supplies the bound.
+    //
+    // Justified against the gateway case specifically, because that is the
+    // case that makes the question sharp: a host answering channel messages
+    // runs headless CONTINUOUSLY, so "headless writes a trace by default" is at
+    // its most expensive there. It is also at its most necessary there. That
+    // host has no terminal anyone is watching, no TUI to route traces to, and
+    // it is the one deployment whose failures (a channel that stopped polling,
+    // a credential that expired, a delivery abandoned at 04:00) are discovered
+    // hours later from the record or not at all. Defaulting headless to no file
+    // would leave the gateway as the only mode of the product with no
+    // diagnostics whatsoever — the exact "a trace record existing nowhere"
+    // state the fix-tui-noise change was made to end.
+    //
+    // The cost it was actually challenged on — unbounded growth on a
+    // continuously-running host — is answered by bounding the file at
+    // 2 × MAX_LOG_BYTES rather than by removing it. A gateway now holds at most
+    // 10 MiB of its own most recent diagnostics, forever.
+    //
+    // The short-lived one-shot run is the cheap case, not the expensive one:
+    // ~7 kB, into a file that is now capped. `RUST_LOG` remains the lever for
+    // anyone who wants the old stderr behaviour instead.
     let rust_log_set = std::env::var_os("RUST_LOG").is_some();
     let log_to_file = will_enter_tui || !rust_log_set;
-    let tui_log_file: Option<std::fs::File> = if log_to_file {
-        open_tui_log_file().ok()
+    let tui_log_file: Option<log_rotate::RotatingLog> = if log_to_file {
+        match open_tui_log_file() {
+            Ok(f) => Some(f),
+            Err(e) => {
+                // B2.3: the fallback must be OBSERVABLE. A product that cannot
+                // open its log must still run — and must say so, or "it exited
+                // 0" is equally consistent with logging being dead, disabled,
+                // or never attempted. This line is the degraded-mode marker the
+                // integration test asserts on.
+                eprintln!("{}: {e}", log_rotate::LOG_FALLBACK_NOTICE);
+                None
+            }
+        }
     } else {
         None
     };
