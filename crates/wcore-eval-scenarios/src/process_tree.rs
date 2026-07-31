@@ -2352,17 +2352,23 @@ mod unix_process_group_tests {
     async fn a_group_that_still_holds_a_live_process_cannot_prove_itself_empty() {
         let (mut child, group) = spawn_group_leader(&["/bin/sh", "-c", "sleep 30"]);
 
-        // Give the leader a moment to be schedulable.
+        // Wait for the group to be observably occupied. The count is asserted
+        // as ">= 1", not "== 1", because it is platform-dependent and the
+        // property under test does not depend on it: Linux `/bin/sh` FORKS
+        // `sleep` rather than exec-ing it, so the group holds 2 (sh + sleep),
+        // while macOS `/bin/sh` execs and it holds 1. Measured -- an earlier
+        // `== Live(1)` here passed on macOS and failed the Linux gate with
+        // `Live(2)`, which was the census counting correctly and the
+        // assertion being wrong.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if group.live_members() == ProcessGroupCensus::Live(1) {
-                break;
+            match group.live_members() {
+                ProcessGroupCensus::Live(n) if n >= 1 => break,
+                other => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the live leader never appeared in its own group census: {other:?}"
+                ),
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the live leader never appeared in its own group census: {:?}",
-                group.live_members()
-            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
