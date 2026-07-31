@@ -53,7 +53,10 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _};
 // `Prefix` is deliberately absent: UNC classification is no longer done here.
 // It lives in `wcore_config::network_path`, reached via `is_unc_path` below.
-use std::path::{Component, Path, PathBuf};
+// `Component` is imported by the `cfg(unix)` arm of `open_once`, its only
+// consumer. Importing it here instead leaves it unused on Windows, where
+// `-D warnings` turns that into a CI failure.
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -406,6 +409,7 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
         use std::ffi::CString;
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
         use std::os::unix::ffi::OsStrExt as _;
+        use std::path::Component;
 
         let mut parts = path.components();
         if !matches!(parts.next(), Some(Component::RootDir)) {
