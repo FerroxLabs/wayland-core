@@ -44,7 +44,9 @@
 //! This file measures that gate against a provider that performs the write the real
 //! backend would perform. It does not claim the end-to-end download.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -74,6 +76,12 @@ impl RecordingProvider {
     }
 
     /// `dest_path` values the provider was actually handed, in order.
+    ///
+    /// Read only by `baseline_downloads_root_confinement_both_directions`, which is
+    /// `#[cfg(unix)]` (it needs `std::os::unix::fs::symlink`). Without the matching
+    /// gate this is dead code on Windows and `-D warnings` fails the whole lint job
+    /// BEFORE the test step — which is how Windows CI stayed test-blind for six runs.
+    #[cfg(unix)]
     fn download_dests(&self) -> Vec<String> {
         self.ops
             .lock()
@@ -124,6 +132,10 @@ impl BrowserProvider for RecordingProvider {
 
 /// Build a tool whose URL policy ALLOWS `example.com`, so any refusal observed is
 /// provably the local-path gate and not the URL policy.
+///
+/// `#[cfg(unix)]` for the same reason as `download_dests` above: its only caller is
+/// the symlink-dependent baseline test.
+#[cfg(unix)]
 fn tool_with_root(provider: Arc<RecordingProvider>, root: &Path) -> BrowserTool {
     BrowserTool::new(
         provider,
@@ -144,6 +156,9 @@ fn download_input(dest: &str) -> serde_json::Value {
 }
 
 /// One escape attempt, measured. Returns `(refused, provider_ops, file_exists)`.
+///
+/// `#[cfg(unix)]` — see `tool_with_root`.
+#[cfg(unix)]
 async fn attempt(root: &Path, dest: &str) -> (bool, usize, bool) {
     let provider = Arc::new(RecordingProvider::default());
     let tool = tool_with_root(provider.clone(), root);
