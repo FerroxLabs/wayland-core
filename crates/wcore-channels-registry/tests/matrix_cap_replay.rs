@@ -9,7 +9,7 @@
 //! `max_message_len`, because one key cannot identify the N destination
 //! messages a chunked body becomes. That branch is correct. The DECLARATION
 //! that sat above it was not: above the cap no key rides the wire, so a retry
-//! duplicates — see `docs/delivery-semantics.md` §10.
+//! duplicates — see `docs/delivery-semantics.md` §4.1.
 //!
 //! # Anti-vacuity: why the below-cap leg is mandatory, not decoration
 //!
@@ -32,7 +32,7 @@
 //! # It also drives the fix
 //!
 //! `ChannelManager::supports_outbound_idempotency_for(name, text)` is the
-//! per-message answer added with §10. The test asserts it says `true` for the
+//! per-message answer added with §4.1. The test asserts it says `true` for the
 //! control body and `false` for the subject body BEFORE either is sent, so the
 //! product's own prediction is recorded and then checked against the platform.
 //!
@@ -64,11 +64,14 @@ const HANDLE: &str = "matrix.live.access_token";
 const CHANNEL: &str = "mxcap";
 
 /// Matrix's declared cap (`wcore-channel-matrix/src/lib.rs`
-/// `max_message_len`). Bound to the adapter by
-/// `delivery_semantics_declaration.rs::exactly_one_adapter_is_exactly_once`,
-/// which asserts the same number against the constructed adapter — so a change
-/// there fails that test rather than silently making this one send the wrong
-/// sizes.
+/// `max_message_len`).
+///
+/// Not a free-floating literal: `docs/delivery-semantics.md` carries
+/// `matrix.cap = 32768` in its machine-readable block, and
+/// `delivery_semantics_declaration.rs` asserts that number against the adapter
+/// the production factory builds. So if the adapter's cap changes and this
+/// constant is not updated, that test fails first — this one cannot quietly
+/// start sending the wrong sizes and calling the result a measurement.
 const CAP: usize = 32_768;
 
 struct EnvCreds;

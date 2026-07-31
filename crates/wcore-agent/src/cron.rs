@@ -180,13 +180,14 @@ impl JobHandler for EngineJobHandler {
     /// delivery at all; for anything else the question does not arise and the
     /// conservative answer is the correct one.
     ///
-    /// It asks about **this body**, not about the adapter. `send_to_keyed`
-    /// drops the idempotency key on a body that exceeds the connector's
-    /// `max_message_len` — one key cannot identify the N messages a chunked
-    /// body becomes — so above the cap nothing rides the wire and a retry
-    /// duplicates. Answering from the adapter's bit alone would take the
-    /// re-attempt arm for an over-cap Matrix delivery and produce exactly the
-    /// silent duplicate this method exists to prevent.
+    /// # Answered per MESSAGE, because the guarantee is conditional
+    ///
+    /// `ChannelManager::send_to_keyed` transmits the delivery key only while the
+    /// body fits in one platform message; above `max_message_len` it splits the
+    /// body and sends the pieces unkeyed. So the per-adapter capability bit is
+    /// `true` for a send that carried no key, and a spine that retried on it
+    /// would duplicate. `Target::Channel` already carries the body, so the
+    /// honest question is available here at no cost.
     async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
         match target {
             Target::Channel {

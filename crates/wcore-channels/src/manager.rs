@@ -748,6 +748,24 @@ impl ChannelManager {
     /// delivery. An unknown channel answers `false` rather than erroring: the
     /// question being asked is "is a retry safe here", and the safe answer for
     /// a destination that cannot even be resolved is no.
+    ///
+    /// # This answer is CAP-BLIND — prefer the per-message form
+    ///
+    /// This is a property of the ADAPTER, and the key only actually rides the
+    /// wire when the body fits in one platform message: [`send_to_keyed`] drops
+    /// it on the chunked path, for the reason documented there. So above
+    /// [`Channel::max_message_len`] this method answers `true` about a send that
+    /// will carry no key, and a caller that retries on the strength of it
+    /// duplicates.
+    ///
+    /// The question a caller almost always means is "is a retry of THIS message
+    /// safe", which is [`supports_outbound_idempotency_for`]. This form is
+    /// retained for the callers that genuinely ask about the adapter (capability
+    /// reporting, the `delivery-semantics` drift test) and for the case where no
+    /// body is in hand yet.
+    ///
+    /// [`send_to_keyed`]: Self::send_to_keyed
+    /// [`supports_outbound_idempotency_for`]: Self::supports_outbound_idempotency_for
     pub async fn supports_outbound_idempotency(&self, name: &str) -> bool {
         match self.channels.get(name) {
             Some(slot) => slot.lock().await.supports_outbound_idempotency(),
@@ -755,41 +773,44 @@ impl ChannelManager {
         }
     }
 
-    /// Whether retrying **this specific body** to `name` is replay-safe.
+    /// Whether an idempotency key will actually ride **this body** to this
+    /// destination — the truthful, per-message form of
+    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency).
     ///
-    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency)
-    /// answers for the ADAPTER, and that answer is not true of every message
-    /// the adapter can be handed. [`send_to_keyed`](Self::send_to_keyed) drops
-    /// the key whenever the body exceeds the connector's
-    /// [`max_message_len`](crate::Channel::max_message_len), because one key
-    /// cannot identify the N destination messages a chunked body becomes — see
-    /// the comment on that branch, which is correct and stays. The consequence
-    /// it does not state is the one that matters here: **above the cap there is
-    /// no key on the wire, so a retry duplicates**, even on an adapter whose
-    /// destination honours a key.
+    /// Answers `true` only when the adapter transmits a key the destination
+    /// honours AND `text` fits in a single platform message, because those are
+    /// exactly the two conditions under which
+    /// [`send_to_keyed`](Self::send_to_keyed) puts a key on the wire. An
+    /// over-cap body is N destination messages carrying no key at all, so a
+    /// retry of it duplicates even on Matrix.
     ///
-    /// A caller deciding "is a retry safe" therefore has to ask about the
-    /// message, not the adapter, and both production callers hold the body when
-    /// they ask: `EngineJobHandler::dispatch_is_idempotent` receives
-    /// `Target::Channel { text, .. }`, and `gateway resend` reads the text out
-    /// of the ledger before it re-sends.
-    ///
-    /// Unknown channel answers `false`, for the same reason the per-adapter
-    /// method does: the safe answer for a destination that cannot be resolved
-    /// is no.
+    /// The cap decision is read from [`Self::chunks_for`] — the same function
+    /// the send itself uses — so this answer cannot drift away from the
+    /// behaviour it describes. That sharing is the point: a parallel
+    /// reimplementation here would be a second opinion about the send rather
+    /// than a report of it.
     pub async fn supports_outbound_idempotency_for(&self, name: &str, text: &str) -> bool {
-        let Some(slot) = self.channels.get(name) else {
-            return false;
-        };
-        let guard = slot.lock().await;
-        if !guard.supports_outbound_idempotency() {
-            return false;
+        match self.channels.get(name) {
+            Some(slot) => {
+                let guard = slot.lock().await;
+                guard.supports_outbound_idempotency()
+                    && Self::chunks_for(guard.max_message_len(), text).len() <= 1
+            }
+            None => false,
         }
-        // Mirrors `send_to_keyed`'s chunking decision exactly. If that call
-        // would split this body, the key does not ride and the answer is no.
-        match guard.max_message_len() {
-            Some(max) if max > 0 => crate::chunk::chunk_message(text, max).len() <= 1,
-            _ => true,
+    }
+
+    /// The chunk split [`send_to_keyed`](Self::send_to_keyed) will perform for
+    /// `text` under `max`.
+    ///
+    /// Factored out of the send so the send and
+    /// [`supports_outbound_idempotency_for`](Self::supports_outbound_idempotency_for)
+    /// share one decision. `None`, or a zero cap, means the connector declares
+    /// no limit and the body goes as one message.
+    fn chunks_for(max: Option<usize>, text: &str) -> Vec<String> {
+        match max {
+            Some(max) if max > 0 => crate::chunk::chunk_message(text, max),
+            _ => vec![text.to_string()],
         }
     }
 
@@ -811,10 +832,7 @@ impl ChannelManager {
         // delivered in pieces rather than rejected+dropped (HIGH-6). When the
         // connector declares no cap (or the body already fits) this is a
         // single send, byte-identical to the pre-chunking path.
-        let chunks = match guard.max_message_len() {
-            Some(max) if max > 0 => crate::chunk::chunk_message(&msg.text, max),
-            _ => vec![msg.text.clone()],
-        };
+        let chunks = Self::chunks_for(guard.max_message_len(), &msg.text);
         if chunks.len() <= 1 {
             return match key {
                 // The key rides only the single-send path on purpose. A chunked
@@ -822,9 +840,14 @@ impl ChannelManager {
                 // delivery, so one key cannot identify them; handing the same
                 // key to every chunk would make a correct destination suppress
                 // chunks 2..N as replays and silently truncate the message.
-                // `supports_outbound_idempotency` is what the caller consults
-                // before it decides a retry is safe, and `max_message_len` is
-                // what decides whether this branch is taken.
+                //
+                // That makes the guarantee CONDITIONAL on the body fitting, so
+                // the question "may I retry this" is per-message, not
+                // per-adapter: ask `supports_outbound_idempotency_for`, which
+                // reads the same `chunks_for` decision this line does. The
+                // cap-blind `supports_outbound_idempotency` answers about the
+                // adapter and will say `true` about this send even when the
+                // branch below is the one taken.
                 Some(k) => guard.send_message_idempotent(msg, k).await,
                 None => guard.send_message(msg).await,
             };
@@ -1192,6 +1215,201 @@ mod tests {
         fn max_message_len(&self) -> Option<usize> {
             Some(self.cap)
         }
+    }
+
+    /// A capped adapter that DOES transmit an idempotency key, and records the
+    /// key that rode each send (`None` for the unkeyed path).
+    ///
+    /// This is the Matrix shape: `supports_outbound_idempotency() == true` plus
+    /// a finite `max_message_len`. Without both, the conditional guarantee of
+    /// `docs/delivery-semantics.md` §4.1 cannot be exercised at all.
+    struct KeyedCappedChannel {
+        name: String,
+        cap: usize,
+        keys: std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl KeyedCappedChannel {
+        #[allow(clippy::type_complexity)]
+        fn new(
+            name: &str,
+            cap: usize,
+        ) -> (
+            Self,
+            std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+        ) {
+            let keys = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    name: name.into(),
+                    cap,
+                    keys: std::sync::Arc::clone(&keys),
+                },
+                keys,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Channel for KeyedCappedChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            "keyed-capped"
+        }
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            Ok(Vec::new())
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            let idx = {
+                let mut log = self.keys.lock().await;
+                log.push(None);
+                log.len() - 1
+            };
+            Ok(MessageReceipt {
+                id: format!("keyed-out-{idx}"),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        async fn send_message_idempotent(
+            &mut self,
+            msg: OutgoingMessage,
+            key: &str,
+        ) -> Result<MessageReceipt, ChannelError> {
+            let idx = {
+                let mut log = self.keys.lock().await;
+                log.push(Some(key.to_string()));
+                log.len() - 1
+            };
+            Ok(MessageReceipt {
+                id: format!("keyed-out-{idx}"),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        fn supports_outbound_idempotency(&self) -> bool {
+            true
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name":"string","platform":"keyed-capped"}"#
+        }
+        fn max_message_len(&self) -> Option<usize> {
+            Some(self.cap)
+        }
+    }
+
+    /// Under the cap: the per-message answer is `true` AND the key really rode.
+    ///
+    /// Asserting the answer alone would be a claim about a bool. The point is
+    /// that the bool describes the wire, so the wire is read back.
+    #[tokio::test]
+    async fn under_the_cap_the_key_rides_and_the_per_message_answer_says_so() {
+        let (ch, keys) = KeyedCappedChannel::new("kc", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        let body = "short";
+        assert!(
+            mgr.supports_outbound_idempotency_for("kc", body).await,
+            "a body inside the cap is a single keyed send"
+        );
+
+        mgr.send_to_keyed("kc", OutgoingMessage::text("c1", body), Some("delivery-1"))
+            .await
+            .expect("send");
+
+        let log = keys.lock().await;
+        assert_eq!(log.len(), 1, "one message");
+        assert_eq!(
+            log[0].as_deref(),
+            Some("delivery-1"),
+            "the key must actually be on the wire"
+        );
+    }
+
+    /// Over the cap: no key rides, and the per-message answer says `false`
+    /// while the cap-blind answer still says `true`.
+    ///
+    /// This is the whole defect in one test. The per-adapter bit is what the
+    /// delivery spine used to consult before deciding a retry was safe, and it
+    /// is `true` here for a send that carried no key at all — so a retry would
+    /// have produced a second full copy.
+    #[tokio::test]
+    async fn over_the_cap_no_key_rides_and_only_the_per_message_answer_notices() {
+        let (ch, keys) = KeyedCappedChannel::new("kc", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        // 25 chars at cap 10 → three chunks.
+        let body = "abcdefghijklmnopqrstuvwxy";
+
+        assert!(
+            mgr.supports_outbound_idempotency("kc").await,
+            "known-positive: the cap-blind form answers true, which is the whole problem. If \
+             this were false the test below would pass for the wrong reason."
+        );
+        assert!(
+            !mgr.supports_outbound_idempotency_for("kc", body).await,
+            "an over-cap body is sent unkeyed, so a retry of it is NOT safe"
+        );
+
+        mgr.send_to_keyed("kc", OutgoingMessage::text("c1", body), Some("delivery-1"))
+            .await
+            .expect("send");
+
+        let log = keys.lock().await;
+        assert_eq!(log.len(), 3, "25 chars at cap 10 → 3 sends");
+        assert!(
+            log.iter().all(|k| k.is_none()),
+            "NO chunk may carry the key — one key cannot identify N destination messages, and \
+             reusing it would make a correct destination suppress chunks 2..N: {log:?}"
+        );
+    }
+
+    /// An adapter that cannot deduplicate at all answers `false` at every
+    /// length, so the per-message form never over-promises for it.
+    #[tokio::test]
+    async fn a_non_idempotent_adapter_is_false_under_and_over_the_cap() {
+        let (ch, _sent) = CappedChannel::new("capped", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        assert!(!mgr.supports_outbound_idempotency_for("capped", "hi").await);
+        assert!(
+            !mgr.supports_outbound_idempotency_for("capped", "abcdefghijklmnopqrstuvwxy")
+                .await
+        );
+    }
+
+    /// An uncapped adapter keeps the unconditional answer at any length — the
+    /// cap check must not turn `None` into a false negative.
+    #[tokio::test]
+    async fn an_uncapped_idempotent_adapter_is_true_at_any_length() {
+        let (ch, _keys) = KeyedCappedChannel::new("kc", 0);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        // cap 0 is the "no cap declared / disabled" sentinel `chunks_for` honours.
+        let long = "x".repeat(100_000);
+        assert!(mgr.supports_outbound_idempotency_for("kc", &long).await);
+    }
+
+    /// Unknown channel: the safe answer, matching the cap-blind form.
+    #[tokio::test]
+    async fn an_unknown_channel_is_not_replay_safe() {
+        let mgr = ChannelManager::new();
+        assert!(!mgr.supports_outbound_idempotency_for("nope", "hi").await);
     }
 
     #[tokio::test]

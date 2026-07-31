@@ -583,6 +583,56 @@ user_id = "@bot:matrix.example.org"
         ch.stop().await.unwrap();
     }
 
+    /// The cap the exactly-once guarantee is conditional on.
+    ///
+    /// # Why this is not the usual constant-against-itself test
+    ///
+    /// Six other adapters assert `max_message_len()` against the literal their
+    /// own function returns, which cannot fail for any reason a reader cares
+    /// about. Matrix had **no test at all** until 2026-07-31 — and Matrix's is
+    /// the one that carries weight, because it is the single adapter still
+    /// claiming exactly-once and `ChannelManager::send_to_keyed` transmits the
+    /// idempotency key ONLY while the body fits inside this number. Above it the
+    /// body is chunked and sent unkeyed, so the guarantee degrades to
+    /// at-least-once (`docs/delivery-semantics.md` §4.1).
+    ///
+    /// So this asserts the two things that actually matter about the value —
+    /// that it is finite, and that it is the number the customer-facing document
+    /// states — rather than restating the literal. The document side of the same
+    /// binding is
+    /// `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which
+    /// reads this method through the production factory and compares it against
+    /// the `matrix.cap` row.
+    #[tokio::test]
+    async fn max_message_len_is_the_cap_the_guarantee_is_conditional_on() {
+        let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+        let ch = MatrixChannel::with_base("test", cfg(), creds, "http://unused.invalid".into());
+
+        let cap = ch.max_message_len().expect(
+            "Matrix must declare a finite cap: an adapter with no cap would make the \
+                     conditional guarantee in docs/delivery-semantics.md §4.1 describe nothing",
+        );
+        assert_eq!(cap, 32_768);
+
+        // The pair that makes the condition real: one char under the cap is a
+        // single message (key rides, exactly-once); one char over is chunked
+        // (no key, at-least-once). Driving the same chunker the manager drives
+        // rather than asserting the arithmetic.
+        let under = "x".repeat(cap);
+        let over = "x".repeat(cap + 1);
+        assert_eq!(
+            wcore_channels::chunk::chunk_message(&under, cap).len(),
+            1,
+            "a body exactly at the cap must still be one message, or the guarantee stops one \
+             char earlier than the document says"
+        );
+        assert!(
+            wcore_channels::chunk::chunk_message(&over, cap).len() > 1,
+            "a body one char over the cap must split — that split is what drops the \
+             idempotency key"
+        );
+    }
+
     /// The capability declaration and the wire must agree.
     ///
     /// `supports_outbound_idempotency()` returning `true` is what permits the
