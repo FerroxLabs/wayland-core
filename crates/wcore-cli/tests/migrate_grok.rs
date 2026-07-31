@@ -295,7 +295,10 @@ fn the_oidc_session_is_never_promoted_even_with_include_credentials() {
     // Positive half — without it, an import that did nothing would pass.
     let plan = migrate::grok::build_plan(grok.path(), true).unwrap();
     let root = &plan.profiles[0];
-    assert!(root.has_credential, "the session store was not even noticed");
+    assert!(
+        root.has_credential,
+        "the session store was not even noticed"
+    );
     assert_eq!(
         root.credential_env_var.as_deref(),
         Some("auth.json.key"),
@@ -545,7 +548,10 @@ fn the_real_install_deferred_inventory_matches_the_manifest() {
     assert_eq!(plan.deferred.skills as u64, declared("skills"));
     for dir in ["bundled", "marketplace-cache", "sessions"] {
         let n = declared(dir);
-        assert!(n > 0, "manifest count for {dir} is zero — assertion vacuous");
+        assert!(
+            n > 0,
+            "manifest count for {dir} is zero — assertion vacuous"
+        );
         assert_eq!(
             plan.deferred_other.get(dir).copied().unwrap_or(0) as u64,
             n,
@@ -604,11 +610,9 @@ fn live_drive_against_a_real_grok_install() {
 
     let after = wcore_config::portability::tree_digest(&peer).unwrap();
     assert_eq!(
-        before.digest,
-        after.digest,
+        before.digest, after.digest,
         "THE IMPORTER MUTATED A REAL PEER HOME ({} files before, {} after)",
-        before.files,
-        after.files
+        before.files, after.files
     );
 
     // What the run must have achieved for the digest comparison to mean
