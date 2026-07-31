@@ -143,6 +143,34 @@ impl GoalKernel {
     /// [`VerifiedTerminal`] — a type with no deserialization route. Refusing it
     /// here as well as in the reducer means neither a caller mistake nor a
     /// hand-built journal record can mint the reserved stamp.
+    ///
+    /// ## Why this stays `pub` (22-C3, re-measured 2026-07-31)
+    ///
+    /// The audit row asks whether `pub` is the last representable engine-verdict
+    /// bypass. Measured at this commit, what `pub` can still reach is:
+    ///
+    /// * NOT `Verified` — refused above, before any append, and again by the
+    ///   reducer.
+    /// * NOT a Goal with a live loop-owner claim — the reducer refuses a plain
+    ///   `GoalTerminated` while a claim is held, which is the half-A fix
+    ///   `goal_no_bypass_test.rs` measures for all five owners and any sixth.
+    ///
+    /// What remains is exactly one capability: terminate a CLAIM-FREE Goal in a
+    /// non-verified category. That is not a bypass to close — it is the
+    /// operator cancel `ProtocolCommand::GoalCancel` performs (`goal/control.rs`),
+    /// on a Goal whose owner may be dead. Removing it removes cancel.
+    ///
+    /// So the only thing `pub` buys over `pub(crate)` is crate-EXTERNAL reach,
+    /// and the measurement of that is: **production callers outside
+    /// `wcore-agent` = 0** (`.terminate(` across `crates/wcore-cli/**` and
+    /// `crates/wcore-agent/examples/**` → no hits; the sole production caller
+    /// repo-wide is `goal/control.rs`). Every other caller is an integration
+    /// test in `crates/wcore-agent/tests/` whose entire purpose is to drive this
+    /// path and assert it is refused — narrowing to `pub(crate)` would delete
+    /// the proof rather than the hole.
+    ///
+    /// If that measurement ever changes — a crate-external PRODUCTION caller
+    /// appears — narrowing to `pub(crate)` becomes free and should be taken.
     pub fn terminate(
         &self,
         goal_id: &GoalId,

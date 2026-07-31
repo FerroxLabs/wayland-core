@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::tui::app::App;
-use crate::tui::commands::{CommandRegistry, Dispatch, parse_theme_mode};
+use crate::tui::commands::{CommandRegistry, Dispatch, goal, parse_theme_mode};
 use crate::tui::engine_bridge::{
     EngineInventory, SessionSwitchResult, SessionSwitchStart, TuiEngine,
     TuiOperatorResolutionInput, TuiRecoveryAction, TuiRecoveryResult, TuiRecoveryView,
@@ -2016,6 +2016,45 @@ impl Router {
                             _ => render_hooks_list(inv),
                         };
                         push_system(app, body);
+                    }
+                    "/goal" => {
+                        // F22-C1: the TUI's durable-Goal CONTROL surface. The
+                        // five `ProtocolCommand::Goal*` variants and the
+                        // engine-side handler both shipped with NOTHING able
+                        // to reach them — this arm is the path a user at the
+                        // terminal drives them from.
+                        //
+                        // The answer is deliberately NOT rendered here. It
+                        // arrives on the protocol event channel as
+                        // `goal_snapshot` / `goal_control_refused` and lands
+                        // in `App` through the same `apply_event` arms an
+                        // observed Goal uses, so the terminal still never
+                        // derives Goal state of its own. What this pushes is
+                        // only "the command left the terminal".
+                        let session_id = self.engine.as_ref().and_then(|e| e.active_session_id());
+                        let request_id = format!("tui-goal-{}", uuid::Uuid::new_v4());
+                        let dispatch = goal::parse_goal_line(
+                            line,
+                            session_id.as_deref(),
+                            &app.goals,
+                            &request_id,
+                        );
+                        match dispatch {
+                            goal::GoalDispatch::Say(text) => push_system(app, text),
+                            goal::GoalDispatch::Issue { command, note } => {
+                                match self.engine.as_ref() {
+                                    Some(engine) => {
+                                        engine.request_goal_control(*command);
+                                        push_system(app, note);
+                                    }
+                                    None => push_system(
+                                        app,
+                                        "No engine attached — /goal needs a live session."
+                                            .to_string(),
+                                    ),
+                                }
+                            }
+                        }
                     }
                     "/repomap" => {
                         // Was a stub forwarded to the LLM. Runs a fresh symbol

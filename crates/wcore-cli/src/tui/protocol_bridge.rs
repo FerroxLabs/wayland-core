@@ -1033,7 +1033,8 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             });
         }
         // The TUI now ISSUES Goal control commands as well as rendering them
-        // (`TuiEngine::issue_goal_control`). A refusal arrives back through
+        // (`/goal` → `TuiEngine::request_goal_control` →
+        // `GoalControlBridge::issue_goal_control`). A refusal arrives back through
         // this same ingest path rather than being returned to the caller, so
         // the rule that Goal view state is written only from the event stream
         // holds for control exactly as it does for observation.
@@ -4848,7 +4849,8 @@ mod tests {
 
     /// F22-C1 control: a REFUSED command must be visible in the TUI.
     ///
-    /// The TUI can now issue Goal commands (`TuiEngine::issue_goal_control`),
+    /// The TUI can now issue Goal commands (`/goal`, dispatched through
+    /// `GoalControlBridge::issue_goal_control`),
     /// so it must be able to show that one was rejected. The refusal that
     /// matters most is the one that arrives with NO Goals and NO transitions —
     /// `goal_not_found` on a fresh session — because the segment's original

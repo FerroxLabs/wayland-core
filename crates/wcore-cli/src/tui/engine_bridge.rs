@@ -1193,7 +1193,20 @@ pub(crate) enum TuiRecoveryResult {
     },
 }
 
-impl TuiEngine {
+/// F22-C1 — a `'static` handle onto exactly the two things a durable-Goal
+/// CONTROL command needs: the live engine and the protocol event channel.
+///
+/// It exists because the reachable path is SYNC and the work is ASYNC.
+/// `Router::dispatch_command` (where `/goal …` lands) cannot await, and
+/// `TuiEngine` cannot be moved into a `tokio::spawn` — it owns a turn
+/// `JoinHandle` and is not `Clone`. Two cheap `Arc`/sender clones are, so the
+/// handler lives here rather than being duplicated into a spawned closure.
+pub(crate) struct GoalControlBridge {
+    engine: Arc<tokio::sync::Mutex<wcore_agent::engine::AgentEngine>>,
+    tx: UnboundedSender<ProtocolEvent>,
+}
+
+impl GoalControlBridge {
     /// F22-C1 — issue a durable-Goal CONTROL command from the TUI.
     ///
     /// ## Why this does not return the result to the caller
@@ -1214,7 +1227,7 @@ impl TuiEngine {
     /// handled command from an unhandled one. It is never zero for one of the
     /// five Goal commands: acceptance emits `goal_snapshot`, refusal emits
     /// `goal_control_refused`.
-    pub async fn issue_goal_control(
+    pub(crate) async fn issue_goal_control(
         &self,
         command: wcore_protocol::commands::ProtocolCommand,
     ) -> usize {
@@ -1238,6 +1251,43 @@ impl TuiEngine {
             let _ = self.tx.send(event);
         }
         emitted
+    }
+}
+
+impl TuiEngine {
+    /// F22-C1 — the SYNC entry point `/goal …` reaches.
+    ///
+    /// Fire-and-forget by construction: the answer is not returned here, it
+    /// arrives on the protocol event channel and is rendered from
+    /// `apply_event`, exactly as an observed Goal is. Spawning (rather than
+    /// awaiting the engine mutex on the render thread) is what keeps a `/goal`
+    /// issued mid-turn from freezing the frame until the turn releases the
+    /// lock — the same spawn-then-lock shape `enter_plan_mode` and
+    /// `set_model` already use.
+    pub(crate) fn request_goal_control(&self, command: wcore_protocol::commands::ProtocolCommand) {
+        let bridge = GoalControlBridge {
+            engine: self.engine.clone(),
+            tx: self.tx.clone(),
+        };
+        tokio::spawn(async move {
+            bridge.issue_goal_control(command).await;
+        });
+    }
+
+    /// F22-C1 — the LIVE durable session id, read without blocking.
+    ///
+    /// `/goal` needs it to NAME the session a control command binds to, and it
+    /// must be readable from the sync slash path. Mirrors the sync read
+    /// `request_recovery_action` already performs on the same field, so the
+    /// two surfaces cannot disagree about which session is live. `None` means
+    /// the engine has no durable session, which `/goal` reports as the real
+    /// cause rather than sending a command Core would answer with
+    /// `session_not_found`.
+    pub(crate) fn active_session_id(&self) -> Option<String> {
+        self.active_session_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// A clone of the protocol event channel sender, so a deferred async action
