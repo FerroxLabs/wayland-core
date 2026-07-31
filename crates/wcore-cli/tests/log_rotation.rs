@@ -17,11 +17,27 @@
 //! # The positive control
 //!
 //! A notice-is-present assertion is worthless if the notice is always present.
-//! [`a_writable_log_dir_produces_a_log_file_and_no_notice`] runs the same
+//! [`a_writable_log_dir_is_left_untouched_and_prints_no_notice`] runs the same
 //! binary with the same arguments against a WRITABLE home and requires the
-//! opposite of every degraded-leg assertion: the log file exists, and the
-//! notice is absent. Between them the two legs show the marker tracks the
+//! opposite: no notice. Between them the two legs show the marker tracks the
 //! condition rather than the run.
+//!
+//! # What the positive control asserts about the FILE, and why it changed
+//!
+//! It used to assert the log file existed after the run. That assertion was
+//! satisfied by an EMPTY file — measured: `models list`, `--config-path`,
+//! `backup restore` and every other offline subcommand write zero log bytes, so
+//! all it ever proved was that `open` had touched the disk. It was also the
+//! defect: `$WAYLAND_HOME` is the directory `backup restore --home` operates
+//! on, so that empty file made a REFUSED restore mutate its target and made a
+//! restore into an empty home refuse itself (#932, see
+//! [`wcore_cli::log_rotate::RotatingLog`]).
+//!
+//! So the leg is inverted: a run with nothing to log must leave NOTHING in the
+//! home. The property it used to stand in for — records actually reach the
+//! documented path — is asserted directly by
+//! [`the_documented_path_receives_records`], through the product's own writer,
+//! because no offline subcommand emits a record to drive it end to end.
 //!
 //! # The negative control that cannot live here
 //!
@@ -35,7 +51,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use wcore_cli::log_rotate::LOG_FALLBACK_NOTICE;
+use std::io::Write;
+
+use wcore_cli::log_rotate::{LOG_FALLBACK_NOTICE, MAX_LOG_BYTES, RotatingLog};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
@@ -62,9 +80,10 @@ fn log_path(home: &Path) -> std::path::PathBuf {
     home.join("logs").join("wayland-core.log")
 }
 
-/// POSITIVE CONTROL: a writable home logs to the file and prints no notice.
+/// POSITIVE CONTROL: a writable home prints no notice — and, because this run
+/// has nothing to log, is left exactly as it was found (#932).
 #[test]
-fn a_writable_log_dir_produces_a_log_file_and_no_notice() {
+fn a_writable_log_dir_is_left_untouched_and_prints_no_notice() {
     let tmp = tempfile::tempdir().unwrap();
     let out = run_with_home(tmp.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -74,14 +93,49 @@ fn a_writable_log_dir_produces_a_log_file_and_no_notice() {
         "the binary failed on a writable home: {stderr}"
     );
     assert!(
-        log_path(tmp.path()).is_file(),
-        "no log file was written to a WRITABLE home, so the degraded leg below would prove \
-         nothing — it would be asserting a fallback for a feature that never works"
-    );
-    assert!(
         !stderr.contains(LOG_FALLBACK_NOTICE),
         "the degraded-mode notice was printed on a healthy run, so its presence in the other \
          leg would not distinguish anything:\n{stderr}"
+    );
+
+    // The home is the directory `backup restore --home` decides about. A
+    // subcommand that emitted no diagnostics must not have created any.
+    let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+        .expect("the home is readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a run that logged nothing left {leftovers:?} in $WAYLAND_HOME. An empty \
+         logs/wayland-core.log here is what made a REFUSED `backup restore` mutate its \
+         target and made a restore into an empty home refuse itself (#932)."
+    );
+}
+
+/// The property the old positive control was standing in for: a record reaches
+/// the documented path. Driven through the product's own writer at the path
+/// `main` hands it, because no offline subcommand emits a record — measured, so
+/// an end-to-end leg would assert on an empty file and prove nothing.
+#[test]
+fn the_documented_path_receives_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = log_path(tmp.path());
+
+    let mut log = RotatingLog::open(path.clone(), MAX_LOG_BYTES).expect("a writable home opens");
+    assert!(
+        !path.exists(),
+        "binding the log created the file before there was anything to put in it"
+    );
+
+    log.write_all(b"a record\n").expect("the record is written");
+    log.flush().expect("the record is flushed");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the log file exists once a record exists"),
+        "a record\n",
+        "the record did not reach {}",
+        path.display()
     );
 }
 
