@@ -35,11 +35,21 @@
 #    collected-test check in merge-test-gate.sh. Read that comment before ever
 #    deleting a line from this file.
 
-# 2. Desktop wire-contract fixture drift. Regenerating it means
-#    `wcore-contract generate`, which LANE-BRIEF.md §0 reserves as a
-#    release-coordination action, so no lane may clear this one unilaterally.
-#    Needs a seam request.
-wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+# 2. REMOVED 2026-07-31 -- FIXED, not deleted, and the distinction is checked.
+#    This entry read:
+#      wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+#    It was blocked because clearing it required `wcore-contract generate`, which
+#    LANE-BRIEF.md §0 reserves to the orchestrator as the LAST action before a
+#    tag. That regeneration has now been run over the merged tree and the test
+#    PASSES (measured: 1 test run, 1 passed).
+#
+#    Removed in the SAME commit as the fix, which is the documented resolution
+#    when a baseline red is genuinely repaired -- the file is a ratchet that may
+#    only shrink. Note the gate itself would have caught a dishonest removal: an
+#    entry that vanishes without passing is reported as BASELINE ENTRY NO LONGER
+#    EXISTS, and one that passes while still listed is reported as STALE
+#    BASELINE. Both directions are covered, which is why deleting this line is
+#    safe to do and safe to review.
 
 # 3. Failed in both full-workspace runs at 43c84493. In crates/wcore-cli, which
 #    lane/fix-clippy-gate did not touch. NOT diagnosed by this lane — recorded so
