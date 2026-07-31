@@ -955,7 +955,13 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
     // did land, the destination suppresses this one. On a destination that
     // cannot, it changes nothing — and that is precisely the case
     // `--confirm-not-delivered` exists to gate.
-    let dedupes = manager.supports_outbound_idempotency(&channel_name).await;
+    // Asked about THIS body, not about the adapter. A body over the
+    // connector's `max_message_len` is chunked by `send_to_keyed`, which drops
+    // the key — so the replay-safety line below would otherwise print "yes" for
+    // a re-send that is about to duplicate every chunk.
+    let dedupes = manager
+        .supports_outbound_idempotency_for(&channel_name, &text)
+        .await;
     let msg = wcore_channels_registry::wcore_channels::OutgoingMessage::text(
         channel_name.clone(),
         text.clone(),

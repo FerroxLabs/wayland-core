@@ -755,6 +755,44 @@ impl ChannelManager {
         }
     }
 
+    /// Whether retrying **this specific body** to `name` is replay-safe.
+    ///
+    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency)
+    /// answers for the ADAPTER, and that answer is not true of every message
+    /// the adapter can be handed. [`send_to_keyed`](Self::send_to_keyed) drops
+    /// the key whenever the body exceeds the connector's
+    /// [`max_message_len`](crate::Channel::max_message_len), because one key
+    /// cannot identify the N destination messages a chunked body becomes — see
+    /// the comment on that branch, which is correct and stays. The consequence
+    /// it does not state is the one that matters here: **above the cap there is
+    /// no key on the wire, so a retry duplicates**, even on an adapter whose
+    /// destination honours a key.
+    ///
+    /// A caller deciding "is a retry safe" therefore has to ask about the
+    /// message, not the adapter, and both production callers hold the body when
+    /// they ask: `EngineJobHandler::dispatch_is_idempotent` receives
+    /// `Target::Channel { text, .. }`, and `gateway resend` reads the text out
+    /// of the ledger before it re-sends.
+    ///
+    /// Unknown channel answers `false`, for the same reason the per-adapter
+    /// method does: the safe answer for a destination that cannot be resolved
+    /// is no.
+    pub async fn supports_outbound_idempotency_for(&self, name: &str, text: &str) -> bool {
+        let Some(slot) = self.channels.get(name) else {
+            return false;
+        };
+        let guard = slot.lock().await;
+        if !guard.supports_outbound_idempotency() {
+            return false;
+        }
+        // Mirrors `send_to_keyed`'s chunking decision exactly. If that call
+        // would split this body, the key does not ride and the answer is no.
+        match guard.max_message_len() {
+            Some(max) if max > 0 => crate::chunk::chunk_message(text, max).len() <= 1,
+            _ => true,
+        }
+    }
+
     /// [`send_to`](Self::send_to), optionally carrying the delivery ledger's
     /// idempotency key so the destination can recognise a replay.
     pub async fn send_to_keyed(

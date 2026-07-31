@@ -165,10 +165,10 @@ fn parse_declaration(doc: &str) -> BTreeMap<String, String> {
         assert!(
             matches!(
                 v.as_str(),
-                "exactly-once" | "at-most-once" | "at-least-once"
+                "exactly-once" | "exactly-once-below-cap" | "at-most-once" | "at-least-once"
             ),
             "unknown guarantee {v:?} for {k:?} — the vocabulary is exactly-once / \
-             at-most-once / at-least-once"
+             exactly-once-below-cap / at-most-once / at-least-once"
         );
         assert!(
             out.insert(k.clone(), v).is_none(),
@@ -183,8 +183,21 @@ fn parse_declaration(doc: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// What an adapter actually says about itself.
+///
+/// `cap` joined this struct on 2026-07-31. The guarantee is not a property of
+/// the adapter alone: `ChannelManager::send_to_keyed` drops the idempotency key
+/// on a body that exceeds `max_message_len`, so an adapter with a cap is
+/// exactly-once only BELOW it. Carrying the cap here is what lets the
+/// `exactly-once-below-cap` label be checked rather than merely written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Measured {
+    idempotent: bool,
+    cap: Option<usize>,
+}
+
 /// Build every constructible adapter and read its declared capability.
-fn measured_capabilities() -> BTreeMap<String, bool> {
+fn measured_capabilities() -> BTreeMap<String, Measured> {
     let mut out = BTreeMap::new();
     for platform in constructible_platforms() {
         let factory = channel_factory_for(platform)
@@ -197,7 +210,10 @@ fn measured_capabilities() -> BTreeMap<String, bool> {
         .unwrap_or_else(|e| panic!("could not construct {platform:?} from its fixture: {e}"));
         out.insert(
             platform.to_string(),
-            channel.supports_outbound_idempotency(),
+            Measured {
+                idempotent: channel.supports_outbound_idempotency(),
+                cap: channel.max_message_len(),
+            },
         );
     }
     out
@@ -210,24 +226,48 @@ fn measured_capabilities() -> BTreeMap<String, bool> {
 /// Returns one human-readable line per disagreement; empty means agreement.
 fn disagreements(
     declared: &BTreeMap<String, String>,
-    measured: &BTreeMap<String, bool>,
+    measured: &BTreeMap<String, Measured>,
 ) -> Vec<String> {
     let mut out = Vec::new();
 
-    for (platform, supports) in measured {
+    for (platform, m) in measured {
         match declared.get(platform) {
             None => out.push(format!(
                 "{platform}: constructible by the registry but has NO row in \
                  docs/delivery-semantics.md"
             )),
             Some(guarantee) => {
-                let expected_supports = guarantee == "exactly-once";
-                if expected_supports != *supports {
+                // Both exactly-once labels require the capability bit; they
+                // differ only in whether a length cap exists to qualify it.
+                let expected_supports = guarantee.starts_with("exactly-once");
+                if expected_supports != m.idempotent {
                     out.push(format!(
                         "{platform}: the document says {guarantee:?} (implying \
                          supports_outbound_idempotency() == {expected_supports}) but the adapter \
-                         returns {supports}"
+                         returns {}",
+                        m.idempotent
                     ));
+                }
+
+                // The cap rule. This is what stops `exactly-once-below-cap`
+                // from being a softer synonym nobody can check, AND stops the
+                // bare label from being reinstated over an adapter that has a
+                // cap — which is the drift that produced this whole section.
+                match guarantee.as_str() {
+                    "exactly-once-below-cap" if m.cap.is_none() => out.push(format!(
+                        "{platform}: the document says \"exactly-once-below-cap\" but the adapter \
+                         declares NO max_message_len(), so there is no cap for the guarantee to \
+                         be below. Either the label is wrong or the cap was removed"
+                    )),
+                    "exactly-once" if m.cap.is_some() => out.push(format!(
+                        "{platform}: the document says a bare \"exactly-once\" but the adapter \
+                         declares max_message_len() == {:?}. Above that cap \
+                         ChannelManager::send_to_keyed chunks the body and drops the key, so the \
+                         guarantee does NOT hold there — the row must say \
+                         \"exactly-once-below-cap\"",
+                        m.cap
+                    )),
+                    _ => {}
                 }
             }
         }
@@ -301,7 +341,7 @@ fn exactly_one_adapter_is_exactly_once() {
     let measured = measured_capabilities();
     let mut idempotent: Vec<&str> = measured
         .iter()
-        .filter(|(_, v)| **v)
+        .filter(|(_, v)| v.idempotent)
         .map(|(k, _)| k.as_str())
         .collect();
     idempotent.sort_unstable();
@@ -318,6 +358,102 @@ fn exactly_one_adapter_is_exactly_once() {
          destination does with it, and for these two it was wrong. Matrix is the only member \
          that has survived a live replay — the shipped binary was killed mid-send against \
          matrix.org and the homeserver returned the original event_id."
+    );
+
+    // …and its guarantee is CONDITIONAL. `send_to_keyed` drops the key on a
+    // body over `max_message_len`, so the one surviving exactly-once row holds
+    // only below the cap. If Matrix ever declared no cap this assertion fails
+    // loudly, because then the row's label would be wrong in the other
+    // direction. See docs/delivery-semantics.md §10.
+    assert_eq!(
+        measured["matrix"].cap,
+        Some(32_768),
+        "matrix's max_message_len is the precondition on the only exactly-once guarantee this \
+         product has. Changing it changes what the guarantee covers, so it is asserted here \
+         rather than only in the adapter's own module."
+    );
+}
+
+/// Every adapter that claims an exactly-once guarantee of any strength must be
+/// reachable by the chunking rule that qualifies it.
+///
+/// Without this, `exactly-once-below-cap` could be applied to an adapter with
+/// no cap (vacuously "below" it) or the bare label could be reinstated over one
+/// that has a cap (the original defect). Both are checked by `disagreements`;
+/// this asserts the CURRENT tree satisfies the rule, so the negative controls
+/// below are mutations of a green baseline.
+#[test]
+fn the_cap_rule_holds_over_the_real_tree() {
+    let declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    let mut checked = 0usize;
+    for (platform, guarantee) in &declared {
+        let Some(m) = measured.get(platform) else {
+            continue; // imessage off macOS
+        };
+        if guarantee.starts_with("exactly-once") {
+            checked += 1;
+            assert_eq!(
+                guarantee == "exactly-once-below-cap",
+                m.cap.is_some(),
+                "{platform}: label {guarantee:?} disagrees with max_message_len() == {:?}",
+                m.cap
+            );
+        }
+    }
+    // Anti-vacuity: a loop that examined nothing would pass.
+    assert_eq!(
+        checked, 1,
+        "expected exactly one exactly-once-family row to check, checked {checked}"
+    );
+}
+
+#[test]
+fn comparator_rejects_a_bare_exactly_once_over_a_capped_adapter() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    // THE original defect, replayed: drop the precondition and claim the
+    // guarantee unconditionally. Matrix has a cap, so this must be rejected.
+    declared.insert("matrix".into(), "exactly-once".into());
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].starts_with("matrix:") && problems[0].contains("exactly-once-below-cap"),
+        "the rejection must name matrix and the label the row should carry: {problems:?}"
+    );
+}
+
+#[test]
+fn comparator_rejects_below_cap_on_an_adapter_with_no_cap() {
+    let mut declared = parse_declaration(DECLARATION);
+    let mut measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    // The other direction: the qualifier applied where there is nothing to
+    // qualify. Matrix's cap is removed and the label left alone.
+    //
+    // Known-positive for this mutation: matrix really does have a cap today
+    // (asserted in `exactly_one_adapter_is_exactly_once`), so removing it is a
+    // real change and not a no-op against an already-empty value.
+    assert!(measured["matrix"].cap.is_some());
+    measured.get_mut("matrix").unwrap().cap = None;
+    declared.insert("matrix".into(), "exactly-once-below-cap".into());
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no cap for the guarantee to be below"),
+        "got: {problems:?}"
     );
 }
 
@@ -339,7 +475,12 @@ fn comparator_rejects_a_flipped_row() {
 
     // Claim exactly-once for an adapter that provides no such thing. This is
     // the dangerous direction: a document over-promising relative to the code.
-    declared.insert("telegram".into(), "exactly-once".into());
+    //
+    // The below-cap spelling is used because telegram DOES declare a cap
+    // (4096), so the bare label would additionally trip the cap rule and this
+    // test would be asserting two failures at once. Here the capability
+    // mismatch is the single variable under test.
+    declared.insert("telegram".into(), "exactly-once-below-cap".into());
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(
@@ -439,22 +580,30 @@ fn the_prose_table_agrees_with_the_machine_readable_block() {
             .find(|l| l.trim_start().starts_with(&format!("| {label}")))
             .unwrap_or_else(|| panic!("no prose table row starting with {label} for {platform:?}"));
 
-        // `exactly-once` is a substring of nothing else in the vocabulary, and
-        // `at-most-once` likewise, so a plain containment check is sound here.
         assert!(
             row.contains(guarantee),
             "prose row for {platform:?} does not carry the declared guarantee {guarantee:?}:\n  \
              {row}"
         );
-        let other = if guarantee == "exactly-once" {
-            "at-most-once"
-        } else {
-            "exactly-once"
-        };
-        assert!(
-            !row.contains(other),
-            "prose row for {platform:?} carries BOTH guarantees, so it is ambiguous:\n  {row}"
-        );
+
+        // Ambiguity check. `exactly-once` is a SUBSTRING of
+        // `exactly-once-below-cap`, so containment alone cannot separate them:
+        // strip every occurrence of the declared label first, then look at what
+        // is left over. A leftover vocabulary term means the row states two
+        // different guarantees and a reader cannot tell which is binding.
+        let leftover = row.replace(guarantee.as_str(), "");
+        for term in ["exactly-once", "at-most-once", "at-least-once"] {
+            // `at-least-once` is the honest description of what happens ABOVE
+            // the cap, so a below-cap row is expected to name it and only it.
+            if guarantee == "exactly-once-below-cap" && term == "at-least-once" {
+                continue;
+            }
+            assert!(
+                !leftover.contains(term),
+                "prose row for {platform:?} is declared {guarantee:?} but also says {term:?}, so \
+                 it states two guarantees and is ambiguous:\n  {row}"
+            );
+        }
     }
 }
 

@@ -179,13 +179,23 @@ impl JobHandler for EngineJobHandler {
     /// outcome-unknown delivery may be retried. Only a channel target is a
     /// delivery at all; for anything else the question does not arise and the
     /// conservative answer is the correct one.
+    ///
+    /// It asks about **this body**, not about the adapter. `send_to_keyed`
+    /// drops the idempotency key on a body that exceeds the connector's
+    /// `max_message_len` — one key cannot identify the N messages a chunked
+    /// body becomes — so above the cap nothing rides the wire and a retry
+    /// duplicates. Answering from the adapter's bit alone would take the
+    /// re-attempt arm for an over-cap Matrix delivery and produce exactly the
+    /// silent duplicate this method exists to prevent.
     async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
         match target {
-            Target::Channel { channel_name, .. } => match &self.channels {
+            Target::Channel {
+                channel_name, text, ..
+            } => match &self.channels {
                 Some(mgr) => {
                     mgr.read()
                         .await
-                        .supports_outbound_idempotency(channel_name)
+                        .supports_outbound_idempotency_for(channel_name, text)
                         .await
                 }
                 None => false,

@@ -18,9 +18,9 @@ the table below disagrees with the adapter's actual capability. See
 
 | | |
 |---|---|
-| **1 of 10** adapters | exactly-once — Matrix, and it is the only one ever proven at the real platform |
+| **1 of 10** adapters | exactly-once **and only below its length cap** — Matrix, the only one ever proven at the real platform. Above the cap the same adapter is **at-least-once**: the body is chunked, the key is dropped, and a retry duplicates. See [§10](#10-the-matrix-guarantee-has-a-precondition-the-length-cap) |
 | **9 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
-| **0 of 10** adapters | at-least-once (the gateway never automatically re-sends to a destination that cannot recognise a replay) |
+| **1 of 10** adapters | at-least-once — Matrix again, **above** its cap, and that is the whole of the at-least-once column. It is not a second row; it is the other half of the first one |
 | **On every platform** | a **recurring** job that outlives its trigger period sends again, under a new delivery id. Not a duplicate, and not Windows-specific — see [§5](#5-a-recurring-job-delivers-again-and-that-is-not-a-duplicate) |
 
 **On 2026-07-30 this table lost two of its three exactly-once rows.** Slack and Discord were
@@ -43,7 +43,7 @@ relying on it, because that scope is narrower than "one message".
 | Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
 |---|---|---|---|---|---|
 | **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
-| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once** | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`.** See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
+| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot, and it rides only a body that fits in ONE event | **exactly-once-below-cap** (above the 32 768-char cap the body is chunked, no key rides, and the guarantee is the at-least-once one — [§10](#10-the-matrix-guarantee-has-a-precondition-the-length-cap)) | **retried** with the same key, below the cap | one message below the cap; the homeserver returns the original `event_id`. Above it, one message **per chunk, per attempt** | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`, in BOTH directions.** Below-cap replay → 1 arrival; above-cap replay → 2× the chunk count. See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) and [§10](#10-the-matrix-guarantee-has-a-precondition-the-length-cap) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **NOT MEASURED at a real destination** — see the correction below |
 | **Twilio SMS** | none that Twilio honours — the adapter sends an `Idempotency-Key` header and the `Messages` resource documents no dedup slot to read it | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **NOT MEASURED at a real destination** — see the correction below |
@@ -542,11 +542,105 @@ existed**, and to one with an empty event id. Acceptance is therefore compatible
 having been redacted. Grade a delete by reading the event back and checking that `content.body`
 is gone — never by the status code.
 
+---
+
+## 10. The Matrix guarantee has a precondition: the length cap
+
+**Matrix is exactly-once for a body that fits in one event, and at-least-once for a body that
+does not.** §2 stated it without the precondition until 2026-07-31. The code was right and the
+declaration was wrong — the same shape as the Slack and Discord corrections above, found in the
+row that survived them.
+
+### Where the key goes
+
+`ChannelManager::send_to_keyed` (`crates/wcore-channels/src/manager.rs`) splits a body that
+exceeds the connector's `max_message_len` and then sends the pieces **unkeyed**:
+
+```rust
+let chunks = match guard.max_message_len() {
+    Some(max) if max > 0 => crate::chunk::chunk_message(&msg.text, max),
+    _ => vec![msg.text.clone()],
+};
+if chunks.len() <= 1 {
+    return match key {
+        Some(k) => guard.send_message_idempotent(msg, k).await,   // <- the key rides HERE only
+        None    => guard.send_message(msg).await,
+    };
+}
+// multi-chunk: every piece goes through send_message — no key anywhere
+```
+
+**That branch is correct and it stays.** One key cannot identify N destination messages, and
+handing the same txn id to every chunk would make a correct homeserver suppress chunks 2..N as
+replays and silently truncate the message. Truncation is a worse outcome than duplication.
+
+What was wrong is the *declaration*. `supports_outbound_idempotency()` is what the delivery
+spine consults before it decides a retry is safe (`automation.rs:216-220`), it is a property of
+the **adapter**, and above the cap the adapter's answer is not true of the message in hand.
+Matrix's cap is **32 768 chars** (`wcore-channel-matrix/src/lib.rs:165`), conservative against
+the spec's 65 536-byte whole-event limit.
+
+### The consequence, before the fix
+
+An outcome-unknown Matrix delivery whose body exceeded 32 768 chars took the **re-attempt** arm.
+Nothing on the wire let the homeserver recognise the replay, so every chunk landed a second
+time. The ledger recorded one delivery, `wayland-core gateway abandoned` stayed empty, and the
+room got two copies of a long message. That is precisely the Discord failure of
+[§8](#8-discord-was-wrong-and-how-it-was-found) — *the product creating a duplicate on purpose,
+on the strength of a guarantee that did not hold for that message* — reached by a different
+route.
+
+### What changed — callers can now get a per-message answer
+
+They could, so they do. The per-adapter method is unchanged and still means what it says;
+`ChannelManager::supports_outbound_idempotency_for(name, text)` is the new one, and it returns
+the adapter's bit **and** whether this body survives as a single chunk. Both production callers
+already held the body when they asked:
+
+| caller | had the text | now asks |
+|---|---|---|
+| `EngineJobHandler::dispatch_is_idempotent` (`wcore-agent/src/cron.rs`) | `Target::Channel { text, .. }` | per-message |
+| `gateway resend` (`wcore-cli/src/gateway.rs`) | read from the ledger before the re-send | per-message |
+
+So an over-cap Matrix delivery now takes the **abandon** arm: recorded, surfaced by
+`wayland-core gateway abandoned`, re-sendable by an operator who has checked. And `gateway
+resend` prints `replay-safe: no` for it, where it previously printed `yes`.
+
+This is the asymmetry §2 already relies on: a wrong `false` abandons a delivery **visibly**, a
+wrong `true` duplicates one **silently**.
+
+### The declaration is machine-checked against the cap
+
+`exactly-once-below-cap` would be decorative if nothing read it, so
+`delivery_semantics_declaration.rs` now requires an adapter with that label to declare a real
+`max_message_len()`, and an adapter with a bare `exactly-once` to declare **none**. Relabelling
+Matrix back to bare `exactly-once` fails the build, because Matrix has a cap. The negative
+control for that check runs in the same file.
+
+### Driven live, in both directions
+
+Anti-vacuity: "2 arrivals above the cap" on its own does not show the cap is the discriminator —
+it is equally explained by retry always duplicating. So the below-cap control was run in the
+same session, against the same room, over the same adapter, with the delivery id replayed
+identically. Only the body length differs between the two legs.
+
+Room `!kntRqkQCkPjhPvMMvf:matrix.org`, via `matrix_cap_replay.rs`, on `hetzner-dsm`.
+
+<!-- B1.3-LIVE-RESULT -->
+
+Every event created by the run was redacted afterwards.
+
 <!-- DELIVERY-SEMANTICS-MACHINE-READABLE
 Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires
 them to agree, so a table edit that misses this block fails, and vice versa.
+
+The vocabulary is exactly-once / exactly-once-below-cap / at-most-once / at-least-once.
+`exactly-once-below-cap` is NOT a softer way of writing `exactly-once`: the test requires
+such an adapter to declare a real `max_message_len()`, and requires a bare `exactly-once`
+adapter to declare NONE. So the two labels are distinguishable by measurement, and the
+bare label cannot be used for an adapter that has a cap. See §10.
 slack = at-most-once
-matrix = exactly-once
+matrix = exactly-once-below-cap
 discord = at-most-once
 telegram = at-most-once
 sms = at-most-once
