@@ -12,7 +12,28 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long `--build-info` gets before the probe calls the binary hung.
+///
+/// This budget exists to catch a **hung** binary, not a slow one, and it was
+/// 5 seconds — a figure that made the packaged-artifact path impossible to
+/// pass on macOS. [`seal`] deliberately copies the binary into a fresh
+/// tempdir, and macOS validates the code signature of a newly-written
+/// executable on its FIRST exec. Measured on this hardware (macOS 15,
+/// aarch64, a 241 MB debug `wayland-core`):
+///
+/// ```text
+/// cp into a tempdir                    0.33 s
+/// first exec of the copy  --build-info 26.37 s   <- signature validation
+/// second exec of the copy --build-info  0.04 s   <- validated, cached
+/// direct exec of the original           0.02 s
+/// ```
+///
+/// Six `driver_cli` tests therefore reported `--build-info timed out` for a
+/// binary that answers in 40 ms once the kernel has seen it. Raising the
+/// budget does not weaken the check: a genuinely hung binary never answers,
+/// so it still fails — just 90 seconds later. Lowering it back below ~30 s
+/// re-creates a gate with no reachable pass state on macOS.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
