@@ -12,6 +12,8 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use tokio::process::{Child, Command};
+#[cfg(unix)]
+use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
 
 #[cfg(target_os = "linux")]
 use linux::Cgroup;
@@ -27,11 +29,29 @@ pub(crate) async fn serialize_candidate_identity() -> tokio::sync::MutexGuard<'s
         .await
 }
 
+/// How long a killed process group is given to become empty before the
+/// containment proof gives up and reports failure.
+///
+/// SIGKILL is not synchronous: the kernel still has to tear each member down.
+/// This is a bound on that teardown, not a retry budget — the proof polls, it
+/// does not re-signal.
+#[cfg(unix)]
+const CONTAINMENT_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug)]
 pub(crate) struct ProcessTree {
     backend: Backend,
     root_pid: Option<u32>,
     cleanup_complete: bool,
+    /// Set once the direct child has been reaped on the process-group backend.
+    ///
+    /// The unreaped leader is the ONLY thing pinning the numeric PGID; after
+    /// it is reaped the kernel may hand that id to an unrelated process group.
+    /// Every path that would address the group again — including [`Drop`] —
+    /// must refuse once this is set, or a late cleanup would SIGKILL somebody
+    /// else's processes.
+    #[cfg(unix)]
+    pgid_anchor_released: bool,
     peak_memory_bytes: Option<u64>,
     peak_cpu_millis: Option<u64>,
 }
@@ -114,6 +134,8 @@ impl ProcessTree {
                         backend: Backend::Cgroup(cgroup),
                         root_pid: None,
                         cleanup_complete: false,
+                        #[cfg(unix)]
+                        pgid_anchor_released: false,
                         peak_memory_bytes: None,
                         peak_cpu_millis: None,
                     });
@@ -141,6 +163,8 @@ impl ProcessTree {
             backend,
             root_pid: None,
             cleanup_complete: false,
+            #[cfg(unix)]
+            pgid_anchor_released: false,
             peak_memory_bytes: None,
             peak_cpu_millis: None,
         })
@@ -219,28 +243,54 @@ impl ProcessTree {
     /// Force the owned tree down, reap the direct child, and prove the kernel
     /// containment is empty before returning success.
     pub(crate) async fn terminate(&mut self, child: &mut Child) -> io::Result<()> {
-        #[cfg(unix)]
-        let process_group = matches!(&self.backend, Backend::ProcessGroup);
-        #[cfg(not(unix))]
-        let process_group = false;
         let tree_error = self.kill_tree().err();
+
+        // ORDER IS LOAD-BEARING on the process-group backend. The proof has to
+        // run BEFORE `reap_child`, because the unreaped leader is the only
+        // thing pinning the numeric PGID — after reaping, that id may name an
+        // unrelated group and a census of it would be meaningless.
+        //
+        // This used to read `self.cleanup_complete = true; None`, which skipped
+        // the proof entirely and recorded `cleanup_verified` anyway: a gate
+        // with no reachable fail state. It is now a real measurement.
+        #[cfg(unix)]
+        let early_verify = if matches!(&self.backend, Backend::ProcessGroup) {
+            Some(self.prove_process_group_empty().await.err())
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let early_verify: Option<Option<io::Error>> = None;
+
         let child_kill_error = child.start_kill().err();
         let reap_error = reap_child(child).await.err();
+        #[cfg(unix)]
+        if matches!(&self.backend, Backend::ProcessGroup) {
+            self.pgid_anchor_released = true;
+        }
         let child_kill_error = reap_error.as_ref().and(child_kill_error);
-        let verify_error = if process_group {
-            // The leader's unreaped PID anchored the group while SIGKILL was
-            // sent. Never address the numeric PGID again after reaping: it can
-            // be recycled for an unrelated process group.
-            self.cleanup_complete = true;
-            None
-        } else {
-            self.finish_cleanup().await.err()
+        let verify_error = match early_verify {
+            Some(error) => error,
+            None => self.finish_cleanup().await.err(),
         };
         let result = combine_cleanup_errors(tree_error, child_kill_error, reap_error, verify_error);
         if result.is_ok() {
             self.cleanup_complete = true;
         }
         result
+    }
+
+    /// Prove the observed process group holds no live member.
+    ///
+    /// Only valid while the leader is still unreaped — see [`Self::terminate`].
+    #[cfg(unix)]
+    async fn prove_process_group_empty(&self) -> io::Result<()> {
+        let pid = self.root_pid.ok_or_else(|| {
+            io::Error::other("process-group child had no anchored PID to prove containment against")
+        })?;
+        UnixProcessGroup::from_pid(pid)?
+            .wait_empty(CONTAINMENT_PROOF_TIMEOUT)
+            .await
     }
 
     /// Wait for a normal exit without surrendering a Unix process-group
@@ -259,12 +309,19 @@ impl ProcessTree {
             let deadline = std::time::Instant::now() + timeout;
             loop {
                 if group.child_exited_unreaped()? {
-                    let cleanup_error = group.kill().err();
-                    self.cleanup_complete = true;
+                    // Kill AND prove empty while the unreaped leader still
+                    // pins the PGID. `child.wait()` below surrenders that
+                    // anchor, after which the id may be recycled and must
+                    // never be addressed again — see `pgid_anchor_released`.
+                    let kill_error = group.kill().err();
+                    let verify_error = group.wait_empty(CONTAINMENT_PROOF_TIMEOUT).await.err();
+                    let cleanup_error =
+                        combine_cleanup_errors(kill_error, None, None, verify_error).err();
+                    if cleanup_error.is_none() {
+                        self.cleanup_complete = true;
+                    }
+                    self.pgid_anchor_released = true;
                     let status = child.wait().await?;
-                    // Group ownership is non-authoritative, but the anchored
-                    // cleanup attempt is complete. Do not risk a stale-PGID
-                    // retry from Drop after the leader has been reaped.
                     return Ok(Some((status, cleanup_error)));
                 }
                 if std::time::Instant::now() >= deadline {
@@ -299,6 +356,14 @@ impl ProcessTree {
             Backend::Cgroup(cgroup) => cgroup.kill(),
             #[cfg(unix)]
             Backend::ProcessGroup => {
+                if self.pgid_anchor_released {
+                    // The leader has been reaped, so this numeric PGID may now
+                    // name an unrelated group and SIGKILLing it would kill
+                    // somebody else's processes. Silent by design: the group
+                    // was already signalled AND proven empty while the anchor
+                    // was still held, so there is nothing left to do here.
+                    return Ok(());
+                }
                 if let Some(pid) = self.root_pid {
                     UnixProcessGroup::from_pid(pid)?.kill()?;
                 }
@@ -321,8 +386,18 @@ impl ProcessTree {
                 }
                 cgroup.wait_empty_and_remove().await
             }
+            // NOT `Ok(())`. Returning success here is what made the
+            // process-group containment proof unfalsifiable: the caller
+            // recorded `cleanup_verified` on the strength of a function that
+            // measured nothing. The proof for this backend has to run before
+            // the leader is reaped, so reaching this arm means a caller used
+            // the wrong order — which is a defect, not a pass.
             #[cfg(unix)]
-            Backend::ProcessGroup => Ok(()),
+            Backend::ProcessGroup => Err(io::Error::other(
+                "process-group containment must be proven empty BEFORE the leader is reaped \
+                 (see ProcessTree::terminate); finish_cleanup cannot verify it afterwards \
+                 because the numeric PGID may already have been recycled",
+            )),
             #[cfg(windows)]
             Backend::WindowsJob(job) => job.wait_empty().await,
             #[cfg(not(any(unix, windows)))]
@@ -434,6 +509,11 @@ impl UnixProcessGroup {
         Ok(())
     }
 
+    /// How many live (non-corpse) processes the group still holds.
+    pub(crate) fn live_members(&self) -> ProcessGroupCensus {
+        process_group_census(self.id as u32)
+    }
+
     pub(crate) fn kill(&self) -> io::Result<()> {
         // SAFETY: the negative id addresses only the evaluator-owned group.
         let rc = unsafe { libc::kill(-self.id, libc::SIGKILL) };
@@ -441,10 +521,65 @@ impl UnixProcessGroup {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            // **Darwin returns EPERM, not ESRCH**, when the group's only
+            // remaining member is the unreaped anchor zombie — which is
+            // precisely the state the success path deliberately creates
+            // (`child_exited_unreaped` holds the corpse via `WNOWAIT`). So on
+            // macOS every clean shutdown used to fail its own cleanup.
+            //
+            // The tolerance is NOT blanket. EPERM also covers the genuinely
+            // dangerous case: a live descendant this process is not permitted
+            // to signal — a real containment failure. The two are separated by
+            // enumerating the group, because `kill(-pgid, 0)` returns EPERM in
+            // BOTH states and cannot tell them apart.
+            Some(libc::EPERM) => match self.live_members() {
+                ProcessGroupCensus::Live(0) => Ok(()),
+                ProcessGroupCensus::Live(n) => Err(io::Error::other(format!(
+                    "SIGKILL to process group {} was refused with EPERM and the group still \
+                     holds {n} LIVE member(s); containment has failed, not completed",
+                    self.id
+                ))),
+                // Cannot see, so cannot excuse. Tolerating EPERM on an
+                // unreadable group would restore exactly the false success
+                // this arm exists to prevent.
+                ProcessGroupCensus::Indeterminate(why) => Err(io::Error::other(format!(
+                    "SIGKILL to process group {} was refused with EPERM and the group could \
+                     not be enumerated to establish whether anything survived: {why}",
+                    self.id
+                ))),
+            },
+            _ => Err(error),
+        }
+    }
+
+    /// Poll until the group holds no live member, or fail loudly.
+    ///
+    /// SIGKILL is asynchronous — the kernel still has to tear each member
+    /// down — so a group that is not yet empty is not yet a failure. A group
+    /// that is *still* not empty at the deadline is.
+    pub(crate) async fn wait_empty(&self, timeout: Duration) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.live_members() {
+                ProcessGroupCensus::Live(0) => return Ok(()),
+                ProcessGroupCensus::Indeterminate(why) => {
+                    return Err(io::Error::other(format!(
+                        "cannot prove process group {} is empty: {why}",
+                        self.id
+                    )));
+                }
+                ProcessGroupCensus::Live(n) if std::time::Instant::now() >= deadline => {
+                    return Err(io::Error::other(format!(
+                        "process group {} still held {n} live member(s) {:?} after SIGKILL; \
+                         containment is NOT proven empty",
+                        self.id, timeout
+                    )));
+                }
+                ProcessGroupCensus::Live(_) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -2131,5 +2266,125 @@ mod linux {
                 .expect_err("persistent cleanup failure must fail closed");
             assert!(error.to_string().contains("fixture cleanup failure"));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_process_group_tests {
+    use super::*;
+
+    /// Spawn a child as leader of its own process group, exactly as
+    /// `ProcessTree::configure` does.
+    fn spawn_group_leader(argv: &[&str]) -> (Child, UnixProcessGroup) {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new(argv[0]);
+        command.args(&argv[1..]);
+        command.stdin(std::process::Stdio::null());
+        command.stdout(std::process::Stdio::null());
+        command.stderr(std::process::Stdio::null());
+        command.as_std_mut().process_group(0);
+        let child = command.spawn().expect("spawn group leader");
+        let pid = child.id().expect("child pid");
+        let group = UnixProcessGroup::from_pid(pid).expect("group from pid");
+        (child, group)
+    }
+
+    /// The measurement the EPERM tolerance rests on.
+    ///
+    /// The success path deliberately leaves the leader unreaped (`WNOWAIT`) so
+    /// its PID/PGID cannot be recycled, then signals the group. On **Darwin**
+    /// `kill(-pgid, SIGKILL)` against a group whose only member is that corpse
+    /// returns **EPERM**, not ESRCH — so the old `ESRCH`-only tolerance made
+    /// every clean shutdown fail its own cleanup. This test pins the platform
+    /// behaviour AND the tolerance, so neither can regress silently.
+    #[tokio::test]
+    async fn a_group_holding_only_the_anchor_corpse_is_cleaned_not_failed() {
+        let (mut child, group) = spawn_group_leader(&["/bin/sh", "-c", "exit 0"]);
+
+        // Wait for the leader to exit while deliberately NOT reaping it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !group.child_exited_unreaped().expect("waitid") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the leader never exited"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The corpse is NOT a live member — this is what makes the tolerance
+        // safe, and it is the half a `kill(-pgid, 0)` probe cannot see.
+        assert_eq!(
+            group.live_members(),
+            ProcessGroupCensus::Live(0),
+            "a group whose only member is the unreaped anchor must census as empty"
+        );
+
+        // Record what this kernel actually answers, so a failure here reads as
+        // a platform fact rather than a mystery.
+        // SAFETY: the negative id addresses only the group we just created.
+        let rc = unsafe { libc::kill(-(group.id), libc::SIGKILL) };
+        let raw = (rc != 0).then(|| io::Error::last_os_error().raw_os_error());
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                raw,
+                Some(Some(libc::EPERM)),
+                "Darwin is expected to answer EPERM here; if this changed, the tolerance in \
+                 UnixProcessGroup::kill needs re-deriving rather than keeping"
+            );
+        }
+
+        // And the product path must treat it as success.
+        group
+            .kill()
+            .expect("cleaning a group that holds only the anchor corpse must succeed");
+        group
+            .wait_empty(Duration::from_secs(5))
+            .await
+            .expect("an anchor-only group must prove empty");
+
+        child.wait().await.expect("reap");
+    }
+
+    /// The negative control. Without this, tolerating EPERM would be
+    /// indistinguishable from ignoring it.
+    #[tokio::test]
+    async fn a_group_that_still_holds_a_live_process_cannot_prove_itself_empty() {
+        let (mut child, group) = spawn_group_leader(&["/bin/sh", "-c", "sleep 30"]);
+
+        // Give the leader a moment to be schedulable.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if group.live_members() == ProcessGroupCensus::Live(1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the live leader never appeared in its own group census: {:?}",
+                group.live_members()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // A live member must defeat the emptiness proof. If this ever passes,
+        // the containment gate has no reachable fail state.
+        let error = group
+            .wait_empty(Duration::from_millis(200))
+            .await
+            .expect_err("a group holding a LIVE process must NOT prove itself empty");
+        assert!(
+            error.to_string().contains("live member"),
+            "unexpected failure text: {error}"
+        );
+
+        // Now clean it for real and show the same call flips to success — the
+        // proof tracks the world rather than always answering one way.
+        group.kill().expect("kill the live group");
+        group
+            .wait_empty(Duration::from_secs(5))
+            .await
+            .expect("after SIGKILL the group must become provably empty");
+
+        child.wait().await.expect("reap");
     }
 }
