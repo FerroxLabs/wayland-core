@@ -1,0 +1,108 @@
+F22-06 WINDOWS LEGS — verbatim console transcript of D:\p22ev\measure.ps1
+Host: SeanDesktop (SEANDESKTOP), Microsoft Windows NT 10.0.26200.0
+Commit under test: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4 (detached worktree C:\p22)
+Date: 2026-07-31
+Instruments: crates/wcore-agent/examples/p22_reduce.rs and p22_append.rs, built release,
+             saved aside as pre-change / post-change, then REVERTED (measurement
+             instruments, not deliverables — C:\p22 crates/ is clean again).
+
+HARNESS NOTE (not a product behaviour): the committed corpus was transported to the
+Windows box over scp, which re-inherits D:\ ACLs and strips the PROTECTED owner-only
+DACL the product itself writes on .snapshot / .authority. The product correctly
+REFUSED to read them in that state:
+    REDUCE-FAILED: session snapshot permissions are not private: ...journal.snapshot
+The harness restores the product's own on-disk invariant (protected DACL, owner-only,
+no inherited ACEs) before each measurement. No check was weakened to make this pass.
+
+=== M0  compile-time exhaustiveness (variant added, NO reducer arm) ===
+error[E0004]: non-exhaustive patterns: `&model::SessionEvent::P22Probe { .. }` not covered
+     |           ^^^^^ pattern `&model::SessionEvent::P22Probe { .. }` not covered
+ 489 |     P22Probe {
+3352 +         &model::SessionEvent::P22Probe { .. } => todo!()
+error: could not compile `wcore-agent` (lib) due to 1 previous error
+CARGO_EXIT=101
+M0_RESULT=REDUCTION-DECISION-IS-FORCED (identical to the Linux observation)
+
+=== HOST ===
+host=SEANDESKTOP os=Microsoft Windows NT 10.0.26200.0
+commit=2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+bin p22_reduce_prechange.exe 6712320 848c8be2301f169d773f4218c7d97a563d40de22ef28917961b57f9664e19fe1
+bin p22_reduce_postchange.exe 6718976 247311c9b5033e3bc50d7a22f63cd8a457cba2389882d8cf739884f60edc4585
+bin p22_append_postchange.exe 5619200 ccab1c582c238f7e630d373072c836ee6c41f96dbd7097fe0f7d7be4d9eecb50
+
+=== M1  pre vs post reduction of the PRISTINE Windows corpus ===
+M1-pre exit=0 stdout_bytes=70783 stdout_lines=245 sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+M1-post exit=0 stdout_bytes=70783 stdout_lines=245 sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+M1_RESULT=IDENTICAL sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+
+=== M2  post binary appends ONE probe frame, then re-reduces ===
+M2-before exit=0 stdout_bytes=70783 stdout_lines=245 sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+M2-append exit=0 stdout_bytes=106 stdout_lines=3
+    append says: OPENED | APPENDED seq=14 checksum=4d10044b0c0a317cc7db149b3ade7bf54b052d4e731f1121e9a93b186c965a6f | RELEASED
+M2-after exit=0 stdout_bytes=70783 stdout_lines=245 sha256=f62a32bc507df7eafbed3142529611eb898f84f5bb8e0186201f78f865bbba8d
+M2_DIFF_LINES=4
+    => "last_seq": 14,
+    => "last_checksum": "4d10044b0c0a317cc7db149b3ade7bf54b052d4e731f1121e9a93b186c965a6f",
+    <= "last_seq": 13,
+    <= "last_checksum": "f0bb709125aeb0f40b5a43f4ebb6de2ce964ba97fcedfda5ae52d4efff7d7eb8",
+M2_RESULT=ONLY-THE-CHAIN-HEAD-MOVED (prefix identical; v5 boundary admits the frame)
+
+=== M3  PRE binary on the probe-bearing journal (must fail closed) ===
+M3-pre-on-probe exit=3 stdout_bytes=0 stdout_lines=0
+    stderr[0]: REDUCE-FAILED: session journal D:\p22ev\work\m2\ee110c384533.journal has a
+    corrupt complete frame 16: unknown variant `p22_probe`, expected one of
+    `session_imported`, ... `delivery_finished` at line 1 column 171
+M3_RESULT=FAILS-CLOSED exit=3 stdout_lines=0
+
+=== M4  snapshot+authority binding: companions present vs absent ===
+M4-with-companions exit=0 stdout_bytes=70783 stdout_lines=245 sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+M4-full-log-only   exit=0 stdout_bytes=70783 stdout_lines=245 sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+M4_RESULT=SNAPSHOT-PATH-AND-FULL-LOG-AGREE sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef
+  (the pre-change product wrote this .snapshot/.authority pair; the post-change binary
+   accepts it, and the snapshot+suffix reduction equals the full-log replay)
+
+=== M5  writer authority lease across restart, WINDOWS ===
+-- M5a sequential: two separate processes, one after the other
+M5a-1 exit=0 :: OPENED | APPENDED seq=14 checksum=4d10044b0c0a317cc7db149b3ade7bf54b052d4e731f1121e9a93b186c965a6f | RELEASED
+M5a-2 exit=0 :: OPENED | APPENDED seq=15 checksum=d7565508c81783ecf4e588ad0b972352fa3edb4f8ff7c70360ccd8bda9a175fc | RELEASED
+M5a_SEQUENTIAL=BOTH-SUCCEEDED (lease released on drop)
+
+-- M5b concurrent: holder keeps the lease 25s; contender AND reader run against it
+    holder still running=True
+M5b-contender exit=5 stdout_bytes=0
+    stderr[0]: OPEN-FAILED: session journal writer lease is already held at
+               D:\p22ev\work\m5\ee110c384533.journal.writer.lock
+M5b_CONTENTION=REFUSED exit=5 (the lease is real and cross-process on Windows)
+M5b-reader-while-locked exit=0 stdout_bytes=70783 stdout_lines=245 sha256=0519f05a9b58c8071b5ea9e60763c929320af7adbc006aedb69f22acb87add44
+M5b_READER_WHILE_LOCKED=READABLE (the sentinel-byte lock at u64::MAX-1 leaves every real
+    journal byte readable; the mandatory-lock read starvation the design guards against
+    does NOT occur)
+    holder :: OPENED | APPENDED seq=16 checksum=be12bf2eb840cbd12edfff1692f6c3856443cef809a74f7233753eb5475ce4cf | HOLDING 25s | RELEASED
+
+-- M5c after release
+M5c-after-release exit=0
+M5c_RELEASED_ON_EXIT=YES
+
+=== NC1  negative control: a corrupted journal MUST be refused ===
+NC1-corrupt exit=3 stdout_bytes=0
+    stderr[0]: REDUCE-FAILED: session journal D:\p22ev\work\nc1\ee110c384533.journal
+               frame 8 digest mismatch
+NC1_RESULT=REFUSED exit=3 (the reduce gate can fail, so its passes are not vacuous)
+
+=== XP  cross-platform: reduce the LINUX corpus on WINDOWS ===
+XP-pre  exit=0 stdout_bytes=74417 stdout_lines=235 sha256=114a1f825ef565a948c829a20b5cdeb6e55dc91dcda69699fe2e1ba29e499c3e
+XP-post exit=0 stdout_bytes=74417 stdout_lines=235 sha256=114a1f825ef565a948c829a20b5cdeb6e55dc91dcda69699fe2e1ba29e499c3e
+
+The raw sha256 does NOT equal the recorded Linux ff13b6ec... and that comparison is
+INVALID: the 2026-07-26 Linux instrument serialised through serde_json::Value, which
+sorts keys, while this instrument serialises the struct directly, which preserves
+declaration order. Both outputs are 74417 bytes and 235 lines. Normalising both to
+sorted-key canonical JSON and re-hashing:
+
+    linux   canonical sha256 = 4f5713e2a625ee050cc36d7f86fb42fbe1183705f58676186bcb9cff9392f6e2
+    windows canonical sha256 = 4f5713e2a625ee050cc36d7f86fb42fbe1183705f58676186bcb9cff9392f6e2
+    python json equality     = True
+
+XP_RESULT=SEMANTICALLY-IDENTICAL — the journal the Linux product wrote reduces to
+exactly the same ReducedSessionState on Windows. Reduction is platform-independent
+by measurement, not by assertion.
