@@ -332,16 +332,45 @@ impl MacProcessGroupAuthority {
                 return Err(error);
             }
         };
-        let root_and_group_still_match = root.still_matches()
-            && macos_process_group(process_group).is_ok_and(|group| group == process_group);
-        if !root_and_group_still_match {
+        // What must hold once the sentinel has joined:
+        //
+        //   1. the SENTINEL is really in `process_group` — confirmed here by
+        //      the parent rather than taken from the child's own report, and
+        //   2. the root has not been replaced by a different process.
+        //
+        // This used to read `root.still_matches() && getpgid(root) == root`,
+        // and on Darwin **neither conjunct can hold once the root exits**:
+        // both `proc_pidinfo` and `getpgid` answer ESRCH for a zombie
+        // (measured). A workload that finishes during the socketpair + fork
+        // window — `git config`, and every other fast child — therefore
+        // reported "authority changed while containment was attached" and
+        // could never establish containment at all. That is a gate with no
+        // reachable pass state, not a security check.
+        //
+        // The anchor is the sentinel, not the root: a process group id cannot
+        // be recycled while a live process sits in it, and the sentinel is a
+        // live unreaped child of ours held open by `channel`. `signal_group`
+        // already rests on exactly that and guards with `sentinel`, not
+        // `root`. A finished root is the SUCCESS case; a *replaced* root is
+        // still refused.
+        let sentinel_holds_the_group =
+            macos_process_group(sentinel_pid).is_ok_and(|group| group == process_group);
+        let root_not_replaced = match root.recheck() {
+            MacIdentityRecheck::Same | MacIdentityRecheck::Corpse => true,
+            MacIdentityRecheck::Recycled | MacIdentityRecheck::Unreadable(_) => false,
+        };
+        if !(sentinel_holds_the_group && root_not_replaced) {
             unsafe {
                 libc::kill(sentinel_pid, libc::SIGKILL);
                 libc::waitpid(sentinel_pid, std::ptr::null_mut(), 0);
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "macOS process-group authority changed while containment was attached",
+                format!(
+                    "macOS process-group authority changed while containment was attached \
+                     (sentinel in group: {sentinel_holds_the_group}, root: {:?})",
+                    root.recheck()
+                ),
             ));
         }
         Ok(Self {
@@ -394,11 +423,55 @@ impl MacProcessIdentity {
     }
 
     fn still_matches(&self) -> bool {
-        macos_bsd_info(self.pid).is_ok_and(|info| {
-            info.pbi_start_tvsec == self.start_sec && info.pbi_start_tvusec == self.start_usec
-        })
+        matches!(self.recheck(), MacIdentityRecheck::Same)
     }
 
+    /// Three-valued identity recheck.
+    ///
+    /// `still_matches()` collapses this to a bool, which is right for the
+    /// sentinel (held alive by its socketpair, so a corpse would be a real
+    /// fault) and WRONG for a workload root, which is allowed to have
+    /// finished. See [`MacIdentityRecheck::Corpse`].
+    fn recheck(&self) -> MacIdentityRecheck {
+        match macos_bsd_info(self.pid) {
+            Ok(info) => {
+                if info.pbi_start_tvsec == self.start_sec
+                    && info.pbi_start_tvusec == self.start_usec
+                {
+                    MacIdentityRecheck::Same
+                } else {
+                    MacIdentityRecheck::Recycled
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => MacIdentityRecheck::Corpse,
+            Err(error) => MacIdentityRecheck::Unreadable(error),
+        }
+    }
+}
+
+/// The outcome of re-checking a captured macOS process identity.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+enum MacIdentityRecheck {
+    /// Same pid, same start tuple: the same process generation.
+    Same,
+    /// The pid names NO live process.
+    ///
+    /// On Darwin this is what an unreaped zombie looks like — measured:
+    /// `proc_pidinfo(PROC_PIDTBSDINFO)` on a zombie fails with **ESRCH**, and
+    /// so does `getpgid()`. Linux answers both for a corpse; Darwin does not.
+    /// That difference is the entire defect this enum exists to express,
+    /// because a two-valued check reads "the process finished" and "the pid
+    /// was handed to a stranger" as the same answer.
+    Corpse,
+    /// The pid resolves to a DIFFERENT process generation. Never acceptable.
+    Recycled,
+    /// Could not be read at all. Not a measurement; never treated as Corpse.
+    Unreadable(std::io::Error),
+}
+
+#[cfg(target_os = "macos")]
+impl MacProcessIdentity {
     /// Identity-checked kill of this exact process generation.
     ///
     /// `cfg(test)` because production has no caller: `signal_group` addresses
@@ -491,20 +564,91 @@ mod macos_tests {
         child.wait().expect("reap fixture");
     }
 
+    /// A root that FINISHES after the sentinel has joined is the success
+    /// case, not a fault.
+    ///
+    /// This test previously asserted the opposite — that attachment must fail
+    /// closed. **That is a deliberate change of security semantics**, made
+    /// because the old rule had no reachable pass state on this platform:
+    ///
+    /// * Darwin answers ESRCH from BOTH `proc_pidinfo` and `getpgid` for an
+    ///   unreaped zombie (measured), so `root.still_matches() && getpgid(root)
+    ///   == root` is unsatisfiable the instant the root exits;
+    /// * the root routinely exits inside the socketpair + fork window — a
+    ///   `git config` invocation does — so delegated dispatch on macOS could
+    ///   not establish containment AT ALL, failing with "authority changed
+    ///   while containment was attached".
+    ///
+    /// Why relaxing it is safe, and not merely convenient: the anchor is the
+    /// live sentinel, never the root. A process-group id cannot be recycled
+    /// while a live process sits in it, and `setpgid(0, <vanished group>)`
+    /// returns **EPERM** — pinned by
+    /// [`joining_a_vanished_process_group_is_refused_by_the_kernel`] below.
+    /// So the sentinel's successful join, which `attach_with_hook` already
+    /// requires before it reaches the post-check, is itself proof that the
+    /// group still exists. A root that was *replaced* by a different process
+    /// is still refused; only a corpse is tolerated.
     #[test]
-    fn root_exit_during_group_attachment_fails_closed() {
+    fn root_exit_after_sentinel_joins_still_yields_containment() {
         let mut child_command = std::process::Command::new("sleep");
         child_command.arg("30");
         isolate_std(&mut child_command);
         let mut child = child_command.spawn().expect("spawn fixture");
         let process_group = child.id() as libc::pid_t;
 
-        let error = MacProcessGroupAuthority::attach_with_hook(process_group, || {
+        let authority = MacProcessGroupAuthority::attach_with_hook(process_group, || {
             child.kill().expect("stop original root");
             child.wait().expect("reap original root");
         })
-        .expect_err("vanished root must invalidate attachment");
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        .expect("a root that finished after the sentinel joined must still yield containment");
+
+        // And the authority must be usable, not merely constructible: a
+        // handle that cannot signal its group is containment in name only.
+        authority
+            .signal_group(libc::SIGKILL)
+            .expect("the attached authority must be able to signal its own group");
+    }
+
+    /// The kernel fact the whole sentinel argument rests on.
+    ///
+    /// If Apple ever lets a process join a process group that no longer has
+    /// any members, "the sentinel joined" stops proving "the group exists",
+    /// and [`root_exit_after_sentinel_joins_still_yields_containment`] above
+    /// becomes unsound. This test is the tripwire for that.
+    #[test]
+    fn joining_a_vanished_process_group_is_refused_by_the_kernel() {
+        // `isolate_std` is what makes this a real test: without
+        // `process_group(0)` the child inherits THIS process's group and
+        // never becomes a group leader, so the setpgid below would fail
+        // because the group never existed rather than because it vanished —
+        // the right answer for the wrong reason.
+        let mut leader_command = std::process::Command::new("true");
+        isolate_std(&mut leader_command);
+        let mut leader = leader_command.spawn().expect("spawn leader");
+        let vanished = leader.id() as libc::pid_t;
+        // It really was its own group leader before we reaped it.
+        assert_eq!(
+            macos_process_group(vanished).expect("leader pgid"),
+            vanished,
+            "fixture did not become its own process-group leader"
+        );
+        leader.wait().expect("reap leader");
+
+        // SAFETY: setpgid only moves the CALLING process, and it is expected
+        // to fail. A success would move this test process into a foreign
+        // group, which is precisely the outcome being ruled out — so the
+        // assertion below runs before anything else can depend on it.
+        let rc = unsafe { libc::setpgid(0, vanished) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(
+            rc, -1,
+            "joining the reaped, empty group {vanished} SUCCEEDED; the sentinel can no longer \
+             prove a group exists and the macOS attach relaxation is unsound"
+        );
+        assert!(
+            matches!(errno, Some(libc::EPERM) | Some(libc::ESRCH)),
+            "expected EPERM/ESRCH joining a vanished group, got {errno:?}"
+        );
     }
 
     /// Required macOS live acceptance: the owned process tree — including a
