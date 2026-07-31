@@ -834,6 +834,33 @@ fn invalid_session_backoff() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Announce that Discord ACCEPTED this handshake.
+///
+/// One function with one call shape so the READY arm and the RESUMED arm can
+/// never drift apart: the whole defect this replaced was one publish site
+/// standing in for two different platform verdicts.
+///
+/// It is logged at `info` deliberately. `Connected` is the event that decides
+/// whether `channel health` reads Healthy, and until this line existed there was
+/// no way to tell from OUTSIDE the process whether a Healthy reading came from
+/// the adapter's own verdict or from somewhere else in the manager — which is
+/// exactly the ambiguity that made the first measurement of this lane
+/// unfalsifiable, because `record_health` blanks the `reason` field for
+/// `Healthy` (wcore-channels/src/manager.rs:59) and the published health file
+/// therefore attributes nothing.
+async fn publish_connected(inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>) {
+    tracing::info!(
+        target: "wcore_channel_discord::gateway",
+        "published Connected (discord accepted the handshake)"
+    );
+    inbox
+        .lock()
+        .await
+        .push_back(ChannelEvent::ConnectionStateChanged {
+            state: ConnectionState::Connected,
+        });
+}
+
 enum SessionExit {
     /// `shutdown` watch flipped — exit the outer loop.
     Shutdown,
@@ -982,16 +1009,39 @@ async fn run_one_session(
         }
     }
 
-    // Push Connected once we've handed the handshake off; READY / RESUMED
-    // landing is the formal "live" moment but for routing it's close
-    // enough — the manager dedupes state-changes anyway.
-    inbox
-        .lock()
-        .await
-        .push_back(ChannelEvent::ConnectionStateChanged {
-            state: ConnectionState::Connected,
-        });
-
+    // `Connected` is NOT published here. It is published when Discord ACCEPTS
+    // the handshake — on READY (fresh IDENTIFY) or RESUMED (replay) — in the
+    // OP_DISPATCH arm below.
+    //
+    // # Why this moved
+    //
+    // This used to fire the moment the IDENTIFY/RESUME frame was handed to the
+    // sink, with the comment "for routing it's close enough". It is not close
+    // enough, and the gap is not theoretical: `HealthState::from_connection_state`
+    // maps `Connected` straight to `Healthy`, so every failed handshake reported
+    // the channel HEALTHY on its way down.
+    //
+    // Measured on the unfixed binary against real Discord on 2026-07-31, with a
+    // valid token and an undefined intent bit so Discord answers close 4013: the
+    // shipped `channel health` surface read **healthy 13 of 46 samples over 92s**,
+    // flapping healthy<->degraded **40 times**, permanently, because the outer
+    // loop reconnects forever on a non-4004 close and every cycle re-announced
+    // Connected between the IDENTIFY and the close. An operator watching that
+    // channel sees a healthy Discord roughly a third of the time while it has
+    // never once completed a handshake.
+    //
+    // The pattern followed is the Slack adapter's (`wcore-channel-slack/src/lib.rs`
+    // `start()`): resolve the credential, put it in front of the PLATFORM, and
+    // publish `Connected` only on the platform's acceptance — publishing
+    // `AuthExpired` and no `Connected` on its rejection. That adapter took this
+    // shape for UAT-C2, which is the same defect on a different transport. The
+    // rejection half already matched it here (`SessionExit::AuthRejected` ->
+    // `ChannelEvent::AuthExpired`); this is the acceptance half.
+    //
+    // HEARTBEATS ARE UNAFFECTED. Discord requires heartbeating from HELLO, which
+    // arrives BEFORE READY, and the timer below is keyed off `interval_ms` — read
+    // from the HELLO payload above — not off `Connected`. Nothing in the
+    // heartbeat path ever consulted the publish, so moving it cannot starve it.
     let mut heartbeat_timer = tokio::time::interval(Duration::from_millis(interval_ms));
     // Skip the immediate tick — Discord wants the first heartbeat
     // delayed by `jitter * interval`. We use a constant 0.5 because
@@ -1105,14 +1155,24 @@ async fn run_one_session(
                                 target: "wcore_channel_discord::gateway",
                                 "READY received; session captured for resume"
                             );
+                            publish_connected(inbox).await;
                         } else if is_resumed(&payload) {
                             // RESUME succeeded: buffered events follow as
                             // normal MESSAGE_CREATE dispatches through the
-                            // mapping below — nothing else to do here.
+                            // mapping below.
                             tracing::debug!(
                                 target: "wcore_channel_discord::gateway",
                                 "RESUMED received; replayed events will flow as dispatches"
                             );
+                            // RESUMED is an acceptance exactly as much as READY
+                            // is, and it is reached by a DIFFERENT arm: an
+                            // INVALID_SESSION that Discord marks resumable, or a
+                            // dropped socket, both send RESUME rather than
+                            // IDENTIFY. Publishing only on READY would leave a
+                            // perfectly recovered channel stuck at whatever the
+                            // drop published — `Reconnecting`, i.e. Degraded —
+                            // for the rest of the process's life.
+                            publish_connected(inbox).await;
                         }
                         // F24-C3: observability for the inbound half.
                         //
