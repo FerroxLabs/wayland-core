@@ -1,0 +1,30 @@
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/goal_control_tui_pty.rs (/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/tgt-regrade/debug/deps/goal_control_tui_pty-daa6e0aae2719d26)
+
+running 13 tests
+test a_bare_goal_is_reachable_from_the_palette ... ok
+test a_near_miss_command_does_not_reach_the_goal_surface ... ok
+test advance_without_a_projection_produces_no_goal_on_the_status_line ... ok
+test goal_open_is_accepted_by_core_on_a_durable_host ... ok
+test goal_open_names_the_cause_on_a_degraded_host ... ok
+test support::mock_llm::self_tests::every_builder_body_is_parser_conformant ... ok
+test support::mock_llm::self_tests::text_fixture_is_parser_conformant ... ok
+test support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant ... ok
+test support::mock_llm::self_tests::truncated_stream_is_detected ... ok
+test support::proving_ground::record::tests::redact_leaves_normal_text_alone ... ok
+test support::proving_ground::record::tests::redact_multiple_keys_in_one_string ... ok
+test support::proving_ground::record::tests::redact_openai_key ... ok
+test support::proving_ground::record::tests::redact_xai_key ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.25s
+
+CARGO_RC=0
+
+--- provenance ---
+host: this Mac, Darwin 25.3.0 arm64 (macOS 26.3)
+tree: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-criteria-regrade @ 659fa4922a62ca9657c600938c6313d017fb859f
+cmd : cargo test -p wcore-cli --test goal_control_tui_pty -- --test-threads=1
+rustc/cargo from ~/.cargo/bin; CARGO_TARGET_DIR set to a lane-private scratch dir
+LANE-BRIEF §0 Darwin exception: single crate, single test target. Justification:
+  the macOS terminal leg of 22-C1 is a platform cell hetzner cannot produce;
+  the harness is #![cfg(unix)] so Linux proves nothing about Darwin's PTY path.
