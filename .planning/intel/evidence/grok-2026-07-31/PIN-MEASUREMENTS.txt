@@ -75,3 +75,20 @@ worktree meta-digest (python os.walk, excludes .git): 75c3e71ff4c08d70ce2977fda5
 }~/.grok file count: 4009
 ~/.grok meta-digest before ANY work today and after the live drive:
   34ffd94f25ef6093b263f8b1bfb0115d49d679eb5c0ae1356d6f68b79943c23a (identical)
+
+--- local checkout provenance (caveats 1 and 2) ---
+$ git -C $R rev-parse a7d0968^
+c68e39f60462f28d9be5e683d9cbe2c57b1a5027
+$ git -C $R show --name-status --format='%an <%ae>' a7d0968
+ci <sean@seandonahoe.com>
+
+A	WAYLAND-INTEGRATION-AUDIT.md
+
+--- NOTE on one false alarm, recorded rather than hidden ---
+An early non-mutation check of the peer tree used
+  find . -print0 | sort -z | xargs -0 stat -f '%N %z %m' | shasum -a 256
+and reported MUTATED. That pipeline silently produced ZERO lines on the
+second invocation, so the comparison was between a real digest and the
+digest of empty input. Re-checked with a python os.walk snapshot taken
+twice: STABLE, and .git/index mtime is unmoved from 2026-07-16. The peer
+tree was never mutated. The shell pipeline was the defect, not the tree.
