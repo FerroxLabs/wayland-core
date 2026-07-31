@@ -131,6 +131,23 @@ fn build_sandbox_pieces_for_session(
         // tools' dynamic `is_project_secret` guard already avoids. Local-keyboard
         // (Trusted, no project-secret denial) is returned unchanged, no walk.
         manifest.fs_read_deny = p.secret_deny_paths_dynamic();
+        // The policy's confined values REPLACE any same-named entry the
+        // ambient passthrough already contributed, rather than being appended
+        // beside it.
+        //
+        // `BASE_SANDBOX_ENV_ALLOWLIST` passes TMPDIR/TMP/TEMP through from the
+        // host, and the policy then supplies its own pointing INTO the private
+        // scratch. A bare `extend` left both in the manifest, so a delegated
+        // shell that must write only into checkout+scratch was also handed the
+        // real user temp directory, and which one the child honoured was
+        // undefined. Linux hid this because TMPDIR is usually unset there, so
+        // only the confined entry existed; macOS always sets it, which is the
+        // only reason it was ever observed.
+        let overridden: std::collections::HashSet<&str> =
+            p.cache_env().iter().map(|(k, _)| k.as_str()).collect();
+        manifest
+            .env
+            .retain(|(k, _)| !overridden.contains(k.as_str()));
         manifest.env.extend(p.cache_env().iter().cloned());
         manifest.network = p.network();
         cwd = Some(p.root().to_path_buf());
