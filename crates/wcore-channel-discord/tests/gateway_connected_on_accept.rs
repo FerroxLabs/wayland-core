@@ -18,6 +18,11 @@
 //! between the IDENTIFY and the close. The channel never once completed a
 //! handshake.
 //!
+//! 4013 is now terminal, so that specific storm is closed twice over. The
+//! reconnect-loop test below therefore uses `4000`, which is still
+//! reconnectable — the loop running forever is correct behaviour, and this file
+//! is about what the loop is allowed to SAY while it does.
+//!
 //! # Why these are fixtures and not live runs
 //!
 //! The live runs exist too and are the primary evidence. These are the part
@@ -423,13 +428,19 @@ async fn a_4004_before_ready_publishes_no_connected() {
 /// The measured one: a NON-auth close that sends the outer loop round again
 /// must not announce a healthy channel once per lap.
 ///
-/// This is the fixture form of the live 13/46 flap. `4013` is Discord's
-/// "invalid intent(s)", it is not classified as a credential rejection, so the
-/// gateway reconnects forever — which is correct — and the defect was that each
-/// reconnection published `Connected` before being refused again.
+/// This is the fixture form of the live 13/46 flap.
+///
+/// The live measurement used 4013 ("invalid intents"), which at the time took
+/// the ordinary reconnect path. It no longer does — 4013 and 4014 are now
+/// classified as terminal alongside 4004 — so reproducing that exact code here
+/// would measure the terminal path instead and the `laps >= 2` anti-vacuity
+/// check could never hold. `4000` ("unknown error") is Discord's documented
+/// reconnectable close and keeps this test pointed at the reconnect loop, which
+/// is the thing under test: the loop is entitled to run forever, and it is not
+/// entitled to announce a healthy channel on every lap.
 #[tokio::test]
 async fn a_repeating_non_auth_close_never_publishes_connected() {
-    let fx = fake_gateway(vec![vec![Act::Close(4013)]], 600_000).await;
+    let fx = fake_gateway(vec![vec![Act::Close(4000)]], 600_000).await;
     let mut ch = channel(fx.base.clone(), 600_000);
     ch.start().await.expect("start spawns the gateway task");
 

@@ -165,6 +165,48 @@ async fn a_4004_close_publishes_auth_expired_and_stops_the_gateway() {
     let _ = ch.stop().await;
 }
 
+/// 4014 (disallowed intents) is marked non-reconnectable by Discord exactly as
+/// 4004 is, and used to fall through to the resumable path — so a bot that was
+/// simply not approved for a privileged intent re-IDENTIFYed forever while the
+/// surface reported a transport fault ("wait") for a condition that only an
+/// operator can clear.
+#[tokio::test]
+async fn a_4014_disallowed_intents_close_is_terminal_and_names_the_fix() {
+    let (base, connections) = fake_gateway(4014).await;
+    let mut ch = channel(base);
+    ch.start().await.expect("start spawns the gateway task");
+
+    let events = collect_events(&mut ch, 5).await;
+
+    let expired: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChannelEvent::AuthExpired { reason } => Some(reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        expired.len(),
+        1,
+        "a 4014 must publish exactly one AuthExpired; got {events:?}"
+    );
+    assert!(
+        expired[0].contains("4014") && expired[0].contains("Developer Portal"),
+        "the operator needs the code AND the right fix — rotating the token does \
+         not enable an intent: {}",
+        expired[0]
+    );
+
+    let n = connections.load(Ordering::SeqCst);
+    assert_eq!(
+        n, 1,
+        "a disallowed intent must not be re-IDENTIFYed; the gateway reconnected \
+         {n} times"
+    );
+
+    let _ = ch.stop().await;
+}
+
 /// The known-negative, and the reason the test above means anything. A close
 /// code that is NOT a credential rejection must publish NO `AuthExpired` and
 /// must keep reconnecting — otherwise every dropped socket would strand the
