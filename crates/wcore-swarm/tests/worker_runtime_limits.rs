@@ -403,17 +403,45 @@ async fn cancellation_kills_worker_descendant_and_releases_owned_workspace() {
     swarm.cleanup().await.expect("explicit cleanup");
 }
 
+/// Preconditions for the `required_live_macos_*` delegated-Docker case below.
+///
+/// Returns `false` after printing a `skip:` line that NAMES the missing
+/// precondition, rather than returning a silent green. A skip is not a pass:
+/// `.github/workflows/macos-docker-gate.yml` runs these under `--nocapture`
+/// (libtest DISCARDS a passing test's stderr otherwise) and fails its gate on
+/// any `skip:` in the output, so an un-opted-in or Docker-less host can never
+/// be read as certification. `DockerBackend::connect` is the probe because it covers BOTH
+/// ways delegated execution can be unavailable — a build without the
+/// `wcore-sandbox/live-docker` feature (`DockerDisabled`, which a bare
+/// `docker info` cannot see) and a host with no reachable daemon (`DockerIo`).
+#[cfg(target_os = "macos")]
+async fn live_macos_docker_available() -> bool {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_DOCKER").is_err() {
+        eprintln!(
+            "skip: WAYLAND_SANDBOX_LIVE_DOCKER not set \
+             (host has not opted into live delegated-Docker execution)"
+        );
+        return false;
+    }
+    match wcore_sandbox::backends::docker::DockerBackend::connect().await {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!(
+                "skip: delegated Docker backend unavailable ({error}) — needs the \
+                 `wcore-sandbox/live-docker` feature and a running Docker daemon"
+            );
+            false
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[ignore = "live macOS delegated-Docker acceptance; run via `--run-ignored all` (or `-- --ignored`) with WAYLAND_SANDBOX_LIVE_DOCKER=1"]
 async fn required_live_macos_docker_cancellation_cleans_container_workspace() {
-    let mut info = shell::shell_command_argv("docker", &["info"]);
-    assert!(
-        info.status()
-            .await
-            .expect("required Docker Desktop CLI")
-            .success(),
-        "required Docker Desktop daemon is unavailable"
-    );
+    if !live_macos_docker_available().await {
+        return;
+    }
     let tmp = tempfile::tempdir().expect("temp repo");
     init_repo(tmp.path()).await;
     let swarm = Arc::new(Swarm::new(tmp.path()).expect("create swarm"));

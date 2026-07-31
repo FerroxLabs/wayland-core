@@ -81,19 +81,51 @@ async fn independent_cli_processes_cannot_overbook_shared_capacity() {
     );
 }
 
+/// Preconditions for the `required_live_macos_*` delegated-Docker case below.
+///
+/// Returns `None` after printing a `skip:` line that NAMES the missing
+/// precondition, rather than returning a silent green. A skip is not a pass:
+/// `.github/workflows/macos-docker-gate.yml` runs these under `--nocapture`
+/// (libtest DISCARDS a passing test's stderr otherwise) and fails its gate on
+/// any `skip:` in the output, so an un-opted-in or Docker-less host can never
+/// be read as certification. `DockerBackend::connect` is the single probe because it
+/// covers BOTH ways this can be unavailable — a build without the
+/// `wcore-sandbox/live-docker` feature (`DockerDisabled`) and a host with no
+/// reachable daemon (`DockerIo`).
+#[cfg(target_os = "macos")]
+async fn live_macos_docker_backend() -> Option<wcore_sandbox::backends::docker::DockerBackend> {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_DOCKER").is_err() {
+        eprintln!(
+            "skip: WAYLAND_SANDBOX_LIVE_DOCKER not set \
+             (host has not opted into live delegated-Docker execution)"
+        );
+        return None;
+    }
+    match wcore_sandbox::backends::docker::DockerBackend::connect().await {
+        Ok(backend) => Some(backend),
+        Err(error) => {
+            eprintln!(
+                "skip: delegated Docker backend unavailable ({error}) — needs the \
+                 `wcore-sandbox/live-docker` feature and a running Docker daemon"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[ignore = "live macOS delegated-Docker acceptance; run via `--run-ignored all` (or `-- --ignored`) with WAYLAND_SANDBOX_LIVE_DOCKER=1"]
 async fn required_live_macos_docker_rejects_over_budget_result() {
     use std::sync::Arc;
-    use wcore_sandbox::backends::docker::DockerBackend;
     use wcore_sandbox::{
         DirectoryAuthority, NetworkPolicy, RetainedWorkspaceAuthority, SandboxCommand,
         SandboxManifest, SandboxRegistry,
     };
 
-    let backend = DockerBackend::connect()
-        .await
-        .expect("required Docker Desktop daemon");
+    let Some(backend) = live_macos_docker_backend().await else {
+        return;
+    };
     let owner = tempfile::tempdir().expect("owner");
     let checkout = owner.path().join("checkout");
     let scratch = owner.path().join("scratch");

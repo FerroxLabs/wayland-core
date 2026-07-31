@@ -248,12 +248,45 @@ async fn cancelled_owner_force_removes_live_container() {
     assert!(removed, "cancelled Docker owner leaked container {id}");
 }
 
+/// Preconditions for the `required_live_macos_*` delegated-Docker cases.
+///
+/// Returns `None` after printing a `skip:` line that NAMES the missing
+/// precondition, rather than returning a silent green. A skip is not a pass:
+/// `.github/workflows/macos-docker-gate.yml` runs these under `--nocapture`
+/// (libtest DISCARDS a passing test's stderr otherwise) and fails its gate on
+/// any `skip:` in the output, so an un-opted-in or Docker-less host can never
+/// be read as certification. `DockerBackend::connect` is the single probe because it
+/// covers BOTH ways this can be unavailable — a build without the
+/// `live-docker` feature (`DockerDisabled`) and a host with no reachable
+/// daemon (`DockerIo`).
+#[cfg(all(feature = "live-docker", target_os = "macos"))]
+async fn live_macos_docker_backend() -> Option<DockerBackend> {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_DOCKER").is_err() {
+        eprintln!(
+            "skip: WAYLAND_SANDBOX_LIVE_DOCKER not set \
+             (host has not opted into live delegated-Docker execution)"
+        );
+        return None;
+    }
+    match DockerBackend::connect().await {
+        Ok(backend) => Some(backend),
+        Err(error) => {
+            eprintln!(
+                "skip: delegated Docker backend unavailable ({error}) — needs the \
+                 `live-docker` feature and a running Docker daemon"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(all(feature = "live-docker", target_os = "macos"))]
 #[tokio::test]
+#[ignore = "live macOS delegated-Docker acceptance; run via `--run-ignored all` (or `-- --ignored`) with WAYLAND_SANDBOX_LIVE_DOCKER=1"]
 async fn required_live_macos_retained_transport_roundtrips_output_and_deletion() {
-    let backend = DockerBackend::connect()
-        .await
-        .expect("required Docker Desktop daemon");
+    let Some(backend) = live_macos_docker_backend().await else {
+        return;
+    };
     let owner = tempfile::tempdir().expect("owner");
     let checkout = owner.path().join("checkout");
     let scratch = owner.path().join("scratch");
@@ -299,10 +332,11 @@ async fn required_live_macos_retained_transport_roundtrips_output_and_deletion()
 
 #[cfg(all(feature = "live-docker", target_os = "macos"))]
 #[tokio::test]
+#[ignore = "live macOS delegated-Docker acceptance; run via `--run-ignored all` (or `-- --ignored`) with WAYLAND_SANDBOX_LIVE_DOCKER=1"]
 async fn required_live_macos_retained_transport_rejects_path_replacement() {
-    let backend = DockerBackend::connect()
-        .await
-        .expect("required Docker Desktop daemon");
+    let Some(backend) = live_macos_docker_backend().await else {
+        return;
+    };
     let owner = tempfile::tempdir().expect("owner");
     let checkout = owner.path().join("checkout");
     let scratch = owner.path().join("scratch");
