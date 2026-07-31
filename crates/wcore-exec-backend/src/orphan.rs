@@ -313,6 +313,22 @@ impl ProcessTableScan {
 /// carry a non-empty command line. We know our own pid, and we know we have a
 /// command line, so if we cannot see our own we cannot see anyone's — and that
 /// is reported as [`ProcessTableScan::CannotDetermine`], never as zero.
+/// The `ps -eo` field list for this Unix.
+///
+/// Exactly four leading whitespace-free columns before `args`, on every arm —
+/// see [`row_command_line`], which skips a fixed count.
+#[cfg(all(unix, target_os = "linux"))]
+pub(crate) const UNIX_PS_FIELDS: &str = "pid,ppid,pgid,etimes,args";
+/// BSD `ps` (macOS, the *BSDs) has no `etimes`; the elapsed column is `etime`,
+/// formatted `[[dd-]hh:]mm:ss`.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) const UNIX_PS_FIELDS: &str = "pid,ppid,pgid,etime,args";
+/// Never used on Windows (that arm builds a PowerShell command instead), but
+/// defined so the constant exists on every target and the test below can
+/// assert its shape without a platform gate.
+#[cfg(not(unix))]
+pub(crate) const UNIX_PS_FIELDS: &str = "pid,ppid,pgid,etime,args";
+
 pub async fn enumerate_process_table(nonce: &str) -> ProcessTableScan {
     // The PowerShell argument is a FIXED literal — the nonce is never
     // interpolated into it and the filtering happens in Rust — so this is not
@@ -328,7 +344,19 @@ pub async fn enumerate_process_table(nonce: &str) -> ProcessTableScan {
              | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }",
         ]
     } else {
-        vec!["-eo", "pid,ppid,pgid,etimes,args"]
+        // THREE platforms, so three arms — not two. `cfg!(windows)` alone left
+        // macOS silently inheriting the Linux arm, and `etimes` is a procps
+        // extension: BSD `ps` answers `ps: etimes: keyword not found`, exits 1
+        // and prints a header with the column simply MISSING. That is a scan
+        // this module can only ever report as `CannotDetermine` — honest, but
+        // permanently so, which makes the whole Unix orphan scanner unable to
+        // pass on macOS. BSD spells the same column `etime`.
+        //
+        // The column count must stay at 4 across both spellings, because
+        // `row_command_line` skips a fixed number of leading fields. Neither
+        // `etimes` (`3600`) nor `etime` (`33-15:30:15`) contains whitespace,
+        // so it does.
+        vec!["-eo", UNIX_PS_FIELDS]
     };
 
     let mut command = wcore_config::shell::shell_command_argv(program, &args);
@@ -411,7 +439,8 @@ fn command_line_visibility_failure(rows: &[&str], me: u32, program: &str) -> Opt
 /// The command-line portion of a row: everything after the fixed leading
 /// numeric columns.
 fn row_command_line(row: &str) -> &str {
-    // Unix: `pid ppid pgid etimes args…` (4 numeric columns).
+    // Unix: `pid ppid pgid <elapsed> args…` (4 leading columns; the elapsed
+    // one is `etimes` on Linux and `etime` on BSD — see `UNIX_PS_FIELDS`).
     // Windows: `pid ppid CommandLine` (2 numeric columns).
     let skip = if cfg!(windows) { 2 } else { 4 };
     let mut rest = row.trim();
@@ -585,6 +614,73 @@ mod tests {
         assert!(
             scan.rows().is_empty(),
             "a nonce matching nothing must yield no rows"
+        );
+    }
+
+    #[test]
+    fn the_unix_field_list_keeps_exactly_four_columns_before_args() {
+        // `row_command_line` skips a FIXED four leading fields on Unix. If a
+        // future edit adds or removes a column from `UNIX_PS_FIELDS` without
+        // updating that count, every orphan row silently loses (or gains) a
+        // word of its command line — and the nonce lives in that command line.
+        let fields: Vec<&str> = UNIX_PS_FIELDS.split(',').collect();
+        assert_eq!(
+            fields.len(),
+            5,
+            "UNIX_PS_FIELDS must be exactly 4 columns plus `args`, got {UNIX_PS_FIELDS}"
+        );
+        assert_eq!(*fields.last().unwrap(), "args");
+        assert_eq!(&fields[..3], &["pid", "ppid", "pgid"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn this_hosts_ps_accepts_our_field_list_and_keeps_the_columns_aligned() {
+        // The test that would have caught the macOS defect. `etimes` is a
+        // procps extension: BSD `ps` rejects the keyword, exits 1, and emits a
+        // header with the column MISSING. A four-field skip over three actual
+        // columns eats the first word of every command line.
+        //
+        // This drives the REAL `ps` on the REAL host, so it fails on any Unix
+        // whose `ps` does not accept what `UNIX_PS_FIELDS` asks for.
+        let output = wcore_config::shell::shell_command_argv("ps", &["-eo", UNIX_PS_FIELDS])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .expect("could not run ps");
+        assert!(
+            output.status.success(),
+            "`ps -eo {UNIX_PS_FIELDS}` failed on this host ({}): {}",
+            std::env::consts::OS,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut lines = text.lines();
+        let header = lines.next().expect("ps produced no header");
+        assert_eq!(
+            header.split_whitespace().count(),
+            5,
+            "ps emitted {header:?} — that is not 4 columns plus ARGS, so the fixed skip in \
+             row_command_line is misaligned"
+        );
+
+        // And the elapsed column must be whitespace-free, or the skip drifts
+        // per row rather than uniformly. Our own row is the one we can check:
+        // we know its pid.
+        let me = std::process::id();
+        let own = lines
+            .find(|line| row_pid(line) == Some(me))
+            .unwrap_or_else(|| panic!("ps did not list this process (pid {me})"));
+        let command_line = row_command_line(own);
+        assert!(
+            !command_line.is_empty(),
+            "our own row {own:?} yielded an EMPTY command line after skipping 4 fields; the \
+             columns do not line up"
+        );
+        assert!(
+            own.ends_with(command_line),
+            "the skipped prefix of {own:?} did not stop at the command line"
         );
     }
 
