@@ -456,7 +456,13 @@ impl WorktreeManager {
         }
     }
 
-    #[cfg(all(test, unix))]
+    // Gated to Linux, not to `unix`, because every call site lives in
+    // `worktree_tests/linux.rs`, which is itself `cfg(target_os = "linux")`.
+    // Under a plain `unix` gate this compiles on macOS with no callers, and
+    // `-D warnings` turns the resulting dead_code lint into a CI failure.
+    // Matches the `set_ambient_git_env` sibling below, gated the same way for
+    // the same reason.
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn new_with_git_script_and_limits(
         repo_root: &Path,
         script: &str,
