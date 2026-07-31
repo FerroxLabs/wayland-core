@@ -1,0 +1,37 @@
+{"type":"ready","version":"0.12.25","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":10,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:eb3f72074f894226c2f6874f88558a0a61ddb9dc146c737786667a2607c123e2","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:da3aa11425a938cef30c97d1eb9ed240286ee63dff7579d54e6eb30bdb5d413c","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785459043392,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785459043392,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"sandbox_exec","writable_roots":["/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2","/private/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wayland-scratch-u501/contained"],"readable_roots":["/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2","/private/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wayland-scratch-u501/contained"],"capabilities":[]}}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"declared"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"configured"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"constructed"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"ready"}
+{"type":"capability_activation","capability":"learned_policy","stage":"declared"}
+{"type":"capability_activation","capability":"learned_policy","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"declared"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"declared"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"ready"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"ready"}
+{"type":"stream_start","msg_id":"m1"}
+{"type":"provider_attempt"}
+{"type":"info","msg_id":"m1","message":"Tool call: transcribe_audio"}
+{"type":"tool_running","msg_id":"m1","call_id":"toolu_f27","tool_name":"transcribe_audio"}
+{"type":"tool_result","msg_id":"m1","call_id":"toolu_f27","tool_name":"transcribe_audio","status":"error","output":"{\"error\":\"Invalid path: path must be absolute: \\\"good.wav\\\"\",\"success\":false}","output_type":"text"}
+{"type":"info","msg_id":"m1","message":"[transcribe_audio error] {\"error\":\"Invalid path: path must be absolute: \\\"good.wav\\\"\",\"success\":false}"}
+{"type":"provider_attempt"}
+{"type":"text_delta","text":"F27-MOCK-REPLY","msg_id":"m1"}
+{"type":"session_cost","session_id":"","total_cost_usd":0.00017999999999999998,"per_turn":[{"turn":0,"model":"claude-sonnet-4-20250514","provider":"anthropic","cost_usd":0.00008999999999999999,"priced":true},{"turn":1,"model":"claude-sonnet-4-20250514","provider":"anthropic","cost_usd":0.00008999999999999999,"priced":true}]}
+{"type":"stream_end","msg_id":"m1","finish_reason":"stop","usage":{"input_tokens":2,"output_tokens":2,"active_window_percent":6},"usage_delta":{"input_tokens":2,"output_tokens":2},"agent_run_id":"agent-run-27e7f72c-32ea-41de-b8f3-25b3270f4888"}

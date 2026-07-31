@@ -1,0 +1,113 @@
+### 27-C1 macOS leg — PTY drive of the TUI media-intake surface
+uname: Darwin Seans-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+HEAD:  0675c051623dadb2c66b7ae250b4edbdc16fc3fb
+binary: /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/target/debug/wayland-core (wayland-core 0.12.25)
+TMPDIR=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/
+
+fixture(home)   = /Users/seandonahoe/.wl-m1-pty/good.wav
+fixture(tmpdir) = /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-m1-pty-fixture-qrwdpckl/good.wav
+
+==============================================================================
+ARM home — audio_path=/Users/seandonahoe/.wl-m1-pty/good.wav
+==============================================================================
+PTY_ROWS=44 PTY_COLS=120 PTY_RAW_BYTES=13751
+PTY_CHILD_RC=0
+MOCK_REQUESTS_CAPTURED=2   (0 would mean the TUI never reached the provider and the arm is void)
+── rendered TUI screen ──
+| 
+|   ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|    ▌ transcribe it
+| 
+|      F27-MOCK-REPLY
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 17;1H
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+|                                                                                                     ↓ jump to latest
+|   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|   › type / for commands43;101H2
+| 
+|   Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|    claude-sonnet-4-20250514 │ Smart  · Default  · STRICT REPO │ ctx                        0% │ $0.0002 │ 15s
+
+==============================================================================
+ARM tmpdir — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-m1-pty-fixture-qrwdpckl/good.wav
+==============================================================================
+PTY_ROWS=44 PTY_COLS=120 PTY_RAW_BYTES=13150
+PTY_CHILD_RC=0
+MOCK_REQUESTS_CAPTURED=2   (0 would mean the TUI never reached the provider and the arm is void)
+── rendered TUI screen ──
+| 
+|   ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|    ▌ transcribe it
+| 
+|      F27-MOCK-REPLY
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 17;1H
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+| 
+|                                                                                                     ↓ jump to latest
+|   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|   › type / for commands43;101H2
+| 
+|   Tab next tab  ⇧Tab mode  ⌃B hide rail  PgUp/PgDn scroll  End ↓latest  F4 copy/select  ? keys
+| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+|    claude-sonnet-4-20250514 │ Smart  · Default  · STRICT REPO │ ctx                        0% │ $0.00025│;15s51;48;2;13;
+| 13;13m│ 0s
+
+M1-PTY-SUMMARY: screens=2 home_shows_ENOTDIR=False tmpdir_shows_ENOTDIR=False arms_differ=True

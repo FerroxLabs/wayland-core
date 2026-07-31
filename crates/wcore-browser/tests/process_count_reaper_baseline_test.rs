@@ -33,10 +33,18 @@
 //!
 //! ## Platform scope, stated
 //!
-//! `#[cfg(target_os = "linux")]` — metrics B and C read `/proc`. macOS and Windows are
-//! **NOT MEASURED** by this file; that is a gap, not a pass.
+//! Linux and **macOS**. The four instrumentation primitives (`alive`, `ppid_of`,
+//! `all_pids`, `descendant_names`) have two implementations — `/proc` on Linux, `ps`
+//! on macOS — and every measurement above them is shared, so the two platforms run
+//! the *same* baseline rather than two different ones.
+//!
+//! **Windows is NOT MEASURED by this file; that is a gap, not a pass.** Note what a
+//! bare `cfg` exclusion looks like from the outside: before macOS was added, running
+//! this binary on a Mac printed `test result: ok. 0 passed; 0 failed` and exited 0 —
+//! a green line for a baseline that did not exist. Any consumer of this file must
+//! read the harness's own `--list` count, not its exit status.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,8 +52,13 @@ use std::time::Duration;
 
 use wcore_browser::supervisor::{BackendHandle, BrowserSupervisor, SupervisorConfig};
 
-// ── /proc instrumentation ────────────────────────────────────────────────
+// ── process-table instrumentation ────────────────────────────────────────
+//
+// Linux reads `/proc`; macOS has no `/proc`, so it shells out to `ps`. Both
+// implementations answer the same four questions and reject zombies identically —
+// a terminated-but-unreaped process must count as cleaned up on either platform.
 
+#[cfg(target_os = "linux")]
 /// Is this PID present in the kernel's process table? `/proc/<pid>` exists for
 /// live processes AND for un-reaped zombies, so `alive()` additionally rejects
 /// state `Z` — a zombie is a terminated process and must count as cleaned up.
@@ -62,6 +75,7 @@ fn alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Parent PID of `pid`, from `/proc/<pid>/stat` field 4.
 fn ppid_of(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -69,6 +83,7 @@ fn ppid_of(pid: u32) -> Option<u32> {
     rest.split_whitespace().nth(1)?.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 /// Every live PID currently in the process table.
 fn all_pids() -> Vec<u32> {
     let mut v = Vec::new();
@@ -82,6 +97,114 @@ fn all_pids() -> Vec<u32> {
     v
 }
 
+// ── macOS: the same four answers, read from `ps` ─────────────────────────
+
+/// One row of the macOS process table.
+#[cfg(target_os = "macos")]
+struct PsRow {
+    pid: u32,
+    ppid: u32,
+    /// First char of `ps -o state=`; `Z` is a zombie.
+    state: char,
+    /// Basename of `ps -o comm=`, so it matches Linux's `/proc/<pid>/comm`.
+    comm: String,
+}
+
+/// The whole process table in one `ps` call. `ps -axo` is the only supported way
+/// to read ppid + state on macOS — there is no `/proc`.
+///
+/// Returns an EMPTY vec only when `ps` itself fails, which every caller must treat
+/// as "could not look", never as "nothing is running". The instrument self-test in
+/// `ps_instrument_is_live` is what makes that distinction observable: if this ever
+/// returns an empty table, that test fails rather than every other test passing
+/// vacuously.
+#[cfg(target_os = "macos")]
+fn ps_snapshot() -> Vec<PsRow> {
+    let out = match std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,state=,comm="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let state = it.next()?.chars().next()?;
+            // `comm` is the remainder — it can contain spaces, and on macOS it is a
+            // full path, so take everything left and reduce it to a basename.
+            let rest: Vec<&str> = it.collect();
+            let comm = rest
+                .join(" ")
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            Some(PsRow {
+                pid,
+                ppid,
+                state,
+                comm,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+/// Live in the process table and not a zombie — the same predicate the Linux arm
+/// applies to `/proc/<pid>/stat` field 3.
+fn alive(pid: u32) -> bool {
+    ps_snapshot().iter().any(|r| r.pid == pid && r.state != 'Z')
+}
+
+// `ppid_of` / `all_pids` have no macOS twin on purpose: the two callers that need
+// ancestry (`process_tree_size`, `descendant_names`) each take ONE `ps` snapshot and
+// walk it locally, so a per-PID accessor would only add process spawns and let the
+// table shift mid-walk.
+
+/// Instrument self-test — the `ps` reader must be able to find THIS process, with
+/// its own real ppid and a non-empty `comm`. Without it an empty or malformed `ps`
+/// table would silently make every "the process is gone" assertion in this file
+/// free (LANE-BRIEF §3b-i; and the Windows `tasklist` measured-zero defect).
+#[cfg(target_os = "macos")]
+#[test]
+fn ps_instrument_is_live() {
+    let me = std::process::id();
+    let snap = ps_snapshot();
+    assert!(
+        !snap.is_empty(),
+        "ps returned an EMPTY process table — the instrument is dead, and every \
+         absence measured by this file would be free"
+    );
+    let row = snap
+        .iter()
+        .find(|r| r.pid == me)
+        .unwrap_or_else(|| panic!("ps cannot see this test process (pid {me}) — dead instrument"));
+    assert!(
+        !row.comm.is_empty(),
+        "ps returned an empty comm for our own pid {me}"
+    );
+    assert!(row.ppid > 0, "ps returned ppid 0 for our own pid {me}");
+    assert!(alive(me), "alive() is false for our own live pid {me}");
+    // Both directions: a PID that cannot exist must read as not-alive.
+    assert!(
+        !alive(0x7fff_fffe),
+        "alive() is true for an impossible pid — the predicate does not discriminate"
+    );
+    println!(
+        "EV3-INSTRUMENT: ps_rows={} self_pid={} self_ppid={} self_comm={} \
+         alive_self=true alive_impossible=false discrimination=PASS",
+        snap.len(),
+        me,
+        row.ppid,
+        row.comm
+    );
+}
+
+#[cfg(target_os = "linux")]
 /// `root` plus every live descendant of it. This is metric C.
 fn process_tree_size(root: u32) -> usize {
     if !alive(root) {
@@ -110,6 +233,7 @@ fn process_tree_size(root: u32) -> usize {
     tree.len()
 }
 
+#[cfg(target_os = "linux")]
 /// `comm` names of `root`'s live descendants (excluding `root` itself). Used so
 /// the evidence names the browser process rather than asserting on a bare count.
 fn descendant_names(root: u32) -> Vec<String> {
@@ -128,6 +252,57 @@ fn descendant_names(root: u32) -> Vec<String> {
                     break;
                 }
                 Some(pp) if pp > 1 => cur = pp,
+                _ => break,
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(target_os = "macos")]
+/// Same as the Linux arm, but over ONE `ps` snapshot — walking the table with a
+/// separate `ps` per ancestry step would be hundreds of process spawns and would
+/// also let the table shift underneath the walk.
+fn process_tree_size(root: u32) -> usize {
+    let snap = ps_snapshot();
+    if !snap.iter().any(|r| r.pid == root && r.state != 'Z') {
+        return 0;
+    }
+    let mut tree = vec![root];
+    for _ in 0..8 {
+        let before = tree.len();
+        for r in &snap {
+            if r.state == 'Z' || tree.contains(&r.pid) {
+                continue;
+            }
+            if tree.contains(&r.ppid) {
+                tree.push(r.pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+    tree.len()
+}
+
+#[cfg(target_os = "macos")]
+fn descendant_names(root: u32) -> Vec<String> {
+    let snap = ps_snapshot();
+    let mut out = Vec::new();
+    for r in &snap {
+        if r.pid == root {
+            continue;
+        }
+        let mut cur = r.ppid;
+        for _ in 0..8 {
+            if cur == root {
+                out.push(r.comm.clone());
+                break;
+            }
+            match snap.iter().find(|x| x.pid == cur) {
+                Some(parent) if parent.ppid > 1 => cur = parent.ppid,
                 _ => break,
             }
         }

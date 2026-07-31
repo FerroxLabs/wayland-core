@@ -1,0 +1,55 @@
+### 27-C2(c) macOS leg — negative controls (mutation runs)
+repo: /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2
+HEAD: 0675c051623dadb2c66b7ae250b4edbdc16fc3fb
+uname: Darwin Seans-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+
+--- MUT-1 — baseline 1 / PRODUCT: replace the symlink-aware root confinement with a naive lexical starts_with on the UNRESOLVED path
+    file: crates/wcore-browser/src/tool.rs (anchor occurrences: 1)
+    expected consequence: B4-symlink escape is NOT refused
+    MUTATED_RC=101
+      test baseline_default_root_is_fail_closed_pair ... FAILED
+      test baseline_downloads_root_confinement_both_directions ... FAILED
+      thread 'baseline_default_root_is_fail_closed_pair' (240049136) panicked at crates/wcore-browser/tests/downloads_root_baseline_test.rs:355:5:
+      thread 'baseline_downloads_root_confinement_both_directions' (240049167) panicked at crates/wcore-browser/tests/downloads_root_baseline_test.rs:178:5:
+      test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+    VERDICT: RED (control valid)
+
+--- MUT-2 — baseline 3 / PRODUCT: make the orphan reaper terminate every registered session regardless of whether its parent is alive
+    file: crates/wcore-browser/src/supervisor.rs (anchor occurrences: 1)
+    expected consequence: ARM 2 (live-parent control) fails — the reaper is indiscriminate
+    MUTATED_RC=101
+      test baseline_process_count_before_during_after ... ok
+      test baseline_reaper_one_interval_both_directions ... FAILED
+      test ps_instrument_is_live ... ok
+      thread 'baseline_reaper_one_interval_both_directions' (240051846) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:572:5:
+      test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.54s
+    VERDICT: RED (control valid)
+
+--- MUT-3 — baseline 3 / INSTRUMENT: make the macOS `ps` reader return an empty process table (the dead-instrument case)
+    file: crates/wcore-browser/tests/process_count_reaper_baseline_test.rs (anchor occurrences: 1)
+    expected consequence: ps_instrument_is_live fails — a dead instrument is caught, so baseline 3's zeros are not free
+    MUTATED_RC=101
+      test baseline_process_count_before_during_after ... FAILED
+      test baseline_reaper_one_interval_both_directions ... FAILED
+      test ps_instrument_is_live ... FAILED
+      thread 'baseline_process_count_before_during_after' (240053815) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:395:5:
+      thread 'baseline_reaper_one_interval_both_directions' (240053838) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:491:5:
+      thread 'ps_instrument_is_live' (240053842) panicked at crates/wcore-browser/tests/process_count_reaper_baseline_test.rs:180:5:
+      test result: FAILED. 0 passed; 3 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.52s
+    VERDICT: RED (control valid)
+
+--- MUT-4 — baseline 2 / PRODUCT: drop the Suspend arm so a withheld approval falls through to backend dispatch
+    file: crates/wcore-cua/src/tool.rs (anchor occurrences: 1)
+    expected consequence: withheld arms dispatch to the backend — approval is advisory
+    MUTATED_RC=101
+      test baseline_approval_gate_blocks_dispatch ... FAILED
+      thread 'baseline_approval_gate_blocks_dispatch' (240123577) panicked at crates/wcore-cua/tests/approval_gate_baseline_test.rs:115:5:
+      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    VERDICT: RED (control valid)
+
+=== baseline restored — re-verifying green ===
+  downloads_root_baseline_test: rc=0 | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+  process_count_reaper_baseline_test: rc=0 | test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.12s
+  approval_gate_baseline_test: rc=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+CONTROLS_ALL_VALID=True

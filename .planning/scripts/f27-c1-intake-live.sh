@@ -10,7 +10,9 @@ set -u
 
 REPO="${1:?repo root}"
 OUT="${2:?output dir}"
-BIN="$REPO/target/release/wayland-core"
+# `WL_BIN` lets a second platform point at whichever profile it actually built
+# (the macOS leg runs the debug binary). Defaults to the original release path.
+BIN="${WL_BIN:-$REPO/target/release/wayland-core}"
 CORPUS="$REPO/crates/wcore-fixture-harness/fixtures/f27/intake"
 MOCK="$REPO/.planning/scripts/f27-mock-provider.py"
 PORT=18931
