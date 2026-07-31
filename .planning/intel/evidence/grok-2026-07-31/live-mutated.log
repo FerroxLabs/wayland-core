@@ -1,0 +1,27 @@
+   Compiling wcore-cli v0.12.25 (/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-grok/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 03s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/migrate_grok.rs (/Users/seandonahoe/dev/.mac-target-grok/debug/deps/migrate_grok-9d358af2a5dfe974)
+
+running 1 test
+test live_drive_against_a_real_grok_install has been running for over 60 seconds
+test live_drive_against_a_real_grok_install ... FAILED
+
+failures:
+
+---- live_drive_against_a_real_grok_install stdout ----
+
+thread 'live_drive_against_a_real_grok_install' (242635474) panicked at crates/wcore-cli/tests/migrate_grok.rs:606:5:
+assertion `left == right` failed: THE IMPORTER MUTATED A REAL PEER HOME (4009 files before, 4010 after)
+  left: "4e38081c16234157bb0786a24d411c73cfdcba3c7426213fa215a562920a052b"
+ right: "390b353e1a2788d0f4601c24b3e682748265e5ba65eb825bbb6e9d14366245ff"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_drive_against_a_real_grok_install
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 98.77s
+
+error: test failed, to rerun pass `-p wcore-cli --test migrate_grok`

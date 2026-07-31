@@ -29,16 +29,31 @@ THE SECRET CLASSIFICATION RULE (explicit, single source of truth):
       >= 8 characters has that value canaried.
   R3  Every string value in a file under a `credentials/` directory, or in a
       file named `auth.json`, is canaried regardless of its key.
+  R4  In a TOML document, a `key = "value"` assignment whose key matches R2's
+      substring set and whose value is >= 8 characters has that value canaried.
+      Line-based, so the rest of the document — comments, ordering, table
+      headers — survives byte-for-byte.
 A value that matches no rule is copied through verbatim, because the corpus is
 only useful if the non-secret shape is real.
 
-Deterministic by construction: the walk is sorted, and a canary token is derived
-from the corpus-relative path plus the key name, so two runs over the same input
-produce byte-identical output.
+THE GROK EXCEPTION TO R3 (recorded because it is a deliberate widening).
+grok's `auth.json` is an OIDC session store whose top-level KEY is an issuer URL
+plus an account UUID — an identifier R3 would leave in place, because R3
+canaries values and not keys. The grok importer never opens that file; it tests
+`is_file()` and records the path by name (`migrate/grok.rs`, module header). So
+the grok corpus replaces `auth.json` wholesale with a single-canary placeholder
+rather than redacting it leaf by leaf. Nothing measurable is lost — the file's
+CONTENT is not an input to any code path under test — and the canary keeps the
+absence assertion able to go red the moment the importer starts reading it.
 
 Usage:
     portability-corpus-gen.py --source ~/.hermes   --kind hermes   --out DIR
     portability-corpus-gen.py --source ~/.openclaw --kind openclaw --out DIR
+    portability-corpus-gen.py --source ~/.grok     --kind grok     --out DIR
+
+Deterministic by construction: the walk is sorted, and a canary token is derived
+from the corpus-relative path plus the key name, so two runs over the same input
+produce byte-identical output.
 """
 
 from __future__ import annotations
@@ -182,6 +197,30 @@ def emit_structured(src: Path, dst: Path, rel: str, sink: list):
     )
 
 
+TOML_ASSIGN_RE = re.compile(r'^(\s*)([A-Za-z0-9_.\-]+)(\s*=\s*)"([^"]*)"(\s*)$')
+
+
+def emit_toml(src: Path, dst: Path, rel: str, sink: list):
+    """Copy a TOML document, canarying secret values (R4).
+
+    Line-based on purpose. There is no TOML *writer* in the standard library, so
+    a parse/re-emit round trip would need a third-party dependency and would
+    reshape the document — losing exactly the byte-level fidelity that makes a
+    structure clone worth more than a hand-written fixture. Only the quoted
+    value on a matching assignment line changes; every other byte is copied.
+    """
+    out = []
+    for line in src.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = TOML_ASSIGN_RE.match(line)
+        if m and is_secret_structured_key(m.group(2).rsplit(".", 1)[-1], m.group(4)):
+            tok = canary(rel, m.group(2))
+            sink.append({"file": rel, "key": m.group(2), "canary": tok})
+            out.append(f'{m.group(1)}{m.group(2)}{m.group(3)}"{tok}"{m.group(5)}')
+        else:
+            out.append(line)
+    dst.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def emit_verbatim(src: Path, dst: Path, limit: int = 65536):
     """Copy a non-secret-bearing file, truncated so the corpus stays small."""
     data = src.read_bytes()[:limit]
@@ -219,11 +258,55 @@ OPENCLAW_MARKER_DIRS = [
 ]
 
 
+# grok's on-disk home. Names taken from the peer's own source as cited in
+# `crates/wcore-cli/src/migrate/grok.rs`, then RECONCILED against a real
+# `~/.grok` install (v0.2.103) — which is the whole point of a structure clone.
+GROK_ROOT_FILES = [
+    "config.toml",  # parsed by grok::build_plan
+    "version.json",  # read by migrate::peer_version's grok branch
+    "auth.json",  # presence only; see THE GROK EXCEPTION TO R3 in the header
+]
+# Directories whose SUBDIRECTORY COUNT the importer reports, plus the user roots
+# it imports from. `count_subdirs` is what reads these, so markers suffice.
+GROK_COUNTED_DIRS = [
+    "skills",
+    "bundled",
+    "hooks",
+    "marketplace-cache",
+    "plugin-data",
+    "server-skills",
+    "vendor",
+    "workspace",
+    "worktrees",
+]
+# Counted like the above, but the names are dropped — see `mark_dirs_opaque`.
+GROK_OPAQUE_DIRS = ["sessions"]
+# Present in a real install and counted by NOTHING in the importer. Cloned so
+# the corpus carries the real tree's shape rather than only the shape the
+# importer expects to find — an absence a reader can check is worth more than
+# an absence nobody recorded.
+GROK_UNCOUNTED_DIRS = [
+    "bin",
+    "completions",
+    "docs",
+    "downloads",
+    "installed-plugins",
+    "logs",
+    "memtrace",
+    "upload_queue",
+]
+# grok personas are `personas/<name>.toml` FILES and memory notes are
+# `memory/<name>.md` FILES, so neither is a directory-marker tree.
+GROK_FILE_TREES = [("personas", ".toml"), ("memory", ".md")]
+
+
 def structured_or_env(path: Path) -> str:
     if path.name == ".env" or path.name.endswith(".env"):
         return "dotenv"
     if path.suffix in (".json", ".yaml", ".yml") or path.name.startswith("openclaw.json"):
         return "structured"
+    if path.suffix == ".toml":
+        return "toml"
     return "verbatim"
 
 
@@ -234,6 +317,8 @@ def emit(src: Path, dst: Path, rel: str, sink: list):
         emit_dotenv(src, dst, rel, sink)
     elif kind == "structured":
         emit_structured(src, dst, rel, sink)
+    elif kind == "toml":
+        emit_toml(src, dst, rel, sink)
     else:
         emit_verbatim(src, dst)
 
@@ -261,6 +346,31 @@ def mark_dirs(src_dir: Path, out_dir: Path, rel_prefix: str, counts: dict):
         d.mkdir(parents=True, exist_ok=True)
         (d / ".keep").write_text("", encoding="utf-8")
     counts[rel_prefix] = len(subs)
+
+
+def mark_dirs_opaque(src_dir: Path, out_dir: Path, rel_prefix: str, counts: dict):
+    """`mark_dirs`, but the subdirectory NAMES are replaced by ordinals.
+
+    Some peer trees encode the user's own filesystem in a directory name —
+    grok's `sessions/` names each session after the URL-escaped absolute path of
+    the working directory it ran in, so a verbatim clone would commit a listing
+    of Sean's local projects into this repository. Only the COUNT is an input to
+    the importer (`count_subdirs`), so the names carry no measurable signal and
+    are dropped rather than published.
+    """
+    if not src_dir.is_dir():
+        return
+    try:
+        n = sum(1 for p in src_dir.iterdir() if p.is_dir())
+    except (PermissionError, OSError) as e:
+        counts[f"{rel_prefix}!unreadable"] = str(type(e).__name__)
+        return
+    for i in range(n):
+        d = out_dir / f"{rel_prefix}-{i:03d}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".keep").write_text("", encoding="utf-8")
+    counts[rel_prefix] = n
+    counts[f"{rel_prefix}!names"] = "opaque"
 
 
 def gen_hermes(source: Path, out: Path, sink: list, counts: dict):
@@ -306,10 +416,69 @@ def gen_openclaw(source: Path, out: Path, sink: list, counts: dict):
         mark_dirs(source / md, out / md, md, counts)
 
 
+def gen_grok(source: Path, out: Path, sink: list, counts: dict):
+    present = []
+    for f in GROK_ROOT_FILES:
+        s = source / f
+        if not s.is_file():
+            continue
+        present.append(f)
+        if f == "auth.json":
+            # THE GROK EXCEPTION TO R3 — see the module header. One canary,
+            # deliberately, so the absence assertion still has an edge.
+            tok = canary("auth.json", "*")
+            sink.append({"file": "auth.json", "key": "*", "canary": tok})
+            (out / "auth.json").write_text(
+                json.dumps({"__elided_session_store__": tok}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            emit(s, out / f, f, sink)
+    counts["root_files"] = len(present)
+
+    for d in GROK_COUNTED_DIRS:
+        mark_dirs(source / d, out / d, d, counts)
+    for d in GROK_UNCOUNTED_DIRS:
+        mark_dirs(source / d, out / d, d, counts)
+    for d in GROK_OPAQUE_DIRS:
+        mark_dirs_opaque(source / d, out / d, d, counts)
+
+    # A skill directory is only discoverable to `scan_peer_skills` when it holds
+    # a `SKILL.md`, so the marker alone would silently shrink the surface from
+    # five skills to none. The body is ELIDED rather than cloned: these are the
+    # vendor's shipped skill texts, which are the peer's content and not the
+    # user's setup. Recorded in the manifest so a reader is never left inferring
+    # that a placeholder body is real.
+    elided = 0
+    skills_src = source / "skills"
+    if skills_src.is_dir():
+        for name in sorted(p.name for p in skills_src.iterdir() if p.is_dir()):
+            if (skills_src / name / "SKILL.md").is_file():
+                d = out / "skills" / name
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "SKILL.md").write_text(
+                    f"---\nname: {name}\n---\nbody elided by "
+                    "portability-corpus-gen.py\n",
+                    encoding="utf-8",
+                )
+                elided += 1
+    counts["skills_with_skill_md"] = elided
+
+    for tree, suffix in GROK_FILE_TREES:
+        src_dir = source / tree
+        if not src_dir.is_dir():
+            counts[f"{tree}!absent"] = 0
+            continue
+        names = sorted(p.name for p in src_dir.iterdir() if p.is_file() and p.suffix == suffix)
+        counts[tree] = len(names)
+        for name in names:
+            emit(src_dir / name, out / tree / name, f"{tree}/{name}", sink)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", required=True, type=Path)
-    ap.add_argument("--kind", required=True, choices=["hermes", "openclaw"])
+    ap.add_argument("--kind", required=True, choices=["hermes", "openclaw", "grok"])
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
@@ -326,6 +495,8 @@ def main() -> int:
     counts: dict = {}
     if args.kind == "hermes":
         gen_hermes(source, out, sink, counts)
+    elif args.kind == "grok":
+        gen_grok(source, out, sink, counts)
     else:
         gen_openclaw(source, out, sink, counts)
 
@@ -344,6 +515,16 @@ def main() -> int:
                 f"with a string value >= {STRUCTURED_MIN_LEN} chars"
             ),
             "R3": "every string value under credentials/ or in auth.json",
+            "R4": (
+                "TOML key = \"value\" assignment whose key matches R2's substring "
+                f"set with a value >= {STRUCTURED_MIN_LEN} chars"
+            ),
+            "grok_exception": (
+                "grok's auth.json is replaced wholesale by a single-canary "
+                "placeholder: its top-level KEY is an issuer URL plus an account "
+                "UUID that R3 would leave in place, and the grok importer never "
+                "opens the file (presence check only)."
+            ),
         },
         "counts": dict(sorted(counts.items())),
         "canaries": sink,
