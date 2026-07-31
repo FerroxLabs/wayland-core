@@ -12,6 +12,12 @@ Date: 2026-07-26
 **`F22-06-VERDICT: COMPATIBLE-AT-V5`**, on the Linux evidence below, with the
 Windows leg's status recorded honestly in §5 rather than assumed from Linux.
 
+> **Updated 2026-07-31.** The Windows leg is no longer open: M0–M5 were taken on
+> `SeanDesktop` at the same commit and every one agrees with Linux — see §5.1.
+> The verdict now rests on measurement from both platforms. Two claims the
+> original §5 made about the Windows lease were measured FALSE and are corrected
+> there.
+
 ---
 
 ## 1. The live product exercise (Linux)
@@ -222,18 +228,60 @@ with no log at all, which is recorded because it costs an hour to rediscover).
 
 `wayland-core.exe` (87,730,176 bytes) built with `CLI_EXIT=0`. At the time this
 record was written the second build — the reduce instrument — was still running,
-so the Windows legs of M1–M5 were **NOT RUN**.
+so the Windows legs of M1–M5 were NOT RUN.
 
-**`F22-06-LEG-WINDOWS: NOT RUN`** — the reduce instrument had not finished
-building on a heavily contended box within this session's budget; the Windows
-observations of M1–M5, and specifically the writer-lease-across-restart
-observation that threat T-22-06 exists for, are open.
+### 5.1 CLOSED 2026-07-31 — `F22-06-LEG-WINDOWS: RAN`
 
-This is the single largest gap in the determination and it is not papered over.
-The schema half of the verdict is platform-independent Rust compiled from one
-source and the panel said so explicitly; the **lease** half is
-`#[cfg(unix)]`-gated with a recorded prior defect class about Windows byte-range
-locks being mandatory rather than advisory, and nothing here measured it.
+The reduce and append instruments were rebuilt on `SeanDesktop` in the same
+detached worktree `C:\p22`, still at `2ecdfdf5` (`git rev-parse HEAD` verified),
+against the warm `C:\p22-target` tree the previous session left behind. Both
+builds finished in about eight minutes each. **M0 through M5 were all taken**,
+with a negative control and a cross-platform check. Full transcript:
+`22-01-EVIDENCE/windows/GATE-RESULTS-WINDOWS.txt`.
+
+| Leg | Windows result |
+|---|---|
+| M0 | same `E0004`, cargo exit 101 — the reduction decision is forced on Windows too |
+| M1 | **IDENTICAL**, `sha256=e95de5c1…` — growing the enum perturbs nothing |
+| M2 | only `last_seq` 13→14 and `last_checksum` moved; prefix identical |
+| M3 | **fails closed**, exit 3, zero stdout, `unknown variant p22_probe` |
+| M4 | pre-change `.snapshot`/`.authority` accepted; snapshot+suffix == full-log replay |
+| M5a | two sequential processes both took the lease (seq 14, then 15) |
+| M5b | a concurrent second writer is **refused** (exit 5, "writer lease is already held") |
+| M5c | the lease is released on process exit |
+| NC1 | a single flipped byte is refused (`frame 8 digest mismatch`) — the gate can fail |
+| XP | the **Linux** journal reduces to the **same** state on Windows (canonical `sha256=4f5713e2…` both sides) |
+
+**Two premises in the paragraph above were measured FALSE.**
+
+1. *"the **lease** half is `#[cfg(unix)]`-gated"* — it is not, and was not at this
+   commit. `session_journal/lease.rs:67` carries a full `#[cfg(windows)]`
+   `LockFileEx` implementation with a matching `UnlockFileEx`. The Windows lease
+   was never unimplemented; it was only unmeasured.
+
+2. *"a recorded prior defect class about Windows byte-range locks being mandatory
+   rather than advisory, and nothing here measured it"* — the source already
+   anticipates exactly that and mitigates it: `AUTHORITY_LOCK_OFFSET = u64::MAX - 1`
+   locks a **one-byte sentinel past the largest addressable file offset**, so the
+   mandatory range covers no real journal byte. M5b measured the consequence
+   directly: with the authority lock **held**, the product's own read path still
+   reduced the journal to 245 lines, exit 0. The `ERROR_LOCK_VIOLATION` read
+   starvation that threat T-22-06 exists for **does not occur**.
+
+So the lease half of the verdict is now measured on Windows rather than assumed,
+and it holds — including the one property Linux could not exercise, because
+`flock` being advisory makes the reader-while-locked question vacuous there.
+
+**One honest limitation.** The raw `sha256` of this session's reductions is not
+comparable to the 2026-07-26 Linux figures: that instrument serialised through
+`serde_json::Value` (sorted keys), this one serialises the struct directly
+(declaration order). The XP comparison was therefore made on **canonicalised**
+JSON, where both platforms agree exactly. The M1–M5 comparisons are unaffected —
+each compares two binaries built from one instrument on one host.
+
+**Still not measured, and still owed:** no Windows run reached a tool call
+either, so the Windows corpus has the same `tool_execution_*` hole as the Linux
+one. That gap is credential-bound and reserved to Sean.
 
 ---
 
