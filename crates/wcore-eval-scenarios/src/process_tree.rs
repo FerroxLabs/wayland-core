@@ -2354,12 +2354,13 @@ mod unix_process_group_tests {
 
         // Wait for the group to be observably occupied. The count is asserted
         // as ">= 1", not "== 1", because it is platform-dependent and the
-        // property under test does not depend on it: Linux `/bin/sh` FORKS
-        // `sleep` rather than exec-ing it, so the group holds 2 (sh + sleep),
-        // while macOS `/bin/sh` execs and it holds 1. Measured -- an earlier
+        // property under test does not depend on it. Measured: an earlier
         // `== Live(1)` here passed on macOS and failed the Linux gate with
-        // `Live(2)`, which was the census counting correctly and the
-        // assertion being wrong.
+        // `Live(2)` -- the census counting correctly and the assertion being
+        // wrong. Whether `/bin/sh` execs a lone command or forks it is a
+        // property of the specific shell on the specific host (dash execs,
+        // some bash builds do not), NOT a stable Linux-vs-macOS rule, so the
+        // count must not be pinned on either platform.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             match group.live_members() {

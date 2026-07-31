@@ -30,9 +30,13 @@ use thiserror::Error;
 ///
 /// Six `driver_cli` tests therefore reported `--build-info timed out` for a
 /// binary that answers in 40 ms once the kernel has seen it. Raising the
-/// budget does not weaken the check: a genuinely hung binary never answers,
-/// so it still fails — just 90 seconds later. Lowering it back below ~30 s
-/// re-creates a gate with no reachable pass state on macOS.
+/// budget DOES weaken the check, and the direction matters: the tolerated
+/// stall grows 18x, so a binary that hangs 89 s and then answers now passes
+/// where it used to fail. What it does not do is make the check unable to
+/// fail — a genuinely hung binary never answers at all, so it still fails,
+/// just 85 s later. That trade is worth taking because the previous value had
+/// no reachable pass state on macOS at all; anything back below ~30 s
+/// re-creates that.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
 

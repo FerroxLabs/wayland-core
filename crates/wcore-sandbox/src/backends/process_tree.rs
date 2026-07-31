@@ -355,21 +355,37 @@ impl MacProcessGroupAuthority {
         // still refused.
         let sentinel_holds_the_group =
             macos_process_group(sentinel_pid).is_ok_and(|group| group == process_group);
-        let root_not_replaced = match root.recheck() {
-            MacIdentityRecheck::Same | MacIdentityRecheck::Corpse => true,
+        // The OLD check `root.still_matches() && getpgid(root) == root` carried
+        // TWO properties: root identity, and root group-leadership. Only the
+        // first is unsatisfiable for a corpse, so only the first is relaxed —
+        // a LIVE root must still be in the group it claims to lead. Dropping
+        // that conjunct would accept a root that called `setpgid`/`setsid`
+        // itself during the attach window, and teardown would then kill a
+        // group the workload had already left. (The module header is explicit
+        // that a child can escape at any later instant, so this closes an
+        // attach-time window rather than providing hard containment — but a
+        // window that was closed should not be opened for free.)
+        let root_state = root.recheck();
+        let root_ok = match root_state {
+            MacIdentityRecheck::Same => {
+                macos_process_group(root.pid).is_ok_and(|group| group == process_group)
+            }
+            MacIdentityRecheck::Corpse => true,
             MacIdentityRecheck::Recycled | MacIdentityRecheck::Unreadable(_) => false,
         };
-        if !(sentinel_holds_the_group && root_not_replaced) {
+        if !(sentinel_holds_the_group && root_ok) {
             unsafe {
                 libc::kill(sentinel_pid, libc::SIGKILL);
                 libc::waitpid(sentinel_pid, std::ptr::null_mut(), 0);
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
+                // `root_state` is the value the DECISION was made on. Calling
+                // `recheck()` again here would let the diagnostic disagree
+                // with the branch that produced it.
                 format!(
                     "macOS process-group authority changed while containment was attached \
-                     (sentinel in group: {sentinel_holds_the_group}, root: {:?})",
-                    root.recheck()
+                     (sentinel in group: {sentinel_holds_the_group}, root: {root_state:?})"
                 ),
             ));
         }
@@ -426,7 +442,7 @@ impl MacProcessIdentity {
         matches!(self.recheck(), MacIdentityRecheck::Same)
     }
 
-    /// Three-valued identity recheck.
+    /// Four-valued identity recheck.
     ///
     /// `still_matches()` collapses this to a bool, which is right for the
     /// sentinel (held alive by its socketpair, so a corpse would be a real
@@ -622,16 +638,23 @@ mod macos_tests {
         // never becomes a group leader, so the setpgid below would fail
         // because the group never existed rather than because it vanished —
         // the right answer for the wrong reason.
-        let mut leader_command = std::process::Command::new("true");
+        // `sleep 30`, not `true`: the leader must still be RUNNING when its
+        // group membership is confirmed. Darwin `getpgid` on a zombie answers
+        // ESRCH (the very fact this file documents), and `true` routinely
+        // exits before the parent's next statement — so a short-lived fixture
+        // makes this assertion flake, and a flaky tripwire gets quarantined,
+        // which silently removes the guard on the whole safety argument.
+        let mut leader_command = std::process::Command::new("sleep");
+        leader_command.arg("30");
         isolate_std(&mut leader_command);
         let mut leader = leader_command.spawn().expect("spawn leader");
         let vanished = leader.id() as libc::pid_t;
-        // It really was its own group leader before we reaped it.
         assert_eq!(
             macos_process_group(vanished).expect("leader pgid"),
             vanished,
             "fixture did not become its own process-group leader"
         );
+        leader.kill().expect("stop leader");
         leader.wait().expect("reap leader");
 
         // SAFETY: setpgid only moves the CALLING process, and it is expected

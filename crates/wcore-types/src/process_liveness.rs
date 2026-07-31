@@ -242,11 +242,14 @@ mod platform {
             }
         };
 
-        // The instrument's self-test. A `hidepid=2` mount, or a /proc from a
-        // different PID namespace, lists nothing we own — and an enumeration
-        // that cannot find the process asking the question cannot be trusted
-        // to find a survivor either. Without this, a restricted /proc would
-        // report every group empty, which is universal false success.
+        // A weak self-test, kept for the PID-namespace case but NOT relied on
+        // for permission failures.
+        //
+        // It does not catch `hidepid`, and an earlier version of this comment
+        // claimed it did. `hidepid` hides OTHER users' processes; your own
+        // stay visible, so `saw_self` is green while the scan is blind to
+        // exactly the members that matter. That gap is closed by the
+        // per-entry error handling below, not here.
         let me = std::process::id();
         let mut saw_self = false;
 
@@ -261,7 +264,29 @@ mod platform {
                 Ok(stat) => stat,
                 // Exited and was reaped between `read_dir` and this read. A
                 // process that no longer exists is not a containment failure.
-                Err(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                // ANY other error is "could not look", and must never be
+                // recorded as "nothing was there".
+                //
+                // This is the exact shape the whole module exists to refuse.
+                // Under `hidepid=1`, reading a different uid's
+                // `/proc/<pid>/stat` fails with EACCES. A group member owned
+                // by another uid is also precisely the member `kill(-pgid,
+                // SIGKILL)` answers EPERM for — the genuine containment
+                // failure. Skipping it here would return `Live(0)`, and the
+                // EPERM arm in `UnixProcessGroup::kill` would read that as
+                // proof the group was already empty. A live survivor would be
+                // recorded as a clean teardown.
+                //
+                // `liveness()` above already distinguishes NotFound from other
+                // errors; this census used to contradict its own module.
+                Err(error) => {
+                    return ProcessGroupCensus::Indeterminate(format!(
+                        "/proc/{name}/stat could not be read ({error}); a census that skips \
+                         unreadable entries can only undercount, and undercounting is the \
+                         direction that fakes an empty group"
+                    ));
+                }
             };
             let Some((state, group)) = proc_stat_state_and_pgrp(&stat) else {
                 // Skipping an unparseable entry could only ever UNDERcount,
@@ -279,6 +304,9 @@ mod platform {
         }
 
         if !saw_self {
+            // Catches a /proc from a foreign PID namespace, or `hidepid=2`
+            // hiding everything including us. It does NOT catch hidepid
+            // hiding only other users — see the comment above.
             return ProcessGroupCensus::Indeterminate(format!(
                 "/proc did not list this process (pid {me}); the enumeration cannot see \
                  itself, so a count of {live} for group {pgid} is not a measurement"
@@ -824,16 +852,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_unused_process_group_id_is_empty_not_indeterminate() {
+    fn a_group_whose_every_member_is_gone_censuses_as_empty() {
         // The negative direction. A census that answered `Indeterminate` for
         // everything would never let a containment proof succeed, wedging
         // every clean shutdown — the opposite failure, equally invisible in a
-        // bool. pid_max is 4194304 on Linux and 99999 on macOS, so this id
-        // cannot name a live group.
-        let unused = 4_000_000_u32;
-        match process_group_census(unused) {
+        // bool.
+        //
+        // The group is made genuinely empty rather than guessed at. An earlier
+        // version picked the "unused" id 4_000_000, which is BELOW Linux's
+        // default pid_max of 4194304 — on a high-churn host that id can name a
+        // real group, and the test would flake red for a correct census.
+        use std::os::unix::process::CommandExt;
+
+        let mut command = std::process::Command::new("true");
+        command.process_group(0);
+        let mut leader = command.spawn().expect("spawn group leader");
+        let pgid = leader.id();
+        leader.wait().expect("reap group leader");
+
+        match process_group_census(pgid) {
             ProcessGroupCensus::Live(0) => {}
-            other => panic!("expected an unused group id to census as Live(0), got {other:?}"),
+            other => {
+                panic!("a group whose only member was reaped must census as Live(0), got {other:?}")
+            }
         }
     }
 
