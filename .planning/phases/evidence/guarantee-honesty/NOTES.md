@@ -88,6 +88,35 @@ successor had reimplemented the check beside the send, which can drift.
      "Yes" beside a two-part guarantee would have been the same evidence-vs-claim
      mismatch the Slack correction in that document diagnoses.
 
+## B2.2 — the decision, and what it was judged against
+
+**A one-shot headless run keeps writing a trace file by default.** The defect was the
+missing bound, not the file; `log_rotate` supplies the bound. Full reasoning lives at
+the decision point in `wcore-cli/src/main.rs`, next to `log_to_file`.
+
+Judged against the gateway case specifically, because that is where the question is
+sharp. A host answering channel messages runs headless CONTINUOUSLY, so "headless
+writes a trace by default" is most expensive exactly there — and most necessary: that
+host has no terminal anyone is watching, no TUI to route traces to, and its failures
+(a channel that stopped polling, a credential that expired, a delivery abandoned at
+04:00) are found hours later from the record or not at all. Defaulting headless to no
+file would make the gateway the only mode of the product with no diagnostics
+whatsoever, which is the "trace record existing nowhere" state the original change
+ended. The cost it was actually challenged on — unbounded growth on a continuous host
+— is answered by capping the directory at 2 × MAX_LOG_BYTES, not by removing the file
+(B2.4). `RUST_LOG` remains the lever for anyone who wants the old stderr behaviour.
+
+## B2.3 — the fallback is now observable, and the control was run
+
+The open-failure path was not merely untested, it was **unobservable**: it degraded
+silently, so "the run still exits 0" was equally consistent with logging being dead,
+disabled, or never attempted. It now prints `LOG_FALLBACK_NOTICE`.
+
+Negative control, run on hetzner-dsm: deleting the `eprintln!` from `main.rs` and
+rebuilding makes `the_binary_survives_an_unopenable_log_dir` FAIL on the missing
+notice **while the process still exits 0** — which is precisely the false green. The
+mutation was reverted (`git checkout --` verified).
+
 ## B1.4 — recorded, not fixed
 
 `max_message_len` is asserted against its own literal at six sites and untested at two.
