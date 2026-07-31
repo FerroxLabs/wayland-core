@@ -26,9 +26,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProviderError;
 
-/// Default (cheapest) image arm — Together FLUX.1-schnell, ~$0.01/image
-/// (contract §3.3 / §3.5). Used when the caller does not name a `model`.
-pub const DEFAULT_IMAGE_MODEL: &str = "flux-image-together-flux";
+/// Default image arm. Used when the caller does not name a `model`.
+///
+/// MEASURED LIVE against `https://api.fluxrouter.ai/v1` on 2026-07-31 with a real
+/// key, both directions in the same minute:
+///
+/// * `flux-image`                -> HTTP **200**, one image returned (b64_json, 137 KB)
+/// * `flux-image-together-flux`  -> HTTP **401** `{"message": "unauthorized"}`
+///
+/// The previous value was `flux-image-together-flux`, and it is not usable. It also
+/// does not appear in `GET /v1/models`, which lists exactly one image arm:
+/// `flux-image`. F-27C3-04 fixed the *tool* path (via `OPENAI_IMAGE_MODEL=flux-image`,
+/// see docs/providers.md) but left this constant — which is what the
+/// `wayland-core image` SUBCOMMAND defaults to — pointing at the dead arm.
+///
+/// Note the 401: because the failure is an auth-shaped status rather than a 404, the
+/// error was previously read as an ambiguity between "bad key" and "bad arm" (see the
+/// `format_provider_error` 401 test in wcore-cli/src/image.rs). The two calls above
+/// used the SAME key, so that ambiguity is now resolved by measurement: it is the arm.
+pub const DEFAULT_IMAGE_MODEL: &str = "flux-image";
 
 /// One generated image. `data[i]` keys vary by arm (contract §3.4):
 /// Gemini returns `b64_json` only; together-flux adds `timings`/`index`;
@@ -279,7 +295,11 @@ mod tests {
         assert_eq!(req.model, DEFAULT_IMAGE_MODEL);
         assert_eq!(req.n, 1);
         let body = req.to_body();
-        assert_eq!(body["model"], "flux-image-together-flux");
+        // Pinned to the literal deliberately: this asserts the exact string that goes
+        // ON THE WIRE, so a change to DEFAULT_IMAGE_MODEL cannot pass unnoticed.
+        // `assert_eq!(body["model"], DEFAULT_IMAGE_MODEL)` would compare the constant
+        // to itself and hold for ANY value, including the dead arm this replaced.
+        assert_eq!(body["model"], "flux-image");
         assert_eq!(body["prompt"], "a red apple");
         assert_eq!(body["n"], 1);
         // Omitted options must NOT appear on the wire.
@@ -292,7 +312,9 @@ mod tests {
     #[test]
     fn together_flux_keeps_response_format() {
         let body = ImageRequest::new("x")
-            .with_model(Some("flux-image-together-flux"))
+            // A non-default arm on purpose: if this were the default, the test could
+            // not tell `with_model` from doing nothing at all.
+            .with_model(Some("gpt-image-1-mini"))
             .with_response_format(Some("url".into()))
             .with_size(Some("1024x1024".into()))
             .to_body();

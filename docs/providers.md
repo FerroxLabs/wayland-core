@@ -518,4 +518,10 @@ OPENAI_IMAGE_MODEL=dall-e-3 wayland-core -p openai "generate a logo"
 
 Note this governs the **tool** only. The separate `wayland-core image`
 subcommand talks to Flux Router directly and takes its arm from `--model`
-(default `flux-image-together-flux`).
+(default `flux-image`).
+
+> **Measured 2026-07-31.** The subcommand default used to be
+> `flux-image-together-flux`, which returns HTTP 401 `unauthorized` from the live
+> router, while `flux-image` returns 200 with the same key. `GET /v1/models` lists
+> `flux-image` as the only image arm. F-27C3-04 fixed the tool path above but not this
+> one, so the subcommand shipped defaulting to a dead arm.
