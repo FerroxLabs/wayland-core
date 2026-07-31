@@ -145,7 +145,7 @@ fn constructible_platforms() -> Vec<&'static str> {
 /// absent block panics rather than yielding an empty map, because an empty map
 /// would make every comparison below trivially satisfied — the classic
 /// self-passing shape.
-fn parse_declaration(doc: &str) -> BTreeMap<String, String> {
+fn parse_declaration(doc: &str) -> Declaration {
     let start = doc.find(BEGIN).expect(
         "docs/delivery-semantics.md has lost its DELIVERY-SEMANTICS-MACHINE-READABLE block",
     );
@@ -154,37 +154,82 @@ fn parse_declaration(doc: &str) -> BTreeMap<String, String> {
         .find(END)
         .expect("DELIVERY-SEMANTICS-MACHINE-READABLE block is not terminated");
 
-    let mut out = BTreeMap::new();
+    let mut out = Declaration::default();
     for line in rest[..end].lines() {
         let line = line.trim();
         if line.is_empty() || !line.contains('=') {
             continue;
         }
+        // Prose inside the block explains the vocabulary; it must not be parsed
+        // as data. Only `key = value` where key is a bare platform (or
+        // `platform.cap`) counts, so a sentence containing '=' is skipped
+        // rather than becoming a phantom row.
         let (k, v) = line.split_once('=').expect("checked above");
         let (k, v) = (k.trim().to_string(), v.trim().to_string());
+        if k.contains(char::is_whitespace) {
+            continue;
+        }
+
+        if let Some(platform) = k.strip_suffix(".cap") {
+            let n: usize = v.parse().unwrap_or_else(|_| {
+                panic!("{k:?} must be a plain char count in decimal, got {v:?}")
+            });
+            assert!(
+                out.caps.insert(platform.to_string(), n).is_none(),
+                "{k:?} is declared twice"
+            );
+            continue;
+        }
+
         assert!(
             matches!(
                 v.as_str(),
-                "exactly-once" | "at-most-once" | "at-least-once"
+                "exactly-once" | "exactly-once-below-cap" | "at-most-once" | "at-least-once"
             ),
             "unknown guarantee {v:?} for {k:?} — the vocabulary is exactly-once / \
-             at-most-once / at-least-once"
+             exactly-once-below-cap / at-most-once / at-least-once"
         );
         assert!(
-            out.insert(k.clone(), v).is_none(),
+            out.guarantees.insert(k.clone(), v).is_none(),
             "{k:?} is declared twice"
         );
     }
     assert!(
-        !out.is_empty(),
+        !out.guarantees.is_empty(),
         "parsed zero rows out of the declaration — the parser or the document is broken, and \
          an empty table would make this whole test vacuous"
     );
     out
 }
 
+/// The machine-readable block, parsed.
+///
+/// `caps` is separate from `guarantees` because a cap is a *qualifier* on a
+/// guarantee rather than one of its values: only `exactly-once-below-cap` rows
+/// carry one, and the cross-checks between the two maps are the point (see
+/// [`disagreements`]).
+#[derive(Default, Clone)]
+struct Declaration {
+    guarantees: BTreeMap<String, String>,
+    caps: BTreeMap<String, usize>,
+}
+
+/// What an adapter, as the production factory builds it, actually reports.
+///
+/// `max_message_len` joined `supports` here on 2026-07-31. The exactly-once
+/// claim is conditional on the cap (see `docs/delivery-semantics.md` §4.1), and
+/// **Matrix's cap — the one number the whole surviving claim rests on — had no
+/// test of any kind.** The other six caps were each covered by an `assert_eq!`
+/// against the literal the function returns, which checks the constant against
+/// itself; this binds the number to the document instead.
+#[derive(Clone, Copy, Debug)]
+struct Measured {
+    supports: bool,
+    max_message_len: Option<usize>,
+}
+
 /// Build every constructible adapter and read its declared capability.
-fn measured_capabilities() -> BTreeMap<String, bool> {
+fn measured_capabilities() -> BTreeMap<String, Measured> {
     let mut out = BTreeMap::new();
     for platform in constructible_platforms() {
         let factory = channel_factory_for(platform)
@@ -197,7 +242,10 @@ fn measured_capabilities() -> BTreeMap<String, bool> {
         .unwrap_or_else(|e| panic!("could not construct {platform:?} from its fixture: {e}"));
         out.insert(
             platform.to_string(),
-            channel.supports_outbound_idempotency(),
+            Measured {
+                supports: channel.supports_outbound_idempotency(),
+                max_message_len: channel.max_message_len(),
+            },
         );
     }
     out
@@ -208,32 +256,89 @@ fn measured_capabilities() -> BTreeMap<String, bool> {
 /// only by the negative tests would prove nothing about this one.
 ///
 /// Returns one human-readable line per disagreement; empty means agreement.
-fn disagreements(
-    declared: &BTreeMap<String, String>,
-    measured: &BTreeMap<String, bool>,
-) -> Vec<String> {
+fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) -> Vec<String> {
     let mut out = Vec::new();
 
-    for (platform, supports) in measured {
-        match declared.get(platform) {
+    for (platform, m) in measured {
+        let supports = m.supports;
+        match declared.guarantees.get(platform) {
             None => out.push(format!(
                 "{platform}: constructible by the registry but has NO row in \
                  docs/delivery-semantics.md"
             )),
             Some(guarantee) => {
-                let expected_supports = guarantee == "exactly-once";
-                if expected_supports != *supports {
+                // Both exactly-once flavours mean the adapter transmits a key.
+                // The flavours differ in WHEN it rides, not in whether the
+                // capability bit is set.
+                let expected_supports = guarantee.starts_with("exactly-once");
+                if expected_supports != supports {
                     out.push(format!(
                         "{platform}: the document says {guarantee:?} (implying \
                          supports_outbound_idempotency() == {expected_supports}) but the adapter \
                          returns {supports}"
                     ));
                 }
+
+                // The cap half. This is what makes the conditional row a
+                // measurement rather than a caveat: the number in the document
+                // has to be the number the shipped adapter reports.
+                match (guarantee.as_str(), declared.caps.get(platform)) {
+                    ("exactly-once-below-cap", None) => out.push(format!(
+                        "{platform}: declared exactly-once-below-cap but the block carries no \
+                         {platform}.cap row, so the condition the guarantee depends on is \
+                         unstated"
+                    )),
+                    ("exactly-once-below-cap", Some(&cap)) => match m.max_message_len {
+                        None => out.push(format!(
+                            "{platform}: the document says the guarantee stops at {cap} chars, \
+                             but the adapter reports max_message_len() == None (no cap), so the \
+                             condition describes nothing"
+                        )),
+                        Some(actual) if actual != cap => out.push(format!(
+                            "{platform}: the document says the guarantee stops at {cap} chars \
+                             but the adapter's max_message_len() is {actual}"
+                        )),
+                        Some(_) => {}
+                    },
+                    // The converse, and the rule that stops this document
+                    // sliding back to the unconditional sentence it carried
+                    // until 2026-07-31: a finite cap makes bare `exactly-once`
+                    // false above that length.
+                    ("exactly-once", _) => {
+                        if let Some(actual) = m.max_message_len {
+                            out.push(format!(
+                                "{platform}: declared bare exactly-once, but the adapter caps a \
+                                 single message at {actual} chars. Above that, send_to_keyed \
+                                 chunks the body and transmits NO key, so the guarantee is \
+                                 at-least-once there. Declare exactly-once-below-cap with a \
+                                 {platform}.cap row"
+                            ));
+                        }
+                    }
+                    _ => {
+                        if let Some(&cap) = declared.caps.get(platform) {
+                            out.push(format!(
+                                "{platform}: carries a {platform}.cap row ({cap}) but its \
+                                 guarantee is {guarantee:?}, which has no cap condition — the cap \
+                                 row implies a guarantee it does not have"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
 
-    for platform in declared.keys() {
+    // A cap row for a platform with no guarantee row at all.
+    for platform in declared.caps.keys() {
+        if !declared.guarantees.contains_key(platform) {
+            out.push(format!(
+                "{platform}: has a {platform}.cap row but no guarantee row"
+            ));
+        }
+    }
+
+    for platform in declared.guarantees.keys() {
         // iMessage is compiled out off macOS, so its row is expected to have no
         // adapter here. Every other row must name something constructible.
         if platform == "imessage" && !cfg!(target_os = "macos") {
@@ -271,11 +376,20 @@ fn declaration_matches_every_adapter() {
         measured.keys().collect::<Vec<_>>()
     );
     assert_eq!(
-        declared.len(),
+        declared.guarantees.len(),
         10,
         "docs/delivery-semantics.md must carry a row for all ten adapters (including the \
          macOS-only iMessage), found {}",
-        declared.len()
+        declared.guarantees.len()
+    );
+    // The cap rows are the conditional half of §4.1. Zero of them would mean
+    // the parser had silently stopped seeing `<platform>.cap` lines, which
+    // would make every cap assertion below vacuously satisfied.
+    assert!(
+        !declared.caps.is_empty(),
+        "parsed zero <platform>.cap rows. At least Matrix declares one, so an empty cap map is \
+         a broken parser rather than a document with no conditional guarantees — and it would \
+         make every cap check silently pass"
     );
 
     let problems = disagreements(&declared, &measured);
@@ -301,7 +415,7 @@ fn exactly_one_adapter_is_exactly_once() {
     let measured = measured_capabilities();
     let mut idempotent: Vec<&str> = measured
         .iter()
-        .filter(|(_, v)| **v)
+        .filter(|(_, m)| m.supports)
         .map(|(k, _)| k.as_str())
         .collect();
     idempotent.sort_unstable();
@@ -339,17 +453,33 @@ fn comparator_rejects_a_flipped_row() {
 
     // Claim exactly-once for an adapter that provides no such thing. This is
     // the dangerous direction: a document over-promising relative to the code.
-    declared.insert("telegram".into(), "exactly-once".into());
+    declared
+        .guarantees
+        .insert("telegram".into(), "exactly-once".into());
 
+    // TWO disagreements since 2026-07-31, and both are real: Telegram neither
+    // transmits a key NOR is uncapped, so the mutated row is false in two
+    // independent ways. Asserting `len() == 1` here would have been the weaker
+    // claim — the count is pinned so a rule silently ceasing to fire still
+    // reddens.
     let problems = disagreements(&declared, &measured);
     assert_eq!(
         problems.len(),
-        1,
-        "expected exactly one disagreement, got: {problems:?}"
+        2,
+        "expected the capability mismatch AND the bare-exactly-once-over-a-capped-adapter \
+         report, got: {problems:?}"
     );
     assert!(
-        problems[0].starts_with("telegram:") && problems[0].contains("returns false"),
-        "the disagreement must name telegram and the measured value: {problems:?}"
+        problems
+            .iter()
+            .any(|p| p.starts_with("telegram:") && p.contains("returns false")),
+        "the capability disagreement must name telegram and the measured value: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("telegram:") && p.contains("declared bare exactly-once")),
+        "the unconditional claim over a 4096-char cap must also be reported: {problems:?}"
     );
 }
 
@@ -365,13 +495,27 @@ fn comparator_rejects_a_downgraded_row() {
     // exactly-once adapter until a live replay showed Slack ignoring the key.
     // The mutation has to name an adapter that really does declare `true`, or
     // the "document downgrades a real guarantee" case is not being exercised.
-    declared.insert("matrix".into(), "at-most-once".into());
+    declared
+        .guarantees
+        .insert("matrix".into(), "at-most-once".into());
 
+    // Also two since 2026-07-31: downgrading the guarantee leaves the
+    // `matrix.cap` row behind, and a cap row under a guarantee with no cap
+    // condition is itself drift — it implies a conditional promise the row no
+    // longer makes.
     let problems = disagreements(&declared, &measured);
-    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert_eq!(problems.len(), 2, "got: {problems:?}");
     assert!(
-        problems[0].starts_with("matrix:") && problems[0].contains("returns true"),
+        problems
+            .iter()
+            .any(|p| p.starts_with("matrix:") && p.contains("returns true")),
         "got: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("matrix:") && p.contains("has no cap condition")),
+        "the orphaned cap row must also be reported: {problems:?}"
     );
 }
 
@@ -382,7 +526,8 @@ fn comparator_rejects_a_missing_row() {
 
     // A new adapter shipped with no row is the drift a row-by-row comparison
     // cannot see on its own — there is no row to disagree with.
-    declared.remove("matrix");
+    declared.guarantees.remove("matrix");
+    declared.caps.remove("matrix");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
@@ -397,13 +542,153 @@ fn comparator_rejects_a_row_for_an_adapter_that_does_not_exist() {
     let mut declared = parse_declaration(DECLARATION);
     let measured = measured_capabilities();
 
-    declared.insert("carrierpigeon".into(), "exactly-once".into());
+    declared
+        .guarantees
+        .insert("carrierpigeon".into(), "exactly-once".into());
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
         problems[0].contains("cannot construct it"),
         "got: {problems:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Direction 2b — the CAP half of a conditional guarantee, both directions.
+//
+// Added 2026-07-31 with §4.1. Matrix's `max_message_len` is the single number
+// the surviving exactly-once claim is conditional on and it had NO test of any
+// kind; the six caps that were "covered" were each covered by an `assert_eq!`
+// against the literal their own function returns, which cannot fail for any
+// reason a reader cares about.
+// ---------------------------------------------------------------------------
+
+/// Can it pass: the real document's cap against the real adapter.
+#[test]
+fn the_declared_cap_is_the_adapters_real_cap() {
+    let declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    // Not vacuous: there is at least one conditional row, and it is Matrix.
+    assert_eq!(
+        declared.caps.keys().collect::<Vec<_>>(),
+        vec!["matrix"],
+        "the set of cap-conditional rows changed"
+    );
+    let cap = declared.caps["matrix"];
+    let actual = measured["matrix"].max_message_len;
+    assert_eq!(
+        actual,
+        Some(cap),
+        "docs/delivery-semantics.md §4.1 says the Matrix guarantee stops at {cap} chars, but the \
+         adapter the production factory builds reports max_message_len() == {actual:?}. One of \
+         the two is wrong, and the document is the customer-facing one."
+    );
+}
+
+/// Can it fail, 1: the document's number drifts from the adapter's.
+#[test]
+fn comparator_rejects_a_cap_that_does_not_match_the_adapter() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    declared.caps.insert("matrix".into(), 32_767);
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("32767") && problems[0].contains("32768"),
+        "the disagreement must name both the documented and the real cap: {problems:?}"
+    );
+}
+
+/// Can it fail, 2: a conditional guarantee with the condition left unstated.
+#[test]
+fn comparator_rejects_a_conditional_row_with_no_cap() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared.caps.remove("matrix");
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no matrix.cap row"),
+        "got: {problems:?}"
+    );
+}
+
+/// Can it fail, 3 — **the important one.**
+///
+/// This is the exact state the document was in until 2026-07-31: a bare
+/// `exactly-once` claim over an adapter that caps a single message, so the
+/// promise is false above the cap. No row in the real document exercises this
+/// rule any more, which is precisely why it needs a test that constructs the
+/// state: an unexercised rule is indistinguishable from an absent one.
+#[test]
+fn comparator_rejects_bare_exactly_once_over_a_capped_adapter() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    // Regress the document to its pre-2026-07-31 wording.
+    declared
+        .guarantees
+        .insert("matrix".into(), "exactly-once".into());
+    declared.caps.remove("matrix");
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(
+        problems.len(),
+        1,
+        "the old, false, unconditional wording must be rejected: {problems:?}"
+    );
+    assert!(
+        problems[0].contains("declared bare exactly-once") && problems[0].contains("32768"),
+        "the disagreement must say why the unconditional claim is false and name the cap: \
+         {problems:?}"
+    );
+}
+
+/// Can it fail, 4: a cap row attached to a guarantee that has no cap condition,
+/// which would imply a conditional promise the row does not actually make.
+#[test]
+fn comparator_rejects_a_cap_row_on_an_unconditional_guarantee() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared.caps.insert("telegram".into(), 4096);
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("has no cap condition"),
+        "got: {problems:?}"
+    );
+}
+
+/// The parser must not turn the explanatory prose inside the block into rows.
+///
+/// The block gained several sentences with the vocabulary in them on
+/// 2026-07-31. A parser that swallowed those would either panic on an unknown
+/// guarantee or, worse, invent platforms — and the row-count assertions
+/// elsewhere would then be measuring the prose.
+#[test]
+fn the_parser_ignores_the_prose_inside_the_block() {
+    let declared = parse_declaration(DECLARATION);
+    let mut names: Vec<&str> = declared.guarantees.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "discord", "email", "imessage", "matrix", "msteams", "signal", "slack", "sms",
+            "telegram", "whatsapp"
+        ],
+        "the parser picked up something that is not an adapter row"
     );
 }
 
@@ -432,29 +717,63 @@ fn the_prose_table_agrees_with_the_machine_readable_block() {
         }
     };
 
-    for (platform, guarantee) in &declared {
+    for (platform, guarantee) in &declared.guarantees {
         let label = prose_label(platform);
         let row = DECLARATION
             .lines()
             .find(|l| l.trim_start().starts_with(&format!("| {label}")))
             .unwrap_or_else(|| panic!("no prose table row starting with {label} for {platform:?}"));
 
-        // `exactly-once` is a substring of nothing else in the vocabulary, and
-        // `at-most-once` likewise, so a plain containment check is sound here.
-        assert!(
-            row.contains(guarantee),
-            "prose row for {platform:?} does not carry the declared guarantee {guarantee:?}:\n  \
-             {row}"
-        );
-        let other = if guarantee == "exactly-once" {
-            "at-most-once"
-        } else {
-            "exactly-once"
+        // What the prose row must, and must not, say for each machine label.
+        //
+        // The conditional row is the interesting case: it is REQUIRED to state
+        // both halves. A row that said only "exactly-once" while the block said
+        // `exactly-once-below-cap` would be precisely the omission this whole
+        // change exists to close — the reader would take away the unconditional
+        // promise the document carried until 2026-07-31.
+        let (must_have, must_not_have): (&[&str], &[&str]) = match guarantee.as_str() {
+            "exactly-once" => (&["exactly-once"], &["at-most-once", "at-least-once"]),
+            "exactly-once-below-cap" => (&["exactly-once", "at-least-once"], &["at-most-once"]),
+            "at-most-once" => (&["at-most-once"], &["exactly-once"]),
+            "at-least-once" => (&["at-least-once"], &["exactly-once", "at-most-once"]),
+            other => panic!("no prose expectation defined for guarantee {other:?}"),
         };
-        assert!(
-            !row.contains(other),
-            "prose row for {platform:?} carries BOTH guarantees, so it is ambiguous:\n  {row}"
-        );
+
+        for needle in must_have {
+            assert!(
+                row.contains(needle),
+                "prose row for {platform:?} is declared {guarantee:?} but does not say \
+                 {needle:?}:\n  {row}"
+            );
+        }
+        for needle in must_not_have {
+            assert!(
+                !row.contains(needle),
+                "prose row for {platform:?} is declared {guarantee:?} but also says {needle:?}, \
+                 so it is ambiguous:\n  {row}"
+            );
+        }
+
+        // For a conditional row the prose must also carry the actual number.
+        // "exactly-once below a cap" without saying which cap is a caveat a
+        // reader cannot act on.
+        if guarantee == "exactly-once-below-cap" {
+            let cap = declared.caps.get(platform).unwrap_or_else(|| {
+                panic!("{platform:?} is exactly-once-below-cap but has no cap row")
+            });
+            // Rendered with a thousands separator in the prose table.
+            let plain = cap.to_string();
+            let grouped = format!(
+                "{},{}",
+                &plain[..plain.len() - 3],
+                &plain[plain.len() - 3..]
+            );
+            assert!(
+                row.contains(&plain) || row.contains(&grouped),
+                "prose row for {platform:?} must state the cap ({plain} or {grouped}) that its \
+                 guarantee is conditional on:\n  {row}"
+            );
+        }
     }
 }
 

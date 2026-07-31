@@ -225,3 +225,10 @@ pub mod startup_error;
 // `wcore-skill-govern` helper that is packaged by nothing, so no installed copy of
 // the product could reach it.
 pub mod skill_govern;
+
+// Size-bounded rotation for `$WAYLAND_HOME/logs/wayland-core.log`. Lives in the
+// lib so the rotation invariants — that a rotation happens AND that the bytes
+// it keeps are the newest — are testable under `cargo test -p wcore-cli --lib`,
+// while the fallback-when-the-log-cannot-be-opened path is proven against the
+// real binary in `tests/log_rotation.rs`.
+pub mod log_rotate;

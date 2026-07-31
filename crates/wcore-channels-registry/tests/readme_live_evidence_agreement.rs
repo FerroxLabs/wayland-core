@@ -20,7 +20,18 @@
 //! `docs/delivery-semantics.md` §2 carries a *"Replay measured at a real
 //! destination?"* column. A row whose cell says `NOT MEASURED` has no live
 //! evidence; every other row does. That partition is the fact. This test
-//! requires the README to state the same partition:
+//! requires the README to state the same partition.
+//!
+//! **Three states since 2026-07-31, not two.** Matrix's guarantee acquired a
+//! precondition (exactly-once below its length cap, at-least-once above), and
+//! only the below-cap half has been driven live. Its cell therefore says both
+//! `Yes` and `NOT MEASURED`, which a substring test for either one reads
+//! wrongly. Such a cell must carry the explicit [`SCOPED_DRIVEN`] phrase and
+//! counts as driven; a cell claiming both WITHOUT that phrase is rejected as
+//! ambiguous rather than guessed at. See
+//! [`the_comparator_rejects_a_mixed_cell_that_does_not_declare_its_scope`].
+//!
+//! This test requires the README to state the same partition:
 //!
 //! 1. the spelled count of driven platforms matches the doc's count;
 //! 2. the spelled count of the remainder matches the doc's count;
@@ -70,6 +81,28 @@ const DOC_LINK: &str = "](docs/delivery-semantics.md)";
 /// The phrase `docs/delivery-semantics.md` §2 uses for a row with no live
 /// evidence. Every other row in that column asserts one.
 const NOT_MEASURED: &str = "NOT MEASURED";
+
+/// The phrase a row uses when its evidence is **split**: measured live for part
+/// of the guarantee's range, unmeasured for the rest.
+///
+/// Added 2026-07-31 for the Matrix row, and the reason it is an explicit
+/// literal rather than a cleverer parse matters. `NOT MEASURED` used to be a
+/// sound binary test because every cell was wholly one thing or the other.
+/// Matrix is now genuinely both — driven at matrix.org below its 32,768-char
+/// cap, never driven above it — so its cell contains `Yes` *and* `NOT
+/// MEASURED`, and a substring check for either one alone silently returns the
+/// wrong answer.
+///
+/// It counts as **driven**: the README bullet's claim is "this platform has
+/// been driven at the real platform", and Matrix has. The above-cap gap is a
+/// scope note on the guarantee, recorded in §4.1, not a claim that no live run
+/// ever happened.
+///
+/// Requiring the exact phrase, rather than inferring "mixed" from the presence
+/// of both substrings, keeps the dangerous direction closed: a genuinely
+/// unmeasured row that happens to contain the word "Yes" in prose still
+/// classifies as not-measured, because it will not carry this literal.
+const SCOPED_DRIVEN: &str = "BELOW the cap: Yes";
 
 /// Row labels as they appear in the first column of the §2 prose table.
 ///
@@ -165,14 +198,38 @@ fn driven_per_platform(doc: &str, problems: &mut Vec<String>) -> BTreeMap<&'stat
         }
         let evidence = parts[parts.len() - 2].trim();
 
-        let driven = !evidence.contains(NOT_MEASURED);
-        if driven && !evidence.contains("Yes") {
+        // Ordered, because the cases overlap. A scoped cell contains BOTH
+        // "Yes" and "NOT MEASURED", so it has to be recognised before either
+        // of the plain checks can misread it.
+        let driven = if evidence.contains(SCOPED_DRIVEN) {
+            true
+        } else if evidence.contains(NOT_MEASURED) {
+            false
+        } else if evidence.contains("Yes") {
+            true
+        } else {
             problems.push(format!(
-                "§2 evidence cell for {platform:?} says neither {NOT_MEASURED:?} nor \"Yes\", so \
-                 it cannot be classified: {evidence:?}"
+                "§2 evidence cell for {platform:?} says none of {SCOPED_DRIVEN:?}, \
+                 {NOT_MEASURED:?} or \"Yes\", so it cannot be classified: {evidence:?}"
+            ));
+            continue;
+        };
+
+        // A cell that claims both without using the scoped phrase is
+        // ambiguous, and guessing at it is how a partial measurement gets
+        // recorded as a whole one. Reject it and make the author say which.
+        if !evidence.contains(SCOPED_DRIVEN)
+            && evidence.contains(NOT_MEASURED)
+            && evidence.contains("Yes")
+        {
+            problems.push(format!(
+                "§2 evidence cell for {platform:?} claims both \"Yes\" and {NOT_MEASURED:?} but \
+                 does not carry {SCOPED_DRIVEN:?}, so it is ambiguous about what was actually \
+                 measured: {evidence:?}"
             ));
             continue;
         }
+
         out.insert(*platform, driven);
     }
 
@@ -352,6 +409,34 @@ fn the_comparator_rejects_a_platform_on_the_wrong_side() {
             && p.contains("not-measured side")),
         "expected Telegram to be reported as claimed-driven while the table says \
          not-measured; got: {problems:?}"
+    );
+}
+
+/// The scoped-evidence branch, in both directions.
+///
+/// Known-positive first: Matrix's real cell IS scoped today, and the whole
+/// suite is green, so the branch is exercised by every other test here. What
+/// this adds is the failure direction — a cell that claims a live "Yes" AND a
+/// "NOT MEASURED" without saying which part is which must be REJECTED, not
+/// silently resolved. Guessing is how half a measurement gets recorded as a
+/// whole one, which is the error this whole file exists to catch one layer up.
+#[test]
+fn the_comparator_rejects_a_mixed_cell_that_does_not_declare_its_scope() {
+    // Known-positive: the real document classifies cleanly.
+    assert!(
+        disagreements(README, DECLARATION).is_empty(),
+        "the unmutated comparison must be green for this control to mean anything"
+    );
+
+    // Strip only the scoping phrase, leaving both claims standing.
+    let ambiguous = replace_once(DECLARATION, SCOPED_DRIVEN, "Yes");
+    let problems = disagreements(README, &ambiguous);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("ambiguous about what was actually measured")),
+        "a cell claiming both Yes and NOT MEASURED without the scoping phrase must be \
+         rejected; got: {problems:?}"
     );
 }
 
