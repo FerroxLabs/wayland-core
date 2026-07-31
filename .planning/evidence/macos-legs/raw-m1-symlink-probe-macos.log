@@ -1,0 +1,29 @@
+### macOS media-intake component-walk probe
+uname: Darwin 25.3.0 arm64
+TMPDIR=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/
+
+0. Which top-level directories are symlinks on this host?
+  /tmp       islink=True -> private/tmp
+  /var       islink=True -> private/var
+  /etc       islink=True -> private/etc
+  /Users     islink=False -> -
+  /private   islink=False -> -
+
+1. A real file under the platform's own TMPDIR (what tempfile/mktemp -d give you)
+  TMPDIR (as handed out)       path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-m1-probe-skc8c4xg/good.wav
+                               walk_ok=False failed_at=var errno=ENOTDIR (Not a directory)
+
+2. The SAME file, via its fully resolved path (no symlinked component)
+  TMPDIR (realpath)            path=/private/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-m1-probe-skc8c4xg/good.wav
+                               walk_ok=True failed_at=None errno=0 (-)
+
+3. A file under $HOME, whose components are all real directories
+  HOME                         path=/Users/seandonahoe/.wl-m1-probe/good.wav
+                               walk_ok=True failed_at=None errno=0 (-)
+
+4. Literal /tmp (the Linux-native shape this walk was written against)
+  /tmp literal                 path=/tmp/wl-m1-probe-40079.wav
+                               walk_ok=False failed_at=tmp errno=ENOTDIR (Not a directory)
+
+PROBE-SUMMARY: tmpdir_walk_ok=False tmpdir_realpath_walk_ok=True home_walk_ok=True slash_tmp_walk_ok=False
+INTERPRETATION: the walk succeeds only when NO component is a symlink. On macOS `/tmp` and `/var` are OS-provided symlinks into `/private`, and `$TMPDIR` is always under `/var/folders/...`, so every path the platform's own temp APIs hand out is refused by an O_NOFOLLOW|O_DIRECTORY walk. Linux has no such top-level symlinks, which is why this never appeared there.

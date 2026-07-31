@@ -1,0 +1,40 @@
+wayland-core cron: refusing to create a webhook job: webhook triggers have no producer in this build: nothing
+routes an inbound HTTP request to a job, and no authentication scheme exists for one. This job will never fire
+. Use `cron publish` with an `event:` trigger instead.
+Nothing was written.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
