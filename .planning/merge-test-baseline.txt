@@ -176,15 +176,55 @@
 #    Removed in the SAME commit as the fix, per the resolution documented on
 #    entries 1 and 2 above.
 
-# 6. REFUSED RESTORE MUTATES THE TARGET — data loss, not a test artifact.
-#    portability_hostile_corpus.rs:1242. The test digests an occupied target
-#    before and after a restore that is REFUSED, and the digests differ:
-#      before 3044f265e70cc6624fd44cc39eab10299a43c6190630af49296e847530ba5018
-#      after  d50b29ed835e66b420b75fe0fbc98713087f7ee52a8c127a8890276303d32047
-#    So the refusal path has already written to the user's file by the time it
-#    declines. Measured by digest, deliberately not read off the refusal message —
-#    the message says the right thing while the bytes do not, which is why an
-#    honest instrument was needed to see it. Same family as #114 (restore
-#    --replace torn-SQLite on the rollback side). Needs its own issue and a fix;
-#    it is in this file only so the gate stays usable in the meantime.
-wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
+# 6. REMOVED 2026-07-31 -- FIXED, in the same commit, measured in BOTH
+#    directions. This entry read:
+#      wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
+#    and recorded, correctly, that a REFUSED restore changed the occupied
+#    target's digest from 3044f265... to d50b29ed... . Its DIAGNOSIS — "the
+#    refusal path has already written to the user's file", "data loss" — was
+#    wrong, and is corrected here rather than quietly dropped, because the next
+#    reader will find this line before they find the fix.
+#
+#    What the refusal actually left behind, measured against the real binary by
+#    diffing the target tree rather than by reading the message:
+#        + logs/                    (directory)
+#        + logs/wayland-core.log    (0 bytes)
+#    and nothing else. config.toml and keep.txt were byte-identical; no user
+#    content was touched, so no data was lost. The writer was not the restore
+#    path, which is why the restore path "looked careful": `main` opens
+#    $WAYLAND_HOME/logs/wayland-core.log BEFORE dispatching the subcommand, and
+#    $WAYLAND_HOME is the very directory `backup restore --home` was being asked
+#    to decline. Every offline subcommand writes zero log bytes, so the file was
+#    always empty — it existed only because `open` created it.
+#
+#    The same eager creation was hiding a defect that IS severe, found while
+#    measuring this one and closed by the same change: `backup restore
+#    <archive> --home $WAYLAND_HOME` into a genuinely EMPTY home was refused
+#    with "the target already holds state ... choose an empty target", because
+#    dir_holds_state saw the logs/ directory this same process had created
+#    microseconds earlier. Restoring your own backup into your own home — the
+#    reason the feature exists — was unreachable. Control: the identical
+#    restore into a target that is NOT the process's $WAYLAND_HOME succeeded.
+#
+#    Fix (issue #932, which stays OPEN): RotatingLog binds its path with a
+#    read-only probe and materialises the directory and file with the FIRST
+#    RECORD. A run with nothing to say leaves nothing behind.
+#
+#    PASSES at c1c1b924: "1 test run: 1 passed" (nextest --status-level pass, so
+#    the PASS line was printed and the count is not a vacuous zero). The whole
+#    binary plus tests/log_rotation.rs plus the log_rotate unit tests: "32 tests
+#    run: 32 passed".
+#
+#    NEGATIVE CONTROL, because a test that cannot fail is worthless: with the
+#    eager `create_dir_all` + `File::create` put back into RotatingLog::open and
+#    NOTHING else changed, the same test goes red at the same assertion with
+#    left 3044f265e70cc6624fd44cc39eab10299a43c6190630af49296e847530ba5018 and
+#    right d50b29ed835e66b420b75fe0fbc98713087f7ee52a8c127a8890276303d32047 —
+#    the exact digest pair this entry recorded, so the removed line and the
+#    reintroduced write are the same phenomenon rather than two things that
+#    happen to be red together.
+#
+#    Removed in the same commit as the fix, per the resolution documented at
+#    entry 2: the gate reports an entry that vanishes without passing as
+#    BASELINE ENTRY NO LONGER EXISTS, and one that passes while still listed as
+#    STALE BASELINE.

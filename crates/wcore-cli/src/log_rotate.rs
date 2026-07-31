@@ -61,10 +61,88 @@ fn rotated_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Read-only check that `path` could be opened for append later, returning the
+/// bytes already in it.
+///
+/// Creates nothing — that is the whole point, see [`RotatingLog`]. It therefore
+/// cannot see every failure the real open can: a `logs/` directory that exists
+/// but is not writable is only discovered at the first record. It does see the
+/// shape that a probe is actually for — something already occupying the path,
+/// or the `logs/` path, that is not what the log needs it to be — which is the
+/// condition `the_binary_survives_an_unopenable_log_dir` constructs.
+fn probe(path: &Path) -> io::Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => {
+            return Err(io::Error::other(format!(
+                "{} is a directory, not a log file",
+                path.display()
+            )));
+        }
+        Ok(m) => return Ok(m.len()),
+        // Unix reports ENOTDIR here when an ancestor is a plain file; Windows
+        // reports a not-found. Both are resolved by the ancestor walk below,
+        // which is why only NotFound falls through rather than every error.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    // The log does not exist yet, so the nearest ancestor that DOES exist must
+    // be a directory or `create_dir_all` will fail at the first record.
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if dir.as_os_str().is_empty() {
+            // A relative path whose parent is the current directory.
+            return Ok(0);
+        }
+        match std::fs::metadata(dir) {
+            Ok(m) if m.is_dir() => return Ok(0),
+            Ok(_) => {
+                return Err(io::Error::other(format!(
+                    "{} exists and is not a directory",
+                    dir.display()
+                )));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => ancestor = dir.parent(),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "no existing ancestor directory for {}",
+        path.display()
+    )))
+}
+
 /// An append-mode log file that rotates once it passes `max_bytes`.
+///
+/// # The file is created by the FIRST RECORD, not by `open`
+///
+/// [`RotatingLog::open`] binds a path and proves the location is usable. It
+/// creates neither the `logs/` directory nor the file, so a run that emits no
+/// records leaves NOTHING behind.
+///
+/// That is not tidiness. `$WAYLAND_HOME` is also the directory
+/// `wayland-core backup restore --home …` operates on, and `main` opens the log
+/// before dispatching the subcommand. Creating the file eagerly meant every
+/// invocation of every offline subcommand — `models list`, `--config-path`,
+/// `backup restore` — planted an empty `logs/wayland-core.log` in that home.
+/// Measured on `backup restore` (issue #932), which emits no records at all:
+///
+/// * a REFUSED restore left the target no longer byte-identical, because the
+///   process doing the refusing had already created `logs/` inside it —
+///   `portability_hostile_corpus::hostile_refused_restore_leaves_an_occupied_target_byte_identical`;
+/// * a restore into a genuinely EMPTY home was refused with "the target already
+///   holds state", because [`crate::backup::dir_holds_state`] saw the `logs/`
+///   directory this same process had created microseconds earlier. The
+///   disaster-recovery path — restore your backup into your own home — was
+///   unreachable, and the refusal told the operator to "choose an empty target"
+///   when they already had.
+///
+/// Neither is a logging defect in the abstract. Both are the consequence of
+/// writing before there was anything to write.
 pub struct RotatingLog {
     path: PathBuf,
-    file: File,
+    /// `None` until the first record — see the type docs.
+    file: Option<File>,
     /// Bytes in the LIVE file. Seeded from its existing length so an append to
     /// an already-large log rotates promptly instead of allowing another full
     /// `max_bytes` on top of it.
@@ -73,19 +151,39 @@ pub struct RotatingLog {
 }
 
 impl RotatingLog {
-    /// Open (creating parents) in append mode.
+    /// Bind to `path`, creating nothing.
+    ///
+    /// An error means the location is already unusable and the caller prints
+    /// [`LOG_FALLBACK_NOTICE`]. The check is read-only: a probe that opened the
+    /// file to find out would be exactly the write this type exists to avoid.
     pub fn open(path: PathBuf, max_bytes: u64) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = File::options().create(true).append(true).open(&path)?;
-        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let written = probe(&path)?;
         Ok(Self {
             path,
-            file,
+            file: None,
             written,
             max_bytes,
         })
+    }
+
+    /// Materialize the directory and the file. Called by the first record.
+    fn file_mut(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = File::options().create(true).append(true).open(&self.path)?;
+            // Re-seed from the handle: another process may have appended
+            // between the probe and here.
+            self.written = file.metadata().map(|m| m.len()).unwrap_or(self.written);
+            self.file = Some(file);
+        }
+        // Assigned immediately above whenever it was `None`, so this cannot be
+        // `None` — expressed as an error rather than an `expect` because a
+        // logging path must never be the thing that aborts the process.
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file handle vanished immediately after open"))
     }
 
     /// Copy the live log over the previous generation, then truncate it.
@@ -96,9 +194,13 @@ impl RotatingLog {
     /// form needs no platform branch, and `set_len(0)` is correct for an append
     /// handle — the next write lands at the new end of file, which is 0.
     fn rotate(&mut self) -> io::Result<()> {
-        self.file.flush()?;
+        // Nothing has been written, so there is no live generation to retire.
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        file.flush()?;
         std::fs::copy(&self.path, rotated_path(&self.path))?;
-        self.file.set_len(0)?;
+        file.set_len(0)?;
         self.written = 0;
         Ok(())
     }
@@ -106,19 +208,29 @@ impl RotatingLog {
 
 impl Write for RotatingLog {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Materialize the file BEFORE the rotation decision. `written` may have
+        // been seeded from a log an earlier process left behind, in which case
+        // this process's very first record is the one that rotates — and
+        // `rotate` needs a real handle to do it.
+        self.file_mut()?;
         // `self.written > 0` keeps a single record larger than the whole bound
         // from looping: it is written to an empty file and overshoots once,
         // rather than rotating forever and never making progress.
         if self.written > 0 && self.written.saturating_add(buf.len() as u64) > self.max_bytes {
             self.rotate()?;
         }
-        let n = self.file.write(buf)?;
+        let n = self.file_mut()?.write(buf)?;
         self.written = self.written.saturating_add(n as u64);
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            // No record was ever written. Creating the file in order to flush
+            // an empty buffer is the defect, not the fix.
+            None => Ok(()),
+        }
     }
 }
 
@@ -251,5 +363,52 @@ mod tests {
             "the reopened log did not count the 280 bytes already present, so it never rotated"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "B".repeat(50));
+    }
+
+    /// BOTH directions of the lazy-creation contract (#932). Opening must leave
+    /// the tree untouched, and the first record must still land where the
+    /// operator is told to look — an `open` that created nothing but a `write`
+    /// that also created nothing would satisfy half of this and be useless.
+    #[test]
+    fn open_creates_nothing_and_the_first_record_creates_everything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let path = dir.join("wayland-core.log");
+
+        let mut log = RotatingLog::open(path.clone(), MAX_LOG_BYTES).unwrap();
+        assert!(
+            !dir.exists(),
+            "opening the log created {} — the home is the directory `backup restore` \
+             is deciding about, and a run with nothing to say must leave it alone",
+            dir.display()
+        );
+        assert!(!path.exists(), "opening the log created the file");
+        // Flushing an empty writer is the other way an empty file appears.
+        log.flush().unwrap();
+        assert!(!path.exists(), "flushing an empty log created the file");
+
+        log.write_all(b"RECORD\n").unwrap();
+        log.flush().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "RECORD\n",
+            "the first record did not reach the documented path"
+        );
+    }
+
+    /// The probe reports a location that can never work, without writing to it.
+    /// A plain file where `logs/` belongs fails `create_dir_all` on every
+    /// platform, and is what the binary-level degraded leg constructs.
+    #[test]
+    fn open_refuses_a_location_that_can_never_be_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("logs"), b"not a directory").unwrap();
+        let path = tmp.path().join("logs").join("wayland-core.log");
+
+        assert!(
+            RotatingLog::open(path, MAX_LOG_BYTES).is_err(),
+            "a log path blocked by a plain file was accepted, so the caller would \
+             never print the degraded-mode notice"
+        );
     }
 }

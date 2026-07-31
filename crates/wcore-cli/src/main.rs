@@ -854,12 +854,17 @@ fn print_known_models(provider: Option<&str>) {
     }
 }
 
-/// v0.9.1 W2 cycle-2 HIGH 2: open the tracing log file in append mode.
+/// v0.9.1 W2 cycle-2 HIGH 2: bind the tracing log file for append.
 /// Lives under `$WAYLAND_HOME/logs/wayland-core.log`, with `~/.wayland/logs/`
-/// as the platform default. The parent directory is created lazily; any error
-/// is surfaced to the caller, which prints
+/// as the platform default. Any error is surfaced to the caller, which prints
 /// [`log_rotate::LOG_FALLBACK_NOTICE`] and falls back to stderr (better than
 /// no traces at all).
+///
+/// #932: neither the directory nor the file is created here. This runs BEFORE
+/// the subcommand short-circuit, so `$WAYLAND_HOME` may well be the directory
+/// the subcommand is about to refuse to touch — see [`log_rotate::RotatingLog`]
+/// for the two measured failures that caused. The file appears with the first
+/// record.
 ///
 /// The writer is size-bounded — see [`log_rotate`]. It was not, and on a
 /// gateway host that is a file which grows for as long as the host runs.
