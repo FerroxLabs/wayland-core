@@ -51,10 +51,48 @@
 #    BASELINE. Both directions are covered, which is why deleting this line is
 #    safe to do and safe to review.
 
-# 3. Failed in both full-workspace runs at 43c84493. In crates/wcore-cli, which
-#    lane/fix-clippy-gate did not touch. NOT diagnosed by this lane — recorded so
-#    the gate has a reachable pass state, and flagged as needing an owner.
-wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
+# 3. REMOVED 2026-07-31 — FIXED, and the fix is in the test's fixture, not in a
+#    weakened assertion. This entry read:
+#      wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
+#
+#    DIAGNOSIS. The test never reached the behaviour it names. It died on its
+#    FIRST wait — 10s for "Detected in your environment" — because the binary had
+#    booted past onboarding to the Workspace, status bar already reading
+#    claude-sonnet-4-6. Its fixture (ConfigState::MultiEnvKeys) exported
+#    OPENAI_API_KEY *and* ANTHROPIC_API_KEY, and anthropic is the DEFAULT
+#    provider, so with no config.toml on disk a credential and a model both
+#    resolved and `tui::is_first_run` correctly returned false. Commit c2963999
+#    (2026-07-30 19:17) made that gate read credentials and not just the config
+#    file, closing UAT-TUI-UNIX F1 where the connect card sat over a configured
+#    session and ate the first typed characters. The baseline was established at
+#    43c84493 (2026-07-30 21:44), two and a half hours later — the test has been
+#    red since, for exactly that reason.
+#
+#    It is therefore NOT a product defect and NOT a headless-environment
+#    artifact. In particular it is not the keyring family (f14): this path writes
+#    provider slugs to config.toml and touches no secure store, and the
+#    single-key sibling `onboarding_persists_across_relaunch` passed on the same
+#    headless runs. It is a stale fixture whose premise a deliberate product
+#    change had removed.
+#
+#    FIX: MultiEnvKeys now exports two NON-default providers (openai + groq), so
+#    the gate leaves onboarding reachable and the connect-all path is actually
+#    executed. The assertion was not loosened — it still demands both slugs in
+#    config.toml, only the second slug's name changed with the fixture.
+#
+#    BOTH DIRECTIONS, measured on hetzner-dsm, `1 test run` each (not a vacuous
+#    filter):
+#      361d14d2  fixture fixed          -> 1 test run: 1 passed
+#      660ec3d7  fixture fixed AND
+#                connect_all_env_keys deliberately broken to gather only the
+#                first key -> 1 test run: 0 passed, 1 failed, panicking at
+#                proving_ground.rs:157 "connect-all must write groq to
+#                config.toml; got: [default]"
+#    The break-control failing at the guarded assertion — rather than at the
+#    onboarding wait — is what shows the test now runs the flow instead of
+#    timing out ahead of it. That break was reverted; it exists only as evidence.
+#
+#    Removed in the SAME commit as the fix, per the ratchet convention above.
 
 # ---------------------------------------------------------------------------
 # ADDED 2026-07-31 at e64ec3da, by the orchestrator, on the gate's first real
