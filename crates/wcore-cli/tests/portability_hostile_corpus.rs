@@ -102,6 +102,20 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
 }
 
+/// The CPython interpreter's name on THIS platform.
+///
+/// A python.org / winget Windows install ships `python.exe` and no `python3.exe`;
+/// the only `python3` on a stock Windows box is the Microsoft Store
+/// app-execution *alias* under `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is
+/// per-user and therefore absent for the CI runner's service account. Hard-coding
+/// `python3` cost 23 of the 81 failures in the first Windows CI enumeration
+/// (run 30403867920, `program not found`).
+///
+/// Same convention as `wcore-agent/src/orchestration/anvil/detect.rs:59`.
+fn python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 /// Materialise one hostile corpus, on THIS platform, right now.
 ///
 /// The generator's own post-creation verification runs here: a case whose
@@ -116,14 +130,14 @@ fn materialise(case_id: &str) -> (TempDir, Manifest) {
         "the hostile generator is missing at {}",
         script.display()
     );
-    let run = Command::new("python3")
+    let run = Command::new(python())
         .arg(&script)
         .arg("--out")
         .arg(out.path())
         .arg("--only")
         .arg(case_id)
         .output()
-        .expect("python3 must be available to materialise a hostile corpus");
+        .expect("a CPython interpreter must be available to materialise a hostile corpus");
     assert!(
         run.status.success(),
         "hostile generator failed for case {case_id}: status={:?}\nstdout:\n{}\nstderr:\n{}",
@@ -430,12 +444,12 @@ fn assert_canary_present_in_corpus(manifest: &Manifest, corpus: &Path, canary: &
 fn hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks() {
     let out = tempfile::tempdir().unwrap();
     let spec = out.path().join("spec.json");
-    let run = Command::new("python3")
+    let run = Command::new(python())
         .arg(generator())
         .arg("--emit-spec")
         .arg(&spec)
         .output()
-        .expect("python3");
+        .expect("a CPython interpreter must be on PATH");
     assert!(
         run.status.success(),
         "spec emission failed: {}",
@@ -517,23 +531,23 @@ fn hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks() {
 /// it exits non-zero; handed no arguments it exits non-zero.
 #[test]
 fn hostile_generator_can_go_red() {
-    let bad = Command::new("python3")
+    let bad = Command::new(python())
         .arg(generator())
         .arg("--only")
         .arg("no-such-case")
         .arg("--out")
         .arg(tempfile::tempdir().unwrap().path())
         .output()
-        .expect("python3");
+        .expect("a CPython interpreter must be on PATH");
     assert!(
         !bad.status.success(),
         "the generator reported SUCCESS for a case id it does not have — a \
          generator that cannot go red produces corpora that prove nothing"
     );
-    let noargs = Command::new("python3")
+    let noargs = Command::new(python())
         .arg(generator())
         .output()
-        .expect("python3");
+        .expect("a CPython interpreter must be on PATH");
     assert!(
         !noargs.status.success(),
         "the generator reported SUCCESS with no arguments"
@@ -1107,12 +1121,12 @@ fn hostile_excessive_item_count_hits_the_declared_refusal() {
 #[test]
 fn hostile_conservation_invariant_balances_across_every_corpus() {
     let out = tempfile::tempdir().unwrap();
-    let run = Command::new("python3")
+    let run = Command::new(python())
         .arg(generator())
         .arg("--out")
         .arg(out.path())
         .output()
-        .expect("python3");
+        .expect("a CPython interpreter must be on PATH");
     assert!(
         run.status.success(),
         "generating the full hostile corpus set failed:\n{}",

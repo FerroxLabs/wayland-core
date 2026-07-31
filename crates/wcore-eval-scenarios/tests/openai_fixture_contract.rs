@@ -78,8 +78,16 @@ async fn success_is_valid_sse_and_records_one_redacted_request() {
 
 #[tokio::test]
 async fn workspace_aware_identity_is_root_independent_and_collision_free() {
-    let first_root = "/private/openai-run-a";
-    let second_root = "/private/openai-run-b";
+    // `Path::new("/private/...").is_absolute()` is FALSE on Windows (root but no
+    // drive Prefix), and `start_for_workspace` runs the workspace through
+    // `workspace_forms`, whose first guard is `!workspace.is_absolute()`. These are
+    // synthetic identity roots — never created, never opened — so a drive prefix on
+    // Windows preserves the test exactly while making the literal absolute there.
+    let (first_root, second_root) = if cfg!(windows) {
+        ("C:/private/openai-run-a", "C:/private/openai-run-b")
+    } else {
+        ("/private/openai-run-a", "/private/openai-run-b")
+    };
     let first_script = OpenAiFixtureScript::new([OpenAiStep::tool_call(
         "call-edit",
         "Edit",

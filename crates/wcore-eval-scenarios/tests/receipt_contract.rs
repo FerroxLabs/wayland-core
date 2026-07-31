@@ -29,7 +29,31 @@ fn h64(ch: char) -> String {
     std::iter::repeat_n(ch, 64).collect()
 }
 
+/// Make a `/`-rooted synthetic path absolute on Windows too.
+///
+/// `Path::new("/private/ephemeral").is_absolute()` is **false** on Windows — a
+/// `/`-rooted path has a root but no `Prefix`, so it is only `has_root()`. Every
+/// workspace literal below is fed to `workspace_forms`
+/// (`crates/wcore-eval-scenarios/src/workspace_evidence.rs:29`), whose first guard
+/// is exactly `!workspace.is_absolute()`, so on Windows the whole file failed with
+/// `InvalidEvidence("workspace must be an absolute non-root path")` before
+/// measuring anything.
+///
+/// These roots are pure string-identity fixtures — nothing is created on disk and
+/// no path is ever opened — so prefixing a drive letter on Windows keeps the
+/// semantics identical (still absolute, still non-root, still `/`-separated for the
+/// substring assertions) while satisfying the platform's notion of "absolute".
+fn abs(path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{path}")
+    } else {
+        path.to_string()
+    }
+}
+
 fn traced_result(workdir: &str, external_path: &str) -> ScenarioResult {
+    let workdir = &abs(workdir);
+    let external_path = &abs(external_path);
     ScenarioResult {
         name: "workspace-normalization".to_string(),
         provider: ProviderId::OpenAI,
@@ -911,7 +935,7 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
         final_text: "apparently successful".to_string(),
         stderr_tail: "panic: background subsystem crashed".to_string(),
         turn_results: Vec::new(),
-        workdir: PathBuf::from("/private/ephemeral"),
+        workdir: PathBuf::from(abs("/private/ephemeral")),
         boot_time: Duration::from_millis(10),
         info_events: Vec::new(),
         execution: ExecutionEvidence {
@@ -987,7 +1011,7 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
     let reports = render_receipt_reports(&receipt, &[]).expect("safe projections");
     assert!(reports.console.contains("panic-regression"));
     assert!(!reports.json.contains("background subsystem crashed"));
-    assert!(!reports.json.contains("/private/ephemeral"));
+    assert!(!reports.json.contains(&abs("/private/ephemeral")));
 }
 
 #[test]
