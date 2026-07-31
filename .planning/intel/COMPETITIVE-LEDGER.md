@@ -61,9 +61,13 @@ Baseline-to-HEAD drift at the time of pinning: Hermes `0.17.0 → 0.18.2`; OpenC
 
 **Peers not in the CTRL-01 contract.** `gemini-cli` and `grok-build` are also checked out at
 `/Users/seandonahoe/dev/resources/`. CTRL-01, `REQUIREMENTS.md` CTRL-01/F30-01/F30-03, and
-`ROADMAP.md:83` all declare the peer set as Hermes and OpenClaw only. No family row references
-either tool, so neither was added — widening the declared peer set is a change to the control's
-contract, not a refresh of it.
+`ROADMAP.md:83` all declare the peer set as Hermes and OpenClaw only — **re-read 2026-07-31 and
+STILL TRUE** — so widening the declared peer set remains a change to the control's contract, not
+a refresh of it. ~~No family row references either tool, so neither was added.~~
+**PARTLY SUPERSEDED 2026-07-31.** The first clause stands: no family row references either tool
+and no Delta cites either. The consequence does not: `grok-build` now **has a pinned baseline**,
+recorded in `PEER PIN ADDENDUM — 2026-07-31` at the foot of this file. Hold the two states apart
+— grok-build is **PINNED, NOT ADMITTED**; `gemini-cli` is neither.
 
 ## Core-side commit lineage used by this refresh
 
@@ -481,3 +485,113 @@ CONSTRUCTED, whose surviving case is recorded inside the row rather than discard
   conditions, and the `FIELD-REGRESSIONS.md` entries `TXN-*` owes are still owed by that row.
 - **No Delta re-derivation.** The `GOAL-*` Delta text is byte-unchanged and still bound to
   `BASE-2026-07-13`; the open question it carries for F30 is carried forward, not answered.
+
+---
+
+# PEER PIN ADDENDUM — 2026-07-31, lane `lane/grok`
+
+**Scope: one peer BASELINE, and nothing else.** `grok-build` acquires a pinned baseline here. No
+family row is re-graded, no Delta is authored or re-derived, no maturity moves, the declared
+CTRL-01 peer set is unchanged, and Hermes and OpenClaw were not re-read. This section exists
+because `RECON-GROK.md` (lane `recon-grok`, 2026-07-29) produced a pin block formatted "ready to
+paste into `COMPETITIVE-LEDGER.md`" and it was never pasted — leaving the only Grok statement in
+this file the now-partly-superseded "neither was added" note above.
+
+**Every number below was RE-MEASURED for this addendum**, not copied from the recon. That was the
+right call twice: two of the recon's figures do not survive re-measurement, and both corrections
+are recorded here rather than laundered into the ledger. The measurement was read-only via
+`/usr/bin/git -C /Users/seandonahoe/dev/resources/grok-build`; the peer working tree was
+unchanged afterwards (`git status --porcelain` → 0 lines, `.git/index` mtime unmoved at
+2026-07-16 16:36:43).
+
+## Baseline table row
+
+| Peer | Repository | Baseline commit | Exact version | Version pin source | Commit date |
+|---|---|---|---|---|---|
+| Grok Build | `https://github.com/xai-org/grok-build.git` | `c68e39f60462f28d9be5e683d9cbe2c57b1a5027` | **0.2.0-dev** | `git show c68e39f6:crates/codegen/xai-grok-version/Cargo.toml` → line 4 `version = "0.2.0-dev"` (description: "Lockstepped grok CLI version.") | 2026-07-16 |
+
+> **CORRECTION 2026-07-31.** `RECON-GROK.md` §1 records ~~**0.2.102**~~ against this commit. It is
+> not what that commit contains. The recon's own pin-source cell names
+> `git show **origin/main**:…`, so the value was read at `98c3b24` and written into the BASELINE
+> row. At `c68e39f6` the crate says `0.2.0-dev`. The recon's baseline version is **withdrawn**;
+> `0.2.102` is correct only for the HEAD row below. Recorded rather than quietly fixed, because a
+> version pin whose stated source is a different commit is the exact failure mode the "Version pin
+> source" column was added to prevent.
+
+## Declared refresh candidate row
+
+| Peer | HEAD commit | Version | Version pin source | `git describe --tags` | HEAD date |
+|---|---|---|---|---|---|
+| Grok Build | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` (`origin/main`) | 0.2.102 | `git show origin/main:crates/codegen/xai-grok-version/Cargo.toml` → line 4 | *(no tags in the repo — `fatal: No names found, cannot describe anything.`)* | 2026-07-17 |
+
+Baseline-to-HEAD drift: `0.2.0-dev → 0.2.102` across **2** commits
+(`rev-list --count c68e39f6..origin/main` → 2). `c68e39f6` resolves (`cat-file -t` → `commit`)
+and **is an ancestor of `origin/main`** (`merge-base --is-ancestor` → true), so the baseline is
+legitimate.
+
+## Pin caveats that travel with these rows
+
+1. **The local checkout is not on upstream main.** Working-tree HEAD is
+   `a7d0968fe027b0e1f8e54c54d14e2ecba719a882`, branch `research/wayland-integration-audit`, tree
+   clean. Its parent is the baseline commit; `origin/main` is 2 commits ahead. Anything read from
+   the working tree is materially stale — every figure here is read from `origin/main` by
+   `git show`.
+2. **`a7d0968` and `WAYLAND-INTEGRATION-AUDIT.md` in that tree are OURS, not xAI's.** Prior-work
+   reference; never peer evidence.
+3. **No archaeology is possible on this peer.** The entire history is 2 squashed monorepo dumps
+   ("Publish harness and TUI open-source", "Synced from monorepo"). No tags, no PRs, no
+   per-feature commits.
+4. **This is a SOURCE pin, not an install pin.** The real `~/.grok` install on the planning Mac
+   reports `version.json → "version": "0.2.103"` — one patch ahead of the source at `origin/main`.
+   Same product, different object; do not use one to date the other.
+
+## Scale comparison — reproduced, with one correction
+
+Structural counts only. Both lockfiles were parsed the same way on the same day; the Core side is
+`f9b404f9` on `lane/grok`.
+
+| | Grok Build (`98c3b24`) | Wayland Core (`f9b404f9`) | Recon said | Re-measured |
+|---|---|---|---|---|
+| Distinct `Cargo.lock` package names | **1,125** | **900** | 1,125 / 900 | **confirmed** |
+| Distinct package names IN COMMON | **610** | — | 610 | **confirmed exactly** |
+| `[workspace] members` entries | **79** | **57** | 74 / 57 | **79**, not 74 |
+| Edition (`[workspace.package]`) | 2024 | 2024 | both 2024 | **confirmed** |
+
+The 79 decomposes as 62 `crates/codegen`, 11 `crates/common`, 1 `crates/build`, 1 `prod/mc` and
+**4 `third_party`** vendored members. The recon's own parts sum to 75 and its total reads 74; the
+gap to 79 is the four vendored members. The decomposition claim the recon drew from it — 74 vs 57
+is "comparable, not 4x" — survives the correction and if anything widens slightly to 79 vs 57.
+
+**610 shared crates is the only reason this peer is worth pinning at all.** It is the sole
+same-language peer: Hermes is Python and OpenClaw is TypeScript, so both existing comparisons are
+structural by necessity. This one is like-for-like at the dependency-graph level.
+
+## What this addendum does NOT claim
+
+- **No behavioural comparison, of any kind.** `RECON-GROK.md` §8 states its own bound: *"Did not
+  compile, run or install anything from the peer"* and *"Did not verify their capability claims
+  behaviourally — no binary was run. Every 'they have X' here is a source/manifest reading."*
+  Neither did this addendum. Every figure above is a version string, a commit id, a lockfile name
+  set or a manifest array length. Presence of a counterpart — never performance, never
+  effectiveness, never quality. Same standard as `PEER-PROBE-2026-07-26`.
+- **No Delta.** The recon's §3-§6 comparative readings (tree-sitter code graph, `rmcp`/ACP
+  adoption, `xai-sqlite-journal`, suspend/wake, hunk attribution, and the channels/gateway plane
+  we hold and they do not) are **not** carried into any Delta cell here. They are source readings
+  awaiting F30, which owns the first comparison.
+- **No admission.** grok-build is **PINNED, NOT ADMITTED**: no family row cites it, no Delta cites
+  it, and the declared CTRL-01 peer set — re-read at `REQUIREMENTS.md` CTRL-01/F30-01/F30-03 and
+  `ROADMAP.md` on 2026-07-31 — is still Hermes and OpenClaw only. Admitting a third peer is a
+  change to the control's contract and is not in this lane's gift.
+- **No CTRL-01 movement.** CTRL-01 stays **OPEN**. Its close conditions are untouched.
+- **`gemini-cli` is still unpinned.** It was not read. `UNPINNED` remains an explicit open state.
+- **The product surface is not a ledger fact.** `wayland-core` ships `migrate grok` (and
+  `migrate gemini`) as importers, which is a *product* capability and says nothing about the
+  ledger's peer set. Recorded so a reader who notices the mismatch finds it already noticed.
+
+## New evidence IDs
+
+| Evidence ID | Artifact |
+|---|---|
+| `RECON-GROK-2026-07-29` | `.planning/intel/RECON-GROK.md` (+ `RECON-GROK-NOTES.md`), lane `recon-grok`. Read-only source/manifest reconnaissance of `grok-build`. Its §1 baseline version is **withdrawn** by the correction above; its §2-§6 readings stand as unverified-behaviourally source claims |
+| `GROK-PIN-2026-07-31` | `.planning/intel/evidence/grok-2026-07-31/PIN-MEASUREMENTS.txt` — every `git show` / `cat-file` / `merge-base` / `rev-list` / `describe` invocation above with its verbatim output, plus the lockfile and workspace-member counts and the peer-tree non-mutation check |
+| `GROK-LIVE-DRIVE-2026-07-31` | `.planning/intel/evidence/grok-2026-07-31/` — `live-real.log`, `live-copy.log`, `live-mutated.log`, `antivacuity.log`. The `migrate grok` importer driven against the **untouched real `~/.grok` install** (v0.2.103, 4,009 files) on the planning Mac: `1 passed`, and the peer home's content-addressed `tree_digest` identical before and after. Both directions proved — the same test goes RED at `4009 files before, 4010 after` when the importer is mutated to write one byte into the peer home. The eleven `crates/wcore-cli/tests/migrate_grok.rs` tests each have a recorded mutation that reddens them |

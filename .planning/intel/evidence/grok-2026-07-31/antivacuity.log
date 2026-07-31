@@ -1,0 +1,35 @@
+=== baseline: whole binary ===
+ Nextest run ID 8f60864f-8b0d-429f-9105-2b30b7383c90 with nextest profile: ci
+     Summary [   0.039s] 10 tests run: 10 passed, 1 skipped
+=== mutations ===
+apply_writes_the_grok_root_profile rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+apply_writes_the_grok_root_profile rc=0 :: 1 test run: 1 passed, 10 skipped
+M1 | apply_writes_the_grok_root_profile | mutated=RED reverted=GREEN
+the_oidc_session_is_never_promoted_even_with_include_credentials rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+the_oidc_session_is_never_promoted_even_with_include_credentials rc=0 :: 1 test run: 1 passed, 10 skipped
+M2 | the_oidc_session_is_never_promoted_even_with_include_credentials | mutated=RED reverted=GREEN
+the_real_install_corpus_imports_and_leaks_no_canary rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+the_real_install_corpus_imports_and_leaks_no_canary rc=0 :: 1 test run: 1 passed, 10 skipped
+M3 | the_real_install_corpus_imports_and_leaks_no_canary | mutated=RED reverted=GREEN
+an_executable_grok_mcp_definition_is_contained_not_written_live rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+an_executable_grok_mcp_definition_is_contained_not_written_live rc=0 :: 1 test run: 1 passed, 10 skipped
+M4 | an_executable_grok_mcp_definition_is_contained_not_written_live | mutated=RED reverted=GREEN
+a_disabled_grok_mcp_server_is_absent_from_every_destination rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+a_disabled_grok_mcp_server_is_absent_from_every_destination rc=0 :: 1 test run: 1 passed, 10 skipped
+M5 | a_disabled_grok_mcp_server_is_absent_from_every_destination | mutated=RED reverted=GREEN
+the_grok_import_is_idempotent_without_overwrite rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+the_grok_import_is_idempotent_without_overwrite rc=0 :: 1 test run: 1 passed, 10 skipped
+M6 | the_grok_import_is_idempotent_without_overwrite | mutated=RED reverted=GREEN
+version_json_reaches_the_provenance_record rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+version_json_reaches_the_provenance_record rc=0 :: 1 test run: 1 passed, 10 skipped
+M7 | version_json_reaches_the_provenance_record | mutated=RED reverted=GREEN
+missing_grok_home_errors rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+missing_grok_home_errors rc=0 :: 1 test run: 1 passed, 10 skipped
+M8 | missing_grok_home_errors | mutated=RED reverted=GREEN
+the_importer_never_opens_the_session_store rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+the_importer_never_opens_the_session_store rc=0 :: 1 test run: 1 passed, 10 skipped
+M9 | the_importer_never_opens_the_session_store | mutated=RED reverted=GREEN
+the_real_install_deferred_inventory_matches_the_manifest rc=100 :: 1 test run: 0 passed, 1 failed, 10 skipped
+the_real_install_deferred_inventory_matches_the_manifest rc=0 :: 1 test run: 1 passed, 10 skipped
+M10 | the_real_install_deferred_inventory_matches_the_manifest | mutated=RED reverted=GREEN
+=== done ===

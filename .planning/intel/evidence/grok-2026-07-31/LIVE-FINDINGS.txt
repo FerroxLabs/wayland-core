@@ -1,0 +1,70 @@
+LIVE DRIVE FINDINGS — `wayland-core migrate grok` vs a real ~/.grok
+lane/grok, 2026-07-31. Raw run output in live-real.log.
+
+WHAT WAS DRIVEN
+  Peer home : /Users/seandonahoe/.grok   (grok-build v0.2.103, 4,009 files)
+  Host      : the planning Mac. The importer is a library path, so the test
+              binary was built and run locally; nothing was compiled on the
+              peer tree and nothing inside it was executed.
+  Safety    : driven first against a full 557 MB rsync copy, whose digest was
+              proved unmoved, BEFORE the untouched real home was used.
+  Result    : 1 passed, 0 failed. The peer home's content-addressed
+              tree_digest is identical before and after. Independently
+              corroborated by a metadata digest taken before any of today's
+              work and again afterwards: 34ffd94f… both times.
+
+MEASURED (facts about THIS install, not about grok)
+  version.json            0.2.103   (source origin/main says 0.2.102)
+  imported profiles       1  (grok/root)
+  model                   None
+  provider                None
+  mcp servers             0
+  has_credential          true
+  deferred.skills         5
+  deferred.personas       0
+  deferred.memory_files   0
+  deferred_other          bundled=4, marketplace-cache=6, sessions=26
+  warnings                []            <-- see F-GROK-L1
+  report                  profiles_added=1, quarantined=0, discovered=6,
+                          imported=6, excluded=0, files_written=5
+
+F-GROK-L1 — A REAL INSTALL IMPORTS AN EMPTY ROOT PROFILE, SILENTLY.  (open)
+  The real config.toml carries [cli], [marketplace] and [ui] and nothing the
+  importer reads: no [models] default, no [mcp_servers]. So grok/root lands
+  with provider=None and model=None — a profile that cannot be used to talk to
+  anything — and warnings is EMPTY.
+  Cause: grok.rs's "imported empty" warning is guarded by
+      config.model.is_none() && !has_credential
+  and the second conjunct is false on any logged-in install, which is the
+  normal state. The warning therefore cannot fire on the very case it names.
+  NOT FIXED in this lane: changing it is a product behaviour change outside a
+  test-and-ledger brief, and it would alter output other tests read. Recorded
+  so the next lane decides deliberately rather than rediscovering it.
+
+F-GROK-L2 — THE DEFERRED INVENTORY WAS NAMED FROM SOURCE, NOT FROM AN INSTALL.
+  (open, latent)
+  DEFERRED_DIRS lists five directories that do not exist in this real install:
+      hooks, plugin-data, server-skills, workspace, worktrees
+  ("worktrees" exists only as worktrees.db, a FILE, so count_subdirs sees 0.)
+  And the install carries eight directories nothing counts:
+      bin, completions, docs, downloads, installed-plugins, logs, memtrace,
+      upload_queue
+  The sharp one is installed-plugins/ — the importer looks for plugin-data/.
+  LATENT, NOT MANIFEST: installed-plugins/ holds 0 subdirectories on this
+  machine, so nothing is under-reported HERE. On an install with plugins it
+  would be. Stated this way on purpose; "the importer loses your plugins" is
+  not something this run measured.
+
+F-GROK-L3 — THE PERSONA AND MEMORY PATHS ARE NOT MEASURED BY THIS DRIVE.
+  ~/.grok has no personas/ and no memory/ directory (the user has authored
+  none; the vendor catalog at bundled/personas/*.toml is correctly excluded).
+  So count_toml_files and count_memory_notes were exercised only against the
+  synthetic fixture. NOT MEASURED live. The .toml extension the module assumes
+  for personas IS corroborated by bundled/personas/ — seven *.toml files —
+  but that is the vendor catalog, not the user root.
+
+WHAT THIS DRIVE DOES NOT SHOW
+  One install, one platform, one user. It shows the importer handles the shape
+  a real grok home has; it does not show it handles every shape one can have.
+  No grok binary was run, so nothing here is a claim about grok's behaviour —
+  only about ours when pointed at its state.
