@@ -30,12 +30,27 @@
 #
 #   1. `running 1 test`            — the case was collected, not filtered away.
 #   2. `1 passed; 0 failed`        — it reached the end without an assertion firing.
-#   3. NO `skip:` line in stdout   — neither early return was taken, so the
+#   3. NO `skip:` text in stdout   — neither early return was taken, so the
 #                                    assertions actually ran against a live
 #                                    sandbox-exec backend.
 #
 # Property 3 is the load-bearing one. Drop it and an unset env var reads as a
-# clean pass. The exit status is captured out of PIPESTATUS, never off the tail
+# clean pass. Two details make it actually work, both measured 2026-07-30 on a
+# real Mac (lane/macos-docker-gate) after property 3 was found inert here:
+#
+#   * `--nocapture` is REQUIRED. libtest captures a passing test's stderr and
+#     DISCARDS it, so without this flag the `eprintln!("skip: ...")` reason never
+#     reaches the log and property 3 matches nothing — it could not fire, and the
+#     gate would have reported PASSED on a suite that asserted nothing. Measured:
+#     `cargo test -p wcore-sandbox --test live_integrity_macos -- --ignored
+#     --test-threads=1` with WAYLAND_SANDBOX_LIVE_MACOS unset prints
+#     `test ... ok` / `1 passed`, with no `skip:` anywhere in the output.
+#   * the match is UNANCHORED. With `--nocapture` the reason interleaves onto
+#     libtest's partial line (`test <name> ... skip: ...`), so `^skip:` never
+#     matches. Over-matching here fails the gate closed, which is the safe way
+#     to be wrong.
+#
+# The exit status is captured out of PIPESTATUS, never off the tail
 # of a pipe, because `cmd | tee` reports tee's status and not cmd's.
 
 name: macOS native suites (Phase 28)
@@ -103,7 +118,7 @@ jobs:
       # `-- --ignored`, and the "Assert both suites executed" step below is a
       # STRONGER guard than nextest's `no-tests = "fail"`: it pins the exact
       # expected count (`running 1 test`, `1 passed; 0 failed`) and additionally
-      # catches flavour B (an env-gated early return printing `^skip:`), which a
+      # catches flavour B (an env-gated early return printing a `skip:` reason), which a
       # non-zero-test check cannot see. Exit status is ignored on purpose —
       # PIPESTATUS[0] is recorded to a file the gate step reads back separately.
       - name: Run hard_process_containment_macos
@@ -112,7 +127,7 @@ jobs:
         run: |
           set -uo pipefail
           vx cargo test -p wcore-sandbox --test hard_process_containment_macos \
-            -- --ignored --test-threads=1 2>&1 | tee /tmp/containment.log
+            -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/containment.log
           echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/containment.rc
 
       # vacuity-checked: as above — count asserted in the dedicated gate step.
@@ -122,7 +137,7 @@ jobs:
         run: |
           set -uo pipefail
           vx cargo test -p wcore-sandbox --test live_integrity_macos \
-            -- --ignored --test-threads=1 2>&1 | tee /tmp/integrity.log
+            -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/integrity.log
           echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/integrity.rc
 
       # The gate proper. Deliberately separate from the run steps so a
@@ -151,13 +166,13 @@ jobs:
               grep -E "test result" "${log}" || true
               fail=1
             fi
-            if grep -q "^skip:" "${log}"; then
+            if grep -q "skip:" "${log}"; then
               echo "FAIL(${name}): the test took an early return and asserted NOTHING (flavour B):"
-              grep "^skip:" "${log}"
+              grep "skip:" "${log}"
               fail=1
             fi
             echo "--- ${name} verdict lines ---"
-            grep -E "running [0-9]+ test|test result|^skip:" "${log}" || true
+            grep -E "running [0-9]+ test|test result|skip:" "${log}" || true
           }
           check_suite hard_process_containment_macos /tmp/containment.log 1
           check_suite live_integrity_macos /tmp/integrity.log 1

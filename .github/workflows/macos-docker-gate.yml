@@ -1,0 +1,229 @@
+# macOS delegated-Docker acceptance — the `required_live_macos_docker_*` /
+# `required_live_macos_retained_transport_*` cases, on a Docker-capable macOS host.
+#
+# Why this workflow exists
+# ------------------------
+# macOS has no delegated sandbox backend of its own: sandbox-exec cannot own
+# descendants, so `select_delegated_backend` (crates/wcore-swarm/src/dispatch.rs)
+# rejects it and can only admit the Docker fallback. That fallback lives behind
+# wcore-sandbox's `live-docker` cargo feature, which NO workspace member enables,
+# so `DockerBackend::connect()` returns `DockerDisabled` on a default build.
+#
+# The five cases below were written non-skipping against that reality. They had
+# no reachable pass state on ANY host — measured on a Mac WITH Docker Desktop
+# running, so "GitHub runners have no Docker" was never the explanation. Their
+# only outcome was a `DockerDisabled` panic, i.e. a permanently-red gate, which
+# certifies exactly as much as a permanently-green one.
+#
+# They are now on the same shape as `macos-native-suites.yml`: `#[ignore]`d, opted
+# in through `WAYLAND_SANDBOX_LIVE_DOCKER`, skipping with a printed reason when a
+# precondition is missing, and gated HERE so a skip can never read as a pass.
+#
+# Why the gate can fail
+# ---------------------
+# Each case opens with a precondition probe that prints `skip: ...` and returns.
+# An un-opted-in host would print `N passed` having asserted nothing (flavour B),
+# and without `--ignored` the binary prints `test result: ok` having run zero
+# tests (flavour A). Asserting the exit status, or even `N passed`, would
+# therefore certify nothing. Every target asserts three properties separately:
+#
+#   1. `running N test`          — the cases were collected, not filtered away.
+#   2. `N passed; 0 failed`      — they reached the end without an assertion firing.
+#   3. NO `skip:` text in stdout — no precondition probe returned early, so the
+#                                  assertions ran against a live Docker daemon.
+#
+# Property 3 is the load-bearing one. Drop it and an unset env var reads as a
+# clean pass. Two details make it actually work, both measured:
+#
+#   * `--nocapture` is REQUIRED. libtest captures a passing test's stderr and
+#     DISCARDS it, so without this flag the skip reason never reaches the log and
+#     the check silently matches nothing. Measured on `live_integrity_macos` with
+#     its opt-in unset: `test ... ok / 1 passed`, and no `skip:` anywhere.
+#   * the match is UNANCHORED. With `--nocapture` the reason interleaves onto
+#     libtest's partial line (`test <name> ... skip: ...`), so `^skip:` never
+#     matches. Over-matching here fails the gate closed, which is the safe way
+#     to be wrong.
+#
+# Exit status is captured out of PIPESTATUS, never off the tail of a pipe,
+# because `cmd | tee` reports tee's status and not cmd's.
+#
+# Runner
+# ------
+# GitHub-hosted `macos-latest` has NO Docker daemon, so a hosted run is EXPECTED
+# to report `GATE: FAILED ... did not execute`. That is the honest answer — the
+# hosted pool cannot certify delegated macOS execution — and it is why this
+# workflow is dispatch-only and gates no branch. Point `runner` at a
+# Docker-capable self-hosted macOS label to actually certify.
+#
+# Step order
+# ----------
+# NOTHING that can fail is ordered before the test steps except checkout and the
+# toolchain install. No fmt, no clippy, no `docker pull` step: six consecutive CI
+# runs once reported macOS `skipped` purely because clippy failed earlier in the
+# same job, which blinded the whole platform. The image pulls therefore live
+# INSIDE the test steps, after the point of no return, and cannot short-circuit
+# them.
+
+name: macOS delegated-Docker gate
+
+on:
+  # Dispatch-only, and deliberately no `ref` input: feeding a dispatch input into
+  # `actions/checkout`'s `ref:` is a ref-injection surface for no added ability.
+  # `workflow_dispatch` already selects the branch to run on.
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: >-
+          Runner label. GitHub-hosted macos-latest has no Docker daemon and will
+          honestly report NOT-EXECUTED; use a Docker-capable self-hosted macOS
+          label to certify.
+        required: false
+        default: macos-latest
+
+permissions:
+  contents: read
+
+jobs:
+  macos-docker-gate:
+    name: delegated macOS Docker acceptance
+    runs-on: ${{ inputs.runner || 'macos-latest' }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Opt this host into the live delegated-Docker execution all five cases
+      # gate on. Same variable the local harness exports
+      # (scripts/f20-native-macos-proof.sh).
+      WAYLAND_SANDBOX_LIVE_DOCKER: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # vacuity-checked: counts pinned in the dedicated gate step below.
+      # `docker pull` runs INSIDE this step, never before it — see the header.
+      - name: Run wcore-sandbox retained-transport cases
+        run: |
+          set -uo pipefail
+          echo "sw_vers:"; sw_vers
+          echo "docker: $(command -v docker || echo MISSING)"
+          # Wording matters: this line is teed into the log the gate greps, so it
+          # must not itself contain the token the gate looks for.
+          docker info || echo "docker info FAILED — the cases below cannot execute"
+          docker pull alpine:3.19 || echo "alpine:3.19 pull FAILED"
+          vx cargo test -p wcore-sandbox --features live-docker --lib -- \
+            --ignored --test-threads=1 --nocapture --exact \
+            backends::docker::tests::required_live_macos_retained_transport_roundtrips_output_and_deletion \
+            backends::docker::tests::required_live_macos_retained_transport_rejects_path_replacement \
+            2>&1 | tee /tmp/sandbox-transport.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/sandbox-transport.rc
+
+      - name: Run wcore-swarm workspace-authority budget case
+        if: always()
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
+            --test workspace_authority -- \
+            --ignored --test-threads=1 --nocapture --exact \
+            required_live_macos_docker_rejects_over_budget_result \
+            2>&1 | tee /tmp/swarm-budget.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/swarm-budget.rc
+
+      # The two cases below enter through the public `Swarm::dispatch`, which
+      # runs the worker in `ghcr.io/tradecanyon/wcore-sandbox:base`. That image
+      # is not published (`docker manifest inspect` -> denied), so the pull is
+      # expected to fail and the cases are expected to RED until it ships. Left
+      # red on purpose: a red gate naming a real product gap is information, and
+      # skipping on a missing image would make them vacuous everywhere.
+      - name: Run wcore-swarm public-dispatch containment case
+        if: always()
+        run: |
+          set -uo pipefail
+          docker pull ghcr.io/tradecanyon/wcore-sandbox:base \
+            || echo "delegated base image pull FAILED — see workflow header"
+          vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
+            --test dispatch_smoke -- \
+            --ignored --test-threads=1 --nocapture --exact \
+            required_live_macos_public_dispatch_bash_confines_parent_and_descendants \
+            2>&1 | tee /tmp/swarm-dispatch.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/swarm-dispatch.rc
+
+      - name: Run wcore-swarm Docker cancellation case
+        if: always()
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
+            --test worker_runtime_limits -- \
+            --ignored --test-threads=1 --nocapture --exact \
+            required_live_macos_docker_cancellation_cleans_container_workspace \
+            2>&1 | tee /tmp/swarm-cancel.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/swarm-cancel.rc
+
+      # The gate proper. Deliberately separate from the run steps so a non-zero
+      # cargo exit cannot short-circuit the executed-count checks, and so each
+      # asserted property fails with its own message.
+      - name: Assert every case executed and did not skip
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          check_suite() {
+            local name="$1" log="$2" want_tests="$3"
+            echo "=== ${name} ==="
+            if [ ! -s "${log}" ]; then
+              echo "FAIL(${name}): no log produced — the target never ran"
+              fail=1
+              return
+            fi
+            if ! grep -q "running ${want_tests} test" "${log}"; then
+              echo "FAIL(${name}): expected 'running ${want_tests} test' — target collected the wrong number of cases (flavour A/C: zero executed)"
+              grep -E "running [0-9]+ test|test result" "${log}" || true
+              fail=1
+            fi
+            if ! grep -qE "test result: ok\. ${want_tests} passed; 0 failed" "${log}"; then
+              echo "FAIL(${name}): expected '${want_tests} passed; 0 failed'"
+              grep -E "test result" "${log}" || true
+              fail=1
+            fi
+            if grep -q "skip:" "${log}"; then
+              echo "FAIL(${name}): a case took an early return and asserted NOTHING (flavour B):"
+              grep "skip:" "${log}"
+              fail=1
+            fi
+            echo "--- ${name} verdict lines ---"
+            grep -E "running [0-9]+ test|test result|skip:" "${log}" || true
+          }
+          check_suite sandbox-retained-transport /tmp/sandbox-transport.log 2
+          check_suite swarm-workspace-budget     /tmp/swarm-budget.log     1
+          check_suite swarm-public-dispatch      /tmp/swarm-dispatch.log   1
+          check_suite swarm-docker-cancellation  /tmp/swarm-cancel.log     1
+          echo "=== recorded cargo exit codes ==="
+          cat /tmp/sandbox-transport.rc /tmp/swarm-budget.rc \
+              /tmp/swarm-dispatch.rc /tmp/swarm-cancel.rc 2>/dev/null \
+              || echo "(none recorded)"
+          if [ "${fail}" -ne 0 ]; then
+            echo "GATE: FAILED"
+            exit 1
+          fi
+          echo "GATE: PASSED — all 5 required_live_macos delegated-Docker cases executed on a real macOS host"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-docker-gate-logs
+          path: |
+            /tmp/sandbox-transport.log
+            /tmp/swarm-budget.log
+            /tmp/swarm-dispatch.log
+            /tmp/swarm-cancel.log
+            /tmp/sandbox-transport.rc
+            /tmp/swarm-budget.rc
+            /tmp/swarm-dispatch.rc
+            /tmp/swarm-cancel.rc
+          if-no-files-found: warn
