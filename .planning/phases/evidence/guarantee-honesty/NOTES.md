@@ -51,11 +51,47 @@ user as a false statement**:
 
 Note main.rs is a §6 FENCED file — edits must stay additive and minimal.
 
-## Open questions to settle
+## Open questions — settled 2026-07-31 by the successor run
 
-1. Rotate-on-open alone does NOT bound a long-running gateway process. Needs a
-   size-checking writer, else the fix is cosmetic for the exact briefed scenario.
-2. Machine-readable schema must gain a way to express a conditional guarantee
-   without breaking `delivery_semantics_declaration.rs` drift enforcement.
-3. Live: over-cap Matrix send + retry, count arrivals. Room
-   `!kntRqkQCkPjhPvMMvf:matrix.org` ONLY, redact after.
+The run that wrote everything above was interrupted after `c8b062d6`. A successor
+started fresh from integration `0675c051`, found this branch **on push** (the push
+was rejected as non-fast-forward), and merged rather than force-pushed. It had
+independently reached the same three conclusions and even the same label,
+`exactly-once-below-cap`. Where the two overlapped the earlier B1 was kept, because
+its `chunks_for` factoring makes the send and the query share ONE cap decision — the
+successor had reimplemented the check beside the send, which can drift.
+
+1. **SETTLED — rotate-on-open is insufficient, as suspected.** `wcore-cli/src/log_rotate.rs`
+   checks the bound inside `Write::write`, so a long-lived gateway rotates mid-process.
+   Proven in both directions: `rotation_discards_the_oldest_and_keeps_the_newest`
+   asserts a rotation happened AND that the newest bytes are what survived, and
+   `no_rotation_below_the_bound_and_nothing_is_discarded` inverts every one of those
+   assertions under a large bound. 4 tests run, 4 passed on hetzner-dsm.
+2. **SETTLED — `exactly-once-below-cap` plus a `<platform>.cap` line.** The label is not
+   decorative: an adapter carrying it must declare a real `max_message_len()`, the number
+   must match, and a bare `exactly-once` row must belong to a capless adapter. 14 tests
+   run, 14 passed, including four negative controls.
+3. **NOT RUN — blocked on a dead credential, and this is the one thing the lane could
+   not close.** `matrix_cap_replay.rs` is written and committed, with the mandatory
+   below-cap control in the same session (without it, "2 arrivals above the cap" is
+   equally explained by retry always duplicating). matrix.org answered the first
+   authenticated call `M_UNKNOWN_TOKEN — "Token is not active"`. A working token is a
+   Sean-only input.
+   - **Nothing was written to the room.** The failure is at the baseline read, which
+     precedes the first send; neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` printed.
+   - The run still measured OUR half before it died:
+     `MCR_BODY ctrl_chars=51 ctrl_chunks=1 subj_chars=36814 subj_chunks=2`,
+     `MCR_PREDICTED ctrl=true subj=false`. The production manager answers `true` for a
+     body that will carry the key and `false` for one that will not.
+   - `docs/delivery-semantics.md` was corrected to say so: the §2 evidence cell now reads
+     "BELOW the cap: Yes … ABOVE the cap: NOT MEASURED". Leaving the old unqualified
+     "Yes" beside a two-part guarantee would have been the same evidence-vs-claim
+     mismatch the Slack correction in that document diagnoses.
+
+## B1.4 — recorded, not fixed
+
+`max_message_len` is asserted against its own literal at six sites and untested at two.
+Matrix's is now machine-checked against the constructed adapter, which closes doc-vs-code
+drift but still compares two numbers we wrote. The residual — does a declared cap equal the
+*platform's* limit — needs live credentials for eight platforms.
+Filed as **FerroxLabs/wayland#934**.

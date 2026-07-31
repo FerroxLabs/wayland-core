@@ -43,7 +43,7 @@ relying on it, because that scope is narrower than "one message".
 | Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
 |---|---|---|---|---|---|
 | **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
-| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once, up to 32,768 chars; at-least-once above it** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) | **retried** with the same key | one message; the homeserver returns the original `event_id` | **Yes — by the PRODUCT, against matrix.org, across a real `kill -9`.** See [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
+| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once, up to 32,768 chars; at-least-once above it** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) | **retried** with the same key, below the cap | one message below the cap; the homeserver returns the original `event_id` | **BELOW the cap: Yes** — by the PRODUCT, against matrix.org, across a real `kill -9`; see [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). **ABOVE the cap: NOT MEASURED at a real destination** — the harness exists and has never completed a run; see [§4.1](#41-exactly-once-stops-at-the-message-cap) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **NOT MEASURED at a real destination** — see the correction below |
 | **Twilio SMS** | none that Twilio honours — the adapter sends an `Idempotency-Key` header and the `Messages` resource documents no dedup slot to read it | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **NOT MEASURED at a real destination** — see the correction below |
@@ -310,6 +310,44 @@ platform cannot deduplicate at all" from "this body was too long for the key to 
 The other nine adapters are unaffected in practice: they are `at-most-once` at every length,
 because they transmit nothing the destination honours whether the body is chunked or not.
 
+#### The above-cap half is NOT MEASURED at a real destination (2026-07-31)
+
+**Everything above this line is derived from our own source. The `at-least-once` claim for an
+over-cap body has never been confirmed by counting arrivals at matrix.org**, and this section
+would be repeating the exact mistake §8 and the Slack correction diagnose if it implied
+otherwise. The reasoning is strong — no key is transmitted, and §8 established that a
+destination with no honoured key produces a duplicate — but reasoning is what the Discord row
+had.
+
+The harness is written and committed:
+`crates/wcore-channels-registry/tests/matrix_cap_replay.rs`. It sends an over-cap body, replays
+the same delivery id, and counts arrivals through an independent read of the room — **and it
+runs a below-cap control in the same session against the same room.** That control is not
+decoration: "two arrivals above the cap" is equally well explained by "a replayed key always
+duplicates here", which would make the §2 row false rather than conditional. Only the pair
+distinguishes them. The test is `#[ignore]`d and **panics on missing configuration rather than
+skipping**, so it cannot report green without having talked to a homeserver.
+
+**Why it has not run:** the stored Matrix credential is dead. On 2026-07-31 matrix.org answered
+the first authenticated call with `M_UNKNOWN_TOKEN — "Token is not active"`. A working token is
+a Sean-only input, so this is blocked on a credential and not on engineering.
+
+What that run DID establish, because it happens before the first network write:
+
+```text
+MCR_CAP=32768
+MCR_BODY   ctrl_chars=51 ctrl_chunks=1   subj_chars=36814 subj_chunks=2
+MCR_PREDICTED ctrl=true  subj=false
+```
+
+That is a measurement of **our** code and not of Matrix: the production `ChannelManager`, built
+by the production loader from real channel TOML, answers `true` for a body that will carry the
+key and `false` for one that will not. It is the fix working at the product surface. It is not
+evidence about arrival counts, and it is not counted as any.
+
+The run wrote nothing to the room — it failed on the baseline read, which precedes the first
+send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
+
 ---
 
 ## 5. A recurring job delivers again, and that is not a duplicate
@@ -471,6 +509,18 @@ A declaration that drifts from the code is worse than no declaration. This one i
 
 If you change an adapter's capability **or its `max_message_len`**, this file is part of the
 change.
+
+**What checks 5 and 6 still do NOT establish — tracked as
+[FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).** They compare the
+cap in this document against the cap the adapter returns. Both numbers are ours. Whether either
+equals the *platform's* real limit is unmeasured, and the six adapters that do have a cap test
+assert `max_message_len()` against the literal the function returns one line above — which
+restates the code rather than testing it. Being wrong is not cosmetic in either direction: a cap
+set too high reinstates HIGH-6 (the platform rejects the message and it is dropped), and a cap
+set too low chunks bodies that did not need it, which per [§4.1](#41-exactly-once-stops-at-the-message-cap)
+**drops the idempotency key and downgrades exactly-once for messages that should have been
+covered by it.** Closing it needs a live boundary probe per platform, at `cap` and `cap + 1`,
+against eight destinations we do not all hold credentials for.
 
 ---
 
