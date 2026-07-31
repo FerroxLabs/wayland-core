@@ -28,7 +28,7 @@ harness = false
 # M5.4: remote-registry gates the network-backed `GitHubReleasesResolver`
 # behind a feature flag (default ON for v0.6) so unit tests stay offline
 # and a stripped build can disable the reqwest dep entirely.
-default = ["remote-registry", "workflow", "monitor", "review_artifact"]
+default = ["remote-registry", "workflow", "monitor", "review_artifact", "voice"]
 remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
@@ -52,9 +52,13 @@ harness-failure-injection = []
 workflow = []
 monitor = []
 review_artifact = []
-# Issue #14 — re-export wcore-agent's optional `voice` feature so the binary
-# can be built with mic capture: `cargo build -p wcore-cli --features voice`.
-# OFF by default to keep libasound.so.2 (ALSA) off the default Linux binary.
+# Issue #14 — re-exports wcore-agent's `voice` feature (cpal mic capture).
+# 27-C4: now ON by default. The feature only *links* the OS audio library —
+# on a host with no input device `build_voice_mode_backend` returns `None`
+# and the `voice_mode` tool hides via `Tool::is_available() == false`, so a
+# headless server still starts cleanly. Cost of the default: the Linux binary
+# gains a dynamic dependency on libasound.so.2 (ALSA), and building it needs
+# the ALSA dev headers (`libasound2-dev` / `alsa-lib-devel`).
 voice = ["wcore-agent/voice"]
 
 [dependencies]

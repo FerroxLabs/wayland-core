@@ -1240,6 +1240,27 @@ impl ProviderStatus {
     }
 }
 
+/// The `voice_mode` row's description, which is genuinely build-dependent.
+///
+/// 27-C4. This text used to be stated unconditionally, and the comment that
+/// justified doing so reasoned that the build requirement "is true in both
+/// builds — a `--features voice` binary satisfies it, a default one does not".
+/// **That premise died when `voice` entered the default feature list.** A
+/// default binary now HAS mic capture linked, so telling its user to rebuild
+/// with `--features voice` is false, and it points them at a remedy that would
+/// change nothing — while `resolve_voice_mode_status` on the very same row
+/// simultaneously reports a live `✓ device ready` / `⚠ no audio device` probe.
+///
+/// The catalog stops being pure data at exactly this row because the fact it
+/// describes is build-dependent. Keeping it "pure" would only be preserving the
+/// shape of the old invariant after its substance was gone.
+#[cfg(feature = "voice")]
+const VOICE_MODE_DESCRIPTION: &str =
+    "Local microphone capture via cpal. Compiled into this build; no env var needed.";
+#[cfg(not(feature = "voice"))]
+const VOICE_MODE_DESCRIPTION: &str = "Local microphone capture via cpal. Requires a build with \
+                                      `--features voice`; no env var needed.";
+
 /// The full Tools & Providers catalog. Order matches the W4 E1 brief:
 /// search → vision → audio → image → tts → channels → home → db →
 /// meet → voice → provider keys.
@@ -1363,11 +1384,9 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderEntry] = &[
         name: "voice_mode",
         category: "Audio",
         // 27-C4: the build requirement is part of the capability's identity,
-        // not a footnote. Stated unconditionally because it is true in both
-        // builds — a `--features voice` binary satisfies it, a default one
-        // does not — so the static catalog stays pure data with no `cfg`.
-        description: "Local microphone capture via cpal. Requires a build with \
-                      `--features voice`; no env var needed.",
+        // not a footnote — but WHICH requirement is true is now build-
+        // dependent. See VOICE_MODE_DESCRIPTION.
+        description: VOICE_MODE_DESCRIPTION,
         env_vars: &[],
         signup_url: "",
         deferred: false,
@@ -5232,6 +5251,83 @@ mod tests {
         assert!(
             !meet.description.contains("--features voice"),
             "the build-flag matcher must discriminate between rows"
+        );
+    }
+
+    /// 27-C4, the feature-ON counterpart of
+    /// `voice_mode_row_tells_the_user_it_is_not_in_this_build`, and the test
+    /// whose ABSENCE was the actual defect.
+    ///
+    /// When `voice` joined the default feature list, both `cfg(not(voice))`
+    /// tests compiled out of the shipped configuration. The resolver kept its
+    /// coverage (`voice_mode_status_reflects_cpal_probe_when_feature_on`
+    /// compiled IN), so this was never "two tests deleted" — it was one
+    /// DIMENSION going dark: the catalog row and its description had no
+    /// feature-ON guard at all.
+    ///
+    /// That is not a hypothetical gap. It is exactly the hole the false string
+    /// went through: the row kept telling users of a voice-enabled binary to
+    /// rebuild with `--features voice`, and no test in the shipped build could
+    /// see it. A conditional test is only honest if BOTH conditions are tested;
+    /// otherwise flipping the feature silently retires the assertion.
+    #[cfg(feature = "voice")]
+    #[test]
+    fn voice_mode_row_does_not_demand_a_rebuild_it_already_has() {
+        let entry = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "voice_mode")
+            .expect("catalog must contain the voice_mode row");
+
+        // THE REGRESSION THIS EXISTS FOR. In a binary that already links mic
+        // capture, naming the build flag is a false instruction.
+        assert!(
+            !entry.description.contains("--features voice"),
+            "a voice-enabled build must not tell the user to rebuild with the \
+             feature it already has, got: {}",
+            entry.description
+        );
+        // ...and it must still describe the capability, so the fix cannot be
+        // "empty the string".
+        assert!(
+            entry.description.contains("microphone capture"),
+            "the row must still say what the capability IS, got: {}",
+            entry.description
+        );
+        assert!(
+            !entry.deferred,
+            "voice_mode is compiled in here; `deferred` would misdescribe it"
+        );
+
+        // The status must be a real probe outcome, never the not-compiled-in
+        // state — and must carry no build remedy, because there is nothing to
+        // rebuild.
+        let status = resolve_provider_status(entry);
+        assert!(
+            matches!(
+                status,
+                ProviderStatus::DeviceAvailable | ProviderStatus::DeviceUnavailable
+            ),
+            "a compiled-in voice build must report a probe outcome, got {status:?}"
+        );
+        assert!(
+            status.remedy().is_none(),
+            "only an uncompiled feature may carry a build remedy, got {:?}",
+            status.remedy()
+        );
+        assert_ne!(status.label(), "· not in this build");
+
+        // KNOWN-POSITIVE liveness control: prove the description matcher is
+        // alive by finding a string that IS present on another row for an
+        // unrelated reason. A dead `contains` returns false and would silently
+        // satisfy the negative-shaped assertion at the top of this test — the
+        // single most likely way for this guard to rot into a no-op.
+        let meet = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "google_meet")
+            .expect("catalog must contain the google_meet row");
+        assert!(
+            meet.description.contains("OAuth"),
+            "liveness control failed: the description matcher is not working"
         );
     }
 
