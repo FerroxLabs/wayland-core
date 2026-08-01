@@ -142,11 +142,23 @@ fn vault_files_are_0600() {
     }
 }
 
+/// INVERTED, deliberately. This case used to be
+/// `no_passphrase_falls_back_to_plaintext_not_keyring` and asserted that an
+/// isolated profile with no unlock material wrote `credentials.toml` in
+/// cleartext. That was the D1 "warned fallback", and it is the behaviour the
+/// ladder removes: a warning is not a control, and the encrypted tier the
+/// fallback skipped already shipped.
+///
+/// The `not_keyring` half of the old name still holds and is still asserted —
+/// an isolated home must never touch the process-global OS keyring, because
+/// that is what bleeds secrets across profiles (C4/D1).
+///
+/// Full ablation of the new behaviour lives in
+/// `tests/credential_ladder_test.rs`; this keeps the isolation-specific arm
+/// beside its siblings.
 #[test]
 #[serial]
-fn no_passphrase_falls_back_to_plaintext_not_keyring() {
-    // WAYLAND_HOME set but NO passphrase material → plaintext-0600 in-home,
-    // round-trips, and writes credentials.toml (not credentials.enc).
+fn no_passphrase_refuses_the_write_instead_of_downgrading_to_plaintext() {
     let h = tempdir().unwrap();
     let _g = EnvGuard::set(&[("WAYLAND_HOME", h.path().to_str().unwrap())]);
     // Ensure no stray passphrase from the ambient environment — routed through
@@ -154,33 +166,48 @@ fn no_passphrase_falls_back_to_plaintext_not_keyring() {
     let _g2 = EnvGuard::remove(&["WAYLAND_VAULT_PASSPHRASE", "WAYLAND_VAULT_PASSPHRASE_FD"]);
 
     let cfg = CredentialsStorageConfig::default();
+    // Opening still succeeds: "cannot write" must not become "cannot start".
     let store = open_store(&cfg, &h.path().join("credentials.toml")).expect("open");
-    store.put(KEY, "secret-plain").expect("put");
+
+    let error = store
+        .put(KEY, "secret-plain")
+        .expect_err("with no keyring and no unlock material the write must be refused");
+    assert!(
+        error.to_string().contains("WAYLAND_VAULT_PASSPHRASE"),
+        "the refusal must name the way forward: {error}"
+    );
+
+    assert!(
+        !h.path().join("credentials.toml").exists(),
+        "the refused write must NOT leave a cleartext credentials file"
+    );
+    assert!(
+        !h.path().join("credentials.enc").exists(),
+        "must NOT create an encrypted vault without unlock material either"
+    );
+    assert_eq!(
+        store.get(KEY).expect("get"),
+        None,
+        "non-vacuity: a refused write is not resolvable from any tier"
+    );
+
+    // NOT the keyring, still. Supplying unlock material must route the write to
+    // the IN-HOME vault, never to the process-global credential store — and
+    // this also proves the refusal above is about availability, not about a
+    // store that is broken for every input.
+    let _g3 = EnvGuard::set(&[("WAYLAND_VAULT_PASSPHRASE", PASS)]);
+    let store = open_store(&cfg, &h.path().join("credentials.toml")).expect("open with vault");
+    store.put(KEY, "secret-plain").expect("the vault accepts it");
     assert_eq!(
         store.get(KEY).expect("get").as_deref(),
         Some("secret-plain")
     );
     assert!(
-        h.path().join("credentials.toml").exists(),
-        "plaintext fallback must write credentials.toml"
+        h.path().join("credentials.enc").exists(),
+        "the write must land in the in-home vault"
     );
     assert!(
-        !h.path().join("credentials.enc").exists(),
-        "must NOT create an encrypted vault without unlock material"
+        !h.path().join("credentials.toml").exists(),
+        "and never in cleartext"
     );
-
-    // The plaintext fallback must still be 0o600 (D1: warned, but never loose).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(h.path().join("credentials.toml"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "plaintext fallback must be 0o600, got {mode:#o}"
-        );
-    }
 }

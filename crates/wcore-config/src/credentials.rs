@@ -860,10 +860,12 @@ fn no_secure_backend_for_write(key: &str) -> CredentialsError {
     CredentialsError::BackendUnavailable(format!(
         "refusing to store credential '{key}': no secure credential backend is available on \
          this host. The OS keyring is not writable here, and the encrypted vault is locked. \
-         Either unlock the vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file \
-         descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or opt in to unencrypted \
-         storage explicitly with [storage.credentials] backend = \"plaintext\" in config.toml. \
-         Wayland will never write a secret in cleartext without that opt-in."
+         To store it securely, unlock the vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a \
+         passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE; on a Linux \
+         desktop, starting a Secret Service (gnome-keyring / KWallet) restores the keyring \
+         instead. Unencrypted storage exists but is NOT recommended and is never selected \
+         automatically: it writes your key in cleartext where any process or backup that \
+         can read the file can read the key. Wayland will not do that on your behalf."
     ))
 }
 
@@ -941,37 +943,109 @@ impl LadderCredentialsStore {
         }
     }
 
-    /// Move `value` up to the highest available tier and drop the copy that
-    /// `found_in` left behind. Best-effort: a promotion that fails leaves the
-    /// lower copy in place and readable, which is strictly better than losing
-    /// the secret to a half-completed move.
-    fn promote(&self, key: &str, value: &str, found_in: LadderTier) {
-        let target = if self.keyring.is_some() {
-            LadderTier::Keyring
+    /// The highest tier that is mounted right now, or `None` for a ladder with
+    /// no secure rung at all.
+    fn top_tier(&self) -> Option<LadderTier> {
+        if self.keyring.is_some() {
+            Some(LadderTier::Keyring)
         } else if self.vault.is_some() {
-            LadderTier::Vault
+            Some(LadderTier::Vault)
         } else {
+            None
+        }
+    }
+
+    fn tier(&self, tier: LadderTier) -> Option<&dyn CredentialsStore> {
+        match tier {
+            LadderTier::Keyring => self.keyring.as_deref(),
+            LadderTier::Vault => self.vault.as_deref(),
+            LadderTier::Legacy => Some(&self.legacy),
+        }
+    }
+
+    /// Remove `key` from every tier strictly BELOW `above`, so the ladder holds
+    /// at most one copy of a credential.
+    ///
+    /// This is what bounds the crash window in [`Self::promote`] and in
+    /// [`CredentialsStore::put`]: a process killed after the new write and
+    /// before this purge leaves a duplicate, and the very next successful write
+    /// or promotion of that key removes it again. Without it a stale lower copy
+    /// would persist indefinitely and could resurface — as the OLD value — if
+    /// the upper tier later became unavailable.
+    fn purge_below(&self, key: &str, above: LadderTier) -> Result<(), CredentialsError> {
+        let mut first_error = None;
+        for tier in [LadderTier::Keyring, LadderTier::Vault, LadderTier::Legacy] {
+            if tier >= above {
+                continue;
+            }
+            let removed = match tier {
+                LadderTier::Legacy => self.delete_legacy(key),
+                other => self.tier(other).map_or(Ok(()), |store| store.delete(key)),
+            };
+            if let Err(error) = removed {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Move `value` up to the highest available tier and drop the copies below.
+    ///
+    /// CRASH ORDER, and it is not negotiable: **write-new → verify-readback →
+    /// delete-old.** A delete that precedes a verified write can lose the
+    /// secret outright, and for a key that a caller re-creates on absence (the
+    /// `load_or_create_*` shape) losing it does not fail — it silently MINTS a
+    /// replacement and every artifact sealed under the old key stops opening.
+    /// So the readback is a real re-read of the destination tier, not an
+    /// inference from `put` returning `Ok`.
+    ///
+    /// Killed at any point, the state is recoverable and never empty:
+    ///
+    /// * before the write            — unchanged; the next read retries.
+    /// * after write, before verify  — both tiers hold the SAME value; the next
+    ///                                 read is served from the top and purges.
+    /// * after verify, before purge  — same, and `purge_below` is idempotent.
+    ///
+    /// Best-effort by design: a promotion that cannot complete leaves the lower
+    /// copy in place and readable. A permanent-but-correct downgrade beats a
+    /// lossy heal.
+    fn promote(&self, key: &str, value: &str, found_in: LadderTier) {
+        let Some(target) = self.top_tier() else {
             return;
         };
-        if target >= found_in {
+        if target <= found_in {
             return;
         }
-        let written = match target {
-            LadderTier::Keyring => self.keyring.as_ref().map(|k| k.put(key, value)),
-            LadderTier::Vault => self.vault.as_ref().map(|v| v.put(key, value)),
-            LadderTier::Legacy => None,
+        let Some(destination) = self.tier(target) else {
+            return;
         };
-        if !matches!(written, Some(Ok(()))) {
+
+        // 1. write-new.
+        if let Err(error) = destination.put(key, value) {
+            tracing::debug!(
+                target: "wcore_credentials",
+                key,
+                error = %error,
+                "could not promote a credential to a higher tier; the lower copy stands"
+            );
             return;
         }
-        // Only now is it safe to drop the lower copy: the value is readable
-        // from the higher tier.
-        let removed = match found_in {
-            LadderTier::Keyring => Ok(()),
-            LadderTier::Vault => self.vault.as_ref().map_or(Ok(()), |v| v.delete(key)),
-            LadderTier::Legacy => self.delete_legacy(key),
-        };
-        match removed {
+        // 2. verify-readback, from the destination itself.
+        match destination.get(key) {
+            Ok(Some(read_back)) if read_back == value => {}
+            other => {
+                tracing::warn!(
+                    target: "wcore_credentials",
+                    key,
+                    readback_ok = other.is_ok(),
+                    "a promoted credential did not read back from its new tier; leaving \
+                     the lower-tier copy in place"
+                );
+                return;
+            }
+        }
+        // 3. delete-old.
+        match self.purge_below(key, target) {
             Ok(()) => tracing::info!(
                 target: "wcore_credentials",
                 key,
@@ -982,14 +1056,31 @@ impl LadderCredentialsStore {
                 target: "wcore_credentials",
                 key,
                 error = %error,
-                "credential promoted to a higher tier but the lower-tier copy could not \
-                 be removed; it will be retried on the next read"
+                "credential promoted and verified, but the lower-tier copy could not be \
+                 removed; it will be retried on the next read or write"
             ),
         }
     }
 }
 
 impl LadderCredentialsStore {
+    /// Post-write hygiene for [`CredentialsStore::put`]: a value that has just
+    /// been written to `above` makes any copy below it STALE, and a stale copy
+    /// is worse than no copy — it is an OLD credential that a later tier
+    /// regression would silently start serving. Best-effort and never fails the
+    /// write, which has already succeeded.
+    fn purge_stale_below(&self, key: &str, above: LadderTier) {
+        if let Err(error) = self.purge_below(key, above) {
+            tracing::warn!(
+                target: "wcore_credentials",
+                key,
+                error = %error,
+                "wrote the credential to a secure tier but could not remove a now-stale \
+                 lower-tier copy; it will be retried on the next write"
+            );
+        }
+    }
+
     /// Delete from the legacy cleartext file WITHOUT materializing it.
     ///
     /// `PlaintextCredentialsStore::delete` is a load-modify-save, and on a
@@ -1093,7 +1184,10 @@ impl CredentialsStore for LadderCredentialsStore {
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
         if let Some(keyring) = &self.keyring {
             match keyring.put(key, value) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.purge_stale_below(key, LadderTier::Keyring);
+                    return Ok(());
+                }
                 Err(error) => tracing::warn!(
                     target: "wcore_credentials",
                     error = %error,
@@ -1104,7 +1198,10 @@ impl CredentialsStore for LadderCredentialsStore {
         }
         if let Some(vault) = &self.vault {
             match vault.put(key, value) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.purge_stale_below(key, LadderTier::Vault);
+                    return Ok(());
+                }
                 Err(error) => tracing::warn!(
                     target: "wcore_credentials",
                     error = %error,
@@ -1619,8 +1716,7 @@ fn warn_no_secure_credential_tier(path: &Path) {
              readable, but saving a new credential will be REFUSED rather than written in \
              cleartext. To store credentials, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase \
              file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via \
-             /proc/<pid>/environ) to unlock the vault, or opt in to unencrypted storage \
-             explicitly with [storage.credentials] backend = \"plaintext\".",
+             /proc/<pid>/environ) to unlock the encrypted vault.",
             path.display()
         );
     });
@@ -4012,6 +4108,393 @@ mod tests {
         assert!(
             validate_readable_fd(-1).is_err(),
             "a negative fd must be rejected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The ladder's ordering, against injected tiers.
+    //
+    // `KeyringCredentialsStore` talks to the host's real credential store, so
+    // the keyring rungs can only be exercised on a host that HAS one — i.e.
+    // never on the headless gate host these rungs exist to serve. These cases
+    // inject the tiers instead, so the ORDER, the promotion sequence and the
+    // refusal are measured everywhere.
+    // -----------------------------------------------------------------------
+
+    /// An in-memory tier that can be made to fail on demand, and that COUNTS
+    /// its operations — so a test can prove not just the end state but the
+    /// sequence that produced it (the write-before-delete ordering is the whole
+    /// crash-safety argument, and an end-state assertion cannot see it).
+    #[derive(Default)]
+    struct FakeTier {
+        entries: Mutex<HashMap<String, String>>,
+        log: Mutex<Vec<String>>,
+        fail_put: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeTier {
+        fn with(pairs: &[(&str, &str)]) -> Self {
+            let tier = Self::default();
+            for (key, value) in pairs {
+                tier.entries
+                    .lock()
+                    .unwrap()
+                    .insert((*key).to_string(), (*value).to_string());
+            }
+            // Seeding is fixture, not behaviour under test.
+            tier.log.lock().unwrap().clear();
+            tier
+        }
+
+        fn record(&self, event: &str) {
+            self.log.lock().unwrap().push(event.to_string());
+        }
+
+        fn ops(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn snapshot(&self) -> Vec<(String, String)> {
+            let mut items: Vec<_> = self
+                .entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            items.sort();
+            items
+        }
+    }
+
+    impl CredentialsStore for std::sync::Arc<FakeTier> {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            self.record(&format!("get:{key}"));
+            Ok(self.entries.lock().unwrap().get(key).cloned())
+        }
+
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            if self.fail_put.load(std::sync::atomic::Ordering::SeqCst) {
+                self.record(&format!("put-FAILED:{key}"));
+                return Err(CredentialsError::Keyring("injected write failure".into()));
+            }
+            self.record(&format!("put:{key}"));
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.record(&format!("delete:{key}"));
+            self.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    fn tier(pairs: &[(&str, &str)]) -> std::sync::Arc<FakeTier> {
+        std::sync::Arc::new(FakeTier::with(pairs))
+    }
+
+    fn boxed(tier: &std::sync::Arc<FakeTier>) -> Box<dyn CredentialsStore> {
+        Box::new(std::sync::Arc::clone(tier))
+    }
+
+    /// ABLATION (d). The downgrade must not be permanent: when the keyring
+    /// comes back, the secret moves UP and the lower copy is GONE.
+    ///
+    /// The sequence is asserted, not only the end state. `write-new →
+    /// verify-readback → delete-old` is what makes a kill at any point
+    /// recoverable; a delete that preceded the write could lose the secret
+    /// outright, and for a caller with `load_or_create` semantics losing it
+    /// silently MINTS a replacement key instead of failing.
+    #[test]
+    fn the_ladder_promotes_a_credential_when_a_higher_tier_returns() {
+        let keyring = tier(&[]);
+        let vault = tier(&[("k", "v-from-vault")]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        assert_eq!(
+            ladder.get("k").unwrap().as_deref(),
+            Some("v-from-vault"),
+            "non-vacuity: the read must still return the value while it moves"
+        );
+
+        // End state: exactly one copy, in the TOP tier.
+        assert_eq!(
+            keyring.snapshot(),
+            vec![("k".to_string(), "v-from-vault".to_string())],
+            "the credential must have been promoted into the keyring"
+        );
+        assert!(
+            vault.snapshot().is_empty(),
+            "the lower-tier copy must be gone, not merely shadowed"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "promotion must not conjure a cleartext credentials file"
+        );
+
+        // Sequence: the keyring is WRITTEN and READ BACK before the vault is
+        // touched by a delete.
+        let keyring_ops = keyring.ops();
+        assert_eq!(
+            keyring_ops,
+            vec![
+                "get:k".to_string(),   // ladder read: keyring miss
+                "put:k".to_string(),   // 1. write-new
+                "get:k".to_string(),   // 2. verify-readback
+            ],
+            "unexpected keyring op sequence: {keyring_ops:?}"
+        );
+        let vault_ops = vault.ops();
+        assert_eq!(
+            vault_ops,
+            vec!["get:k".to_string(), "delete:k".to_string()],
+            "the vault must be deleted from only AFTER the readback: {vault_ops:?}"
+        );
+
+        // And the value is still readable afterwards, from the new tier.
+        assert_eq!(ladder.get("k").unwrap().as_deref(), Some("v-from-vault"));
+    }
+
+    /// The other direction of the same rule: a promotion whose destination
+    /// write FAILS must leave the lower copy untouched and still readable. A
+    /// heal that can lose the secret is worse than no heal.
+    #[test]
+    fn a_failed_promotion_leaves_the_lower_copy_intact() {
+        let keyring = tier(&[]);
+        keyring
+            .fail_put
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let vault = tier(&[("k", "v-from-vault")]);
+        let dir = tempdir().unwrap();
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            dir.path().join("credentials.toml"),
+        );
+
+        assert_eq!(
+            ladder.get("k").unwrap().as_deref(),
+            Some("v-from-vault"),
+            "the read must succeed even though the promotion could not"
+        );
+        assert_eq!(
+            vault.snapshot(),
+            vec![("k".to_string(), "v-from-vault".to_string())],
+            "a failed promotion must NOT delete the only copy"
+        );
+        assert!(
+            !vault.ops().contains(&"delete:k".to_string()),
+            "the vault must never be deleted from when the destination write failed"
+        );
+    }
+
+    /// A `put` maintains the single-copy invariant: after a write to the top
+    /// tier, no stale copy is left below. Without this a crash-created (or
+    /// migration-created) duplicate would linger as an OLD value that a later
+    /// tier regression would silently start serving.
+    #[test]
+    fn a_put_removes_the_now_stale_copies_below_it() {
+        let keyring = tier(&[]);
+        let vault = tier(&[("k", "OLD-value")]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        PlaintextCredentialsStore::new(&legacy_path)
+            .put("k", "OLDER-value")
+            .unwrap();
+
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+        ladder.put("k", "NEW-value").unwrap();
+
+        assert_eq!(
+            keyring.snapshot(),
+            vec![("k".to_string(), "NEW-value".to_string())]
+        );
+        assert!(
+            vault.snapshot().is_empty(),
+            "the stale vault copy must be removed by the write that superseded it"
+        );
+        let legacy_body = std::fs::read_to_string(&legacy_path).unwrap();
+        assert!(
+            !legacy_body.contains("OLDER-value"),
+            "the stale cleartext copy must be removed too: {legacy_body}"
+        );
+        assert_eq!(
+            ladder.get("k").unwrap().as_deref(),
+            Some("NEW-value"),
+            "non-vacuity: the surviving copy is the new one"
+        );
+    }
+
+    /// Mid-session revocation. The write probe is a HINT — probe→write is a
+    /// TOCTOU window by construction — so a keyring that refuses the actual
+    /// write must descend the SAME ladder, not take a plaintext branch.
+    #[test]
+    fn a_keyring_that_fails_mid_session_descends_to_the_vault_not_to_cleartext() {
+        let keyring = tier(&[]);
+        keyring
+            .fail_put
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let vault = tier(&[]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        ladder.put("k", "v").expect("the vault must catch the write");
+        assert_eq!(
+            vault.snapshot(),
+            vec![("k".to_string(), "v".to_string())],
+            "the write must land in the vault"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "a mid-session keyring failure must NOT produce a cleartext file — that is \
+             the exact edge FallbackCredentialsStore::put took"
+        );
+        assert_eq!(
+            ladder.get("k").unwrap().as_deref(),
+            Some("v"),
+            "non-vacuity: readable back from the tier that accepted it"
+        );
+    }
+
+    /// Both secure tiers refuse → the ladder refuses. There is no cleartext arm
+    /// to fall into, and the refusal is actionable.
+    #[test]
+    fn the_ladder_refuses_rather_than_writing_cleartext_when_every_tier_fails() {
+        let keyring = tier(&[]);
+        keyring
+            .fail_put
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let vault = tier(&[]);
+        vault
+            .fail_put
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        let error = ladder.put("k", "v").expect_err("both tiers refused");
+        assert!(
+            error.to_string().contains("WAYLAND_VAULT_PASSPHRASE"),
+            "the refusal must be actionable: {error}"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "a fully-refused write must leave no cleartext file behind"
+        );
+        // Known-positive for the assertion above: the same ladder DOES write
+        // when a tier accepts, so `!exists` is not passing for free.
+        vault
+            .fail_put
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        ladder.put("k", "v").expect("the vault now accepts");
+        assert_eq!(ladder.get("k").unwrap().as_deref(), Some("v"));
+    }
+
+    /// P3. `purge_profile_confidential_keys` must delete from the service the
+    /// profile's own marker records, and must be a no-op (never an error) for a
+    /// profile that never opened a confidential store.
+    #[test]
+    fn purging_a_profile_is_driven_by_its_own_marker_and_is_a_noop_without_one() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+
+        // No marker → nothing to purge, and specifically NOT an error: a
+        // profile that never held confidential material must stay deletable.
+        purge_profile_confidential_keys(&credentials_path)
+            .expect("a profile with no marker has nothing to purge");
+
+        // A vault-pinned profile is also a no-op here: its key lives in files
+        // inside the profile tree, which the caller is about to remove.
+        let marker_path = confidential_backend_marker_path(
+            &absolute_confidential_path(&credentials_path).unwrap(),
+        );
+        write_confidential_backend_marker(
+            &marker_path,
+            &ConfidentialBackendMarker {
+                version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+                selection: ConfidentialBackendSelection::EncryptedFile {
+                    cipher_path: dir.path().join("credentials.enc"),
+                    key_params_path: dir.path().join("credentials.kdf.json"),
+                },
+                confirmed: true,
+            },
+        )
+        .unwrap();
+        purge_profile_confidential_keys(&credentials_path)
+            .expect("a vault-pinned profile needs no keyring purge");
+
+        // The key ref the purge targets must be the one the writer uses. This
+        // is the whole reason the constant lives in this crate: two spellings
+        // is a writer with no deleter, which is the P3 leak.
+        assert!(
+            CONFIDENTIAL_KEY_REFS.contains(&RECOVERY_PREPARED_REQUEST_KEY_REF),
+            "the recovery key ref must be in the purge set"
+        );
+    }
+
+    /// Vault hygiene: a world-readable vault is REFUSED, not loaded. Both
+    /// directions in one case, so neither a hardwired refusal nor a hardwired
+    /// acceptance can pass it.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn a_world_readable_vault_is_refused_and_a_0600_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let _pass = EnvPassphraseGuard::set("hygiene-pass");
+        let _fd = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE_FD");
+        let dir = tempdir().unwrap();
+        let cipher = dir.path().join("v.enc");
+        let params = dir.path().join("v.kdf.json");
+
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        store.put("k", "v").unwrap();
+
+        // Known-positive: at the perms the store itself writes, it loads.
+        assert_eq!(
+            EncryptedFileCredentialsStore::new(cipher.clone(), params.clone())
+                .get("k")
+                .unwrap()
+                .as_deref(),
+            Some("v"),
+            "a 0600 vault must load — otherwise the refusal below is not discriminating"
+        );
+
+        // The directory the store created must be 0700 (kimi-code's umask
+        // lesson: create_dir_all's mode is masked and only applies on create).
+        let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "the vault directory must be 0700, got {dir_mode:#o}");
+
+        // Now loosen it and require a refusal.
+        std::fs::set_permissions(&cipher, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = EncryptedFileCredentialsStore::new(cipher.clone(), params)
+            .get("k")
+            .expect_err("a world-readable vault must be refused");
+        assert!(
+            error.to_string().contains("readable by accounts other than its owner"),
+            "the refusal must say why and how to fix it: {error}"
         );
     }
 }

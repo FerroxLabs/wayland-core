@@ -4200,8 +4200,28 @@ pub fn effective_config_toml_with_provenance(
 /// True if a TOML key name designates a secret value that must be redacted.
 /// Matched case-insensitively as a substring so compound names
 /// (`webhook_secret`, `bot_token`, `Authorization`) are covered.
+///
+/// The needle list is a DENYLIST, and a denylist's failure mode is the omission
+/// nobody notices. Two were found by audit and are fixed here:
+///
+/// * `service_account_json` ([`VertexConfig`]) — an inline GCP service-account
+///   document, private-key PEM included. Matched no needle: not "secret", not
+///   "credential", not "private_key", not "auth".
+/// * `access_key_id` / `secret_access_key` ([`BedrockConfig`]) — the second
+///   matched "secret", the first matched nothing.
+///
+/// Both structs' hand-written `Debug` impls DO redact these fields, so the
+/// tracing surface was clean while the effective-config preview rendered them
+/// in cleartext. Two surfaces disagreeing is how this survived; a test now pins
+/// them together.
+///
+/// Inverting to an allowlist of renderable keys is the structurally correct fix
+/// and is deliberately NOT done here: the config surface is large and an
+/// allowlist built in this change would silently mask ordinary fields, trading
+/// a leak for an unreadable preview. Recorded as a follow-up in
+/// `.planning/CREDENTIAL-STORAGE-DESIGN.md` §7.
 fn is_secret_key(key: &str) -> bool {
-    const NEEDLES: [&str; 9] = [
+    const NEEDLES: [&str; 12] = [
         "api_key",
         "apikey",
         "token",
@@ -4211,6 +4231,14 @@ fn is_secret_key(key: &str) -> bool {
         "credential",
         "private_key",
         "auth",
+        // Matches `access_key_id` AND `secret_access_key`.
+        "access_key",
+        // Matches `service_account_json` and any sibling that carries the
+        // account document itself.
+        "service_account",
+        // Catches the `*_key_id` / `*_key` family generally, e.g. a future
+        // `signing_key`, without matching ordinary words containing "key".
+        "_key",
     ];
     let lowered = key.to_ascii_lowercase();
     NEEDLES.iter().any(|n| lowered.contains(n))
