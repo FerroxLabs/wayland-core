@@ -1437,6 +1437,42 @@ mod tests {
         ));
     }
 
+    /// P3 wiring, and the failure mode that matters most about it: the purge is
+    /// BEST-EFFORT, so a profile whose keyring cannot be reached must still be
+    /// deletable.
+    ///
+    /// This is not a nicety. The leak being closed is one orphaned credential
+    /// per deleted profile; a purge that made `profile delete` FAIL on a
+    /// keyring-less host would turn that into an undeletable profile, and
+    /// undeletable profiles are how the orphans accumulate in the first place.
+    /// The fixture pins a KEYRING selection precisely so the purge takes its
+    /// keyring branch — on a headless host that branch errors, and the deletion
+    /// must survive it.
+    #[test]
+    #[serial(wayland_home_env)]
+    fn delete_dir_survives_a_keyring_purge_that_cannot_reach_the_keyring() {
+        let (_g, root) = rooted();
+        let dir = create_profile("keyed", None).unwrap();
+        // A marker pinning a keyring service that does not exist on any host.
+        std::fs::write(
+            dir.join(".credentials.confidential-backend.json"),
+            serde_json::json!({
+                "version": 1,
+                "backend": "keyring",
+                "service": "wayland-core.profile.deliberately-absent-0000",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(dir.join(".credentials.confidential-backend.json").exists());
+
+        delete_profile_dir("keyed").expect("a profile must stay deletable regardless");
+        assert!(
+            !root.path().join("keyed").exists(),
+            "the profile tree must be gone"
+        );
+    }
+
     #[test]
     #[serial(wayland_home_env)]
     fn delete_profile_clears_pointer_when_active() {

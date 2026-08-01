@@ -2221,10 +2221,27 @@ pub fn purge_profile_confidential_keys(credentials_path: &Path) -> Result<(), Cr
         credentials_path.with_file_name(".credentials.confidential-key.lock"),
         None,
     );
+    purge_confidential_keys_from(&store)
+}
+
+/// The delete set, split from the marker resolution so it can be measured
+/// without an OS keyring.
+///
+/// The keyring binding in [`purge_profile_confidential_keys`] cannot be
+/// exercised on a headless host — which is most of them, and all of the gate
+/// hosts. Splitting here means the thing that can actually be WRONG (which key
+/// refs get deleted, and whether a failure on one still attempts the rest) is
+/// unconditionally provable, and only the literal
+/// `KeyringCredentialsStore::new(service)` line is left untested.
+fn purge_confidential_keys_from(
+    store: &ConfidentialCredentialsStore,
+) -> Result<(), CredentialsError> {
     let mut first_error = None;
     for key_ref in CONFIDENTIAL_KEY_REFS {
-        if let Err(error) = crate::confidential_blob::delete_confidential_blob_key(&store, key_ref)
-        {
+        // Every ref is attempted even after one fails: stopping early would
+        // leave later keys orphaned for the sake of an error we are already
+        // reporting.
+        if let Err(error) = crate::confidential_blob::delete_confidential_blob_key(store, key_ref) {
             tracing::warn!(
                 target: "wcore_credentials",
                 key_ref,
@@ -4516,6 +4533,69 @@ mod tests {
             CONFIDENTIAL_KEY_REFS.contains(&RECOVERY_PREPARED_REQUEST_KEY_REF),
             "the recovery key ref must be in the purge set"
         );
+    }
+
+    /// P3, the half that can actually be wrong, measured without a keyring: the
+    /// purge REMOVES the confidential key rather than merely being called.
+    ///
+    /// The seeded key is written by the same `load_or_create_confidential_blob_key`
+    /// path production uses, so this is the real writer's output being deleted
+    /// — not a hand-rolled approximation of it that could disagree about the
+    /// key ref and pass anyway.
+    #[test]
+    fn purging_removes_the_confidential_key_the_writer_created() {
+        let dir = tempdir().unwrap();
+        let backing = tier(&[]);
+        let store = ConfidentialCredentialsStore::new(
+            boxed(&backing),
+            dir.path().join(".credentials.confidential-key.lock"),
+            None,
+        );
+
+        // The production writer mints and persists the key.
+        let created = crate::confidential_blob::load_or_create_confidential_blob_key(
+            &store,
+            RECOVERY_PREPARED_REQUEST_KEY_REF,
+        )
+        .expect("the writer must create a key");
+        // NON-VACUITY: it is really there, and really readable, before the
+        // purge. Without this the assertion below passes on an empty store.
+        assert_eq!(
+            backing.snapshot().len(),
+            1,
+            "the writer must have persisted exactly one entry: {:?}",
+            backing.snapshot()
+        );
+        let reloaded = crate::confidential_blob::load_confidential_blob_key(
+            &store,
+            RECOVERY_PREPARED_REQUEST_KEY_REF,
+        )
+        .expect("the key must load back before the purge");
+        assert_eq!(
+            created.as_bytes(),
+            reloaded.as_bytes(),
+            "fixture sanity: the same key must round trip"
+        );
+
+        purge_confidential_keys_from(&store).expect("purge");
+
+        assert!(
+            backing.snapshot().is_empty(),
+            "the confidential key must be GONE from the backing store: {:?}",
+            backing.snapshot()
+        );
+        assert!(
+            crate::confidential_blob::load_confidential_blob_key(
+                &store,
+                RECOVERY_PREPARED_REQUEST_KEY_REF,
+            )
+            .is_err(),
+            "a purged key must no longer load"
+        );
+
+        // Idempotent: deleting an already-absent key is success, so a second
+        // profile-delete attempt cannot fail on the first one's work.
+        purge_confidential_keys_from(&store).expect("purge is idempotent");
     }
 
     /// Vault hygiene: a world-readable vault is REFUSED, not loaded. Both
