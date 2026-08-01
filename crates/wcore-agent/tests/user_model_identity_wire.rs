@@ -340,7 +340,15 @@ fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str
     // every seed landed in a bucket the session never opened — and the symptom
     // is an absent user-context block, which is indistinguishable from the
     // defect this file pins. Name it here instead.
+    // The body is a JSON document, so the needle must carry JSON's escaping or
+    // this check is a Windows-only false positive: every `\` in `D:\lanes\...`
+    // appears in the body as `\\`. Encoding the expected string and stripping
+    // its quotes escapes exactly what the serializer escaped, on every platform.
     let working_directory = format!("Working directory: {}", cwd.display());
+    let working_directory = serde_json::to_string(&working_directory)
+        .expect("a String always serializes")
+        .trim_matches('"')
+        .to_string();
     assert!(
         bodies[index].contains(&working_directory),
         "{label}: the session reported a workspace spelling other than the one this \
