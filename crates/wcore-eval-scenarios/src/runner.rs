@@ -882,7 +882,36 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                 None
             }
         });
+    // An authoritative process tree must SHOW its work: if the cgroup backend
+    // is the one that ran, the peak memory and CPU samples it exists to produce
+    // have to be there, and a silent sampling gap is a failure.
+    //
+    // `containment_authoritative` is part of the condition, and that is the
+    // repair. This used to read `authority_evidence_required` alone, which
+    // demanded cgroup samples from every run that asked for authenticated
+    // evidence — a demand nothing in this repository can satisfy and two of the
+    // three supported platforms cannot satisfy at all:
+    //   * the samples exist only on `Backend::Cgroup`, which is
+    //     `#[cfg(target_os = "linux")]`, so on macOS and Windows the assertion
+    //     could never pass — and `packaged_driver_gate.rs` sets
+    //     `WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE=1` itself, on every platform;
+    //   * even on Linux, `Cgroup::create` needs euid 0 AND
+    //     `WCORE_EVAL_CANDIDATE_UID`/`_GID` naming a distinct unprivileged
+    //     identity (process_tree.rs). Those two variables are READ in exactly
+    //     one place and WRITTEN nowhere in this repository, so no CI job and no
+    //     developer checkout has ever supplied them.
+    // The result was a gate with no reachable pass state, which proves as
+    // little as one with no fail state.
+    //
+    // Requiring the authoritative posture ITSELF is a separate, already-built
+    // switch: under `WCORE_EVAL_REQUIRE_CONTAINMENT`, `ProcessTree::prepare`
+    // returns the cgroup error instead of falling back, so the run never
+    // reaches this line. Nothing that used to fail closed now passes silently
+    // — a non-authoritative run still records `sandbox_backend:
+    // "process-group-observed-nonauthoritative"` and `resources: Unavailable`
+    // in the receipt, which is the honest surface for what it measured.
     if authority_evidence_required
+        && containment_authoritative
         && (process_tree.peak_memory_bytes().is_none() || process_tree.peak_cpu_millis().is_none())
     {
         failures.push(Failure::RunnerError(

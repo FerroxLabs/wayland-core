@@ -60,6 +60,19 @@ struct Cli {
     )]
     base_url: Option<String>,
 
+    /// Declare that the loopback fixture behind `--base-url` bills nothing.
+    ///
+    /// Never inferred — `ProviderConfig::cost_is_known_free` is documented as
+    /// an explicit declaration, so the driver requires the operator to say it.
+    /// `tempenv::build_with` rejects the declaration for any non-loopback API
+    /// root, so it cannot be used to hide spend on a real endpoint.
+    ///
+    /// Without it, a fixture answering as a catalog-known model is admitted at
+    /// the vendor's list price, and a scenario budget sized for its declared
+    /// provider stops the call before it is sent.
+    #[arg(long, requires = "base_url", conflicts_with = "list")]
+    fixture_cost_is_free: bool,
+
     /// Full 40-hex source commit the selected binary must report.
     #[arg(long, value_name = "SHA", conflicts_with = "list")]
     expected_source_commit: Option<String>,
@@ -179,6 +192,7 @@ async fn execute(cli: Cli) -> i32 {
         if let Some(base_url) = &cli.base_url {
             for provider in &mut resolution.runnable {
                 provider.base_url = Some(base_url.clone());
+                provider.cost_is_known_free = cli.fixture_cost_is_free;
             }
         }
         runnable_count += resolution.runnable.len();

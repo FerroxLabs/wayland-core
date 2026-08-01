@@ -332,6 +332,7 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
             "openai",
             "--base-url",
             &passing_base_url,
+            "--fixture-cost-is-free",
             "--report-dir",
             report_root.to_str().expect("UTF-8 report root"),
             "--fixture-manifest",
@@ -494,6 +495,7 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
             "openai",
             "--base-url",
             &failing_base_url,
+            "--fixture-cost-is-free",
         ],
     )
     .await;
@@ -552,6 +554,7 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
             "openai",
             "--base-url",
             fixture.base_url(),
+            "--fixture-cost-is-free",
             "--binary",
             core.to_str().expect("UTF-8 packaged Core path"),
             "--expected-source-commit",
@@ -569,7 +572,11 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
         .await
         .expect("run packaged egress replacement attack");
     let observation = fixture.shutdown().await.expect("stop attack fixture");
-    assert!(observation.complete(), "attack fixture was not consumed");
+    assert!(
+        observation.complete(),
+        "attack fixture was not consumed: {observation:?}\n{}",
+        context(&output)
+    );
 
     let receipt_path = std::fs::read_dir(&report_root)
         .expect("attack report root")
@@ -657,9 +664,19 @@ smart_handoff_to_memory = true
             )?;
             Ok(())
         })
+        // `PricingRefresher` HAS a production constructor
+        // (`bootstrap.rs::build_fallback_providers` builds one), so
+        // `NoProductionConstructor` — correct when this expectation was
+        // written, while the row was an unconditional `unavailable(...)` —
+        // became a false claim once the row started reading the real
+        // construction fact. This scenario leaves `[provider_chain] enabled`
+        // at its `false` default, so the constructor is never reached and
+        // `DisabledByConfig` is the honest reason. The strictness is
+        // unchanged: `enforce_expectations` still demands an exact reason
+        // match and still rejects any `Ready` on the chain.
         .require_capability_unavailable(
             CapabilityId::PricingRefresher,
-            CapabilityReasonCode::NoProductionConstructor,
+            CapabilityReasonCode::DisabledByConfig,
         )
         .require_capability_outcome(CapabilityId::SmartHandoff)
         .turn(Turn::new("Reply exactly PRIMED").assert(Assertion::Contains("PRIMED")))
