@@ -704,3 +704,114 @@ async fn windows_retained_cwd_bind_survives_a_pathname_substitution() {
         "the refused execution still ran a child against the unpinned pathname"
     );
 }
+
+// ---------- the readiness seam ----------
+
+/// THE regression for the `--json-stream` `ready` frame.
+///
+/// `SandboxRegistry::required_for_session` is resolved inside agent bootstrap,
+/// BEFORE the `ready` frame is written. It used to decide the Windows backend
+/// by running `AppContainerBackend::is_available()` — a real guarded
+/// `cmd.exe /c exit 0` through the whole pipeline, bounded by a 15s wall-clock
+/// guard because `CreateAppContainerProfile` / `CreateProcessAsUserW` can stall
+/// on an AV image scan or a slow profile-service RPC. That guard is longer than
+/// the host's ready deadline, so on a first launch that hit the stall the
+/// Desktop app got no `ready` frame at all.
+///
+/// This asserts the wiring, not a helper: it calls the production selector and
+/// then reads the production process-global probe cache. If selection probes
+/// again, the cache is populated and this goes red.
+///
+/// The cache is process-global and `nextest` runs each test in its own process,
+/// so the cold precondition is real. The final block is the anti-vacuity
+/// control: it drives the SAME cache through the production `is_available()` to
+/// prove the observation would have caught a probe if one had happened.
+#[test]
+fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
+    // `WAYLAND_SANDBOX` would route selection down the docker / refusal arms
+    // instead of the platform cascade under test.
+    assert!(
+        std::env::var("WAYLAND_SANDBOX").is_err(),
+        "this test drives the default platform cascade; WAYLAND_SANDBOX must be unset"
+    );
+    assert_eq!(
+        settled_verdict(),
+        None,
+        "precondition: the probe cache must be cold at the start of this process — \
+         run this test with `cargo nextest run` (process per test)"
+    );
+
+    let registry =
+        crate::SandboxRegistry::required_for_session(None).expect("session selection must resolve");
+
+    assert_eq!(
+        registry.backend_name(),
+        "appcontainer",
+        "the session must take the real Windows backend, not a fail-closed placeholder"
+    );
+    assert_eq!(
+        settled_verdict(),
+        None,
+        "session selection ran the AppContainer real-spawn probe — that is the 15s guard \
+         sitting on the `ready` path this fix removed"
+    );
+
+    // Anti-vacuity: the verdict IS reachable through the production path, so
+    // "still None above" is an observation, not an inability to observe.
+    let available = registry.is_available();
+    assert_eq!(
+        settled_verdict(),
+        Some(available),
+        "the production availability path must settle the same cache this test read"
+    );
+}
+
+/// The deferral moved the probe, it did not delete the refusal: once the
+/// verdict has settled unavailable, the backend refuses commands and withdraws
+/// the containment claims that a working AppContainer would justify.
+///
+/// Runs only where the verdict actually settled negative — on a healthy box the
+/// probe succeeds and there is nothing to assert. It reports which arm it took
+/// so a "passed" line is never mistaken for coverage it did not provide.
+#[tokio::test]
+async fn a_settled_unavailable_verdict_refuses_and_withdraws_the_containment_claim() {
+    let backend = AppContainerBackend::new();
+    let available = backend.is_available();
+    if available {
+        println!(
+            "NOT EXERCISED: AppContainer probed available on this host, so the \
+             unavailable arm has no state to observe"
+        );
+        assert!(backend.enforces_read_deny());
+        assert!(backend.binds_cwd_authority());
+        assert!(backend.owns_descendants_hard());
+        return;
+    }
+    println!("EXERCISED: AppContainer probed UNAVAILABLE on this host");
+    let err = backend
+        .execute(
+            &SandboxManifest {
+                timeout: Some(Duration::from_secs(5)),
+                ..Default::default()
+            },
+            SandboxCommand {
+                argv: vec!["cmd.exe".into(), "/c".into(), "exit 0".into()],
+                cwd: None,
+            },
+        )
+        .await
+        .expect_err("an unavailable backend must refuse, not spawn");
+    let text = format!("{err}");
+    assert!(
+        text.contains("sandbox UNAVAILABLE"),
+        "the refusal must read like the fail-closed refusal: {text}"
+    );
+    assert!(
+        !backend.enforces_read_deny(),
+        "a backend that cannot spawn must not claim OS-enforced read deny"
+    );
+    assert!(
+        !backend.binds_cwd_authority(),
+        "a backend that cannot spawn binds no cwd authority"
+    );
+}
