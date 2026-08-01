@@ -325,7 +325,8 @@ async fn the_resolved_user_ids_model_reaches_the_wire() {
     install_named_user_id();
     let server = start_mock_anthropic().await;
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     // Seed ONLY the named bucket — the one the write path uses.
     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;
@@ -383,7 +384,8 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
     install_named_user_id();
     let server = start_mock_anthropic().await;
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     // Seed ONLY `"default"` — another user's bucket, from this session's view.
     seed_bucket(cwd, DEFAULT_BUCKET, DEFAULT_FINGERPRINT).await;
@@ -463,7 +465,8 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
 async fn the_prefix_render_expression_reads_an_empty_bucket() {
     install_named_user_id();
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     // Production seeding: the WRITE path keys by the resolved id.
     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;

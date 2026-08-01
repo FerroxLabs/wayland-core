@@ -318,7 +318,8 @@ async fn run_everything_that_would_clobber_a_correction(cwd: &Path) {
 async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
     let server = start_mock_anthropic().await;
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     seed_inferred_style(cwd).await;
 
@@ -397,7 +398,8 @@ async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
 async fn the_control_proves_the_probe_can_fail() {
     let server = start_mock_anthropic().await;
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     seed_inferred_style(cwd).await;
     drive_cold_session(&server, cwd, "msg-ctl-1").await;
@@ -439,7 +441,8 @@ async fn the_control_proves_the_probe_can_fail() {
 async fn forgetting_a_correction_returns_the_subject_to_inference_on_the_wire() {
     let server = start_mock_anthropic().await;
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let cwd_owned = common::bootstrap_workspace(workdir.path());
+    let cwd = cwd_owned.as_path();
 
     seed_inferred_style(cwd).await;
     let (_, corrections_path) = user_model_paths(cwd);

@@ -30,6 +30,44 @@ use wcore_types::tool::ToolResult;
 /// test binaries never mutate process-global profile environment.
 pub const RECOVERY_TEST_KEY: [u8; 32] = [0x5a; 32];
 
+/// The workspace spelling `AgentBootstrap` will actually run under.
+///
+/// `AgentBootstrap::new` puts its workspace through `canonical_workspace`
+/// (canonicalize, then `dunce::simplified`), and `wcore_memory::paths::
+/// auto_memory_dir` keys the on-disk auto-memory / user-model store by that
+/// spelling. Any test that seeds one of those stores from the RAW
+/// `tempfile::TempDir` path is therefore seeding a different bucket whenever
+/// canonicalization changes the string.
+///
+/// It does on the Windows CI account. Two tests in CI run 30699019736 printed
+/// the same `%TEMP%` two different ways in the same job:
+///
+/// ```text
+/// deterministic_openai_loop (raw TempDir path):
+///   C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\.tmpR3OiTp
+/// user_model_identity_wire  (bootstrap-canonicalized workspace):
+///   C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\.tmpqeBC9E
+/// ```
+///
+/// The service account's `%TEMP%` is the 8.3 SHORT form; `canonicalize`
+/// returns the long one. So the seed landed in bucket
+/// `C--WINDOWS-SERVIC-1-NETWOR-1-...` while bootstrap read
+/// `C--Windows-ServiceProfiles-NetworkService-...`, and every user-context
+/// assertion saw an empty brief and no block at all.
+///
+/// Canonicalize once here and hand the SAME string to the seeder and to
+/// `AgentBootstrap::new`, so the two agree by construction. On a host where the
+/// raw path is already canonical (every Unix CI runner, and a normal Windows
+/// user profile) this returns the input unchanged.
+pub fn bootstrap_workspace(dir: &std::path::Path) -> std::path::PathBuf {
+    match std::fs::canonicalize(dir) {
+        Ok(canonical) => dunce::simplified(&canonical).to_path_buf(),
+        // Same fail-soft contract as `canonical_workspace`: an unresolvable
+        // path is left exactly as given rather than turned into a failure.
+        Err(_) => dir.to_path_buf(),
+    }
+}
+
 pub fn configure_persisted_test_session(config: &mut Config, session_root: &std::path::Path) {
     config.session.enabled = true;
     config.session.directory = session_root.join("sessions").to_string_lossy().into_owned();
