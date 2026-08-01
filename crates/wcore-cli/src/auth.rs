@@ -407,12 +407,8 @@ fn add_cmd(
     };
 
     let store = credentials_store(config_path, &doc)?;
-    let existed = store
-        .get(&slot)
-        .unwrap_or_default()
-        .is_some()
-        .then_some(true)
-        .unwrap_or_else(|| legacy_config_key(&doc, slug).is_some());
+    let existed =
+        store.get(&slot).unwrap_or_default().is_some() || legacy_config_key(&doc, slug).is_some();
 
     // The ladder, not the config file. `[providers.<slug>].api_key` is a
     // CLEARTEXT sink and it was this command's only destination: `auth add` was

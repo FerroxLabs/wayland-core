@@ -1001,10 +1001,10 @@ impl LadderCredentialsStore {
     ///
     /// Killed at any point, the state is recoverable and never empty:
     ///
-    /// * before the write            — unchanged; the next read retries.
-    /// * after write, before verify  — both tiers hold the SAME value; the next
-    ///                                 read is served from the top and purges.
-    /// * after verify, before purge  — same, and `purge_below` is idempotent.
+    /// * before the write — unchanged; the next read retries.
+    /// * after write, before verify — both tiers hold the SAME value; the next
+    ///   read is served from the top and purges.
+    /// * after verify, before purge — same, and `purge_below` is idempotent.
     ///
     /// Best-effort by design: a promotion that cannot complete leaves the lower
     /// copy in place and readable. A permanent-but-correct downgrade beats a
