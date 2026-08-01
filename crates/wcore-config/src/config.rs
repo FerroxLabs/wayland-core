@@ -9318,16 +9318,76 @@ require_priced = true
         // would mask an OAuth-only connectivity answer.
         "XAI_API_KEY",
         "GROK_HOME",
-        // Vault unlock material. Cleared by default so the ladder has no secure
-        // rung unless a test explicitly asks for one via `unlock_vault`.
-        "WAYLAND_VAULT_PASSPHRASE",
-        "WAYLAND_VAULT_PASSPHRASE_FD",
     ];
+
+    /// Vault unlock material, held SEPARATELY from [`CRED_ENV_KEYS`].
+    ///
+    /// These two are process-global and are also driven by the encrypted-file
+    /// tests in `credentials.rs`, which serialize on `vault_passphrase_env`.
+    /// Folding them into `CredEnvGuard` would make every one of the ~18
+    /// `wayland_home_env` tests mutate them, and those two serial groups run
+    /// concurrently — measured: a full-crate run then fails with
+    /// `aead::Error` in one group and an empty vault read in the other, because
+    /// each was clearing or overwriting the other's passphrase mid-test. Any
+    /// test that touches these must hold BOTH serial keys.
+    const VAULT_ENV_KEYS: [&str; 2] = ["WAYLAND_VAULT_PASSPHRASE", "WAYLAND_VAULT_PASSPHRASE_FD"];
+
+    /// Mount a secure rung on the credential ladder for the duration of a test.
+    ///
+    /// `WAYLAND_HOME` is set by [`CredEnvGuard`], so the keyring rung is
+    /// deliberately suppressed (it is a host-global service). Unlock material
+    /// makes the in-home encrypted vault the top rung — which is what a
+    /// headless runner actually has, and the configuration these tests need in
+    /// order to store an OAuth login the way the product now does.
+    ///
+    /// `WAYLAND_VAULT_PASSPHRASE_FD` is cleared, not just left alone: the
+    /// resolver prefers the descriptor, so a stale one would silently discard
+    /// the passphrase set here.
+    struct VaultUnlockGuard {
+        prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl VaultUnlockGuard {
+        fn new() -> Self {
+            let prior = VAULT_ENV_KEYS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            // SAFETY: callers hold both serial keys; no concurrent env access.
+            unsafe {
+                std::env::remove_var("WAYLAND_VAULT_PASSPHRASE_FD");
+                std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "test-vault-passphrase");
+            }
+            Self { prior }
+        }
+    }
+
+    impl Drop for VaultUnlockGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized; restore each prior value (or clear it).
+            unsafe {
+                for (k, v) in &self.prior {
+                    match v {
+                        Some(val) => std::env::set_var(k, val),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
 
     /// Hermetic credential environment: points `HOME` (the ChatGPT OAuth-file
     /// root) and `WAYLAND_HOME` (the credentials-store root) at fresh tempdirs
     /// and clears every credential env var, restoring all of them on drop.
-    /// Tests using it must be `#[serial]`.
+    ///
+    /// Users must hold BOTH `wayland_home_env` and `provider_env_vars`.
+    /// `provider_for_credential_env_var_round_trips_the_resolver` clears
+    /// `ANTHROPIC_API_KEY` (and every other provider key) inside a loop under
+    /// the `provider_env_vars` key alone, and env vars are process-global — so
+    /// with only the `wayland_home_env` key the two groups run concurrently and
+    /// each deletes the other's variables. Observed once as
+    /// "Anthropic with ANTHROPIC_API_KEY set must be connected", in a run where
+    /// this guard's test had set that variable three lines earlier.
     struct CredEnvGuard {
         _home: tempfile::TempDir,
         _wh: tempfile::TempDir,
@@ -9369,18 +9429,6 @@ require_priced = true
             std::fs::write(dir.join("chatgpt.json"), "{\"access_token\":\"t\"}").unwrap();
         }
 
-        /// Mount a secure rung on the credential ladder for this profile.
-        ///
-        /// `WAYLAND_HOME` is set, so the keyring rung is deliberately
-        /// suppressed (it is a host-global service). Unlock material makes the
-        /// in-home encrypted vault the top rung, which is what a headless
-        /// runner actually has — the exact configuration these tests need in
-        /// order to store an OAuth login the way the product now does.
-        fn unlock_vault(&self) {
-            // SAFETY: callers are #[serial]; the guard restores it on drop.
-            unsafe { std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "test-vault-passphrase") };
-        }
-
         /// Store an OAuth token set for `provider` through the same ladder the
         /// product writes to, under the same key spelling.
         fn store_oauth_login(&self, provider: &str) {
@@ -9412,7 +9460,7 @@ require_priced = true
     }
 
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial(wayland_home_env, provider_env_vars)]
     fn connected_providers_detects_key_ambient_and_oauth_excludes_keyless() {
         let guard = CredEnvGuard::new();
         // Keyed provider: Anthropic via its env var.
@@ -9461,7 +9509,7 @@ require_priced = true
     }
 
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial(wayland_home_env, provider_env_vars)]
     fn provider_connected_oauth_false_without_token_file() {
         let _guard = CredEnvGuard::new();
         // No token file written → ChatGPT is not connected. (Ambient-cloud
@@ -9485,10 +9533,10 @@ require_priced = true
     /// The file is asserted absent on purpose: it is what makes this test able
     /// to fail. Restore the file check as the only source and this goes red.
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial(wayland_home_env, vault_passphrase_env, provider_env_vars)]
     fn provider_connected_sees_a_ladder_stored_chatgpt_login_with_no_token_file() {
         let guard = CredEnvGuard::new();
-        guard.unlock_vault();
+        let _vault = VaultUnlockGuard::new();
         guard.store_oauth_login("chatgpt");
 
         assert!(
@@ -9514,10 +9562,10 @@ require_priced = true
     /// `MissingApiKey`. So an xAI OAuth user with no `~/.grok/auth.json`, no
     /// token file and no API key must still authenticate — off the ladder.
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial(wayland_home_env, vault_passphrase_env, provider_env_vars)]
     fn xai_oauth_login_in_the_ladder_authenticates_without_a_file_or_env_key() {
         let guard = CredEnvGuard::new();
-        guard.unlock_vault();
+        let _vault = VaultUnlockGuard::new();
         // Point GROK_HOME at a path that cannot exist, so the Grok-CLI import
         // cannot supply the answer on any platform.
         unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
@@ -9551,7 +9599,7 @@ require_priced = true
     }
 
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial(wayland_home_env, provider_env_vars)]
     fn for_provider_discovery_overrides_identifying_fields() {
         let _guard = CredEnvGuard::new();
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-openai-test") };
