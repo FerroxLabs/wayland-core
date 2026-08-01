@@ -4864,7 +4864,11 @@ mod tests {
         let access_token = format!("hdr.{seg}.sig");
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())

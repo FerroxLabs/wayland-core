@@ -131,8 +131,21 @@ managed entirely by the engine:
 
 ### Token Storage & Security
 
-- Tokens are stored encrypted at `~/.wayland/oauth/{provider}.json`, with
-  directory mode `0700` and file mode `0600` on Unix.
+- Tokens are stored through the same credential ladder as API keys: the OS
+  keyring first, then the encrypted vault
+  (`WAYLAND_VAULT_PASSPHRASE_FD` / `WAYLAND_VAULT_PASSPHRASE`), and a refusal if
+  neither is available. There is no cleartext rung — on a host with no keyring
+  and a locked vault, `auth login` fails with the remedy rather than writing
+  your refresh token to disk in the clear. `backend = "plaintext"` does not
+  apply to OAuth tokens.
+- A token file written by a build before v0.12.26
+  (`~/.wayland/oauth/{provider}.json`, directory mode `0700` and file mode
+  `0600` on Unix) still works. The first time the engine reads it, the token is
+  written into the ladder, verified by reading it back, and only then is the
+  cleartext file removed. If no secure tier is available the file is left alone
+  and you stay signed in.
+- `wayland-core auth logout chatgpt` clears both — the ladder entry and any
+  leftover file.
 - PKCE (S256) and a CSRF `state` token are mandatory on the login flow; the
   callback compares `state` in constant time.
 - Refresh is engine-managed: concurrent refreshes coalesce into a single

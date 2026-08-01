@@ -61,7 +61,8 @@ pub enum AuthCmd {
     ///
     /// Currently only `chatgpt` (aliases: `openai-chatgpt`) is wired: it
     /// runs the loopback PKCE flow against OpenAI's Codex client and stores
-    /// the tokens encrypted under `~/.wayland/oauth/chatgpt.json`.
+    /// the tokens in the credential ladder (OS keyring, else the encrypted
+    /// vault). It fails rather than writing them in cleartext.
     Login {
         /// Subscription provider to sign in to (`chatgpt`).
         provider: String,
@@ -551,33 +552,21 @@ fn import_codex_login() -> Result<()> {
 
 /// `wayland-core auth logout chatgpt`.
 ///
-/// C5: removing the on-disk token is not enough — also unlink any
-/// `*.json.tmp` orphan left by an interrupted atomic write. A live
-/// `ChatGptTokenManager` cache cannot be reached from this short-lived CLI
-/// process (there is no live engine), so there is nothing in-memory to clear
-/// here; the manager built at the next engine start re-reads the (now
-/// missing) file. NotFound on the token file is treated as already-logged-out.
+/// C5: removing the on-disk token is not enough — the login now lives in the
+/// credential ladder, and a pre-migration cleartext file (plus any `*.json.tmp`
+/// orphan from an interrupted atomic write) may still exist beside it.
+/// [`OAuthStorage::delete`] clears BOTH tiers; deleting only the file would
+/// leave the user signed in through the ladder. A live `ChatGptTokenManager`
+/// cache cannot be reached from this short-lived CLI process (there is no live
+/// engine), so there is nothing in-memory to clear here; the manager built at
+/// the next engine start re-reads the (now empty) store.
 async fn logout_cmd(provider_arg: &str) -> Result<()> {
     let provider = resolve_oauth_provider(provider_arg)?;
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    let path = storage.path_for(provider);
 
-    let removed = match std::fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(anyhow!("removing {}: {e}", path.display())),
-    };
-
-    // Unlink any orphaned temp file from an interrupted atomic write so a
-    // stale half-written token cannot resurrect a logged-out session.
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::remove_file(&tmp)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        // Best-effort: a leftover tmp that can't be removed is not fatal to a
-        // logout whose real token file is gone.
-        tracing::warn!(error = %e, path = %tmp.display(), "could not remove orphaned oauth tmp file");
-    }
+    let removed = storage
+        .delete(provider)
+        .map_err(|e| anyhow!("removing the stored token: {e}"))?;
 
     if removed {
         println!("Signed out of ChatGPT. The stored OAuth token was removed.");

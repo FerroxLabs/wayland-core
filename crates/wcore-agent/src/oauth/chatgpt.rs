@@ -862,8 +862,18 @@ mod tests {
         format!("hdr.{seg}.sig")
     }
 
+    /// A storage handle over a hermetic in-memory secure tier. Tests must
+    /// never reach the host's real keyring: it is a machine-global singleton.
+    fn storage_at(root: std::path::PathBuf) -> OAuthStorage {
+        OAuthStorage::at_root(
+            root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("storage")
+    }
+
     fn manager_at(root: std::path::PathBuf) -> ChatGptTokenManager {
-        ChatGptTokenManager::new(OAuthStorage::at_root(root).expect("storage"))
+        ChatGptTokenManager::new(storage_at(root))
     }
 
     /// Point `CODEX_HOME` at a guaranteed-empty (but existing) dir for the
@@ -1104,7 +1114,7 @@ mod tests {
         let _ = mgr.get().await.expect("get");
         // Remove the backing file and clear the cache: a subsequent load must
         // miss, proving the cache was dropped.
-        std::fs::remove_file(mgr.storage.path_for(PROVIDER)).unwrap();
+        mgr.storage.delete(PROVIDER).unwrap();
         mgr.clear_cache().await;
         let err = mgr.get().await.unwrap_err();
         assert!(err.contains("not signed in"), "err={err}");
@@ -1334,14 +1344,14 @@ mod tests {
     #[test]
     fn login_status_none_for_empty_store() {
         let tmp = TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = storage_at(tmp.path().join("oauth"));
         assert_eq!(login_status(&storage).unwrap(), None);
     }
 
     #[test]
     fn login_status_reports_plan_and_expiry_from_seeded_token() {
         let tmp = TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = storage_at(tmp.path().join("oauth"));
         let exp = far_future();
         storage
             .store(
@@ -1361,7 +1371,7 @@ mod tests {
         // No stored `expires_at_unix_secs`, but the JWT carries a top-level
         // `exp`. The snapshot must surface the JWT expiry rather than None.
         let tmp = TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = storage_at(tmp.path().join("oauth"));
         let jwt = jwt_with_account_and_exp("acct_j", 1_900_000_000);
         storage
             .store(PROVIDER, &token(&jwt, Some("rt"), None))

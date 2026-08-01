@@ -1802,29 +1802,62 @@ pub fn provider_type_slug(provider: ProviderType) -> &'static str {
     }
 }
 
-/// Path to the stored OAuth token for the ChatGPT backend
+/// The OAuth-store provider slug for the ChatGPT backend — the key
+/// `wcore_agent::oauth::chatgpt::PROVIDER` writes under. Distinct from the
+/// `openai-chatgpt` catalog slug.
+pub(crate) const CHATGPT_OAUTH_PROVIDER: &str = "chatgpt";
+/// The OAuth-store provider slug for the xAI (Grok) backend.
+pub(crate) const XAI_OAUTH_PROVIDER: &str = "xai";
+
+/// Path to the LEGACY cleartext OAuth token file for the ChatGPT backend
 /// (`~/.wayland/oauth/chatgpt.json`). Mirrors `wcore_agent::oauth::OAuthStorage`
 /// (`from_home` → `~/.wayland/oauth/`, `path_for("chatgpt")` →
-/// `chatgpt.json`) WITHOUT depending on `wcore-agent` (layering): the check is
-/// a cheap path existence test, not a token load. The `chatgpt` provider slug
-/// is the OAuth-store key (distinct from the `openai-chatgpt` catalog slug).
+/// `chatgpt.json`) WITHOUT depending on `wcore-agent` (layering).
+///
+/// Since OAuth tokens moved into the credential ladder this file is a
+/// pre-migration artifact: it exists only until the first `load` promotes it.
+/// It remains part of the connectivity answer because a user who has not yet
+/// re-launched (or whose host has no secure tier, so the migration
+/// deliberately left the file alone) is still signed in.
 ///
 /// Resolved under [`profile_home`] so it honours `WAYLAND_HOME` exactly like the
 /// token *writer* (`OAuthStorage::from_home`) — the two must agree or a
-/// sandboxed run would look for the token in the wrong place. Identical to the
-/// old `dirs::home_dir()/.wayland/oauth/chatgpt.json` when `WAYLAND_HOME` is
-/// unset.
+/// sandboxed run would look for the token in the wrong place.
 fn chatgpt_oauth_token_path() -> PathBuf {
     profile_home().join("oauth").join("chatgpt.json")
 }
 
+/// Whether an OAuth token set for `provider` is present in the credential
+/// ladder.
+///
+/// This is the half a file-existence check cannot see. Once a login is stored
+/// through the ladder there is no file at all, so a connectivity check that
+/// only stats `~/.wayland/oauth/{provider}.json` reports a signed-in user as
+/// signed out — and for xAI, whose key resolver *gates* on this, it turns a
+/// working OAuth login into `MissingApiKey`.
+///
+/// Keyed via [`crate::credentials::oauth_tokens_key`], the same function the
+/// writer uses, so the two spellings cannot drift.
+fn oauth_tokens_in_ladder(provider: &str) -> bool {
+    let storage = crate::credentials::CredentialsStorageConfig::default();
+    crate::credentials::open_secure_ladder_store(&storage, &credentials_storage_path())
+        .get(&crate::credentials::oauth_tokens_key(provider))
+        .ok()
+        .flatten()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 /// Whether an xAI (Grok) OAuth credential exists to authenticate out-of-band:
-/// the engine's own store (`~/.wayland/oauth/xai.json`) or the Grok CLI's
-/// `~/.grok/auth.json` (`$GROK_HOME/auth.json` when set). File-existence only —
-/// the actual parse + refresh lives in `wcore_agent::oauth::xai` (config can't
-/// depend on agent), mirroring how the ChatGPT presence check is split.
+/// the engine's own token store (credential ladder, or the pre-migration
+/// `~/.wayland/oauth/xai.json`) or the Grok CLI's `~/.grok/auth.json`
+/// (`$GROK_HOME/auth.json` when set). Presence only — the actual parse +
+/// refresh lives in `wcore_agent::oauth::xai` (config can't depend on agent),
+/// mirroring how the ChatGPT presence check is split.
 fn xai_oauth_credentials_present() -> bool {
     if profile_home().join("oauth").join("xai.json").exists() {
+        return true;
+    }
+    if oauth_tokens_in_ladder(XAI_OAUTH_PROVIDER) {
         return true;
     }
     let grok = std::env::var("GROK_HOME")
@@ -1847,8 +1880,11 @@ fn xai_oauth_credentials_present() -> bool {
 ///   — NOT unconditionally. They carry no API key, but listing them as
 ///   connected on a box with no AWS/GCP credentials offered the user a provider
 ///   that would error on the first turn.
-/// - **OAuth** (`openai-chatgpt`): connected when the stored login file
-///   (`~/.wayland/oauth/chatgpt.json`) exists.
+/// - **OAuth** (`openai-chatgpt`): connected when a stored login exists —
+///   either in the credential ladder (where logins now live) or as the
+///   pre-migration `~/.wayland/oauth/chatgpt.json` file. Checking only the file
+///   made every ladder-stored login invisible: one ordinary `load()` migrated
+///   the token off disk and flipped a signed-in user to "Not configured".
 /// - **API key** (everything else): connected when `resolve_api_key`
 ///   resolves a non-empty key via the config field / credentials store / env
 ///   chain. A `MissingApiKey` error (or an empty resolved key) is "not
@@ -1867,17 +1903,21 @@ pub fn provider_connected(provider: ProviderType) -> bool {
 ///
 /// Results are positionally aligned with `providers`.
 pub fn providers_connected(providers: &[ProviderType]) -> Vec<bool> {
+    // One store key per provider that HAS one — an API-key slot for the bearer
+    // providers, the OAuth token-set key for the OAuth ones. Both classes are
+    // resolved from the same snapshot, so adding the OAuth lookup costs no
+    // extra vault open (and therefore no extra Argon2 run) on a picker refresh.
     let store_keys = providers
         .iter()
-        .filter_map(|provider| credentials_store_key(*provider))
+        .filter_map(|provider| provider_snapshot_key(*provider))
         .collect::<Vec<_>>();
     let store_key_refs = store_keys.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = crate::credentials::CredentialsStorageConfig::default();
     let stored_values = if store_keys.is_empty() {
         Vec::new()
     } else {
-        crate::credentials::open_store(&storage, &credentials_storage_path())
-            .and_then(|store| store.get_many(&store_key_refs))
+        crate::credentials::open_secure_ladder_store(&storage, &credentials_storage_path())
+            .get_many(&store_key_refs)
             .unwrap_or_else(|_| vec![None; store_keys.len()])
     };
     let mut stored_values = stored_values.into_iter();
@@ -1887,10 +1927,27 @@ pub fn providers_connected(providers: &[ProviderType]) -> Vec<bool> {
         .map(|provider| match provider {
             // Ambient cloud credentials — connected only when AWS/GCP
             // credentials are actually present, decided with no network call.
+            // Neither has a store key, so neither consumes a snapshot slot.
             ProviderType::Bedrock => aws_ambient_credentials_present(),
             ProviderType::Vertex => gcp_ambient_credentials_present(),
-            // OAuth-backed — the stored login token is the credential.
-            ProviderType::OpenAIChatGpt => chatgpt_oauth_token_path().exists(),
+            // OAuth-backed — the stored login token set is the credential. It
+            // lives in the ladder; the file is only a pre-migration remnant.
+            ProviderType::OpenAIChatGpt => {
+                let stored = stored_values.next().flatten();
+                stored.as_deref().is_some_and(|v| !v.trim().is_empty())
+                    || chatgpt_oauth_token_path().exists()
+            }
+            // xAI carries BOTH classes: an API key and an out-of-band OAuth
+            // login. The key resolver signals the OAuth case with an EMPTY
+            // `Ok`, which the generic arm below reads as "not connected" — so
+            // an OAuth-only Grok user was listed as unconfigured while being
+            // perfectly able to authenticate. Ask the presence probe directly.
+            ProviderType::Xai => {
+                let stored = stored_values.next().flatten();
+                stored.as_deref().is_some_and(|key| !key.trim().is_empty())
+                    || xai_oauth_credentials_present()
+                    || matches!(resolve_api_key_from_env(ProviderType::Xai), Ok(key) if !key.trim().is_empty())
+            }
             // API-key providers: one value is consumed from the aligned store
             // snapshot, then the normal environment fallback chain applies.
             _ => {
@@ -1900,6 +1957,22 @@ pub fn providers_connected(providers: &[ProviderType]) -> Vec<bool> {
             }
         })
         .collect()
+}
+
+/// The credentials-store key [`providers_connected`] must look up for
+/// `provider`, across BOTH credential classes.
+///
+/// Kept beside the consumer that positionally zips its results: the filter that
+/// builds the batch and the match arms that drain it must agree on exactly
+/// which providers occupy a slot, or every answer after the first mismatch is
+/// read from the wrong provider's row.
+fn provider_snapshot_key(provider: ProviderType) -> Option<String> {
+    match provider {
+        ProviderType::OpenAIChatGpt => {
+            Some(crate::credentials::oauth_tokens_key(CHATGPT_OAUTH_PROVIDER))
+        }
+        other => credentials_store_key(other),
+    }
 }
 
 /// Whether AWS credentials the Bedrock provider's default SDK chain would use
@@ -9241,6 +9314,14 @@ require_priced = true
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_CONFIG_FILE",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        // xAI: the API-key fallback and the Grok CLI login root, both of which
+        // would mask an OAuth-only connectivity answer.
+        "XAI_API_KEY",
+        "GROK_HOME",
+        // Vault unlock material. Cleared by default so the ladder has no secure
+        // rung unless a test explicitly asks for one via `unlock_vault`.
+        "WAYLAND_VAULT_PASSPHRASE",
+        "WAYLAND_VAULT_PASSPHRASE_FD",
     ];
 
     /// Hermetic credential environment: points `HOME` (the ChatGPT OAuth-file
@@ -9286,6 +9367,33 @@ require_priced = true
             let dir = crate::config::profile_home().join("oauth");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("chatgpt.json"), "{\"access_token\":\"t\"}").unwrap();
+        }
+
+        /// Mount a secure rung on the credential ladder for this profile.
+        ///
+        /// `WAYLAND_HOME` is set, so the keyring rung is deliberately
+        /// suppressed (it is a host-global service). Unlock material makes the
+        /// in-home encrypted vault the top rung, which is what a headless
+        /// runner actually has — the exact configuration these tests need in
+        /// order to store an OAuth login the way the product now does.
+        fn unlock_vault(&self) {
+            // SAFETY: callers are #[serial]; the guard restores it on drop.
+            unsafe { std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "test-vault-passphrase") };
+        }
+
+        /// Store an OAuth token set for `provider` through the same ladder the
+        /// product writes to, under the same key spelling.
+        fn store_oauth_login(&self, provider: &str) {
+            let store = crate::credentials::open_secure_ladder_store(
+                &crate::credentials::CredentialsStorageConfig::default(),
+                &credentials_storage_path(),
+            );
+            store
+                .put(
+                    &crate::credentials::oauth_tokens_key(provider),
+                    r#"{"access_token":"hdr.e30.sig","refresh_token":"rt","token_type":"Bearer"}"#,
+                )
+                .expect("the vault rung must accept the write");
         }
     }
 
@@ -9364,6 +9472,81 @@ require_priced = true
         assert!(
             !provider_connected(ProviderType::OpenAIChatGpt),
             "ChatGPT without a stored token file must be unconnected"
+        );
+    }
+
+    /// REGRESSION GUARD (authentication). OAuth logins live in the credential
+    /// ladder, so there is NO token file for a user who signed in on this
+    /// build — or for one who signed in on an older build and has since had
+    /// their token migrated up by a single ordinary `load()`. A connectivity
+    /// check that only stats `~/.wayland/oauth/chatgpt.json` reports that user
+    /// as "Not configured".
+    ///
+    /// The file is asserted absent on purpose: it is what makes this test able
+    /// to fail. Restore the file check as the only source and this goes red.
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn provider_connected_sees_a_ladder_stored_chatgpt_login_with_no_token_file() {
+        let guard = CredEnvGuard::new();
+        guard.unlock_vault();
+        guard.store_oauth_login("chatgpt");
+
+        assert!(
+            !profile_home().join("oauth").join("chatgpt.json").exists(),
+            "precondition: this login exists ONLY in the ladder"
+        );
+        assert!(
+            provider_connected(ProviderType::OpenAIChatGpt),
+            "a ladder-stored ChatGPT login must be visible to provider_connected"
+        );
+        // The batch form is the one the pickers call; it must agree.
+        assert_eq!(
+            providers_connected(&[ProviderType::OpenAI, ProviderType::OpenAIChatGpt]),
+            vec![false, true],
+            "the batch snapshot must stay positionally aligned once the OAuth \
+             provider also consumes a slot"
+        );
+    }
+
+    /// REGRESSION GUARD (authentication). `xai_oauth_credentials_present`
+    /// GATES `resolve_api_key_from_env` for xAI: when it answers false the
+    /// resolver falls through to `XAI_API_KEY` and, finding none, returns
+    /// `MissingApiKey`. So an xAI OAuth user with no `~/.grok/auth.json`, no
+    /// token file and no API key must still authenticate — off the ladder.
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn xai_oauth_login_in_the_ladder_authenticates_without_a_file_or_env_key() {
+        let guard = CredEnvGuard::new();
+        guard.unlock_vault();
+        // Point GROK_HOME at a path that cannot exist, so the Grok-CLI import
+        // cannot supply the answer on any platform.
+        unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
+
+        // Baseline: with nothing stored, xAI is unauthenticated. Without this
+        // the positive assertion below could pass on a permanently-true probe.
+        assert!(
+            resolve_api_key_from_env(ProviderType::Xai).is_err(),
+            "precondition: no OAuth login and no XAI_API_KEY means MissingApiKey"
+        );
+
+        guard.store_oauth_login("xai");
+
+        assert!(
+            !profile_home().join("oauth").join("xai.json").exists(),
+            "precondition: this login exists ONLY in the ladder"
+        );
+        assert!(
+            std::env::var_os("XAI_API_KEY").is_none(),
+            "precondition: no API key to fall back to"
+        );
+        let resolved = resolve_api_key_from_env(ProviderType::Xai);
+        assert!(
+            resolved.is_ok(),
+            "an xAI OAuth login held in the ladder must authenticate, got {resolved:?}"
+        );
+        assert!(
+            provider_connected(ProviderType::Xai),
+            "and it must show as connected in the picker"
         );
     }
 

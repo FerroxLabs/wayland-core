@@ -4009,8 +4009,11 @@ mod tests {
     fn chatgpt_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
         let tmp = tempfile::tempdir().expect("tempdir");
         let oauth_dir = tmp.path().join("oauth");
-        let storage = wcore_agent::oauth::OAuthStorage::at_root(oauth_dir.clone())
-            .expect("oauth storage at tempdir root");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(
+            oauth_dir.clone(),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("oauth storage at tempdir root");
         if let Some(expires_at) = token {
             // A JWT-less access_token is fine: the plan decode just yields None,
             // and the status row only reads expiry. The struct must round-trip

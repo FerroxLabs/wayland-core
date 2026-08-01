@@ -459,7 +459,11 @@ mod tests {
         // Isolate from any real ~/.grok/auth.json so the test is deterministic.
         unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
         let tmp = TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         storage
             .store(PROVIDER, &token("at-fresh", Some("rt"), Some(far_future())))
             .unwrap();

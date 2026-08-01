@@ -560,7 +560,11 @@ mod tests {
         api_base: String,
         storage_root: std::path::PathBuf,
     ) -> HttpGoogleMeetBackend {
-        let storage = OAuthStorage::at_root(storage_root).unwrap();
+        let storage = OAuthStorage::at_root(
+            storage_root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         let flow = OAuthFlow::new(
             "test-client-id",
             Some("test-client-secret".into()),

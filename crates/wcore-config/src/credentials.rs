@@ -120,6 +120,52 @@ pub trait CredentialsStore: Send + Sync {
     fn delete(&self, key: &str) -> Result<(), CredentialsError>;
 }
 
+/// A [`CredentialsStore`] that keeps its secrets in process memory and nowhere
+/// else.
+///
+/// Public because it is the only secure tier a hermetic test can mount: the OS
+/// keyring is a host-global singleton (a test that wrote to it would collide
+/// with the developer's real credentials and with every other test), and the
+/// encrypted vault needs unlock material no headless runner has. Cloning shares
+/// one backing map, so a test can prove that a value written through one handle
+/// is readable through another — the "reopen the store" shape.
+///
+/// It is NOT a production backend: nothing persists past the process, so it can
+/// never be selected by [`open_store`] or [`open_secure_ladder_store`].
+#[derive(Clone, Default)]
+pub struct InMemoryCredentialsStore {
+    entries: std::sync::Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl InMemoryCredentialsStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl CredentialsStore for InMemoryCredentialsStore {
+    fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+        Ok(self.map().get(key).cloned())
+    }
+
+    fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+        self.map().insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+        self.map().remove(key);
+        Ok(())
+    }
+}
+
 /// A credential store selected through the fail-closed confidential backend
 /// policy. The private inner store prevents callers from constructing this
 /// capability around a plaintext backend.
@@ -1926,65 +1972,113 @@ fn migrate_plaintext_into_vault(
     Ok(())
 }
 
+/// Build the ordered ladder — keyring, then encrypted vault, then a refusal.
+/// Cleartext is never a rung; the legacy plaintext file is mounted read-only so
+/// pre-existing keys stay resolvable. (F16, P1)
+///
+/// Shared by the [`CredentialsBackend::Auto`] arm of [`open_store`] and by
+/// [`open_secure_ladder_store`], so the two cannot drift in which rungs they
+/// mount or in the order they try them.
+fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> LadderCredentialsStore {
+    // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
+    // keyring: the keyring service is a process-global constant
+    // ("wayland-core") that bleeds secrets across every profile on the
+    // host (C4 / D1). Such a profile's top rung is the in-home vault.
+    let isolated = std::env::var_os("WAYLAND_HOME").is_some();
+
+    let keyring: Option<Box<dyn CredentialsStore>> = if isolated {
+        None
+    } else {
+        let service = cfg
+            .service_name
+            .clone()
+            .unwrap_or_else(|| "wayland-core".to_string());
+        keyring_available(&service)
+            .then(|| Box::new(KeyringCredentialsStore::new(service)) as Box<dyn CredentialsStore>)
+    };
+
+    let vault: Option<Box<dyn CredentialsStore>> = if vault_unlock_material_present() {
+        // An operator who named explicit vault paths gets THOSE, so the ladder
+        // and an explicit `backend = "encrypted_file"` never open two different
+        // vaults for the same profile.
+        let (cipher_path, key_params_path) = match &cfg.backend {
+            CredentialsBackend::EncryptedFile {
+                cipher_path,
+                key_params_path,
+            } => (cipher_path.clone(), key_params_path.clone()),
+            _ => default_vault_paths(plaintext_path),
+        };
+        let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+        // #183: import any pre-existing plaintext secrets into the
+        // vault once. On failure the legacy tier keeps serving them, so
+        // no secret is ever lost — but the vault stays mounted, because
+        // dropping it would turn a migration hiccup into a refusal to
+        // write at all.
+        if let Err(error) = migrate_plaintext_into_vault(plaintext_path, &store) {
+            tracing::warn!(
+                target: "wcore_credentials",
+                error = %error,
+                "plaintext→vault migration failed; the existing plaintext file \
+                 stays readable and the vault remains the write target"
+            );
+        }
+        Some(Box::new(store) as Box<dyn CredentialsStore>)
+    } else {
+        None
+    };
+
+    if keyring.is_none() && vault.is_none() {
+        warn_no_secure_credential_tier(plaintext_path);
+    }
+
+    LadderCredentialsStore::new(keyring, vault, plaintext_path.to_path_buf())
+}
+
+/// The keyring → encrypted-vault → REFUSE ladder, built regardless of
+/// `cfg.backend`.
+///
+/// [`open_store`] honours an explicit `backend = "plaintext"` opt-out, because
+/// an operator may legitimately choose that for an ordinary API key. Material
+/// that must NEVER be written in cleartext — OAuth token sets, whose refresh
+/// token is a long-lived bearer credential for the user's account — opens the
+/// ladder through this entry point instead, so that opt-out cannot downgrade
+/// it. When no secure rung is mounted, `put` refuses; it never falls through to
+/// a cleartext write.
+///
+/// Reads still descend to the legacy `credentials.toml`, so credentials written
+/// before a secure tier existed stay resolvable and are promoted up on the next
+/// read.
+#[must_use]
+pub fn open_secure_ladder_store(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+) -> Box<dyn CredentialsStore> {
+    Box::new(build_ladder(cfg, plaintext_path))
+}
+
+/// The credentials-store key holding `provider`'s OAuth token set.
+///
+/// Defined in the crate that owns the store rather than in the writer, so the
+/// writer (`wcore_agent::oauth::OAuthStorage`) and the connectivity readers
+/// ([`crate::config::provider_connected`] and the xAI key resolver) name the
+/// same string by construction. A reader that re-spells this is a reader that
+/// reports a signed-in user as signed out.
+///
+/// `provider` is sanitized on the same rule as `OAuthStorage::path_for` so a
+/// hostile provider name cannot forge another key's namespace.
+#[must_use]
+pub fn oauth_tokens_key(provider: &str) -> String {
+    let safe = provider.replace(['/', '\\', '\0', '.'], "_");
+    format!("oauth.{safe}.tokens")
+}
+
 /// Factory selecting the configured backend.
 pub fn open_store(
     cfg: &CredentialsStorageConfig,
     plaintext_path: &Path,
 ) -> Result<Box<dyn CredentialsStore>, CredentialsError> {
     match &cfg.backend {
-        // Default: the ordered ladder — keyring, then encrypted vault, then a
-        // refusal. Cleartext is never a rung; the legacy plaintext file is
-        // mounted read-only so pre-existing keys stay resolvable. (F16, P1)
-        CredentialsBackend::Auto => {
-            // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
-            // keyring: the keyring service is a process-global constant
-            // ("wayland-core") that bleeds secrets across every profile on the
-            // host (C4 / D1). Such a profile's top rung is the in-home vault.
-            let isolated = std::env::var_os("WAYLAND_HOME").is_some();
-
-            let keyring: Option<Box<dyn CredentialsStore>> = if isolated {
-                None
-            } else {
-                let service = cfg
-                    .service_name
-                    .clone()
-                    .unwrap_or_else(|| "wayland-core".to_string());
-                keyring_available(&service).then(|| {
-                    Box::new(KeyringCredentialsStore::new(service)) as Box<dyn CredentialsStore>
-                })
-            };
-
-            let vault: Option<Box<dyn CredentialsStore>> = if vault_unlock_material_present() {
-                let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
-                let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
-                // #183: import any pre-existing plaintext secrets into the
-                // vault once. On failure the legacy tier keeps serving them, so
-                // no secret is ever lost — but the vault stays mounted, because
-                // dropping it would turn a migration hiccup into a refusal to
-                // write at all.
-                if let Err(error) = migrate_plaintext_into_vault(plaintext_path, &store) {
-                    tracing::warn!(
-                        target: "wcore_credentials",
-                        error = %error,
-                        "plaintext→vault migration failed; the existing plaintext file \
-                         stays readable and the vault remains the write target"
-                    );
-                }
-                Some(Box::new(store) as Box<dyn CredentialsStore>)
-            } else {
-                None
-            };
-
-            if keyring.is_none() && vault.is_none() {
-                warn_no_secure_credential_tier(plaintext_path);
-            }
-
-            Ok(Box::new(LadderCredentialsStore::new(
-                keyring,
-                vault,
-                plaintext_path.to_path_buf(),
-            )))
-        }
+        CredentialsBackend::Auto => Ok(Box::new(build_ladder(cfg, plaintext_path))),
         CredentialsBackend::Plaintext => {
             warn_explicit_plaintext_backend(plaintext_path);
             Ok(Box::new(PlaintextCredentialsStore::new(
