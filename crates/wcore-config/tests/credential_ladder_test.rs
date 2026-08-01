@@ -94,14 +94,13 @@ fn auto() -> CredentialsStorageConfig {
     CredentialsStorageConfig::default()
 }
 
-/// Assert the secret appears nowhere in cleartext under `home`, byte-scanning
-/// every file in the tree rather than only the paths we expect to exist.
+/// Recursively byte-scan every file under `root` for `needle`, returning the
+/// first file that contains it.
 ///
 /// A per-path check ("credentials.toml does not exist") is satisfied by a leak
 /// into any file we forgot to name — a temp file, a log, a `.env`. This walks.
-fn assert_no_cleartext_secret_anywhere(home: &Path) {
-    let mut stack = vec![home.to_path_buf()];
-    let mut scanned = 0_usize;
+fn find_cleartext(root: &Path, needle: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -115,21 +114,33 @@ fn assert_no_cleartext_secret_anywhere(home: &Path) {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
-            scanned += 1;
-            assert!(
-                !bytes
-                    .windows(SECRET.len())
-                    .any(|window| window == SECRET.as_bytes()),
-                "the secret appears in CLEARTEXT in {}",
-                path.display()
-            );
+            if bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+            {
+                return Some(path);
+            }
         }
     }
+    None
+}
+
+/// Assert the secret appears nowhere in cleartext under `home`, having FIRST
+/// proved that the scanner can find a planted copy.
+///
+/// Without the planted control this is satisfied by an empty directory, and a
+/// refused write legitimately produces one — so the negative result would be
+/// true for the wrong reason exactly when it matters most.
+fn assert_no_cleartext_secret_anywhere(home: &Path) {
+    let control = tempdir().unwrap();
+    std::fs::write(control.path().join("planted"), SECRET).unwrap();
     assert!(
-        scanned > 0,
-        "scanned zero files under {} — the cleartext scan cannot fail, so it proves nothing",
-        home.display()
+        find_cleartext(control.path(), SECRET).is_some(),
+        "the cleartext scanner cannot find a planted secret, so it cannot fail"
     );
+    if let Some(leaked) = find_cleartext(home, SECRET) {
+        panic!("the secret appears in CLEARTEXT in {}", leaked.display());
+    }
 }
 
 // ---------------------------------------------------------------------------

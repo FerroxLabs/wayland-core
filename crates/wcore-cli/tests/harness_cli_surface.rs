@@ -196,13 +196,34 @@ fn auth_add_without_a_secure_tier_refuses_and_writes_no_cleartext() {
         "the refusal must name the way forward; got: {rendered}"
     );
 
-    // Nothing anywhere, in any file, in cleartext.
-    let mut stack = vec![home.path().to_path_buf()];
-    let mut scanned = 0_usize;
+    // NON-VACUITY FOR THE SCANNER, planted first. A refused `auth add` writes
+    // NOTHING — not even a log line, since `RotatingLog` materialises on its
+    // first record — so "the scan found no cleartext" would otherwise be true
+    // of an empty directory and would prove nothing. Prove the scanner can
+    // actually find the needle before trusting it not to.
+    let control = TempDir::new().expect("create control dir");
+    std::fs::write(control.path().join("planted.txt"), api_key).unwrap();
+    assert!(
+        find_cleartext(control.path(), api_key).is_some(),
+        "the cleartext scanner cannot find a planted key, so it cannot fail"
+    );
+
+    // Now the real assertion: nothing anywhere under HOME, in any file.
+    if let Some(leaked) = find_cleartext(home.path(), api_key) {
+        panic!("the refused key was written in cleartext to {}", leaked.display());
+    }
+}
+
+/// Recursively byte-scan every file under `root` for `needle`, returning the
+/// first file that contains it.
+///
+/// A per-path check ("config.toml does not contain it") is satisfied by a leak
+/// into any file the test forgot to name — a temp file, a log, a `.env`. This
+/// walks the tree instead.
+fn find_cleartext(root: &Path, needle: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
+        let entries = std::fs::read_dir(&dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -212,24 +233,15 @@ fn auth_add_without_a_secure_tier_refuses_and_writes_no_cleartext() {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
-            scanned += 1;
-            assert!(
-                !bytes
-                    .windows(api_key.len())
-                    .any(|window| window == api_key.as_bytes()),
-                "the refused key was written in cleartext to {}",
-                path.display()
-            );
+            if bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+            {
+                return Some(path);
+            }
         }
     }
-    // Non-vacuity for the scan: the run must have produced SOME file (the log
-    // the binary opens at startup), else "no cleartext found" is free.
-    assert!(
-        scanned > 0,
-        "the cleartext scan found no files at all under {} — it cannot fail, so it \
-         proves nothing",
-        home.path().display()
-    );
+    None
 }
 
 #[test]
