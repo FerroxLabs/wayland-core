@@ -242,15 +242,32 @@ jobs:
           mkdir -p "$dest"
           curl -fsSL -o "$dest/py.zip" \
             "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
-          # `unzip` is not guaranteed on the runner; git-bash ships tar, which
-          # reads zip archives.
+          # `unzip` is not guaranteed on the runner, and the `tar` a bash step
+          # gets on Windows is git-bash's GNU tar 1.35, which CANNOT read a zip
+          # at all. Two separate failures proved this, in order:
+          #   1. run 30689934972 -- `tar -xf "$dest/py.zip"` with the absolute
+          #      Windows path: GNU tar read the drive letter as a remote host,
+          #      `tar: Cannot connect to C: resolve failed`.
+          #   2. run 30694433664 -- same command with a relative name from
+          #      inside $dest: the drive-letter trap was gone, and the real
+          #      defect surfaced underneath it,
+          #      `tar: This does not look like a tar archive`.
+          # An earlier revision of this comment asserted git-bash's tar reads
+          # zips. It does not; (2) is what that wrong assumption cost.
           #
-          # Extract from INSIDE $dest with a relative name. Passing the absolute
-          # Windows path made GNU tar read the drive letter as a remote host:
-          #   tar: Cannot connect to C: resolve failed
-          # (measured, run 30689934972). `--force-local` also works but a
-          # relative path needs no flag and cannot regress on a tar that lacks it.
-          ( cd "$dest" && tar -xf py.zip )
+          # Windows ships bsdtar (libarchive) at a fixed System32 path, and
+          # THAT reads zip. Measured on the ferrox-win-msvc box (= SeanDesktop),
+          # same git-bash, same archive:
+          #   GNU tar 1.35      -> rc=2, 0 files extracted, 3 lines on stderr
+          #   bsdtar 3.8.4      -> rc=0, empty stderr, working python.exe
+          # Call it by absolute path: `tar` on PATH is GNU tar, so the name
+          # alone would silently pick the one that cannot do the job.
+          bsdtar=/c/Windows/System32/tar.exe
+          if [ ! -x "$bsdtar" ]; then
+            echo "::error title=No bsdtar::$bsdtar is missing, so this runner has no zip reader (PATH tar is GNU tar, which cannot read zip). Install Python machine-wide on this runner instead."
+            exit 1
+          fi
+          ( cd "$dest" && "$bsdtar" -xf py.zip )
           test -x "$dest/python.exe" || test -f "$dest/python.exe"
           echo "$dest" >> "$GITHUB_PATH"
           echo "gate-count:python_provisioned=1 ($dest)"
