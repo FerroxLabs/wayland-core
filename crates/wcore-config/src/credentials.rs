@@ -1132,45 +1132,45 @@ impl CredentialsStore for LadderCredentialsStore {
     /// per key) would put one KDF run per provider on the model picker's path.
     fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
         let mut out = vec![None; keys.len()];
+        // Indices still unresolved. Each tier is queried for THIS list and then
+        // the list shrinks, so every tier must be queried strictly after the one
+        // above it has narrowed it — querying them up front and zipping later
+        // mis-aligns the results against the reduced list.
         let mut missing: Vec<usize> = (0..keys.len()).collect();
 
-        for (tier, values) in [
-            (
-                LadderTier::Keyring,
-                self.keyring.as_ref().and_then(|keyring| {
-                    let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
-                    keyring.get_many(&subset).ok()
-                }),
-            ),
-            (
-                LadderTier::Vault,
-                self.vault.as_ref().and_then(|vault| {
-                    let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
-                    vault.get_many(&subset).ok()
-                }),
-            ),
-        ] {
-            let Some(values) = values else { continue };
-            let mut still_missing = Vec::new();
+        for tier in [LadderTier::Keyring, LadderTier::Vault] {
+            if missing.is_empty() {
+                return Ok(out);
+            }
+            let Some(store) = self.tier(tier) else {
+                continue;
+            };
+            let subset: Vec<&str> = missing.iter().map(|index| keys[*index]).collect();
+            // A tier that errors must not hide a value a lower tier holds.
+            let Ok(values) = store.get_many(&subset) else {
+                continue;
+            };
+            debug_assert_eq!(values.len(), missing.len());
+            let mut still_missing = Vec::with_capacity(missing.len());
             for (slot, value) in missing.iter().copied().zip(values) {
                 match value {
                     Some(value) => {
-                        if tier != LadderTier::Keyring {
-                            self.promote(keys[slot], &value, tier);
-                        }
+                        self.promote(keys[slot], &value, tier);
                         out[slot] = Some(value);
                     }
                     None => still_missing.push(slot),
                 }
             }
             missing = still_missing;
-            if missing.is_empty() {
-                return Ok(out);
-            }
         }
 
-        let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
-        for (slot, value) in missing.iter().copied().zip(self.legacy.get_many(&subset)?) {
+        if missing.is_empty() {
+            return Ok(out);
+        }
+        let subset: Vec<&str> = missing.iter().map(|index| keys[*index]).collect();
+        let values = self.legacy.get_many(&subset)?;
+        debug_assert_eq!(values.len(), missing.len());
+        for (slot, value) in missing.iter().copied().zip(values) {
             if let Some(value) = &value {
                 self.promote(keys[slot], value, LadderTier::Legacy);
             }
@@ -4336,6 +4336,67 @@ mod tests {
             ladder.get("k").unwrap().as_deref(),
             Some("NEW-value"),
             "non-vacuity: the surviving copy is the new one"
+        );
+    }
+
+    /// `get_many` must return values POSITIONALLY aligned with `keys` when the
+    /// answers come from different tiers.
+    ///
+    /// Written after the first version of the batched path was wrong: it
+    /// queried both upper tiers up front against the same index list, then
+    /// zipped the vault's answers against a list the keyring pass had already
+    /// shortened, so every value below the first keyring hit came back attached
+    /// to the WRONG key. That is a credential mix-up, not a cosmetic bug, and it
+    /// was invisible to every existing case because they all ran with the
+    /// keyring tier absent (the isolated-profile fixture) — the one arrangement
+    /// in which no reduction happens. This case interleaves the tiers so the
+    /// reduction is forced.
+    #[test]
+    fn get_many_keeps_values_aligned_when_tiers_answer_different_keys() {
+        let keyring = tier(&[("b", "B-keyring"), ("d", "D-keyring")]);
+        let vault = tier(&[("c", "C-vault")]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let legacy = PlaintextCredentialsStore::new(&legacy_path);
+        legacy.put("e", "E-legacy").unwrap();
+
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        // a: nowhere. b: keyring. c: vault. d: keyring. e: legacy.
+        // The keyring answers positions 1 and 3, so the remaining list the
+        // vault sees is [0, 2, 4] — a different shape from the original.
+        assert_eq!(
+            ladder.get_many(&["a", "b", "c", "d", "e"]).unwrap(),
+            vec![
+                None,
+                Some("B-keyring".to_string()),
+                Some("C-vault".to_string()),
+                Some("D-keyring".to_string()),
+                Some("E-legacy".to_string()),
+            ]
+        );
+
+        // And the batched path re-migrates exactly like the single-key one: the
+        // lower-tier answers moved up, and their old homes are empty.
+        assert!(
+            vault.snapshot().is_empty(),
+            "the vault answer must have been promoted out: {:?}",
+            vault.snapshot()
+        );
+        assert_eq!(legacy.get("e").unwrap(), None, "legacy copy must be gone");
+        assert_eq!(
+            keyring.snapshot(),
+            vec![
+                ("b".to_string(), "B-keyring".to_string()),
+                ("c".to_string(), "C-vault".to_string()),
+                ("d".to_string(), "D-keyring".to_string()),
+                ("e".to_string(), "E-legacy".to_string()),
+            ],
+            "every resolved value must now live in the top tier"
         );
     }
 
