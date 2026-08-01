@@ -125,14 +125,24 @@ pub(super) fn settled_verdict() -> Option<bool> {
         .settled()
 }
 
+/// Whether a backend admitted WITHOUT a startup probe may still claim its
+/// containment properties, given only what the probe has settled.
+///
+/// Pure in the verdict so both arms are reachable from a test on any host.
+/// An "unknown" verdict is NOT a negative — the claim is withdrawn only on
+/// evidence, because a session that has not yet run a command has not yet
+/// learned anything about this host.
+pub(super) fn containment_claim(settled: Option<bool>) -> bool {
+    settled != Some(false)
+}
+
 /// True once a probe has actually settled UNAVAILABLE.
 ///
 /// Monotone by construction: [`ProbeCache::settled`] keeps a negative verdict
 /// until a probe succeeds, so a predicate built on this answers the same way
-/// for as long as the host stays broken. An "unknown" verdict is NOT a negative
-/// — the containment claim is withdrawn only on evidence.
+/// for as long as the host stays broken.
 fn containment_withdrawn() -> bool {
-    settled_verdict() == Some(false)
+    !containment_claim(settled_verdict())
 }
 
 /// The refusal a deferred-selection backend returns when its probe has settled

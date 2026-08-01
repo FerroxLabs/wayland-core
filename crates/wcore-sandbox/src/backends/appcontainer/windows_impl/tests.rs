@@ -764,54 +764,46 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
         Some(available),
         "the production availability path must settle the same cache this test read"
     );
+
+    // …and the containment predicates are driven by that same settled verdict,
+    // not by a constant. Whichever way this host probed, the claims must agree
+    // with it — a hardcoded `true` disagrees on a host whose probe fails.
+    let backend = AppContainerBackend::new();
+    println!("OBSERVED: AppContainer probed available={available} on this host");
+    assert_eq!(
+        backend.enforces_read_deny(),
+        available,
+        "the read-deny claim must track the settled verdict"
+    );
+    assert_eq!(
+        backend.binds_cwd_authority(),
+        available,
+        "the cwd-authority claim must track the settled verdict"
+    );
+    assert_eq!(
+        backend.owns_descendants_hard(),
+        available,
+        "the descendant-ownership claim must track the settled verdict"
+    );
 }
 
-/// The deferral moved the probe, it did not delete the refusal: once the
-/// verdict has settled unavailable, the backend refuses commands and withdraws
-/// the containment claims that a working AppContainer would justify.
+/// Both arms of the containment claim, reachable on ANY host because the
+/// mapping is pure in the verdict.
 ///
-/// Runs only where the verdict actually settled negative — on a healthy box the
-/// probe succeeds and there is nothing to assert. It reports which arm it took
-/// so a "passed" line is never mistaken for coverage it did not provide.
-#[tokio::test]
-async fn a_settled_unavailable_verdict_refuses_and_withdraws_the_containment_claim() {
-    let backend = AppContainerBackend::new();
-    let available = backend.is_available();
-    if available {
-        println!(
-            "NOT EXERCISED: AppContainer probed available on this host, so the \
-             unavailable arm has no state to observe"
-        );
-        assert!(backend.enforces_read_deny());
-        assert!(backend.binds_cwd_authority());
-        assert!(backend.owns_descendants_hard());
-        return;
-    }
-    println!("EXERCISED: AppContainer probed UNAVAILABLE on this host");
-    let err = backend
-        .execute(
-            &SandboxManifest {
-                timeout: Some(Duration::from_secs(5)),
-                ..Default::default()
-            },
-            SandboxCommand {
-                argv: vec!["cmd.exe".into(), "/c".into(), "exit 0".into()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect_err("an unavailable backend must refuse, not spawn");
-    let text = format!("{err}");
+/// "Unknown" must still claim: a session that has not run a command yet has
+/// learned nothing about this host, and withdrawing on no evidence would make
+/// every fresh process report itself uncontained. Only a settled negative
+/// withdraws — and because `ProbeCache::settled` keeps a negative until a probe
+/// succeeds, that answer cannot flip back on an unchanged machine.
+#[test]
+fn the_containment_claim_is_withdrawn_only_by_a_settled_negative_verdict() {
     assert!(
-        text.contains("sandbox UNAVAILABLE"),
-        "the refusal must read like the fail-closed refusal: {text}"
+        containment_claim(None),
+        "an unprobed backend must not withdraw its claim on no evidence"
     );
+    assert!(containment_claim(Some(true)));
     assert!(
-        !backend.enforces_read_deny(),
-        "a backend that cannot spawn must not claim OS-enforced read deny"
-    );
-    assert!(
-        !backend.binds_cwd_authority(),
-        "a backend that cannot spawn binds no cwd authority"
+        !containment_claim(Some(false)),
+        "a settled-unavailable backend must withdraw the containment claim"
     );
 }
