@@ -781,6 +781,18 @@ fn compat_turn_cost_with_cache_usd(
 ///
 /// Fix(pricing-audit-2026-05-24): wiring catalog into the TurnTrace path so
 /// session_cost events reflect real per-model pricing (not compat-row fallback).
+///
+/// `cost_is_known_free` is checked BEFORE the catalog, and that ordering is
+/// load-bearing. The catalog is keyed on provider + model NAME; it cannot see
+/// that `base_url` points somewhere else. `cost_is_known_free` is an explicit
+/// operator statement about the ENDPOINT actually being called, so it is the
+/// more specific fact and the catalog cannot outrank it. Catalog-first meant
+/// the declaration was silently discarded for every model name the bundled
+/// catalog happens to know: a loopback evaluator fixture answering as
+/// `openai/gpt-4o` was reserved at OpenAI's list price ($0.1726 for one
+/// worst-case canary turn), which tripped the F11 admission cap and stopped
+/// the provider call before it was ever sent. The compat fallback below has
+/// always returned $0 for this flag; only the ordering was wrong.
 fn resolve_turn_cost(
     provider: &str,
     model: &str,
@@ -790,6 +802,13 @@ fn resolve_turn_cost(
     cache_write_tokens: u64,
     compat: &wcore_config::compat::ProviderCompat,
 ) -> ResolvedTurnCost {
+    if compat.cost_is_known_free.unwrap_or(false) {
+        return ResolvedTurnCost {
+            usd: 0.0,
+            priced: true,
+        };
+    }
+
     if let Some(resolved) = pricing_turn_cost_with_cache(
         provider,
         model,
@@ -1797,8 +1816,8 @@ mod forgeflow_final_state_tests {
 #[cfg(test)]
 mod w7_pricing_budget_tests {
     use super::{
-        compat_turn_cost_with_cache_usd, pricing_turn_cost_usd, pricing_turn_cost_with_cache,
-        resolve_conservative_reservation_cost, resolve_turn_cost,
+        ResolvedTurnCost, compat_turn_cost_with_cache_usd, pricing_turn_cost_usd,
+        pricing_turn_cost_with_cache, resolve_conservative_reservation_cost, resolve_turn_cost,
     };
     use wcore_budget::{BudgetCap, BudgetTracker};
 
@@ -1922,6 +1941,47 @@ mod w7_pricing_budget_tests {
             compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat),
             Some(0.0),
             "a provider-neutral known-free declaration must preserve a real zero price"
+        );
+    }
+
+    /// A declared-free endpoint outranks the name-keyed catalog, in BOTH
+    /// directions, on one variable.
+    ///
+    /// The catalog knows `openai/gpt-4o` and prices it. Before this ordering
+    /// existed, that row won and an explicit `cost_is_known_free` was silently
+    /// discarded, so a loopback fixture answering as `gpt-4o` was admitted at
+    /// OpenAI's list price. The two halves share one instrument and differ in
+    /// exactly one field, so neither is self-passing.
+    #[test]
+    fn declared_free_endpoint_outranks_the_catalog_price() {
+        let priced = wcore_config::compat::ProviderCompat::openai_defaults();
+        let charged =
+            resolve_conservative_reservation_cost("openai", "gpt-4o", 8_000, 16_000, &priced);
+        assert!(
+            charged.priced && charged.usd > 0.0,
+            "control: the catalog prices gpt-4o, so the declaration below has \
+             something to outrank (got {charged:?})"
+        );
+
+        let declared_free = wcore_config::compat::ProviderCompat {
+            cost_is_known_free: Some(true),
+            ..priced
+        };
+        let free = resolve_conservative_reservation_cost(
+            "openai",
+            "gpt-4o",
+            8_000,
+            16_000,
+            &declared_free,
+        );
+        assert_eq!(
+            free,
+            ResolvedTurnCost {
+                usd: 0.0,
+                priced: true
+            },
+            "an explicit endpoint declaration must resolve to a known zero, not \
+             the vendor list price for the model NAME"
         );
     }
 
