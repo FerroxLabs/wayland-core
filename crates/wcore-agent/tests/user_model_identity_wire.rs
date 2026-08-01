@@ -225,11 +225,17 @@ async fn start_mock_anthropic() -> MockServer {
 ///
 /// Linux has no such alias, which is why leaving this out was green there and
 /// red on macOS. The returned `TempDir` must be kept alive by the caller.
+///
+/// `dunce::simplified` is not decoration: `canonical_workspace` applies it too,
+/// so on Windows it is the difference between `C:\…` and the verbatim
+/// `\\?\C:\…` form `canonicalize` returns. Canonicalizing WITHOUT it leaves the
+/// harness on a third spelling that bootstrap never emits, and this file stays
+/// red on Windows for the same reason it was red on macOS.
 fn resolved_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::TempDir::new().expect("workdir");
-    let cwd =
+    let canonical =
         std::fs::canonicalize(dir.path()).expect("resolve the workdir bootstrap will resolve");
-    (dir, cwd)
+    (dir, dunce::simplified(&canonical).to_path_buf())
 }
 
 /// The user-model store path, computed exactly as `bootstrap.rs` computes it.
