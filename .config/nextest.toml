@@ -120,6 +120,38 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 filter = 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
 slow-timeout = { period = "120s", terminate-after = 2 }
 
+# The F01 packaged-driver gate drives the REAL packaged `wayland-core` binary
+# through complete scenario runs — three of them in the identity test alone,
+# plus a live MCP fixture, a live egress fixture, a materialized repository and
+# two `wayland-receipt` invocations. It is long because it is end-to-end, not
+# because anything in it hangs.
+#
+# MEASURED, hetzner-dsm (96 cores), warm cache, `--profile eval` (test-threads
+# = 1, so these are isolated single-test costs, not contended ones):
+#   packaged_candidate_cannot_replace_authenticated_egress_evidence   36.99s
+#   packaged_core_proves_capability_unavailability_and_outcome        54.68s
+#   packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine  80.94s
+#   packaged_core_identity_and_driver_gates_are_enforced             100.07s
+#
+# Against the global default budget (30s x kill-after-2 = 60s) TWO of those
+# four are terminated mid-run and a third sits 5s under the line. Both the CI
+# job (.github/workflows/ci.yml) and the `f01-packaged-driver-gate` justfile
+# recipe invoke this binary with NO `--profile`, so the default profile is what
+# governs the gate in practice — that is, the gate could not pass on time even
+# when every assertion in it holds. A gate that cannot reach a pass state
+# proves as little as one that cannot fail.
+#
+# `period` is deliberately set BELOW the slowest measured run (60s < 100s), so
+# nextest still prints the "running for over 60 seconds" notice on every run
+# and the cost stays visible in the log instead of being silently absorbed.
+# terminate-after = 5 gives a 300s hard kill, 3x the slowest measured test —
+# headroom for a contended scheduler slot, and still a real ceiling.
+#
+# Scoped to the binary, not the workspace: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'binary(packaged_driver_gate)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit

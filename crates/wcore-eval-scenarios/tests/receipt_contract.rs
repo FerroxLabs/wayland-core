@@ -178,6 +178,11 @@ fn body() -> ReceiptBodyV1 {
             fixture_sha256: h64('d'),
             provider: "openai".to_string(),
             model: "fixture-model-v1".to_string(),
+            // Must equal `ci_provenance()`. The signer attests the provenance
+            // the run recorded; it no longer overwrites it, so a fixture whose
+            // recorded invocation disagrees with the attested one is now a
+            // refusal (`AttestedProvenanceMismatch`) rather than a silent
+            // rewrite. That refusal has its own test below.
             build: Evidence::observed(BuildProvenanceV1 {
                 repository: "FerroxLabs/wayland-core".to_string(),
                 source_ref: "refs/heads/frontier/m0".to_string(),
@@ -297,7 +302,7 @@ fn authoritative_policy(signing_key: &SigningKey) -> AuthoritativeReceiptPolicyV
         repository: "FerroxLabs/wayland-core".to_string(),
         source_ref: "refs/heads/frontier/m0".to_string(),
         workflow: "frontier-eval".to_string(),
-        invocation_id: "ci-456".to_string(),
+        invocation_id: "ci-123".to_string(),
         target_os: "linux".to_string(),
         target_architecture: "x86_64".to_string(),
         sandbox_backend: "cgroup-v2".to_string(),
@@ -312,7 +317,7 @@ fn ci_provenance() -> CiProvenanceV1 {
         repository: "FerroxLabs/wayland-core".to_string(),
         source_ref: "refs/heads/frontier/m0".to_string(),
         workflow: "frontier-eval".to_string(),
-        invocation_id: "ci-456".to_string(),
+        invocation_id: "ci-123".to_string(),
     }
 }
 
@@ -367,7 +372,7 @@ fn behavior_digest_excludes_volatile_execution_identity() {
         repository: "FerroxLabs/wayland-core".to_string(),
         source_ref: "refs/heads/frontier/m0".to_string(),
         workflow: "frontier-eval".to_string(),
-        invocation_id: "ci-456".to_string(),
+        invocation_id: "ci-123".to_string(),
     });
     repeated.timings.boot_ms = Evidence::observed(211);
     repeated.timings.first_token_ms = Evidence::observed(77);
@@ -664,7 +669,7 @@ fn receipt_cli_builds_external_policy_and_signs_only_through_stdin() {
             "--workflow",
             "frontier-eval",
             "--invocation-id",
-            "ci-456",
+            "ci-123",
             "--target-os",
             "linux",
             "--target-architecture",
@@ -702,7 +707,7 @@ fn receipt_cli_builds_external_policy_and_signs_only_through_stdin() {
             "--workflow",
             "frontier-eval",
             "--invocation-id",
-            "ci-456",
+            "ci-123",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -805,6 +810,79 @@ fn authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts() {
             ci_provenance(),
         ),
         Err(AuthorityError::SyntheticFixtureDigest)
+    ));
+}
+
+/// The signer attests a recorded origin; it cannot invent one.
+///
+/// Both directions are here on purpose. A rule with only a fail state is
+/// indistinguishable from a broken feature, and a rule with only a pass state
+/// is decorative.
+#[test]
+fn ci_signer_attests_recorded_build_origin_and_refuses_to_manufacture_one() {
+    let signing_key = SigningKey::from_bytes(&[13; 32]);
+    let seed = BASE64.encode(signing_key.to_bytes());
+
+    // PASS: the run recorded its own provenance and the signer attests exactly
+    // that. This is the only shape that reaches an authoritative signature.
+    let recorded = EvidenceReceiptV1::local(body()).expect("valid local receipt");
+    let signed = sign_ci_receipt(
+        &serde_json::to_vec(&recorded).unwrap(),
+        "release-ci",
+        seed.as_bytes(),
+        ci_provenance(),
+    )
+    .expect("a run that recorded its own provenance may be attested");
+    let (_, verified) = verify_authoritative_receipt(
+        &serde_json::to_vec(&signed).unwrap(),
+        &authoritative_policy(&signing_key),
+    )
+    .expect("attested receipt with complete evidence is authoritative");
+    assert!(verified.gate_passed);
+
+    // FAIL: a locally produced run. `wayland-eval` writes exactly this code
+    // when no `--build-provenance` is supplied, and the signer must not launder
+    // it into `Observed`.
+    let mut local_origin = body();
+    local_origin.identity.build = Evidence::Unavailable {
+        code: "local_non_authoritative".to_string(),
+    };
+    let local_origin = EvidenceReceiptV1::local(local_origin).expect("honest local-origin receipt");
+    let local_origin_json = serde_json::to_vec(&local_origin).unwrap();
+    assert!(matches!(
+        sign_ci_receipt(
+            &local_origin_json,
+            "release-ci",
+            seed.as_bytes(),
+            ci_provenance(),
+        ),
+        Err(AuthorityError::LocalEvidenceOrigin(ref code))
+            if code == "local_non_authoritative"
+    ));
+
+    // ... and if a signature is produced by some other route, the milestone
+    // gate is the second refusal: `identity.build` is one of its clauses.
+    let forged = local_origin.sign_ci("release-ci", &signing_key);
+    assert!(matches!(
+        verify_authoritative_receipt(
+            &serde_json::to_vec(&forged).unwrap(),
+            &authoritative_policy(&signing_key),
+        ),
+        Err(AuthorityError::Receipt(ReceiptError::UnsignedAuthoritative))
+            | Err(AuthorityError::MilestoneGateFailed(_))
+    ));
+
+    // FAIL: the run recorded a DIFFERENT build than the signer claims.
+    let mut wrong_invocation = ci_provenance();
+    wrong_invocation.invocation_id = "ci-999".to_string();
+    assert!(matches!(
+        sign_ci_receipt(
+            &serde_json::to_vec(&recorded).unwrap(),
+            "release-ci",
+            seed.as_bytes(),
+            wrong_invocation,
+        ),
+        Err(AuthorityError::AttestedProvenanceMismatch("invocation_id"))
     ));
 }
 

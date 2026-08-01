@@ -69,6 +69,13 @@ pub enum AuthorityError {
     InvalidSigningKey,
     #[error("only a local receipt can enter the CI signing workflow")]
     NonLocalSigningInput,
+    #[error(
+        "the run did not record its own build provenance ({0}); a locally produced receipt \
+         cannot be promoted to authoritative evidence by attaching provenance afterwards"
+    )]
+    LocalEvidenceOrigin(String),
+    #[error("recorded build provenance disagrees with the attested provenance: {0}")]
+    AttestedProvenanceMismatch(&'static str),
     #[error("receipt is not signed by the policy's trusted authority")]
     WrongAuthority,
     #[error("receipt does not match authoritative policy field: {0}")]
@@ -87,8 +94,22 @@ impl Drop for SecretBytes {
     }
 }
 
-/// Attach CI provenance and sign a local receipt. The secret is supplied as
-/// bytes by the caller so command-line integrations never need a secret argv.
+/// Attest CI provenance over a local receipt. The secret is supplied as bytes
+/// by the caller so command-line integrations never need a secret argv.
+///
+/// The signer ATTESTS the build provenance the run recorded for itself; it does
+/// not MANUFACTURE it. That distinction is the whole content of the word
+/// "authoritative" here. This function used to overwrite `identity.build`
+/// unconditionally, which meant a receipt produced by a developer's local run —
+/// one that had honestly written `Unavailable { code: "local_non_authoritative" }`
+/// — came out the other side carrying `Observed` build provenance and could
+/// then satisfy the authoritative milestone gate, whose `identity.build` clause
+/// is precisely the clause meant to stop that. Nothing about the origin of the
+/// evidence had changed; only the label had. So the signer now REFUSES a
+/// receipt whose run did not observe its own provenance, and refuses one whose
+/// recorded provenance disagrees with what it is being asked to attest.
+///
+/// Runs record provenance at run time: see `wayland-eval --build-provenance`.
 pub fn sign_ci_receipt(
     receipt_json: &[u8],
     key_id: &str,
@@ -104,19 +125,39 @@ pub fn sign_ci_receipt(
         return Err(AuthorityError::NonLocalSigningInput);
     }
     reject_synthetic_fixture(&receipt)?;
+    match &receipt.body.identity.build {
+        Evidence::Observed { value } => provenance_agrees(value, &provenance)?,
+        Evidence::Unavailable { code } => {
+            return Err(AuthorityError::LocalEvidenceOrigin(code.clone()));
+        }
+    }
 
     let mut key_bytes =
         decode_secret_32(signing_key_base64).ok_or(AuthorityError::InvalidSigningKey)?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
     wipe(&mut key_bytes);
-    let mut body = receipt.body;
-    body.identity.build = Evidence::observed(BuildProvenanceV1 {
-        repository: provenance.repository,
-        source_ref: provenance.source_ref,
-        workflow: provenance.workflow,
-        invocation_id: provenance.invocation_id,
-    });
-    Ok(EvidenceReceiptV1::local(body)?.sign_ci(key_id, &signing_key))
+    Ok(EvidenceReceiptV1::local(receipt.body)?.sign_ci(key_id, &signing_key))
+}
+
+fn provenance_agrees(
+    recorded: &BuildProvenanceV1,
+    attested: &CiProvenanceV1,
+) -> Result<(), AuthorityError> {
+    for (field, recorded, attested) in [
+        ("repository", &recorded.repository, &attested.repository),
+        ("source_ref", &recorded.source_ref, &attested.source_ref),
+        ("workflow", &recorded.workflow, &attested.workflow),
+        (
+            "invocation_id",
+            &recorded.invocation_id,
+            &attested.invocation_id,
+        ),
+    ] {
+        if recorded != attested {
+            return Err(AuthorityError::AttestedProvenanceMismatch(field));
+        }
+    }
+    Ok(())
 }
 
 /// Verify one receipt as authoritative release evidence. Success means the

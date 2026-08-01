@@ -15,8 +15,10 @@ use wcore_eval_scenarios::providers::{
     ProviderAvailability, ProviderConfig, ProviderResolution, provider_override, resolve,
 };
 use wcore_eval_scenarios::receipt::{
-    Evidence, EvidenceReceiptV1, ReceiptMetadataV1, ReceiptVerifier, VerificationPolicy,
+    BuildProvenanceV1, Evidence, EvidenceReceiptV1, ReceiptMetadataV1, ReceiptVerifier,
+    VerificationPolicy,
 };
+use wcore_eval_scenarios::receipt_policy::CiProvenanceV1;
 use wcore_eval_scenarios::report::{ReceiptReports, render_receipt_reports};
 use wcore_eval_scenarios::runner::{Failure, run_with_binary};
 use wcore_eval_scenarios::scenario::{Platform, PlatformDisposition};
@@ -110,6 +112,17 @@ struct Cli {
         conflicts_with_all = ["list", "verify_binary", "dry"]
     )]
     fixture_manifest: Option<PathBuf>,
+
+    /// JSON `CiProvenanceV1` describing the build this run is part of.
+    ///
+    /// Present ⇒ the receipt records `identity.build` as OBSERVED, and the CI
+    /// signer may attest exactly that provenance. Absent ⇒ the receipt records
+    /// `Unavailable { code: "local_non_authoritative" }`, which the milestone
+    /// gate refuses and which the signer will not overwrite. This is the only
+    /// way build provenance enters a receipt: it is an input to the run, not a
+    /// label applied to the artifact afterwards.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["list", "dry"])]
+    build_provenance: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -237,6 +250,10 @@ async fn execute(cli: Cli) -> i32 {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let build_provenance = match load_build_provenance(&cli) {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
 
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -296,7 +313,10 @@ async fn execute(cli: Cli) -> i32 {
                             provider,
                             &result,
                             index,
-                            fixture_manifest.as_ref(),
+                            &EvidenceInputs {
+                                fixture_manifest: fixture_manifest.as_ref(),
+                                build_provenance: build_provenance.as_ref(),
+                            },
                         ) {
                             Ok(gate_passed) if gate_passed => {
                                 passed += 1;
@@ -481,9 +501,9 @@ fn build_and_persist_receipt(
     provider: &ProviderConfig,
     result: &wcore_eval_scenarios::ScenarioResult,
     index: usize,
-    fixture_manifest: Option<&LoadedFixtureManifest>,
+    evidence: &EvidenceInputs<'_>,
 ) -> Result<bool, String> {
-    let fixture_sha256 = match fixture_manifest {
+    let fixture_sha256 = match evidence.fixture_manifest {
         Some(manifest) => manifest.verify_sha256()?,
         None => {
             format!(
@@ -504,9 +524,12 @@ fn build_and_persist_receipt(
             binary_sha256: artifact.sha256.clone(),
             fixture_sha256,
             model: provider.model.clone(),
-            build: Evidence::Unavailable {
-                code: "local_non_authoritative".to_string(),
-            },
+            build: evidence.build_provenance.cloned().map_or_else(
+                || Evidence::Unavailable {
+                    code: "local_non_authoritative".to_string(),
+                },
+                Evidence::observed,
+            ),
         },
         result,
         scenario.max_total_cost_usd,
@@ -530,6 +553,17 @@ fn build_and_persist_receipt(
     Ok(cell_passed)
 }
 
+/// The externally supplied evidence bindings for one run cell: which fixture
+/// artifacts the receipt is bound to, and which build the run is part of.
+///
+/// One struct rather than two more parameters because both answer the same
+/// question — what did the caller independently pin about this run — and
+/// `build_and_persist_receipt` is already at clippy's argument ceiling.
+struct EvidenceInputs<'a> {
+    fixture_manifest: Option<&'a LoadedFixtureManifest>,
+    build_provenance: Option<&'a BuildProvenanceV1>,
+}
+
 struct LoadedFixtureManifest {
     root: PathBuf,
     binding: BoundCompositeFixtureManifest,
@@ -542,6 +576,32 @@ impl LoadedFixtureManifest {
         })?;
         Ok(self.binding.manifest().fixture_sha256().to_string())
     }
+}
+
+/// Read the build provenance this run is part of, if the caller supplied it.
+///
+/// Deliberately a RUN input. The alternative — letting the CI signer stamp
+/// provenance onto a finished local receipt — makes `identity.build` a label
+/// rather than an observation, and the milestone gate's `identity.build` clause
+/// unfalsifiable. See `receipt_policy::sign_ci_receipt`.
+fn load_build_provenance(cli: &Cli) -> Result<Option<BuildProvenanceV1>, String> {
+    let Some(path) = &cli.build_provenance else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "could not read build provenance {}: {error}",
+            path.display()
+        )
+    })?;
+    let provenance: CiProvenanceV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid build provenance JSON: {error}"))?;
+    Ok(Some(BuildProvenanceV1 {
+        repository: provenance.repository,
+        source_ref: provenance.source_ref,
+        workflow: provenance.workflow,
+        invocation_id: provenance.invocation_id,
+    }))
 }
 
 fn load_fixture_manifest(cli: &Cli) -> Result<Option<LoadedFixtureManifest>, String> {
