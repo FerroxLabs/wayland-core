@@ -251,6 +251,55 @@ jobs:
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
+      # PER-LEG test-signal gate. The `report` job at the bottom of this file
+      # already refuses a run where NO leg produced JUnit, but it cannot see a
+      # single leg going dark: macOS uploads a report, `COUNT` is non-zero, and
+      # the Windows hole is invisible.
+      #
+      # That hole is not hypothetical. On run 30652437749 (2026-07-31) the
+      # Windows leg finally cleared clippy, entered "Run tests (nextest CI
+      # profile)", and failed 0.4s later because `just test-ci` shelled out to
+      # `scripts/fd-budget.sh` under pwsh, which cannot execute a `.sh` file.
+      # Zero tests ran. In the checks list that is indistinguishable from a leg
+      # whose tests ran and failed, and it was in fact read as "Windows reports
+      # real failures now" by the next lane. The recipe is fixed (justfile
+      # `[windows] test-ci`); this step is what makes the failure mode NAMED
+      # rather than inferred, on every leg, forever.
+      #
+      # Two separate assertions, because they fail for different reasons:
+      #   1. the JUnit file exists at all  — the recipe reached nextest;
+      #   2. it declares tests > 0         — nextest collected something.
+      # `if: !cancelled()` and not `always()`: a cancelled run was never going
+      # to produce evidence and must not be re-reported as a defect.
+      #
+      # `shell: bash` on purpose — Git bash is present on all three legs (other
+      # steps in this same job already use it) and one script beats three.
+      - name: Assert this leg produced test signal (zero tests is not a pass)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          # `runner.os` (Windows/macOS/Linux), not `matrix.os` — the Windows
+          # entry is a label LIST, which renders as the literal string "Array"
+          # and names nothing.
+          LEG: ${{ runner.os }}
+        run: |
+          set -uo pipefail
+          report=target/nextest/ci/junit.xml
+          leg="$LEG"
+          if [ ! -f "$report" ]; then
+            echo "::error title=NO TEST SIGNAL ($leg)::The test step produced no $report, so cargo-nextest never ran on this leg. This is NOT a test failure — it is the absence of a test result, and it must not be read as one. Check whether 'just test-ci' died in the recipe itself (a shell/interpreter mismatch on Windows does exactly this)."
+            exit 1
+          fi
+          # -E, not BRE `\+`: the macOS leg runs BSD grep, where `\+` is not a
+          # portable quantifier. The FIRST `tests="N"` in a nextest JUnit is the
+          # `<testsuites>` roll-up, which is the number this gate is about.
+          tests=$(grep -oE 'tests="[0-9]+"' "$report" | head -1 | grep -oE '[0-9]+' || true)
+          echo "leg: $leg   junit: $report   tests declared: ${tests:-<unparsed>}"
+          if [ -z "${tests:-}" ] || [ "$tests" -eq 0 ]; then
+            echo "::error title=ZERO TESTS ($leg)::$report exists but declares ${tests:-no} tests. A suite that collected nothing certifies nothing."
+            exit 1
+          fi
+
       # 2026-07-27: MOVED to after the test step. It used to run before it, so a
       # contract digest drift failed the job at that step and macOS and
       # self-hosted Windows never reached the tests at all — three separate

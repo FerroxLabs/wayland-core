@@ -28,9 +28,26 @@ build-release:
 # counted like a test failure but means the test never ran, hits a different
 # set of tests every run, and disappears under --test-threads=1. Measured
 # 2026-07-29: 96 such failures at --test-threads=384, 0 real test failures.
-# It is a pass-through on Windows and a no-op wherever the budget already fits.
+# It is a no-op wherever the budget already fits.
+#
+# WINDOWS TAKES A SEPARATE RECIPE, NOT A PASS-THROUGH INSIDE THE SCRIPT.
+# `is_windows()` in fd-budget.sh returns early on Windows, but that arm can
+# only run if the script starts, and under `set windows-shell := pwsh` it never
+# does: pwsh cannot execute a `.sh` file and dies with
+# `Program 'fd-budget.sh' failed to run: ... The operation attempted is not
+# supported`. That is a *recipe* failure, so nextest is never invoked, the JUnit
+# report is never written, and the leg reports "the test step failed" while
+# having run zero tests. Measured on CI run 30652437749 job 91228704700
+# (2026-07-31) — the first Windows job in 40+ runs to get past clippy, which
+# then died here in 0.4s. Windows has no RLIMIT_NOFILE governing process spawn,
+# so there is nothing for the guard to do there anyway.
+[unix]
 test:
     scripts/fd-budget.sh vx cargo nextest run --workspace --profile default
+
+[windows]
+test:
+    vx cargo nextest run --workspace --profile default
 
 # Unit + integration tests with nextest (CI profile — used in GitHub Actions)
 #
@@ -42,9 +59,15 @@ test:
 # minutes on cold cache when something fails; saves orders of
 # magnitude on iteration loops.
 #
-# scripts/fd-budget.sh: see the `test` recipe above.
+# scripts/fd-budget.sh, and why Windows gets its own recipe rather than
+# relying on the script's internal pass-through: see the `test` recipe above.
+[unix]
 test-ci:
     scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
+
+[windows]
+test-ci:
+    vx cargo nextest run --workspace --profile ci --no-fail-fast
 
 # Run a single test by name
 test-one NAME:
