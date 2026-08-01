@@ -567,7 +567,17 @@ fn agent_turn_streams_mock_assistant_text_into_the_transcript() {
     h.send(b"\r");
     h.wait_for(
         |s| s.to_lowercase().contains("anthropic"),
-        Duration::from_secs(6),
+        // 6s was never sound: the whole test takes 7.57s on an IDLE 96-core
+        // host, so this single wait was budgeted below the cost of the work it
+        // waits on. Under the full 13.7k-test nextest fan-out the CI container
+        // runs ~30% slower and it failed 3/3 retries at 9.94s and 10.37s
+        // (run 30695541302) while passing bare-metal in 7.569s.
+        //
+        // `wait_for` polls at 30Hz and returns the instant the predicate holds,
+        // so a longer budget costs nothing when the machine is fast -- it only
+        // changes what this assertion MEANS: it now fails on a genuine hang
+        // rather than on CPU contention. The predicate is unchanged.
+        Duration::from_secs(30),
         "/provider to open the provider picker overlay",
     );
     h.send(b"\x1b"); // esc closes the overlay
