@@ -499,6 +499,29 @@ mod tests {
         }
     }
 
+    /// An absolute candidate root that is NOT under the global temp dir (the
+    /// denied location this module's stage-3 arm uses).
+    ///
+    /// Built from the temp dir's own root component rather than written as a
+    /// literal, because the hard-containment stage calls `is_absolute()` on it:
+    /// a literal `/srv/...` is absolute on Unix but NOT on Windows, so there
+    /// the filesystem stage refused it first and stage 5 — the only stage the
+    /// arm using this exists to exercise — was never reached. Yields exactly
+    /// `/srv/wayland/candidate/checkout` on Unix (unchanged) and
+    /// `<drive>\srv\wayland\candidate\checkout` on Windows.
+    fn absolute_candidate_root() -> PathBuf {
+        let temp = std::env::temp_dir();
+        let root = temp
+            .ancestors()
+            .last()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        root.join("srv")
+            .join("wayland")
+            .join("candidate")
+            .join("checkout")
+    }
+
     /// A fake live-candidate source. Production uses the real seal; the fail
     /// path here proves the executor refuses when the seal cannot be re-proven.
     struct FakeCandidate {
@@ -639,7 +662,7 @@ mod tests {
         // real absolute candidate root outside any denied location so stages 3/4
         // pass and the mint stage is the one that refuses.
         let live = FakeCandidate {
-            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
+            root: Ok(absolute_candidate_root()),
         };
         let error = executor
             .execute_gate(
