@@ -90,6 +90,33 @@ async fn select_delegated_backend() -> Result<SandboxRegistry, String> {
     }
 }
 
+/// Whether this host can host delegated Swarm execution AT ALL, and which
+/// backend would carry it.
+///
+/// This is the SAME decision `dispatch_worker` makes — it calls
+/// [`select_delegated_backend`] directly rather than re-deriving the admission
+/// rules, so the probe can never be more permissive than the thing it predicts.
+/// Duplicating [`admit_delegated_backend`]'s four clauses into a test helper was
+/// the alternative and was rejected: a copy drifts, and a probe that drifts
+/// permissive turns an honest skip into a silent green.
+///
+/// `Ok(backend_name)` means a real delegated dispatch is reachable here.
+/// `Err(reason)` carries the operator-legible reason it is not, verbatim from
+/// the admission path — the same string a failed worker would report.
+///
+/// EXISTS FOR THE TEST GATE. `crates/wcore-swarm/tests/common/mod.rs` uses this
+/// to distinguish "this host cannot host the guarantee" (an honest, recorded
+/// skip) from "the guarantee is broken" (a failure). macOS's `sandbox_exec`
+/// primary is not a hard-containment backend and the Docker fallback needs the
+/// `wcore-sandbox/live-docker` feature plus a live daemon, so on a stock macOS
+/// CI runner there is NO reachable pass state — that is a gate that cannot pass,
+/// and it must read as a skip with a stated reason, never as a pass.
+pub async fn delegated_backend_qualification() -> Result<&'static str, String> {
+    select_delegated_backend()
+        .await
+        .map(|registry| registry.backend_name())
+}
+
 /// Defense-in-depth logical accounting after capacity admission.
 ///
 /// This polling observer is deliberately not described as a hard filesystem
