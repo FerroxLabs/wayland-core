@@ -201,20 +201,19 @@ impl Default for DockerBackend {
 #[cfg(feature = "live-docker")]
 fn configured_docker_client() -> std::result::Result<bollard::Docker, bollard::errors::Error> {
     #[cfg(target_os = "macos")]
-    if std::env::var_os("DOCKER_HOST").is_none() {
-        if let Some(socket) = std::env::var_os("HOME")
+    if std::env::var_os("DOCKER_HOST").is_none()
+        && let Some(socket) = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .map(|home| home.join(".docker/run/docker.sock"))
             .filter(|path| path.exists())
-        {
-            return bollard::Docker::connect_with_socket(
-                &socket.to_string_lossy(),
-                // bollard's own DEFAULT_TIMEOUT (120s) is a private const with no
-                // public re-export in 0.17.1; inline the same value.
-                120,
-                bollard::API_DEFAULT_VERSION,
-            );
-        }
+    {
+        return bollard::Docker::connect_with_socket(
+            &socket.to_string_lossy(),
+            // bollard's own DEFAULT_TIMEOUT (120s) is a private const with no
+            // public re-export in 0.17.1; inline the same value.
+            120,
+            bollard::API_DEFAULT_VERSION,
+        );
     }
     bollard::Docker::connect_with_defaults()
 }

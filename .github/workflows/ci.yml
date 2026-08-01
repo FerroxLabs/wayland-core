@@ -243,6 +243,27 @@ jobs:
       - name: Clippy (warnings = errors)
         run: vx just lint
 
+      # macOS half of the live-docker lint gap; see the twin step in `ci-linux`
+      # for why `--workspace` misses this entirely. This leg exists to reach the
+      # `#[cfg(target_os = "macos")]` Docker-socket branch in
+      # `backends/docker.rs`, which no Linux run can compile.
+      #
+      # On the `runner.os == 'macOS'` guard: an identical-looking
+      # `runner.os == 'Linux'` guard in THIS SAME matrix job is what kept the
+      # anti-vacuity gate dead for its entire life — the matrix has no Linux
+      # entry, so it never fired. This guard is different and was checked
+      # against the matrix literal before being written: on `main`, on a PR, and
+      # on the integration branch the matrix is
+      # `["macos-latest", [self-hosted Windows]]`, so `macOS` is genuinely
+      # present and this step genuinely runs. On a `lane/**` push without
+      # `[ci-darwin]` the macOS entry is dropped on purpose — the step is then
+      # absent because the whole leg is, not because the condition is dead.
+      - name: Clippy the live-docker feature graph (macOS cfg branch)
+        if: runner.os == 'macOS'
+        run: |
+          vx cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
+          vx cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
+
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
@@ -675,6 +696,26 @@ jobs:
 
       - name: Clippy (warnings = errors)
         run: $DOCKER_RUN "$CI_IMAGE" cargo clippy --workspace --all-targets -- -D warnings
+
+      # `--workspace` above does NOT cover this. `live-docker` is an optional
+      # feature that NO workspace member enables, so every line behind
+      # `#[cfg(feature = "live-docker")]` — the whole Docker backend and the
+      # wcore-swarm delegated-dispatch paths that consume it — was invisible to
+      # clippy on every run this repo has ever done. It was linted nowhere: not
+      # here, not in the macOS leg, not in macos-docker-gate.yml (which runs the
+      # feature's tests but never lints it).
+      #
+      # Found the honest way: a real `collapsible_if` sitting unnoticed in
+      # `backends/docker.rs`. A `-D warnings` repo cannot have a whole backend
+      # exempt from the lint that the release gate enforces.
+      #
+      # This leg covers the target-independent and Linux-cfg lints. The
+      # `cfg(target_os = "macos")` branch inside the same file is unreachable
+      # from here and is covered by the macOS leg's twin of this step.
+      - name: Clippy the live-docker feature graph (not covered by --workspace)
+        run: |
+          $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
+          $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
 
       # Wrapped in a retry: the GHA runner-agent crash documented at the
       # top of this file (line 28: "reproducibly crashes the runner agent
