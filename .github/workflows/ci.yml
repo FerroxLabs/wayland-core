@@ -244,7 +244,13 @@ jobs:
             "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
           # `unzip` is not guaranteed on the runner; git-bash ships tar, which
           # reads zip archives.
-          tar -xf "$dest/py.zip" -C "$dest"
+          #
+          # Extract from INSIDE $dest with a relative name. Passing the absolute
+          # Windows path made GNU tar read the drive letter as a remote host:
+          #   tar: Cannot connect to C: resolve failed
+          # (measured, run 30689934972). `--force-local` also works but a
+          # relative path needs no flag and cannot regress on a tar that lacks it.
+          ( cd "$dest" && tar -xf py.zip )
           test -x "$dest/python.exe" || test -f "$dest/python.exe"
           echo "$dest" >> "$GITHUB_PATH"
           echo "gate-count:python_provisioned=1 ($dest)"
