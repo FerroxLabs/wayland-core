@@ -761,13 +761,20 @@ impl AgentBootstrap {
 
         let mut registry = wcore_tools::registry::ToolRegistry::new();
 
-        // W2.5: plugin discovery + initialization. PluginsConfig is
-        // intentionally empty this wave; full ~/.wayland-core/plugins.toml
-        // load lands in W4 alongside the permission-grant UX. Built-in
-        // plugins discovered via inventory work today regardless. Per
-        // design spec §5.17: one bad plugin must not crash session boot —
-        // every plugin error logs via tracing::warn and continues.
-        let plugins_config = wcore_config::plugins_config::PluginsConfig::default();
+        // Plugin discovery + initialization, driven by the operator's
+        // `plugins.toml` (beside `config.toml`; see
+        // `wcore_config::plugins_config::plugins_config_path`). This load is
+        // what makes `enabled = false`, `plugin_signature_verification` and
+        // `trusted_plugin_keys` mean anything — the engine used to boot from
+        // `PluginsConfig::default()`, so every setting in that file, and every
+        // error string and doc telling operators to edit it, was inert.
+        //
+        // A missing file is normal and yields the defaults. A malformed one is
+        // fatal: it is a policy the engine cannot enforce, and booting on
+        // default policy instead is precisely the silent-ignore this replaces.
+        // Per design spec §5.17 one bad *plugin* must not crash session boot —
+        // that still holds; every plugin error below logs and continues.
+        let plugins_config = wcore_config::plugins_config::PluginsConfig::load()?;
         let mut plugin_loader = crate::plugins::PluginLoader::discover(&plugins_config);
         let captured = plugin_loader.validate_all().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "plugin validation failed; continuing without plugins");
