@@ -188,19 +188,43 @@ impl RotatingLog {
 
     /// Copy the live log over the previous generation, then truncate it.
     ///
-    /// Copy-and-truncate rather than rename-and-reopen because the live file is
-    /// held open across the operation: on Windows renaming a file with an open
-    /// handle fails, and renaming onto an existing destination fails too. This
-    /// form needs no platform branch, and `set_len(0)` is correct for an append
-    /// handle — the next write lands at the new end of file, which is 0.
+    /// Copy-and-truncate rather than rename-and-reopen because renaming is the
+    /// operation Windows refuses outright while a handle is open, and refuses
+    /// again when the destination already exists. A copy has neither problem.
+    ///
+    /// # The truncation releases the handle first, and must
+    ///
+    /// `set_len` through the live append handle is what this did originally,
+    /// and it works on unix and CANNOT work on Windows: `append(true)` opens
+    /// with `FILE_APPEND_DATA` and deliberately WITHOUT `FILE_WRITE_DATA`,
+    /// while `set_len` is `SetFileInformationByHandle(FileEndOfFileInfo)`,
+    /// which requires `FILE_WRITE_DATA`. Every rotation therefore failed with
+    /// "Access is denied", and because the check lives in [`Write::write`] the
+    /// error surfaced as a FAILED LOG WRITE — so on Windows the bound did not
+    /// merely fail to bind, the first record past `max_bytes` began erroring
+    /// out. That is the platform where an unbounded log matters most, since a
+    /// gateway host runs headless continuously.
+    ///
+    /// Dropping the handle before truncating needs no platform branch: the
+    /// re-open with `truncate(true)` is a plain `CREATE_ALWAYS`/`O_TRUNC` on
+    /// the pathname, which every platform allows. The handle is then left
+    /// `None` and [`Self::file_mut`] re-opens it in append mode for the write
+    /// that follows, re-seeding `written` from the now-empty file.
     fn rotate(&mut self) -> io::Result<()> {
         // Nothing has been written, so there is no live generation to retire.
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
         file.flush()?;
+        // Release the append handle BEFORE the truncate — see the type note.
+        self.file = None;
         std::fs::copy(&self.path, rotated_path(&self.path))?;
-        file.set_len(0)?;
+        drop(
+            File::options()
+                .write(true)
+                .truncate(true)
+                .open(&self.path)?,
+        );
         self.written = 0;
         Ok(())
     }
