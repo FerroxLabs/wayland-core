@@ -543,3 +543,125 @@ used, or transmitted — this grading required none. Nothing was compiled on the
 ---
 
 _Graded by lane `grade-24`, 2026-07-29, at base `861d1b1a`. Measurement trail: `24-GRADE-NOTES.md`._
+
+---
+
+# SUPERSEDING BLOCK — 2026-08-01, lane `verdict-truth-text`, base `02575b6f`
+
+**This block supersedes four things above: the `new-finding` and `still-blocks-release` front
+matter, §5's Criterion 4 downgrade, §9's costed-gap rows 1, 5 and 13, and the "absences" narrative
+attached to Criteria 2 and 3.** The **grades** for 24-C2 and 24-C3 are NOT overturned — they hold,
+for reasons the original text got right.
+
+**Text only.** Zero files under `crates/`, `.github/`, `docs/` or `scripts/` were changed by the
+lane that wrote this. No cargo was run. Full sweep and method:
+`.planning/VERDICT-TRUTH-2026-08-01.md`.
+
+## 1. `still-blocks-release: YES, on one item only — F24-C4-H1` is **DISCHARGED**
+
+The front matter records:
+
+> *"`wcore_gateway::support_bundle` has ZERO production call sites and no CLI verb. The half of
+> Criterion 4 that says 'produce useful redacted health/log/support evidence' is unreachable from
+> the shipped binary."*
+
+At `02575b6f` the verb exists and dispatches:
+
+```
+grep -n "support_bundle" crates/wcore-cli/src/gateway.rs
+   38: //! `support-bundle` was added afterwards and is NOT one of the nine. It exists
+   40: //! evidence"* and `wcore_gateway::support_bundle` had no operator surface at
+   55: //! `AutomationPlane`; `support-bundle` drives
+   56: //! `wcore_gateway::support_bundle::collect` and adds no redaction rule of its
+  348:             support::support_bundle(&scope, out, json).await
+```
+
+The source comment at `:38-40` names this very finding as its reason for existing. **§9 gap row 1
+(*"A CLI verb that produces the support bundle (module exists, nothing calls it)"*, marked
+`BLOCKS RELEASE: YES`) is closed.**
+
+**24-C4 stays PARTIAL** — this block does not upgrade it. §9 row 2 (*resume + idempotency on REST
+`/v1`, and all three on stdio/WebSocket*) was **not** re-derived here and is not claimed closed.
+What changes is that **Phase 24 no longer blocks a release on this item**, which is the only
+release-blocking claim §8 makes.
+
+## 2. Criterion 2 — grade **PARTIAL, SOUND**; its list of missing measurements is **STALE**
+
+The grade is right and the reason is right: the *plane* was not built. Confirmed at `02575b6f`:
+
+```
+grep -n "CronCmd::Publish"  crates/wcore-cli/src/cron.rs  -> 248   [`event:` has a real producer]
+grep -n "WILL NEVER FIRE"   crates/wcore-cli/src/cron.rs  -> 363   [`webhook:`/`poll:` are refused, loudly]
+```
+
+`max_in_flight` is rendered at `cron.rs:801` and **annotated as unenforced** at `:831` —
+`NOTE: fires are serialized; max_in_flight>1 grants no concurrency in this build` — with the
+principle written into the source at `:826-828`: *"a bound the product states and does not
+implement is a surface that lies to the operator reading it. The value is NOT rewritten —
+narrowing a persisted field on a render path would make this verb disagree with the store — it is
+annotated."* That is the correct shape for a stated limit and it is why the grade holds.
+
+**What is stale is the absence list.** `CRITERIA-STATUS.md` records all three of the row's named
+NOT-MEASURED legs as driven and passing on real macOS 26.3 arm64: the macOS reproduction, the PTY
+surface gate (`ISATTY=1` under a real controlling terminal, `ISATTY=0` through a pipe, in the same
+run), and the kill-mid-fire continuation run (SIGKILL with 5 events outstanding on both arms,
+against a no-restart control that made no progress). **§9 gap rows 5 and 13 are closed.**
+
+A planner reading the *grade* will correctly conclude the webhook and poll planes are absent. A
+planner reading the *absence list* will re-cost work that has been done. **Keep the grade, retire
+the list.**
+
+## 3. Criterion 3 — grade **PARTIAL, and one clause has NO REACHABLE PASS STATE**
+
+This is the finding of this sweep against Phase 24, and it makes the row **worse**, not better.
+
+24-C3 requires **reference channels** to prove eight properties including **idempotency**. The
+reference adapters are fixed by this phase's own `24-03-SUMMARY.md:115`:
+
+> *"Two reference adapters, deliberately different SHAPES — Discord (persistent connection, one
+> HTTP round trip…) and email (polling, four credential handles across two protocols…)."*
+
+`docs/decisions/0005-delivery-semantics-for-platforms-with-no-idempotency-primitive.md`
+(**Accepted, Sean, 2026-07-31**) then records, of exactly those two:
+
+* `:30` — *"**Discord** — the adapter sends `nonce` on message create; Discord does not"* honour it; a replayed key produced two messages at the real API.
+* `:37-38` — *"The remaining seven — Telegram, Twilio SMS, WhatsApp (Meta Graph), **Email (SMTP)**, Signal, iMessage, MS Teams — expose no dedup slot at all."*
+
+**Neither of this row's own reference adapters can ever prove idempotency**, for reasons outside
+this codebase. ADR 0005 re-scoped **24-C1** for precisely this and stopped there; the identical
+defect in 24-C3 went unnoticed because 24-C3 was sitting at NOT MET for unrelated reasons and
+nobody asked whether its *full* pass was reachable.
+
+**The transferable lesson: a row can hide a permanently-red clause behind an honest NOT MET.** Ask
+the reachability question of every row, not only the stuck ones.
+
+**Recommended disposition — owner decision, not a lane's:** apply ADR 0005's re-scope verbatim to
+24-C3's idempotency clause (*the adapter honours the platform's primitive where one exists, and
+declares its absence truthfully where one does not*), which is already what the code does.
+
+**Two 24-C3 residuals confirmed still open here, neither swept:**
+
+* `crates/wcore-channels/src/manager.rs:215` calls `record_health(&self.health, name,
+  HealthState::Healthy, None, 0, 0)` **unconditionally** immediately after start, for every
+  adapter — a `~1s` window in which health reads green before anything has been checked.
+* **macOS and Windows have nothing** on the eight-clause matrix (§9 gap row 11), and 7 of 27 UAT
+  cells are UNRUN because no credential this programme holds can author a *human* message on
+  Slack, Discord or Matrix. That half is not a tooling gap and cannot be automated around.
+
+## 4. Criterion 1 — the correction runs AGAINST the record
+
+24-C1 is graded MET-WITH-STATED-EXCEPTIONS and was re-scoped by ADR 0005 from *"no delivery lost
+**and** none duplicated"* (unsatisfiable on seven platforms) to *"no delivery is lost
+**silently**; every outcome-unknown delivery is recorded and recoverable by an operator."* That
+re-scope is correct and the grade is sound.
+
+**But the guarantee underneath it has now been narrowed three times** — *"exactly-once is 3 of
+10"* → *"**1 of 10** — Matrix"* (2026-07-30) → *"1 of 10, **below `max_message_len` only**"*.
+Every correction made the published promise smaller. ADR 0005 says so in its own words at `:55`:
+the duplicates are *"the state Slack and Discord were in the morning before they were falsified."*
+**A reader quoting this row without its cap precondition is republishing the same class of claim
+that Slack and Discord were falsified on.** Recorded here because a sweep that surfaced only
+improvements would be a sweep with a known bias.
+
+_Corrected 2026-08-01 · base `02575b6f` · lane `verdict-truth-text` · source measurement only,
+two-directional controls, no cargo, no `crates/` edit._
