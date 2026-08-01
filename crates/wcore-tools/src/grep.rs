@@ -111,6 +111,12 @@ impl Tool for GrepTool {
         }
     }
 
+    /// Grep's own search subprocess is fixed and argv-invoked — no input it
+    /// accepts can turn it into a mutation. Safe under `read_only`.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     fn describe(&self, input: &Value) -> String {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");

@@ -760,6 +760,12 @@ impl AgentBootstrap {
         let file_cache_for_engine = file_cache.clone();
 
         let mut registry = wcore_tools::registry::ToolRegistry::new();
+        // D004 — install the session's read-only posture on the registry, which
+        // the orchestration dispatcher consults before it does anything else
+        // with a tool call. Set here, at the point of construction, so no
+        // later registration path can produce a registry that carries tools
+        // but not the posture that governs them.
+        registry.set_read_only(self.config.read_only);
 
         // W2.5: plugin discovery + initialization. PluginsConfig is
         // intentionally empty this wave; full ~/.wayland-core/plugins.toml
@@ -2387,6 +2393,7 @@ impl AgentBootstrap {
         let cron_skill_deny_rules = self.config.tools.skills.deny.clone();
         let cron_skill_allow_rules = self.config.tools.skills.allow.clone();
         let cron_skill_auto_approve = self.config.tools.auto_approve;
+        let cron_read_only = self.config.read_only;
         let cron_workspace_trust = self.config.workspace_trust.clone();
         let cron_workspace = std::path::PathBuf::from(cwd);
         let cron_skill_approval_manager = self.approval_manager.as_ref().cloned();
@@ -2418,7 +2425,12 @@ impl AgentBootstrap {
                 .with_telemetry_sink(skill_telemetry_sink)
                 // GHSA-8r7g H-1: gate project/legacy skill frontmatter hooks
                 // behind the operator's global opt-in (default-deny otherwise).
-                .with_trust_project_hooks(self.config.hooks.trust_project_hooks),
+                .with_trust_project_hooks(self.config.hooks.trust_project_hooks)
+                // A read-only session must not reach the skill body's artifact
+                // writes or its embedded `!` shell. The dispatcher refuses
+                // `Skill` too; this is the same refusal enforced inside the
+                // tool, for the entry points that do not go through it.
+                .with_read_only(self.config.read_only),
         ));
 
         // T3-3.1.7: SessionSearchTool — cross-session conversation recall via
@@ -3667,6 +3679,7 @@ impl AgentBootstrap {
             let deny_rules = cron_skill_deny_rules;
             let allow_rules = cron_skill_allow_rules;
             let auto_approve = cron_skill_auto_approve;
+            let read_only = cron_read_only;
             let workspace_trust = cron_workspace_trust;
             let workspace = cron_workspace;
             let approval_manager = cron_skill_approval_manager;
@@ -3724,7 +3737,12 @@ impl AgentBootstrap {
                             }
                         }
                     }
-                    let mut tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                    let mut tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker)
+                        // No dispatcher in this path — the sink calls
+                        // `execute()` directly — so the read-only posture has
+                        // to travel on the tool itself or an unattended cron
+                        // fire would run skill shell in a read-only session.
+                        .with_read_only(read_only);
                     if let Some(manager) = approval_manager {
                         tool = tool.with_live_approval_manager(manager);
                     }

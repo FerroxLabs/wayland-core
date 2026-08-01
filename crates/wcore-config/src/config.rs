@@ -807,16 +807,21 @@ pub struct DefaultConfig {
     /// name prompt. Purely cosmetic; the engine never gates on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// D004 — read-only / offline posture. When `true` the session must
-    /// refuse every outbound provider API call (the "Skip — browse code,
-    /// no API calls" onboarding path). Defaults to `false`.
+    /// D004 — read-only session posture. When `true` the session may not
+    /// mutate anything: the orchestration dispatcher refuses every tool that
+    /// does not declare [`wcore_tools::Tool::read_only_safe`] for its concrete
+    /// input, which today is Read, Grep and Glob and nothing else. The refusal
+    /// happens BEFORE PreToolUse hooks, so a refused call fires no operator
+    /// shell either. `Skill` is refused — both at the dispatcher and inside
+    /// `SkillTool` itself, because a skill body can write declared artifacts
+    /// and can execute embedded `` !`…` `` shell. Defaults to `false`.
     ///
-    /// NOTE: this field is the persisted source of truth for the posture,
-    /// but the refusal gate that honours it at turn-submit time lives in
-    /// the engine/provider layer (`wcore-agent` bootstrap), which reads
-    /// this flag and short-circuits before any provider request. Until
-    /// that gate is wired, onboarding must NOT promise "no API calls" as if
-    /// it were already enforced.
+    /// Scope, stated precisely so nobody reads a guarantee that is not here:
+    /// this posture bounds TOOL EFFECTS. It does **not** block outbound
+    /// provider API calls — a read-only session still talks to its LLM. The
+    /// "Skip — browse code, no API calls" onboarding path is a separate,
+    /// unimplemented concern; onboarding does not persist this flag and must
+    /// not describe itself in terms of it.
     #[serde(default)]
     pub read_only: bool,
 }
@@ -1262,6 +1267,15 @@ pub struct Config {
     /// approval_mode`). Consumed at TUI boot to seed the approval manager's
     /// initial `SessionMode`; `--force` overrides it.
     pub approval_mode: ApprovalMode,
+    /// D004 — the resolved `[default] read_only` posture for this session.
+    ///
+    /// This field is why the flag now does anything. `[default] read_only`
+    /// parsed and merged correctly at the `ConfigFile` layer, but resolution
+    /// into this struct dropped it, so no runtime component could see it and
+    /// the flag was enforced nowhere. Carried through to bootstrap, which
+    /// installs it on the `ToolRegistry` (the orchestration dispatcher's gate)
+    /// and on `SkillTool` (the cron entry point that bypasses the dispatcher).
+    pub read_only: bool,
     pub system_prompt: Option<String>,
     pub thinking: Option<ThinkingConfig>,
     pub prompt_caching: bool,
@@ -1412,6 +1426,7 @@ impl std::fmt::Debug for Config {
             .field("temperature", &self.temperature)
             .field("max_turns", &self.max_turns)
             .field("approval_mode", &self.approval_mode)
+            .field("read_only", &self.read_only)
             .field("system_prompt", &self.system_prompt)
             .field("thinking", &self.thinking)
             .field("prompt_caching", &self.prompt_caching)
@@ -1479,6 +1494,7 @@ impl Default for Config {
             temperature: None,
             max_turns: None,
             approval_mode: ApprovalMode::default(),
+            read_only: false,
             system_prompt: None,
             thinking: None,
             prompt_caching: false,
@@ -2217,6 +2233,7 @@ impl Config {
                 .unwrap_or(SMART_MAX_TURNS),
         );
         let approval_mode = merged.default.approval_mode;
+        let read_only = merged.default.read_only;
 
         let system_prompt = cli
             .system_prompt
@@ -2445,6 +2462,7 @@ impl Config {
             temperature: None,
             max_turns,
             approval_mode,
+            read_only,
             system_prompt,
             thinking: None,
             prompt_caching,
@@ -5795,6 +5813,46 @@ mod tests {
         assert!(
             rendered.contains("read_only = true"),
             "the rendered config must carry the read_only flag; got:\n{rendered}"
+        );
+    }
+
+    /// The defect the two tests above could not see: `[default] read_only`
+    /// parsed and round-tripped perfectly, and then RESOLUTION into the runtime
+    /// [`Config`] dropped it. Nothing downstream could read the flag, which is
+    /// why it was enforced nowhere. Resolution — not parsing — is the boundary
+    /// that has to be asserted, and it is asserted in both directions so the
+    /// test cannot pass by returning a constant.
+    #[test]
+    fn read_only_survives_resolution_into_the_runtime_config() {
+        fn resolve(read_only: bool) -> Config {
+            let mut merged = ConfigFile::default();
+            merged.default.read_only = read_only;
+            let files = ResolvedConfigFiles {
+                merged,
+                workspace_trust: wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
+                    wcore_types::workspace_trust::AuthoritySource::LocalSession,
+                    "test-fingerprint",
+                    "resolution test",
+                ),
+                provenance: ConfigResolutionProvenance::default(),
+            };
+            // A one-off key so resolution does not fail on credential lookup;
+            // irrelevant to what this test asserts.
+            let cli = CliArgs {
+                api_key: Some("test-key".to_string()),
+                ..CliArgs::default()
+            };
+            Config::resolve_inner_from_files(&cli, false, files).expect("resolve config")
+        }
+
+        assert!(
+            resolve(true).read_only,
+            "a resolved config must carry `[default] read_only = true` — dropping \
+             it here is exactly why the flag was enforced nowhere"
+        );
+        assert!(
+            !resolve(false).read_only,
+            "and it must not invent the posture when the file did not ask for it"
         );
     }
 

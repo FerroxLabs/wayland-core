@@ -376,6 +376,7 @@ pub async fn build_headless_cron_handler_with_channels(
         let deny_rules = config.tools.skills.deny.clone();
         let allow_rules = config.tools.skills.allow.clone();
         let auto_approve = config.tools.auto_approve;
+        let read_only = config.read_only;
         let workspace_trust = config.workspace_trust.clone();
         let workspace = cwd_path.to_path_buf();
         let cwd_for_cron = cwd.to_string();
@@ -431,7 +432,10 @@ pub async fn build_headless_cron_handler_with_channels(
                         }
                     }
                 }
-                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                // No dispatcher in this path — the sink calls `execute()`
+                // directly — so the read-only posture travels on the tool.
+                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker)
+                    .with_read_only(read_only);
                 let input = serde_json::json!({ "skill": skill_name, "args": args });
                 let result = wcore_tools::Tool::execute(&tool, input).await;
                 if result.is_error {

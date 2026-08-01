@@ -528,6 +528,12 @@ impl Tool for ReadTool {
         }
     }
 
+    /// Read cannot mutate anything for any input it accepts: it opens a path
+    /// for reading and returns bytes. Safe under `[default] read_only = true`.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     fn describe(&self, input: &Value) -> String {
         let path = input
             .get("file_path")
