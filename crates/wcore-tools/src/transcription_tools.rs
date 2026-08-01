@@ -841,8 +841,15 @@ mod tests {
             "got: {}",
             r.content
         );
+        // `content` is a JSON document here, so a Windows path arrives with its
+        // separators escaped (`C:\\nonexistent\\...`). Compare against the
+        // JSON-encoded form so this keeps meaning "the refusal names this path"
+        // on every platform instead of "the refusal contains these raw bytes" —
+        // which no correct Windows message could ever satisfy. On unix the
+        // encoding is the identity.
+        let named = serde_json::to_string(missing).expect("encode refused path");
         assert!(
-            r.content.contains(missing),
+            r.content.contains(named.trim_matches('"')),
             "the refusal must name the path it refused; got: {}",
             r.content
         );
