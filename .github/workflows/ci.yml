@@ -196,10 +196,63 @@ jobs:
       # this exact job is what kept the anti-vacuity gate from ever running, so
       # this job gets no new platform conditionals. macOS already ships python3;
       # pinning it here just makes the version explicit on both legs.
-      - name: Setup Python (corpus generators shell to it)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # `actions/setup-python@v5` was tried FIRST and FAILED on the self-hosted
+      # Windows runner, measured in run 30688970084:
+      #   ./setup.ps1 cannot be loaded because running scripts is disabled on
+      #   this system
+      # It downloads Python fine, then runs a .ps1 to install it, and the
+      # NetworkService account's PowerShell ExecutionPolicy is Restricted.
+      # Fixing that would mean loosening the execution policy on the owner's
+      # machine, so we provision without running any script instead — nothing
+      # on the host changes.
+      #
+      # `scripts/portability-hostile-gen.py` imports only stdlib (argparse,
+      # hashlib, json, os, platform, sys, unicodedata — verified), so the
+      # official embeddable zip is sufficient; no pip, no packages.
+      #
+      # Self-selecting rather than platform-conditional: it looks for an
+      # interpreter and provisions only if there is none. macOS already ships
+      # python3 and no-ops here. A dead `runner.os ==` guard in this exact job
+      # is what kept the anti-vacuity gate from ever running, so this job still
+      # gets no new workflow conditionals — the check is at runtime and cannot
+      # silently evaporate.
+      - name: Ensure a Python interpreter (corpus generators shell to it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            echo "gate-count:python_provisioned=0 (already present: $(command -v python3))"
+            python3 --version
+            exit 0
+          fi
+          if command -v python >/dev/null 2>&1; then
+            echo "gate-count:python_provisioned=0 (already present: $(command -v python))"
+            python --version
+            exit 0
+          fi
+          case "${OSTYPE:-}${OS:-}" in
+            *[Ww]indows*|msys*|cygwin*) ;;
+            *)
+              echo "::error title=No Python::No python3/python on PATH and this is not Windows, so the embeddable-zip path does not apply. Install Python on this runner."
+              exit 1
+              ;;
+          esac
+          ver=3.12.10
+          dest="$RUNNER_TEMP/py-embed"
+          mkdir -p "$dest"
+          curl -fsSL -o "$dest/py.zip" \
+            "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
+          # `unzip` is not guaranteed on the runner; git-bash ships tar, which
+          # reads zip archives.
+          tar -xf "$dest/py.zip" -C "$dest"
+          test -x "$dest/python.exe" || test -f "$dest/python.exe"
+          echo "$dest" >> "$GITHUB_PATH"
+          echo "gate-count:python_provisioned=1 ($dest)"
+          "$dest/python.exe" --version
+          # Prove the interpreter can actually run THIS generator's imports --
+          # an interpreter that exists but cannot import unicodedata would
+          # otherwise fail 23 tests later with a much worse message.
+          "$dest/python.exe" -c "import argparse,hashlib,json,os,platform,sys,unicodedata; print('stdlib-ok')"
 
       - name: Setup vx (installs Rust + just from vx.toml)
         uses: loonghao/vx@v0.9.17
