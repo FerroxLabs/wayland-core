@@ -718,6 +718,29 @@ async fn native_windows_command_shell_resolves_cmd_and_bat_from_effective_cwd() 
         )
         .await
         .unwrap();
-        assert_eq!(resolved.as_path(), temp.path().join(program));
+        // The resolver appends the extension in the case PATHEXT supplied
+        // (`.CMD` here), which is what `cmd /C` itself does; it never re-reads
+        // the directory to recover the on-disk case, and it deliberately does
+        // not canonicalize — that would produce a `\\?\` verbatim path this
+        // module rejects as unsupported. So the byte-exact comparison this
+        // assertion used to make was wrong on Windows for any PATHEXT whose
+        // case differs from the file's. Compare the way the filesystem does.
+        let expected = temp.path().join(program);
+        assert!(
+            resolved
+                .as_path()
+                .as_os_str()
+                .eq_ignore_ascii_case(expected.as_os_str()),
+            "resolved {} does not name {}",
+            resolved.as_path().display(),
+            expected.display()
+        );
+        // …and it must name a file that is really there, so the comparison
+        // above cannot be satisfied by a path the resolver merely constructed.
+        assert!(
+            resolved.as_path().is_file(),
+            "resolved {} is not a file on disk",
+            resolved.as_path().display()
+        );
     }
 }

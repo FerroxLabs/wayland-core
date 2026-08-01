@@ -147,13 +147,22 @@ async fn typed_bypass_executes_bash_inside_required_sandbox() {
     configure_persisted_test_session(&mut config, workspace.path());
     let capture = Arc::new(CapturingSink::default());
     let sink: Arc<dyn OutputSink> = capture.clone();
+    // `printf` is a Unix shell builtin. The Bash tool runs `cmd /C` on
+    // Windows, where it does not exist, so the sandboxed child exited with
+    // "'printf' is not recognized" and the proof string never appeared —
+    // reported as a containment failure when containment had in fact been
+    // selected and applied. Same observable string, spelled for each shell.
+    #[cfg(windows)]
+    let proof_command = "echo typed-bypass-bash-succeeded";
+    #[cfg(not(windows))]
+    let proof_command = "printf typed-bypass-bash-succeeded";
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
         .provider(Arc::new(
             MockLlmProvider::with_tool_use(
                 "typed-bash",
                 "Bash",
-                json!({"command": "printf typed-bypass-bash-succeeded"}),
+                json!({ "command": proof_command }),
             )
             .with_physical_url(physical.uri()),
         ))
@@ -180,7 +189,9 @@ async fn typed_bypass_executes_bash_inside_required_sandbox() {
 
     assert!(
         capture.has_success_containing("Bash", "typed-bypass-bash-succeeded"),
-        "Bash must execute through the required sandbox runtime"
+        "Bash must execute through the required sandbox runtime; \
+         recorded tool results: {:?}",
+        capture.tool_results.lock().unwrap()
     );
 }
 
