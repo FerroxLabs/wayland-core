@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -204,6 +204,30 @@ async fn try_grep(
     case_insensitive: bool,
     search_root: Option<&Path>,
 ) -> ToolResult {
+    // #661 on Windows: `findstr` has no distinct status for "cannot open the
+    // target" — it exits 1 with EMPTY stdout and EMPTY stderr for a path that
+    // does not exist, byte-identical to a clean no-match. The exit-code check
+    // below (`code != Some(1)`) therefore cannot tell them apart, and an
+    // unreadable target was reported as "No matches found" with
+    // `is_error: false` — the exact swallowed-error #661 closed on Unix, where
+    // `grep` exits 2. Its regression test is `#[cfg(unix)]`, so nothing caught
+    // the Windows half. Measured on SEANDESKTOP:
+    //   findstr /S /N /R /C:needle ..\escape\*  ->  RC=1, no output at all.
+    // findstr gives us nothing to read after the fact, so the target has to be
+    // checked before the spawn. Unix keeps relying on grep's own exit 2 and is
+    // untouched.
+    if cfg!(windows) {
+        let target = match search_root {
+            Some(root) => root.join(path),
+            None => PathBuf::from(path),
+        };
+        if !target.exists() {
+            return ToolResult {
+                content: format!("grep error: {path}: No such file or directory"),
+                is_error: true,
+            };
+        }
+    }
     // F43: route through `shell_command_argv` (argv mode, no shell) on both
     // platforms for consistent PATHEXT resolution + kill-on-drop.
     let mut cmd = if cfg!(windows) {
@@ -299,6 +323,35 @@ mod tests {
         assert!(
             out.is_error,
             "grep exit-2 must be is_error=true, got: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("No matches found"),
+            "a real error must not be reported as a clean no-match: {}",
+            out.content
+        );
+    }
+
+    /// The Windows half of the same #661 guarantee. `findstr` reports an
+    /// unopenable target as exit 1 with no output — indistinguishable from a
+    /// clean no-match — so the sibling test above was `#[cfg(unix)]` and this
+    /// platform went uncovered. The live symptom was
+    /// `orchestration::d1_refusal_terminal_tests::failed_grep_leaves_turn_committable`
+    /// failing on Windows only: a traversal path returned `is_error: false`, so
+    /// the dispatcher never recorded a tool error.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn try_grep_reports_missing_target_not_no_matches() {
+        let out = try_grep(
+            "pattern",
+            "this_path_does_not_exist_9f3a2b.txt",
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            out.is_error,
+            "an unopenable findstr target must be is_error=true, got: {}",
             out.content
         );
         assert!(
