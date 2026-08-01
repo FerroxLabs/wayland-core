@@ -2,6 +2,13 @@
 
 Lane: `win-triage` (`lane/win-triage`). Nothing here is pushed, merged, PR'd or closed.
 
+> **UPDATE 2026-08-01 (`lane/win-fix`) — read §9 at the bottom before using §2 or §5.**
+> Windows CI still ran ZERO tests at the tip; the clippy blocker was replaced by a
+> different one (§9.0, now fixed). W14's ~20 were already closed before this lane
+> started and need nothing from the runner (§9.1). **W9 is still open** — its
+> filed mechanism is wrong and the replacement is only partly identified
+> (§9.1a). Measured on the box: **36 -> 33** failures, not 40.
+
 ---
 
 ## 0. The headline, before anything else
@@ -369,3 +376,440 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
 ```
 
 Full-workspace build there is ~5m20s warm; the whole suite ~4m after that.
+
+---
+
+# 9. UPDATE — 2026-08-01, lane `win-fix`
+
+Everything above stands except where this section says otherwise. Three things
+in it were wrong, and the two that mattered most were wrong in the same way:
+a Windows-only *test hermeticity* hole was read as a product defect.
+
+## 9.0 Windows CI still runs ZERO tests
+
+The brief handed to this lane said run `30652437749` "reached its test step for
+the FIRST TIME" and "reports real failures now". It reached the step. It ran no
+tests.
+
+```
+gh api repos/FerroxLabs/wayland-core/actions/jobs/91228704700 -q '.steps[]|"\(.conclusion) \(.name)"'
+  success  Clippy (warnings = errors)        <- the §3.1 fix held
+  failure  Run tests (nextest CI profile)    <- died in 0.4s, zero tests
+  skipped  everything after
+```
+
+```
+2026-07-31T18:03:13.44Z scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
+2026-07-31T18:03:13.82Z ResourceUnavailable: Program 'fd-budget.sh' failed to run: ...
+                        The operation attempted is not supported.
+                        error: Recipe `test-ci` failed on line 47 with exit code 1
+```
+
+`justfile` sets `windows-shell := pwsh`, and pwsh cannot execute a `.sh` file.
+`fd-budget.sh` has an `is_windows()` pass-through, but that arm can only run if
+the script *starts*, and it never does. So the run that was read as "Windows
+finally has real numbers" produced none at all — **eight consecutive Windows
+runs with zero test signal, not seven.** Call it **W17**.
+
+That this was misread is the finding, not a footnote. §7.1 predicted it: a leg
+that dies before producing JUnit is indistinguishable in the checks list from a
+leg whose tests ran and failed. It has now happened again, to a reader who had
+this document in hand.
+
+**Fixed** — `justfile` gets `[unix]` / `[windows]` recipe pairs for `test` and
+`test-ci` (just 1.48.1, pinned in `vx.toml`, supports the attributes).
+
+**Ablation, measured on the box at `D:\wintriage\repo`:**
+
+```
+ABLATED (single pre-fix recipe restored):
+  scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
+  ResourceUnavailable: Program 'fd-budget.sh' failed to run: ... not supported
+  error: Recipe `test-ci` failed on line 65 with exit code 1
+  ABLATED_EXIT=1  ELAPSED_MS=1492        <- 1.5s, zero tests, byte-identical to CI
+RESTORED:
+  vx just --dry-run test-ci
+  vx cargo nextest run --workspace --profile ci --no-fail-fast
+  RESTORED_DRYRUN_EXIT=0
+```
+
+The Unix leg is deliberately unchanged — verified on hetzner-dsm, same commit:
+
+```
+/root/.local/bin/vx just --dry-run test-ci
+scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast
+```
+
+so the fd-budget guard still runs everywhere it can actually do something, and
+`just` accepts the attribute pair on both platforms.
+
+**Also fixed: the gap that let it read as a test failure.** `ci.yml` gains a
+per-leg step after the test step (`if: !cancelled()`, `shell: bash`) asserting
+(1) `target/nextest/ci/junit.xml` exists and (2) it declares `tests > 0`, with
+`::error title=NO TEST SIGNAL (<leg>)` / `ZERO TESTS (<leg>)`. The existing
+`report`-job assertion cannot do this: it fires only when *no leg anywhere*
+produced JUnit, so macOS uploading a report hides a dark Windows leg completely.
+
+This gate is UNVERIFIED IN CI — this lane cannot push, so it has never run in a
+real job. It is checked only by `yaml.safe_load` locally (parses; the step lands
+immediately after `Run tests`, `if: ${{ !cancelled() }}`, `shell: bash`,
+`LEG: ${{ runner.os }}`). `runner.os` and not `matrix.os` on purpose: the Windows
+matrix entry is a label LIST, which interpolates to the literal string `Array`.
+
+## 9.1 W9 and W14 are ONE root cause, and it is not the one filed
+
+`HOME` is not an isolation mechanism on Windows. Only `WAYLAND_HOME` is.
+
+`wayland_config_dir()` (`wcore-config/src/config.rs:3367`) resolves
+`WAYLAND_HOME` → `XDG_DATA_HOME` → `dirs::config_dir()`. On Windows the last one
+is the `FOLDERID_RoamingAppData` known folder, read from the OS; `HOME` is never
+consulted. So a test that spawns `wayland-core` with `.env("HOME", tmp)` and
+`.env_remove("WAYLAND_HOME")` — believing it has an empty profile — actually
+runs against **the invoking account's real `%APPDATA%\wayland-core`**.
+
+Both accounts on the box carry a profile there, and both set the same thing:
+
+| account | config | `[storage.credentials]` | `[session]` |
+|---|---|---|---|
+| `seand` (interactive) | `C:\Users\seand\AppData\Roaming\wayland-core\config.toml:104` | `backend = "plaintext"` | `enabled = true` |
+| `NT AUTHORITY\NETWORK SERVICE` (the CI runner) | `C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\wayland-core\config.toml:109` | `backend = "plaintext"` | `enabled = true` |
+
+`reject_backend_without_confidential_storage` refuses that combination **by
+design** — plaintext cannot hold the confidential key durable recovery needs,
+and `durable_sessions_must_be_disabled` deliberately does NOT degrade it
+(`config.rs:2594-2597`: an operator who chose plaintext must keep hearing about
+it). So the engine emits `init_failed` instead of `ready`, and every test that
+waits for `ready` fails.
+
+Nothing is broken in the engine. Nothing is unavailable on the runner.
+
+**Measured on the box 2026-08-01, same binary, minutes apart:**
+
+```
+# ambient profile (what the tests actually got)
+{"type":"error","error":{"code":"init_failed","message":"Engine failed to start:
+ storage.credentials.backend is set to \"plaintext\", ..."}}   EXITCODE=1
+
+# WAYLAND_HOME pinned to an empty directory
+{"type":"ready","version":"0.12.25","capabilities":{...,"user_model_backend":"local",...}}
+```
+
+**And the same pair as the CI service account itself**, via a `schtasks
+/RU "NT AUTHORITY\NETWORK SERVICE"` probe (nothing under `C:\actions-runner-*`
+was touched):
+
+```
+whoami -> nt authority\network service
+  ambient profile        -> init_failed, EXITCODE=1
+  WAYLAND_HOME pinned    -> {"type":"ready",...,"session_id":"b6be1c690c4f",...}, EXITCODE=0
+```
+
+So:
+
+* **W9 is not "`--json-stream` never emits `ready` on Windows".** The engine
+  emits it in about three seconds, measured repeatedly. But the config read is
+  not the whole of W9 and **W9 is NOT closed** — see §9.1a before doing anything
+  with this row.
+* **W14 is not "credential vault unavailable to the CI service account", and it
+  is already closed — by work that predates this lane.** The vault is fine: the
+  service account opens a confidential store and gets a `session_id`. The ~20
+  CI failures came from `deterministic_openai_loop` / `smoke_p0` /
+  `acp_gate_d012`, and those families **already pin `WAYLAND_HOME`** (via
+  `wcore-eval-scenarios::runner::run_with_binary` passing `Some(env.home())`,
+  and `smoke_p0.rs:164`). What refused in run A was the ISOLATED-profile
+  confidential path on a keyring-less account, and that was fixed on 2026-07-30
+  by `c73ac417` ("a host with no keyring now runs, degraded and announced,
+  instead of dying"), two days AFTER run A was measured.
+  **This lane's contribution to W14 is the measurement, not the fix.** The
+  brief's framing ("runner *configuration*... may genuinely need an interactive
+  login") is refuted: no login, no runner change, no `icacls` on the runner, and
+  nothing to ask Sean for.
+* The runner's ambient profile at
+  `C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\wayland-core\`
+  contains `sessions\`, `memory\memory.db`, `channels\channel-poll.lock`,
+  `projects\...` — **written by previous CI runs that believed they were
+  isolated.** Windows CI has been accumulating shared cross-run state. That is
+  also the most likely explanation for the run-A/run-B differential in §1.5 that
+  this document used as its primary classifier: 55-only-in-A and 14-only-in-B is
+  what two different accumulated profiles look like.
+
+### 9.1a W9 IS NOT CLOSED — the fix does not hold, and I could not isolate why
+
+This is the part of this update that a reader must not skim.
+
+The mechanism in §9.1 is real and is proven at the binary level. Pinning
+`WAYLAND_HOME` **does not reliably turn r012 green**, and I ran out of budget
+before finding out what else is in the way. Sequence, in order, all on the box:
+
+| # | what | result |
+|---|---|---|
+| 1 | r012 alone, fix applied | **PASS [3.634s]** |
+| 2 | r012 alone, fix ablated | FAIL [2.370s] — no `user_model_backend` (§9.1) |
+| 3 | r012 alone, fix restored | (not re-run at this point — my mistake) |
+| 4 | full suite, fix applied | **FAIL [33.567s]** — `no ready event within 10s` |
+| 5 | r012 alone, fix applied, after the full suite | **FAIL [2.401s]** — plaintext `init_failed` again |
+
+Step 5 is the one that matters: the same test, same command, same tree that
+passed at step 1, now fails the way it failed BEFORE the fix. So step 1 is not
+reproducible and cannot be reported as a pass.
+
+What I did establish, and re-established four times after step 5, is that the
+ENGINE is fine. Driving `target\debug\wayland-core.exe` directly with the exact
+r012 environment — `WAYLAND_HOME` pinned inside a `%TEMP%` tempdir, `HOME` set,
+cwd = tempdir, `--yolo --json-stream` — emits `ready` every time:
+
+```
+with the seeded .wayland-core/config.toml     FIRST_TYPE=ready
+without it                                    FIRST_TYPE=ready
+launched from ssh                             FIRST_TYPE=ready
+launched detached via Win32_Process (the way nextest runs)  FIRST_TYPE=ready
+  notice: durable session persistence is OFF for this run.   <- c73ac417's degrade, working
+```
+
+So the engine takes the degrade path and starts. Something on the **nextest test
+path specifically** still reaches the ambient `%APPDATA%\wayland-core\config.toml`.
+Ruled out by measurement, not by argument: the binary (`CARGO_BIN_EXE_wayland-core`
+resolves to the same `target\debug\wayland-core.exe`; no release artifact exists
+and `WCORE_EVAL_BIN` is unset), the seeded project config, the cwd-walk (no
+`.wayland-core` on any ancestor of `%TEMP%`), and the launch context's ambient
+environment.
+
+Two candidate explanations I did NOT get to test, in the order I would test them:
+1. something in r012's **Layer 0** (the eval-scenarios runner, which passes and
+   runs first in the same test) leaves process or filesystem state that Layer 1
+   inherits;
+2. an env var nextest sets that reaches config resolution ahead of
+   `WAYLAND_HOME`.
+
+Step 4 adds a probable SECOND cause on top: in the full suite the failure is a
+clean `no ready event within 10s` (~10.5s x 3 attempts, no output at all),
+whereas alone the engine answers in ~3s. A wall-clock deadline inside a
+`test-threads = num-cpus` suite is flaky by construction — but bumping the
+number is exactly the change that reads as a fix while hiding a real startup
+regression, so it is not done here.
+
+**W9 STAYS OPEN.** The `WAYLAND_HOME` pin is kept because it is strictly correct
+(§9.1 proves `env_remove` was wrong) and because r012 was already red before it,
+so it costs nothing — but it is **not** a fix and the failure count in §9.3a
+does not credit it. ~1 day: reproduce step 5, bisect Layer 0, then deal with the
+deadline.
+
+**Applied, but NOT claimed as a fix (the config half).** `harness_regression.rs` r012 pins `WAYLAND_HOME`
+instead of removing it. A new contract test,
+`wcore-config config::tests::home_alone_isolates_on_unix_and_does_not_isolate_on_windows`,
+pins the platform fact on BOTH arms so the trap cannot go quiet again.
+
+Only two `env_remove("WAYLAND_HOME")` sites exist in the workspace; the other
+(`json_stream_startup_refusal.rs:242`) has absent-`WAYLAND_HOME` as its
+condition under test and is correct. The packaged-CLI families
+(`smoke_p0`, `acp_gate_d012`, `wcore-eval-scenarios::runner`) already pin it.
+
+**Ablation, both directions, on the box:**
+
+```
+FIXED
+  wcore-cli::harness_regression r012_honcho_fallback_on_no_key   PASS [3.634s]
+  wcore-config ...home_alone_isolates_on_unix_and_does_not_isolate_on_windows
+                                                                  PASS [0.014s]
+ABLATED  (.env("WAYLAND_HOME", &isolated_home) -> .env_remove("WAYLAND_HOME");
+          the unit test's Windows arm inverted)
+  r012   TRY 3 FAIL [2.370s]
+         "R-012 FAIL: ready event carries no capabilities.user_model_backend"
+  unit   TRY 3 FAIL [0.011s]
+         "HOME appears to relocate the config dir on Windows
+          (got C:\Users\seand\AppData\Roaming\wayland-core)"
+```
+
+That second line is the mechanism printed by the instrument itself: with
+`WAYLAND_HOME` and `XDG_DATA_HOME` removed and `HOME` pointed at a tempdir,
+`wayland_config_dir()` still answers with the real roaming profile.
+
+One honest discrepancy: in the ablated arm r012 fails on the *field* assertion
+in 2.4s, whereas in the §9.3 full-suite baseline it failed on the *10s ready
+timeout* in 31.5s. Same cause — the first stdout line is an `init_failed` frame
+rather than `ready` — but under full-suite load the engine did not get that
+frame out inside the window, and alone it does. The assertion that fires differs;
+the root cause does not.
+
+The Linux leg runs the SAME unit test and passes it through the opposite arm
+(`cargo nextest run -p wcore-config`, hetzner-dsm: `1 passed`), which is what
+makes it a cross-platform contract rather than a Windows quirk.
+
+## 9.2 W3 is a test-fixture defect, not a security decision
+
+§5 rank 5 said W3 needed "someone who knows whether the intended ACE should
+include the writer's own SID — a correctness question about the security
+property". It does not. The production path is untouched by this.
+
+`set_identity_bound_file_dacl` (`snapshot.rs:755`) closes a TOCTOU window by
+re-opening the path after the write via `ensure_path_identity` →
+`open_identity_probe`, which opens with `read(true)`. Windows grants a file's
+OWNER `READ_CONTROL` and `WRITE_DAC` implicitly whatever the DACL says — which
+is why the `open_security_handle` *before* the write succeeds — but grants no
+implicit `GENERIC_READ`. The four `#[cfg(test)]` hostile-DACL installers reuse
+that production helper, so the instant they install `Deny Everyone` or an empty
+DACL, their own post-write read re-probe returns `ERROR_ACCESS_DENIED` and the
+INSTALLER panics. Both tests therefore died before reaching the
+`validate_private_file` assertion they exist to make — they have never asserted
+anything on Windows.
+
+Production only ever installs `Allow <this user>`, which the writer can always
+reopen. `secure_private_file` is unchanged.
+
+**Fixed** — a `#[cfg(test)]` `set_hostile_file_dacl` that omits the re-probe,
+plus `release_hostile_dacl` which hands the file back before `NamedTempFile::drop`.
+
+The second half is belt-and-braces, and I checked rather than assumed: after the
+ablated run left two files carrying a live `Deny Everyone` DACL,
+`%TEMP%` held **0** leftovers. Deleting a file needs `DELETE` on the file **or**
+`FILE_DELETE_CHILD` on its parent, and a user has the latter on their own
+`%TEMP%`. So the accumulation I wrote `release_hostile_dacl` to prevent does not
+occur here. It still guards a fixture pointed at a directory where that is not
+true, which is why it stays — but the claim is "defensive", not "load-bearing".
+
+**Ablation, both directions, on the box:**
+
+```
+FIXED     3 tests run: 3 passed
+          windows_private_dacl_rejects_unprotected_inheritance      PASS
+          windows_private_dacl_accepts_restrictive_deny_ace         PASS
+          windows_private_dacl_rejects_null_empty_and_broad_allow   PASS
+ABLATED   (post-write `ensure_path_identity` put back in the hostile installer)
+          3 tests run: 1 passed, 2 failed
+          accepts_restrictive_deny_ace / rejects_null_empty_and_broad_allow:
+            called `Result::unwrap()` on an `Err` value: Custom { kind: Other,
+            error: Io { path: "C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp4VDmrP",
+            source: Os { code: 5, kind: PermissionDenied } } }
+```
+
+The ablated error is byte-identical to the §9.3 baseline failure, which is what
+says the fix addresses the measured defect and not a lookalike.
+
+The other two W3 failures (`wcore-cli log_rotate::tests`) are NOT this and are
+still open.
+
+## 9.3 The new measured baseline
+
+Full workspace, real box, interactive user, branch tip `5d1eda16`:
+
+```
+vx cargo nextest run --workspace --profile ci --no-fail-fast
+Summary [222.350s] 13350 tests run: 13314 passed (2 slow, 1 flaky, 1 leaky), 36 failed, 130 skipped
+```
+
+**36, not 40** — §4's W1/W13 fixes hold. Composition of the 36:
+
+| root cause | count | note |
+|---|---|---|
+| **W6** swarm worktrees never reclaimed | 9 | `dispatch_smoke` ×4, `worker_runtime_limits` ×2, `worktree::tests` ×2, `swarm_worker_failure_reporting_e2e` ×1 — now the largest single block |
+| **W5** descendants not reaped | 4 | `runner_contracts::*reaps_owned_descendant_listener` |
+| *(new)* `tool_formatter_real_payloads` | 4 | not in §2 at all; 3 of the 4 are `bash_*` |
+| **W3** DACL | 4 | 2 fixed here; `log_rotate` ×2 still open |
+| **W1** `/`-rooted literal | 3 | `gate_executor:652`, `journal_effects:1565`, `transcription_tools:833` — the §5 rank 6 remainder |
+| **W4** AppContainer child exec | 2 | `sandbox_activeness`, `typed_execution_policy_e2e` |
+| *(unfiled)* `audit_2026_05_22_tests` | 2 | filesystem-checkpoint restart, also red in run A |
+| **W12** read-timeout attempt count | 2 | + `packaged_f04_run_is_repeatable` |
+| **W9** | 1 | still open — §9.1a |
+| W7 / W8 / W10 / d1_refusal / f04 | 5 | one each |
+
+W2 (`session_journal_compaction_test restart_rejects_*`) and the W1
+`receipt_contract` block are gone from the failure set.
+
+### 9.3a After the fixes, measured the same way
+
+```
+vx just test-ci                     # the real recipe, exercising the W17 fix end to end
+Summary [283.277s] 13351 tests run: 13318 passed (2 slow, 1 flaky, 2 leaky), 33 failed, 130 skipped
+```
+
+**36 -> 33.** Attribution, honestly:
+
+| | |
+|---|---|
+| `windows_private_dacl_accepts_restrictive_deny_ace` | fixed here (§9.2) |
+| `windows_private_dacl_rejects_null_empty_and_broad_allow` | fixed here (§9.2) |
+| `packaged_core_exhausts_a_real_read_timeout` | **NOT mine — run-to-run variance.** Its sibling `packaged_core_recovers_after_a_real_read_timeout` still fails; these two flip. Treat the suite as 33 ± 1. |
+| `r012_honcho_fallback_on_no_key` | **still red, still open** — §9.1a |
+
+So the delta this lane can actually claim on the failure count is **2**, and the
+run also confirms the W17 fix end to end: `just test-ci` executed 13351 tests on
+Windows instead of dying in the recipe.
+
+The count is the least interesting result here. The two that matter are that
+W14's ~20 are already closed (measured, §9.1) and that ~13350 tests now run on
+Windows CI at all (§9.0).
+
+## 9.4 What §5 should say now
+
+| rank | root cause | count | revised cost |
+|---|---|---|---|
+| 1 | **W6** swarm worktrees | 9 | 1 day — unchanged, and now the biggest block |
+| 2 | **W5** descendant reaping | 4 | 1-2 days, still must be done with the macOS EPERM sibling |
+| 3 | `tool_formatter_real_payloads` | 4 | unmeasured — needs its own triage pass, ~2h to classify |
+| 4 | **W1** remainder | 3 | 1-2 hours, mechanical |
+| 5 | **W4** AppContainer | 2 | 1-2 days + security review — **still a Sean decision**, §2.1 unchanged |
+| 6 | `log_rotate` W3 remainder | 2 | 2-3 hours |
+| 7 | W7 / W8 / W10 / W12 | 6 | ~1 hour each |
+| 8 | **W9** r012 — see §9.1a | 1 | ~1 day. NOT closed. Reproduce the step-5 regression, bisect Layer 0, then the 10s deadline |
+
+**Deleted from §5:** rank 10 (W14) — closed, and closed before this lane
+started (§9.1). **Rank 1 (W9) is NOT deleted and NOT closed** — its stated
+mechanism is wrong (§9.1) and its real one is only partly identified (§9.1a).
+It moves to rank 8 above with a corrected description.
+**Deleted from §5:** rank 11 (W11 box contamination) — `D:\nonexistent` removed
+from the box 2026-08-01; `Test-Path D:\nonexistent` now `False`.
+
+## 9.5 What is owed that this lane could not do
+
+* **The runner's ambient profile is still there.** Pinning `WAYLAND_HOME` in the
+  tests stops new pollution and stops tests reading it, but
+  `C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\wayland-core\`
+  still holds the accumulated state (and the `backend = "plaintext"` config that
+  caused ~20 CI failures). Deleting it is a one-line operator action on the
+  runner host and is Sean's to take, not this lane's — it is outside `D:` and
+  adjacent to live runner services. Nothing depends on it once the pins are in,
+  but leaving it means any FUTURE unpinned test resurrects the whole class.
+* **No CI verification.** This lane cannot push, so none of this has been
+  observed in a real Windows CI job. Every claim above is from the box.
+* **No macOS clippy.** `cargo` is forbidden on the development Macs and this
+  lane had no macOS runner, so the two platforms that were actually run are
+  Windows (`vx cargo clippy -p wcore-config -p wcore-agent -p wcore-cli
+  --all-targets -- -D warnings` -> exit 0) and Linux (same command on
+  hetzner-dsm -> exit 0). The residual risk is small and stated rather than
+  hidden: the `snapshot.rs` change lives entirely inside
+  `#[cfg(windows)] mod windows_snapshot_security`, and the `config.rs` test
+  branches on `cfg!(windows)` at RUNTIME (both arms compile on every target),
+  so there is no macOS-only arm in this diff for a macOS clippy to reach that
+  the Linux run did not already compile.
+
+## 9.6 Bonus finding — the anti-vacuity gate never runs
+
+Not Windows, found while checking that the `justfile` change did not trip it.
+
+`ci.yml:243` — *"No vacuous `cargo test` invocations"* — is guarded by
+`if: runner.os == 'Linux'`, and it lives in the `ci` matrix, whose `os` vector is
+`["macos-latest", ["self-hosted","Windows","X64","msvc"]]`. **There is no Linux
+entry in that matrix** (Linux moved to the separate containerized `ci-linux`
+job, which does not run this step). So the guard is never true and the step is
+recorded `skipped` on every leg of every run — visible in the run-30652437749
+step list quoted in §9.0.
+
+It is not an empty gate. Run manually on hetzner-dsm at `c5ce3857`:
+
+```
+python3 scripts/check-no-vacuous-cargo-test.py --self-test   -> SELF-TEST: PASSED (6 assertions)
+python3 scripts/check-no-vacuous-cargo-test.py               -> exit 1
+  GATE: FAILED - 4 unguarded `cargo test` invocation(s).
+  .github/workflows/macos-docker-gate.yml:119,130,149,160
+```
+
+Four real violations, in a workflow whose entire purpose is a live gate, sitting
+undetected because the check that would name them is wired to a runner class the
+matrix does not contain. Pre-existing — `macos-docker-gate.yml` was last touched
+by `48d1b1a4`, and this lane's diff does not go near it.
+
+Deliberately NOT fixed here: moving the step (to `ci-linux`, or dropping the
+`if:` so it runs on the Windows leg — it is a ~50ms text scan and needs only
+`python3`) turns the Windows job red on someone else's four lines, on a branch
+whose whole point is to get Windows to a readable number. It should be one
+commit, with those four fixed in it. ~1 hour.
