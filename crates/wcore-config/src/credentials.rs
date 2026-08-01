@@ -910,20 +910,28 @@ fn warn_explicit_plaintext_backend(path: &Path) {
 /// (a Windows service account that gains a logon session, a Linux box that
 /// starts its Secret Service) heals on the next read instead of staying
 /// downgraded forever.
+///
+/// The two upper tiers are trait objects (the shape
+/// [`ConfidentialCredentialsStore`] already uses) rather than the concrete
+/// backends. That is what makes the ORDERING provable: `KeyringCredentialsStore`
+/// talks to the host's real credential store, so a ladder that could only be
+/// built with one would have its keyring rungs untestable on precisely the
+/// keyring-less hosts this ladder exists for — the tests would go quiet exactly
+/// where the behaviour matters.
 struct LadderCredentialsStore {
     /// `Some` iff [`keyring_available`] proved a write landed.
-    keyring: Option<KeyringCredentialsStore>,
+    keyring: Option<Box<dyn CredentialsStore>>,
     /// `Some` iff [`vault_unlock_material_present`] — otherwise opening it
     /// would block on an interactive passphrase prompt.
-    vault: Option<EncryptedFileCredentialsStore>,
+    vault: Option<Box<dyn CredentialsStore>>,
     /// Legacy cleartext file. Read and delete only.
     legacy: PlaintextCredentialsStore,
 }
 
 impl LadderCredentialsStore {
     fn new(
-        keyring: Option<KeyringCredentialsStore>,
-        vault: Option<EncryptedFileCredentialsStore>,
+        keyring: Option<Box<dyn CredentialsStore>>,
+        vault: Option<Box<dyn CredentialsStore>>,
         plaintext_path: PathBuf,
     ) -> Self {
         Self {
@@ -1838,17 +1846,19 @@ pub fn open_store(
             // host (C4 / D1). Such a profile's top rung is the in-home vault.
             let isolated = std::env::var_os("WAYLAND_HOME").is_some();
 
-            let keyring = if isolated {
+            let keyring: Option<Box<dyn CredentialsStore>> = if isolated {
                 None
             } else {
                 let service = cfg
                     .service_name
                     .clone()
                     .unwrap_or_else(|| "wayland-core".to_string());
-                keyring_available(&service).then(|| KeyringCredentialsStore::new(service))
+                keyring_available(&service).then(|| {
+                    Box::new(KeyringCredentialsStore::new(service)) as Box<dyn CredentialsStore>
+                })
             };
 
-            let vault = if vault_unlock_material_present() {
+            let vault: Option<Box<dyn CredentialsStore>> = if vault_unlock_material_present() {
                 let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
                 let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
                 // #183: import any pre-existing plaintext secrets into the
@@ -1864,7 +1874,7 @@ pub fn open_store(
                          stays readable and the vault remains the write target"
                     );
                 }
-                Some(store)
+                Some(Box::new(store) as Box<dyn CredentialsStore>)
             } else {
                 None
             };
