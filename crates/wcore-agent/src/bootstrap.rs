@@ -449,11 +449,41 @@ fn build_session_bundled_catalog(
     catalog
 }
 
+/// The single ingress point that fixes the SPELLING of a session's workspace.
+///
+/// The same directory reaches us under two different pathnames depending on who
+/// supplied it: `--project-dir` keeps whatever the caller typed, while
+/// `std::env::current_dir()` returns the getcwd-RESOLVED form. On macOS `/var`,
+/// `/tmp` and `/etc` are symlinks into `/private`, so those two sources disagree
+/// for any workspace under them; on Windows an 8.3 short name and its long form
+/// disagree the same way. Linux has no such alias, which is why this only ever
+/// bites on the other two platforms.
+///
+/// The workspace string is not merely a path here: it is embedded verbatim in
+/// the system prompt (`Working directory: {cwd}`, see [`crate::context`]), and
+/// the system prompt is digested into the session's recovery authority. Two
+/// spellings therefore mint two authorities for one workspace, and a crashed
+/// session refuses to resume with `changed: system_prompt`. Canonicalizing once,
+/// here, is what makes `self.workspace` identity-stable for every consumer
+/// instead of each of them re-deriving a spelling.
+///
+/// `dunce::simplified` keeps Windows on the ordinary `C:\…` form rather than the
+/// verbatim `\\?\C:\…` one `canonicalize` returns, so the prompt text stays
+/// readable. A workspace that does not exist yet, or cannot be resolved, is left
+/// exactly as given — the same fail-soft contract `WorkspacePolicy`'s `canon`
+/// uses, so this can never turn a working session into a failing one.
+fn canonical_workspace(workspace: String) -> String {
+    let Ok(canonical) = std::fs::canonicalize(&workspace) else {
+        return workspace;
+    };
+    dunce::simplified(&canonical).to_string_lossy().into_owned()
+}
+
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
             config,
-            workspace: workspace.into(),
+            workspace: canonical_workspace(workspace.into()),
             output,
             provider: None,
             resume_session: None,
@@ -4716,6 +4746,48 @@ mod tests {
             files: Vec::new(),
             content: name.into(),
         }
+    }
+
+    /// R2: two spellings of one workspace must reach the engine as ONE string,
+    /// or the system prompt they are baked into digests differently and a
+    /// crashed session refuses to resume.
+    ///
+    /// macOS's `/var` -> `/private/var` is exactly this shape, but it cannot be
+    /// staged on Linux, so the alias is built explicitly with a symlink. That
+    /// makes the property testable on every unix host rather than only where the
+    /// bug happens to reproduce.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_spelled_through_a_symlink_normalizes_to_one_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize fixture root");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir(&real).expect("real workspace");
+        std::os::unix::fs::symlink(&real, &alias).expect("alias symlink");
+
+        let via_alias = canonical_workspace(alias.to_string_lossy().into_owned());
+        let via_real = canonical_workspace(real.to_string_lossy().into_owned());
+        assert_eq!(
+            via_alias, via_real,
+            "the two spellings must collapse to one workspace identity"
+        );
+        assert_eq!(
+            via_alias,
+            real.to_string_lossy(),
+            "the surviving spelling must be the resolved one"
+        );
+    }
+
+    /// Fail-soft: a workspace that cannot be resolved keeps the caller's string.
+    /// Canonicalization must never be able to turn a working session into a
+    /// failing one.
+    #[test]
+    fn unresolvable_workspace_is_passed_through_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("not-created-yet");
+        let given = missing.to_string_lossy().into_owned();
+        assert_eq!(canonical_workspace(given.clone()), given);
     }
 
     #[test]

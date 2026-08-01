@@ -106,7 +106,24 @@ impl SandboxExecBackend {
         // the root inode lookup explicitly; allowlisting `/usr` etc. is
         // not enough.
         p.push_str("(allow file-read* (literal \"/\"))\n");
-        p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\"))\n");
+        // macOS spells `/var`, `/tmp` and `/etc` as SYMLINKS into `/private`.
+        // Seatbelt evaluates the symlink node itself before it follows the
+        // link, so a path spelled through one of them (`/tmp/x`,
+        // `$TMPDIR/x` — TMPDIR is `/var/folders/…` on every macOS host) is
+        // denied at the link lookup even when the canonical target
+        // (`/private/var/folders/…`) is granted by an explicit `(subpath …)`
+        // allow. Granting the same `/var` spelling as another `(subpath …)`
+        // does NOT help — the denial is on the link node, so it needs a
+        // `literal` READ grant on the three link nodes themselves. This grants
+        // read of three symlink inodes, not of their targets: everything under
+        // `/private` stays governed by the manifest allow/deny rules below.
+        // Manifest paths are canonicalized upstream, but the shell command is
+        // LLM-authored text that we neither can nor should rewrite.
+        p.push_str("(allow file-read* (literal \"/var\") (literal \"/tmp\") (literal \"/etc\"))\n");
+        // `/private/var/select/sh` is the selector symlink macOS's `sh` reads
+        // at startup; without it every sandboxed shell prints
+        // `Error opening /private/var/select/sh: Operation not permitted`.
+        p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\") (subpath \"/private/var/select\"))\n");
         p.push_str("(allow file-read* (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/dtracehelper\"))\n");
         p.push_str("(allow file-write* (literal \"/dev/null\"))\n");
         // TAHOE FIX: bake hw.* sysctl-read for zsh + future tools.
@@ -579,6 +596,107 @@ mod tests {
         );
         assert!(p.contains("(allow sysctl-read (sysctl-name-prefix \"kern.\"))"));
         assert!(p.contains("(deny default)"));
+    }
+
+    #[test]
+    fn profile_grants_read_of_the_private_symlink_nodes() {
+        // Without a `literal` read grant on `/var`, `/tmp` and `/etc`, seatbelt
+        // denies at the symlink node, so any path spelled through one of them
+        // fails even though its canonical target is allowed.
+        let m = SandboxManifest::default();
+        let p = SandboxExecBackend::build_profile(&m).expect("default profile builds");
+        assert!(
+            p.contains(
+                "(allow file-read* (literal \"/var\") (literal \"/tmp\") (literal \"/etc\"))"
+            ),
+            "the three /private symlink nodes need literal read grants; profile={p}"
+        );
+        assert!(
+            p.contains("(subpath \"/private/var/select\")"),
+            "`sh` reads /private/var/select/sh at startup; profile={p}"
+        );
+        // The grant must stay a `literal` on the link node — a `subpath "/var"`
+        // would re-open the whole of /private/var through the alias.
+        assert!(
+            !p.contains("(subpath \"/var\")") && !p.contains("(subpath \"/tmp\")"),
+            "symlink nodes must be granted as literals, never as subpaths; profile={p}"
+        );
+    }
+
+    /// The R1 defect, measured rather than argued: with the workspace granted
+    /// only under its canonical `/private/var/…` spelling, a write addressed
+    /// through the `/var/…` alias must still land, and the shell must not emit
+    /// a sandbox denial on stderr.
+    ///
+    /// Arm 1 is the instrument control — the same write through the canonical
+    /// spelling must succeed, otherwise a success in arm 2 would be free.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn symlinked_temp_spelling_reaches_the_same_allowed_root() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be usable");
+
+        // `tempfile` builds from `std::env::temp_dir()`, i.e. `$TMPDIR`, which
+        // on macOS is always spelled `/var/folders/…`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let aliased = dir.path().to_path_buf();
+        let canonical = std::fs::canonicalize(&aliased).expect("canonicalize");
+        assert_ne!(
+            aliased, canonical,
+            "fixture is dead: $TMPDIR must be spelled through the /var symlink"
+        );
+
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![canonical.clone()],
+            fs_write_allow: vec![canonical.clone()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+        let write_to = |target: std::path::PathBuf| {
+            let manifest = manifest.clone();
+            async move {
+                SandboxExecBackend::new()
+                    .execute(
+                        &manifest,
+                        SandboxCommand {
+                            argv: vec![
+                                "/bin/sh".into(),
+                                "-c".into(),
+                                format!("echo MARKER > {}", target.display()),
+                            ],
+                            cwd: Some(canonical.clone()),
+                        },
+                    )
+                    .await
+                    .expect("execution")
+            }
+        };
+
+        let control = write_to(canonical.join("canon.txt")).await;
+        assert_eq!(
+            control.exit_code,
+            0,
+            "instrument is dead: the canonical spelling must be writable; stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+
+        let aliased_run = write_to(aliased.join("alias.txt")).await;
+        let stderr = String::from_utf8_lossy(&aliased_run.stderr).into_owned();
+        assert_eq!(
+            aliased_run.exit_code, 0,
+            "a path spelled through the /var symlink must reach the same allowed root; \
+             stderr={stderr:?}"
+        );
+        assert!(
+            canonical.join("alias.txt").is_file(),
+            "the aliased write must have landed on the real file"
+        );
+        // The profile gap also printed a denial on EVERY sandboxed shell; the
+        // fix must leave stderr clean so no later filter is tempted to hide it.
+        assert!(
+            !stderr.contains("Operation not permitted"),
+            "no sandbox denial may remain on a fully-allowed command; stderr={stderr:?}"
+        );
     }
 
     #[test]

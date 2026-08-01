@@ -151,13 +151,18 @@ async fn macos_retained_parent_rename_delete_enumeration_and_cwd_stay_handle_rel
     assert_eq!(authority.child_names().unwrap(), ["landed", "receipt"]);
 
     // Command cwd binds to the retained object and resolves to its real path.
+    // `pwd` reports the RESOLVED pathname, and `tempfile` builds under
+    // `$TMPDIR`, which macOS spells through the `/var` -> `/private/var`
+    // symlink — so the expectation has to be the resolved spelling too, or the
+    // assertion compares two names for one directory.
     let mut command = tokio::process::Command::new("pwd");
     authority.bind_command_cwd(&mut command).unwrap();
     let output = command.output().await.unwrap();
     assert!(output.status.success());
+    let expected = std::fs::canonicalize(&retained).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        retained.to_string_lossy()
+        expected.to_string_lossy()
     );
 
     // The retained object holds every result; the decoy path stays empty.

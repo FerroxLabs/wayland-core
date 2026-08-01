@@ -14,7 +14,7 @@ use wcore_agent::session_journal::{
     LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION, ProviderAttemptNotStartedReason,
     ProviderAttemptPurpose, ProviderStreamEvent, SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent,
     SessionJournal, SessionSnapshot, StoredToolInput, ToolEffectState, ToolNotStartedReason,
-    TurnState, decode_prepared_provider_request_snapshot, load_snapshot,
+    TurnState, canonical_journal_root, decode_prepared_provider_request_snapshot, load_snapshot,
     prepared_provider_request_snapshot, provider_request_digest, replay_from_snapshot,
     replay_state, snapshot_path_for, state_payload_digest, verify_chain,
 };

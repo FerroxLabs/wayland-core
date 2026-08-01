@@ -341,9 +341,14 @@ fn writer_lease_symlink_is_rejected_without_mutating_its_target() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session.journal");
-    let lease_path = dir.path().join("session.journal.writer.lock");
-    let target = dir.path().join("protected");
+    // The journal reports the RESOLVED spelling of its own path, and `$TMPDIR`
+    // reaches us through the `/var` -> `/private/var` symlink on macOS. Build
+    // the fixture from the resolved root so the path equality below compares
+    // one file against itself rather than two names for it.
+    let root = canonical_journal_root(dir.path()).unwrap();
+    let path = root.join("session.journal");
+    let lease_path = root.join("session.journal.writer.lock");
+    let target = root.join("protected");
     std::fs::write(&target, b"must remain unchanged").unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
     symlink(&target, &lease_path).unwrap();

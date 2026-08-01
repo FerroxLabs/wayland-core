@@ -209,34 +209,21 @@ pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
     }
 }
 
-/// Filter macOS sandbox-init noise from stderr.
-///
-/// F-078: On macOS, the system `sh` (`/private/var/select/sh`) emits
-/// sandbox-init warning lines to stderr on every invocation when the process
-/// sandbox denies certain file operations. These lines are not part of the
-/// command's actual output and confuse models into thinking the command failed.
-/// They are safe to strip: they do not indicate user-command errors.
-///
-/// Pattern: any line containing `/private/var/select/sh` or the macOS
-/// sandbox-init prologue (`sandbox_init`, `SandboxProfileLoaded`).
-fn filter_macos_sandbox_noise(stderr: &str) -> String {
-    let noisy = |line: &str| {
-        line.contains("/private/var/select/sh")
-            || line.contains("sandbox_init")
-            || line.contains("SandboxProfileLoaded")
-    };
-    let filtered: Vec<&str> = stderr.lines().filter(|l| !noisy(l)).collect();
-    filtered.join("\n")
-}
-
 /// Render a `SandboxOutput` into the `ToolResult` shape BashTool has always
 /// returned, so routing through the sandbox does not change observable
 /// output for any caller.
+///
+/// stderr is surfaced VERBATIM. An earlier revision stripped every line
+/// mentioning `/private/var/select/sh` as "sandbox-init noise" (F-078). Those
+/// lines were not noise: they read
+/// `Error opening /private/var/select/sh: Operation not permitted` and were a
+/// real seatbelt denial caused by a gap in our own SBPL profile (fixed in
+/// `wcore_sandbox::backends::sandbox_exec::build_profile`). The filter deleted
+/// the only evidence of the defect it was masking, so no stderr line may be
+/// suppressed here again — a profile gap must be fixed in the profile.
 fn output_to_result(output: SandboxOutput) -> ToolResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr_raw = String::from_utf8_lossy(&output.stderr);
-    // F-078: strip macOS sandbox-init noise before surfacing stderr.
-    let stderr = filter_macos_sandbox_noise(&stderr_raw);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.exit_code;
     let content = format!(
         "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
