@@ -825,10 +825,16 @@ mod tests {
     fn missing_local_path_rejected() {
         let backend = Arc::new(CapturingTranscriptionBackend::new("never called"));
         let tool = TranscribeAudioTool::new(backend.clone(), Arc::new(NullAudioFetcher));
-        let r = must_exec(
-            &tool,
-            json!({ "audio_path": "/nonexistent/path/audio.mp3" }),
-        );
+        // The path must be ABSENT but otherwise VALID, or the intake refuses it
+        // on absoluteness before it ever reaches the not-found branch this test
+        // is about. `/nonexistent/...` is absolute on unix and not on Windows,
+        // where `Path::is_absolute` demands a drive or UNC prefix.
+        let missing = if cfg!(windows) {
+            r"C:\nonexistent\path\audio.mp3"
+        } else {
+            "/nonexistent/path/audio.mp3"
+        };
+        let r = must_exec(&tool, json!({ "audio_path": missing }));
         assert!(r.is_error);
         assert!(
             r.content.contains("not found") || r.content.contains("not a regular file"),
@@ -836,7 +842,7 @@ mod tests {
             r.content
         );
         assert!(
-            r.content.contains("/nonexistent/path/audio.mp3"),
+            r.content.contains(missing),
             "the refusal must name the path it refused; got: {}",
             r.content
         );

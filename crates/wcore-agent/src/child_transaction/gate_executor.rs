@@ -638,8 +638,20 @@ mod tests {
         // Stage 5 — containment mint refuses on a non-containing backend, using a
         // real absolute candidate root outside any denied location so stages 3/4
         // pass and the mint stage is the one that refuses.
+        //
+        // Absoluteness is platform-defined: `/srv/...` is absolute on unix but
+        // NOT on Windows, where `Path::is_absolute` demands a drive or UNC
+        // prefix. A unix-shaped literal here makes `HardContainmentFilesystem`
+        // refuse at stage 3, so the assertion below would pass on unix and fail
+        // on Windows against a stage-5 guard that is in fact correct on both.
+        // Same fixture defect, same fix, as `wcore_sandbox`'s
+        // `hard_fixture_root`. The path is never created on disk.
         let live = FakeCandidate {
-            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
+            root: Ok(if cfg!(windows) {
+                PathBuf::from(r"C:\srv\wayland\candidate\checkout")
+            } else {
+                PathBuf::from("/srv/wayland/candidate/checkout")
+            }),
         };
         let error = executor
             .execute_gate(
