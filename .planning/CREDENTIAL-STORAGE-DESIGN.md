@@ -196,9 +196,11 @@ remove` clears both locations.
 > precedence flip needs its own change and its own migration note.
 
 **4–5 — `~/.wayland/.env`.** The TUI credentials modal was the primary
-INTERACTIVE way a user hands us a key, and it wrote cleartext to `.env`.
-`config.rs` also documents that `resolve_api_key` never reads `.env`, so the key
-was invisible until a restart. Provider keys (those with a
+INTERACTIVE way a user hands us a key, and it wrote cleartext to `.env`. Its own
+F21 comment in `wcore-cli/src/tui/surfaces/config.rs` records that
+`resolve_api_key` reads cli → config → store → process-env and never the `.env`
+file, so the key was invisible until a restart reloaded `.env` into the process
+environment. Provider keys (those with a
 `credentials_store_key` slot) now go to the ladder and apply on the next rebind.
 Tool keys (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `ELEVENLABS_API_KEY`, …)
 still go to `.env` because **nothing reads a tool key from the credentials
