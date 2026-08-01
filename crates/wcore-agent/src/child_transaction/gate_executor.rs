@@ -477,8 +477,23 @@ mod tests {
             env,
             "rustc:1.999.0",
             inputs,
-            vec![PathBuf::from("/srv/wayland/private/scratch")],
+            // Platform-shaped for the same reason as the candidate root in
+            // `fails_closed_at_each_gate_execution_stage`: every writable root
+            // must be absolute, and `Path::is_absolute` demands a drive or UNC
+            // prefix on Windows. Never created on disk.
+            vec![private_scratch_root()],
         )
+    }
+
+    /// Absolute, non-denied private writable root for these fixtures, in one
+    /// place so no case re-derives it. Mirrors `wcore_sandbox`'s
+    /// `hard_fixture_root`.
+    fn private_scratch_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\srv\wayland\private\scratch")
+        } else {
+            PathBuf::from("/srv/wayland/private/scratch")
+        }
     }
 
     fn requirement(gate_id: &str, closure_digest: &str) -> ChildGateRequirement {
