@@ -196,21 +196,90 @@ fn windows_program_token(command: &str) -> String {
 ///
 /// `Child::id()` returns `None` once the child has been reaped (e.g. a prior
 /// `kill().await`); in that case there is nothing to signal and we no-op.
-/// `ESRCH` (group already gone) is benign and ignored.
+/// `ESRCH` (group already gone) is benign and ignored; `EPERM` is delegated to
+/// [`classify_group_kill_failure`], which is where the Darwin corpse case is
+/// separated from a genuine containment failure.
 #[cfg(unix)]
 fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
     // SAFETY: `kill` is async-signal-safe and we only pass a process-group
     // target (negated PID) plus a constant signal. The PID was assigned by
     // a successful spawn and is the leader of its own group via
-    // `process_group(0)`; signalling a stale group merely returns ESRCH.
+    // `process_group(0)`; signalling a stale group merely fails, and the
+    // failure is graded by `classify_group_kill_failure`.
     let result = unsafe { libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL) };
-    if result != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
-        }
+    if result == 0 {
+        return Ok(());
     }
-    Ok(())
+    classify_group_kill_failure(process_group_id, std::io::Error::last_os_error())
+}
+
+/// Decide whether a failed `kill(-pgid, SIGKILL)` is a completed teardown or a
+/// containment failure.
+///
+/// Split out from [`kill_process_group`] so the decision can be tested against
+/// **real** process groups without having to manufacture a real `EPERM` (which
+/// needs a process the test user is not permitted to signal). The census below
+/// is the real one; only the errno is supplied by the caller.
+///
+/// # Why `EPERM` is not simply tolerated
+///
+/// `close()` signals the group *before* reaping the direct child, so at the
+/// moment of the `kill` the group leader is normally an unreaped corpse. On
+/// **Darwin** a group whose only remaining member is that corpse answers
+/// `EPERM`, not `ESRCH` — measured on Darwin 25.3.0 arm64, and pinned by
+/// `wcore-eval-scenarios`'
+/// `a_group_holding_only_the_anchor_corpse_is_cleaned_not_failed`. Linux
+/// (measured, 6.8.0 x86_64) does not fail that call at all: it returns 0,
+/// because a zombie still counts as a signalable group member there. That is
+/// why only macOS ever saw this, and why every normal MCP server shutdown on
+/// macOS returned `failed to kill MCP process group: Operation not permitted`.
+/// Linux only produces `ESRCH` once the group is genuinely empty.
+///
+/// But `EPERM` also covers the genuinely dangerous case — a live descendant
+/// this process is not permitted to signal, i.e. containment has failed. A
+/// blanket tolerance would make the two indistinguishable. `kill(-pgid, 0)`
+/// cannot tell them apart either (it returns `EPERM` in both states), so the
+/// group is **enumerated**, reusing `wcore_types::process_liveness`'s census
+/// rather than reimplementing it here. An unreadable group is never read as
+/// an empty one: undercounting is the direction that fakes success.
+///
+/// # Why the child is still not reaped first
+///
+/// Reaping the direct child before signalling would avoid the corpse state
+/// altogether — and would replace it with a worse one. The PGID *is* the
+/// leader's PID; once the leader is reaped and the group is empty that number
+/// is free for the kernel to recycle, and a `kill(-pgid, SIGKILL)` issued
+/// afterwards can land on an unrelated process. Holding the unreaped child as
+/// a PID anchor across the group signal is the same discipline
+/// `wcore-eval-scenarios` uses deliberately (`WNOWAIT`), so the ordering
+/// stays as it is and the corpse case is discriminated instead.
+#[cfg(unix)]
+fn classify_group_kill_failure(
+    process_group_id: u32,
+    error: std::io::Error,
+) -> std::io::Result<()> {
+    use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) => match process_group_census(process_group_id) {
+            // Nothing left that can execute — the corpse leader is not a
+            // member that survived. Teardown completed.
+            ProcessGroupCensus::Live(0) => Ok(()),
+            ProcessGroupCensus::Live(live) => Err(std::io::Error::other(format!(
+                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
+                 the group still holds {live} LIVE member(s); containment has failed, not \
+                 completed"
+            ))),
+            // Cannot see, so cannot excuse.
+            ProcessGroupCensus::Indeterminate(why) => Err(std::io::Error::other(format!(
+                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
+                 the group could not be enumerated to establish whether anything survived: \
+                 {why}"
+            ))),
+        },
+        _ => Err(error),
+    }
 }
 
 // Platform-agnostic unit tests for the cmd.exe quoting function. `shell_quote`
@@ -1138,6 +1207,178 @@ mod tests {
             start.elapsed() < Duration::from_secs(2),
             "close must not hang"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Process-group teardown: EPERM discrimination.
+    //
+    // `close()` signals the group BEFORE reaping the direct child, so the
+    // leader is normally an unreaped corpse at that moment. On Darwin
+    // `kill(-pgid, SIGKILL)` answers EPERM for a corpse-only group (measured
+    // on Darwin 25.3.0 arm64); Linux answers ESRCH. The old ESRCH-only
+    // tolerance therefore failed every normal MCP shutdown on macOS.
+    //
+    // These tests drive `classify_group_kill_failure` against REAL process
+    // groups. Only the errno is injected — manufacturing a genuine EPERM
+    // needs a process the test user may not signal, which is not something a
+    // unit test can arrange portably. The census is the real one, so the
+    // tolerance is proved against real group state on every unix platform,
+    // including Linux where the natural errno would be ESRCH.
+    // -----------------------------------------------------------------
+
+    /// Spawn `sh -c <script>` as the leader of its own process group.
+    /// The returned `Child` is deliberately NOT waited on, so the leader
+    /// stays an unreaped corpse after it exits and its PID/PGID cannot be
+    /// recycled — the same anchor discipline the product path relies on.
+    fn spawn_group_leader(script: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        command.spawn().expect("spawn group leader")
+    }
+
+    /// Poll the real census until it satisfies `want`, or fail loudly.
+    ///
+    /// The live count is not asserted exactly for the non-empty case: whether
+    /// `sh -c 'sleep 30'` execs `sleep` in place or forks it is shell-specific
+    /// (measured: dash on the Linux runner forks, so the group holds 2), and
+    /// the property under test is "something is still alive", not how many.
+    fn await_census(pgid: u32, description: &str, want: impl Fn(usize) -> bool) {
+        use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let census = process_group_census(pgid);
+            if let ProcessGroupCensus::Live(live) = census
+                && want(live)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "group {pgid} never became {description}; last census: {census:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn reap(mut child: std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The shipped defect. A group whose only remaining member is the
+    /// unreaped leader corpse has been torn down, so EPERM over it is a
+    /// completed teardown — not an error handed back to the caller.
+    #[test]
+    fn eperm_on_a_corpse_only_group_is_a_completed_teardown() {
+        let child = spawn_group_leader("exit 0");
+        let pgid = child.id();
+        // The leader exits; the corpse is not counted as a live member.
+        await_census(pgid, "empty of live members", |live| live == 0);
+
+        classify_group_kill_failure(pgid, std::io::Error::from_raw_os_error(libc::EPERM))
+            .expect("a group holding only the unreaped leader corpse must count as torn down");
+
+        reap(child);
+    }
+
+    /// Non-vacuity. The tolerance above must not extend to a group that
+    /// genuinely still holds something that can execute — that is a real
+    /// containment failure and must stay an error. Without this the fix
+    /// would be strictly worse than the bug it closes.
+    #[test]
+    fn eperm_with_a_live_group_member_is_a_containment_failure() {
+        let child = spawn_group_leader("sleep 30");
+        let pgid = child.id();
+        await_census(pgid, "occupied by a live member", |live| live >= 1);
+
+        let error =
+            classify_group_kill_failure(pgid, std::io::Error::from_raw_os_error(libc::EPERM))
+                .expect_err(
+                    "EPERM over a group that still holds a LIVE member must not be tolerated",
+                );
+        let message = error.to_string();
+        assert!(
+            message.contains("LIVE member(s)") && message.contains("containment has failed"),
+            "the error must name the surviving member, got: {message}"
+        );
+
+        reap(child);
+    }
+
+    /// A census that cannot see is not a census of zero. Process group 0
+    /// means "the caller's own group", so the census refuses to answer for
+    /// it — and an unanswerable census must not excuse EPERM.
+    #[test]
+    fn eperm_over_an_unenumerable_group_is_not_excused() {
+        let error = classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::EPERM))
+            .expect_err("EPERM must not be tolerated when the group cannot be enumerated");
+        assert!(
+            error.to_string().contains("could not be enumerated"),
+            "got: {error}"
+        );
+    }
+
+    /// ESRCH keeps its existing meaning: the group is entirely gone.
+    #[test]
+    fn esrch_remains_a_completed_teardown() {
+        classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::ESRCH))
+            .expect("ESRCH means the group is gone");
+    }
+
+    /// Every other errno still propagates unchanged — the census is only
+    /// consulted for EPERM.
+    #[test]
+    fn an_unrelated_errno_propagates_unchanged() {
+        let error = classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::EINVAL))
+            .expect_err("EINVAL is not a teardown");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EINVAL),
+            "the original error must reach the caller intact"
+        );
+    }
+
+    /// End-to-end counterpart of the unit tests above, and the paired
+    /// discriminator for `c9_close_kills_child_and_marks_dead`: c9's server
+    /// (`cat >/dev/null`) is still alive at `close()`, this one has already
+    /// exited, and only the exited case ever hit the Darwin EPERM path. Every
+    /// well-behaved MCP server that shuts itself down is this case.
+    #[tokio::test]
+    async fn close_after_the_server_exits_on_its_own_is_not_an_error() {
+        let transport = StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'"#.to_string(),
+            ],
+            &no_env(),
+        )
+        .await
+        .expect("spawn self-exiting fixture");
+
+        transport
+            .request(&JsonRpcRequest::new(1, "ping", None))
+            .await
+            .expect("fixture response");
+
+        // The server exits after that one line; wait until its group holds
+        // nothing that can execute, so `close()` runs against the corpse.
+        let pgid = transport
+            .process_group_id
+            .expect("unix spawn must record a process group");
+        await_census(pgid, "empty of live members", |live| live == 0);
+
+        transport
+            .close()
+            .await
+            .expect("closing a server that already exited must not report a teardown failure");
     }
 
     /// F-016 — the real transport applies the canonical sanitized context:
