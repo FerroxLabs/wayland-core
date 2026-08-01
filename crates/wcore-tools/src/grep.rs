@@ -204,35 +204,8 @@ async fn try_grep(
     case_insensitive: bool,
     search_root: Option<&Path>,
 ) -> ToolResult {
-    // #661 (Windows half) — resolve the target BEFORE spawning anything.
-    //
-    // The exit-code guard below is sufficient for POSIX `grep` (>=2 == error)
-    // but is a no-op on Windows: `findstr` returns exit **1** with empty stdout
-    // both for a clean no-match and for "FINDSTR: Cannot open <path>". Measured
-    // on Windows 10.0.26200: an explicitly named missing file exits 1, and a
-    // missing directory under the `<dir>\*` lowering exits 1 with no output at
-    // all. So an unreadable target was reported as "No matches found" with
-    // is_error=false — the model concludes the symbol is undefined and deletes
-    // live code. A stat of the target makes "could not look" unrepresentable as
-    // "looked and found nothing", on every platform.
-    //
-    // Resolve against `search_root` because that is the subprocess cwd (F36), so
-    // a relative `path` must be interpreted the same way here as it will be
-    // there.
-    let target = match search_root {
-        Some(root) => root.join(path),
-        None => std::path::PathBuf::from(path),
-    };
-    let is_dir = match std::fs::metadata(&target) {
-        Ok(meta) => meta.is_dir(),
-        Err(e) => {
-            return ToolResult {
-                content: format!("grep error: cannot search {path:?}: {e}"),
-                is_error: true,
-            };
-        }
-    };
-
+    // RED-PROOF BUILD ONLY — production pre-flight deliberately removed so the
+    // new guards run against the pre-fix behaviour. Not for merge.
     // F43: route through `shell_command_argv` (argv mode, no shell) on both
     // platforms for consistent PATHEXT resolution + kill-on-drop.
     let mut cmd = if cfg!(windows) {
@@ -245,32 +218,10 @@ async fn try_grep(
         // regex contract). The `/C:` value is a single argv entry, so a leading
         // `/` in the pattern can no longer be switch-parsed.
         //
-        // #661 (single file) — findstr has no recursive-directory form, so a
-        // DIRECTORY must be lowered to a `<dir>\*` wildcard. Applying that
-        // lowering to a FILE yields `file.rs\*`, which matches nothing: exit 1,
-        // empty stdout, reported as "No matches found" for a pattern the file
-        // demonstrably contains. Pass a file through verbatim, and drop `/S`
-        // with it so a same-named file in a subdirectory cannot be picked up
-        // instead.
-        //
-        // #661 (drive walk) — build the spec from the RESOLVED absolute target,
-        // never from the raw argument. `path.trim_end_matches(['\\', '/'])` maps
-        // both "" and "/" to the empty string, so the spec became `\*` — the
-        // root of the current drive — and `/S` then walked the entire drive.
-        // (Measured: still running after 25s, against 157ms for the same scan
-        // scoped to its intended directory.)
-        let resolved = std::path::absolute(&target).unwrap_or_else(|_| target.clone());
-        let resolved = resolved.to_string_lossy().into_owned();
-        let spec = if is_dir {
-            format!("{}\\*", resolved.trim_end_matches(['\\', '/']))
-        } else {
-            resolved
-        };
+        // RED-PROOF BUILD ONLY — original unconditional `<path>\*` lowering.
+        let spec = format!("{}\\*", path.trim_end_matches(['\\', '/']));
         let cflag = format!("/C:{pattern}");
-        let mut args: Vec<&str> = vec!["/N", "/R"];
-        if is_dir {
-            args.push("/S");
-        }
+        let mut args: Vec<&str> = vec!["/S", "/N", "/R"];
         if case_insensitive {
             args.push("/I");
         }

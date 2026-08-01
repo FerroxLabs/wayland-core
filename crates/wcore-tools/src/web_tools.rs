@@ -564,15 +564,11 @@ impl WebTool {
         // condition. Name the rejected urls and their reasons so the model can
         // correct the input instead of retrying an unsatisfiable call.
         if safe.is_empty() {
-            let detail = rejected
-                .iter()
-                .map(|r| format!("{}: {}", r.url, r.reason))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return err_result(&format!(
-                "All {} URL(s) were rejected, nothing was fetched — {detail}",
-                urls.len(),
-            ));
+            // RED-PROOF BUILD ONLY — original success-on-total-rejection.
+            return ok_result(json!({
+                "success": true,
+                "results": rejected_to_rows(&rejected),
+            }));
         }
 
         let req = ExtractRequest {
