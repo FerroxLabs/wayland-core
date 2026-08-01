@@ -766,6 +766,55 @@ mod windows_snapshot_security {
         super::super::lease::ensure_path_identity(file, path)
     }
 
+    /// Install a DACL **without** the post-write identity re-probe.
+    ///
+    /// [`set_identity_bound_file_dacl`] closes a TOCTOU window by re-opening
+    /// the path after the write and confirming it is still the same file. That
+    /// guard is right for production, where every DACL this code installs is
+    /// `Allow <this user>` and therefore always leaves the writer able to open
+    /// its own file. It is unusable for the hostile fixtures below, whose whole
+    /// purpose is to install a DACL that denies the caller.
+    ///
+    /// The mechanism, measured on the Windows box 2026-08-01 at `5d1eda16`:
+    /// the re-probe runs `ensure_path_identity` -> `open_identity_probe`, which
+    /// opens the path with `read(true)`. Windows grants a file's OWNER
+    /// `READ_CONTROL` and `WRITE_DAC` implicitly whatever the DACL says — which
+    /// is why `open_security_handle` (`READ_CONTROL | WRITE_DAC`) still
+    /// succeeds — but it grants NO implicit `GENERIC_READ`. So the moment the
+    /// fixture installs `Deny Everyone` or an empty DACL, the read re-probe
+    /// fails with `ERROR_ACCESS_DENIED` (5) and the INSTALLER returns an error.
+    ///
+    /// Consequence before this change: `windows_private_dacl_rejects_null_empty_and_broad_allow`
+    /// and `windows_private_dacl_accepts_restrictive_deny_ace` both panicked
+    /// inside the installer, so neither had ever reached — let alone executed —
+    /// the `validate_private_file` assertion they exist to make. Two of the
+    /// four failures the 2026-07-31 triage filed as root cause W3
+    /// ("code writes a restrictive DACL then cannot reopen its own file").
+    /// The production path was never affected; only the fixtures were.
+    #[cfg(test)]
+    fn set_hostile_file_dacl(
+        file: &File,
+        path: &Path,
+        acl: Option<&PrivateAcl>,
+        protected: bool,
+    ) -> Result<(), JournalError> {
+        let security_file = open_security_handle(file, path)?;
+        set_file_dacl(&security_file, acl, protected).map_err(|source| JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Hand a hostile fixture file back to `NamedTempFile::drop`.
+    ///
+    /// A `Deny Everyone` or empty DACL also denies DELETE, so the temp file
+    /// would survive its own test and accumulate in `%TEMP%` every run. The
+    /// owner's implicit `WRITE_DAC` is what makes this possible at all.
+    #[cfg(test)]
+    pub(super) fn release_hostile_dacl(file: &File, path: &Path) {
+        let _ = set_hostile_file_dacl(file, path, None, false);
+    }
+
     pub(super) fn secure_private_file(file: &File, path: &Path) -> Result<(), JournalError> {
         let user = token_user().map_err(|source| JournalError::Io {
             path: path.to_path_buf(),
@@ -892,13 +941,13 @@ mod windows_snapshot_security {
 
     #[cfg(test)]
     pub(super) fn install_null_dacl(file: &File, path: &Path) -> std::io::Result<()> {
-        set_identity_bound_file_dacl(file, path, None, true).map_err(std::io::Error::other)
+        set_hostile_file_dacl(file, path, None, true).map_err(std::io::Error::other)
     }
 
     #[cfg(test)]
     pub(super) fn install_empty_dacl(file: &File, path: &Path) -> std::io::Result<()> {
         let acl = build_acl(&[])?;
-        set_identity_bound_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
+        set_hostile_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
     }
 
     #[cfg(test)]
@@ -908,7 +957,7 @@ mod windows_snapshot_security {
         let user = token_user()?;
         let world = well_known_sid(WinWorldSid)?;
         let acl = build_acl(&[(AceKind::Allow, user.sid()), (AceKind::Allow, world.sid())])?;
-        set_identity_bound_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
+        set_hostile_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
     }
 
     #[cfg(test)]
@@ -918,7 +967,7 @@ mod windows_snapshot_security {
         let user = token_user()?;
         let world = well_known_sid(WinWorldSid)?;
         let acl = build_acl(&[(AceKind::Deny, world.sid()), (AceKind::Allow, user.sid())])?;
-        set_identity_bound_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
+        set_hostile_file_dacl(file, path, Some(&acl), true).map_err(std::io::Error::other)
     }
 
     #[cfg(test)]
@@ -1453,8 +1502,12 @@ mod tests {
         ] {
             let temp = tempfile::NamedTempFile::new().unwrap();
             install(temp.as_file(), temp.path()).unwrap();
+            let verdict = validate_private_snapshot_file(temp.as_file(), temp.path());
+            // Before the assertion, so a failing assertion still leaves a
+            // deletable temp file behind.
+            windows_snapshot_security::release_hostile_dacl(temp.as_file(), temp.path());
             assert!(matches!(
-                validate_private_snapshot_file(temp.as_file(), temp.path()),
+                verdict,
                 Err(JournalError::SnapshotUnsafePermissions { .. })
             ));
         }
@@ -1467,7 +1520,9 @@ mod tests {
         windows_snapshot_security::install_restrictive_deny_dacl(temp.as_file(), temp.path())
             .unwrap();
 
-        validate_private_snapshot_file(temp.as_file(), temp.path()).unwrap();
+        let verdict = validate_private_snapshot_file(temp.as_file(), temp.path());
+        windows_snapshot_security::release_hostile_dacl(temp.as_file(), temp.path());
+        verdict.unwrap();
     }
 
     #[cfg(windows)]

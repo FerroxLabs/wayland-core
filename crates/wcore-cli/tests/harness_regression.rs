@@ -1205,6 +1205,10 @@ async fn r012_honcho_fallback_on_no_key() {
         "claude-sonnet-4-20250514",
         "sk-ant-harness-r012-000000",
     );
+    // The ONLY variable that relocates the engine's home on all three
+    // platforms. See the note on `.env("WAYLAND_HOME", ...)` below.
+    let isolated_home = home.path().join("wayland-home");
+    std::fs::create_dir_all(&isolated_home).expect("create isolated WAYLAND_HOME");
 
     let mut child = AsyncCommand::new(&bin)
         .arg("--yolo")
@@ -1224,8 +1228,34 @@ async fn r012_honcho_fallback_on_no_key() {
         // preserved by pinning a known-fake value rather than by removing the
         // variable; no request is made before `stop`.
         .env("ANTHROPIC_API_KEY", "sk-ant-harness-r012-000000")
-        // Do not inherit a developer's or host's isolated profile.
-        .env_remove("WAYLAND_HOME")
+        // PIN the home; do NOT remove it. This line used to be
+        // `.env_remove("WAYLAND_HOME")` under the comment "do not inherit a
+        // developer's or host's isolated profile" — which is exactly backwards
+        // on Windows, and is why this test was the one W9 failure in the
+        // 2026-07-31 triage.
+        //
+        // `wayland_config_dir()` (wcore-config/src/config.rs) resolves
+        // `WAYLAND_HOME` -> `XDG_DATA_HOME` -> `dirs::config_dir()`. On Windows
+        // `dirs::config_dir()` is the FOLDERID_RoamingAppData known folder,
+        // which is read from the OS and ignores `HOME` entirely. So with
+        // `WAYLAND_HOME` removed and only `HOME` set, this test did not run
+        // against an empty profile — it ran against whatever the invoking
+        // account has in `%APPDATA%\wayland-core`. Measured on the Windows box
+        // 2026-08-01: the real profile there carries
+        // `[storage.credentials] backend = "plaintext"` with
+        // `[session] enabled = true`, which `reject_backend_without_confidential_storage`
+        // refuses BY DESIGN, so the engine emitted
+        // `{"type":"error","code":"init_failed",...}` instead of `ready` and
+        // the assertion below reported "no ready event". Nothing was wrong with
+        // the engine; the test was reading someone else's config.
+        //
+        // Same binary, same box, same second, `WAYLAND_HOME` pinned to an empty
+        // directory: `{"type":"ready",...,"user_model_backend":"local",...}`.
+        //
+        // `HOME` stays set for the Unix legs (it is what `~/.wayland` and
+        // `dirs::config_dir()` resolve from there), but it is `WAYLAND_HOME`
+        // that makes the isolation real on every platform.
+        .env("WAYLAND_HOME", &isolated_home)
         .env_remove("HONCHO_API_KEY")
         .env("RUST_LOG", "info")
         .stdin(std::process::Stdio::piped())

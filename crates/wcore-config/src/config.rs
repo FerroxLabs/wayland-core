@@ -8463,6 +8463,84 @@ skills_lifecycle = true
         );
     }
 
+    /// `HOME` IS NOT AN ISOLATION MECHANISM ON WINDOWS. Only `WAYLAND_HOME` is.
+    ///
+    /// Integration tests across this workspace spawn `wayland-core` with
+    /// `.env("HOME", tmp)` and believe that gives them an empty profile. On
+    /// Unix it does — `dirs::config_dir()` resolves through `$HOME`. On Windows
+    /// it does NOT: `dirs::config_dir()` is the `FOLDERID_RoamingAppData` known
+    /// folder, read from the OS, and `HOME` is not consulted at any point. The
+    /// spawned engine therefore reads the INVOKING ACCOUNT's real
+    /// `%APPDATA%\wayland-core\config.toml`.
+    ///
+    /// That is not theoretical. `harness_regression::r012_customer_flow_user_model`
+    /// removed `WAYLAND_HOME` and set only `HOME`, and on the Windows box the
+    /// ambient profile there carries `[storage.credentials] backend =
+    /// "plaintext"` — a configuration
+    /// `reject_backend_without_confidential_storage` refuses by design. The
+    /// engine emitted `init_failed` instead of `ready`, and the 2026-07-31
+    /// triage recorded it as root cause W9, "`--json-stream` never emits
+    /// `ready` on Windows — HIGH, real product defect". It was neither: the
+    /// same binary on the same box emits `ready` in under a second once
+    /// `WAYLAND_HOME` is pinned to an empty directory.
+    ///
+    /// Both arms are asserted, not just the Windows one. The Unix arm is what
+    /// makes the trap invisible to everyone who develops on a Mac or a Linux
+    /// box, so if it ever stops holding, this test should say so rather than
+    /// leave the Windows arm looking like an arbitrary platform quirk.
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn home_alone_isolates_on_unix_and_does_not_isolate_on_windows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake_home = tmp.path().join("fake-home");
+        std::fs::create_dir_all(&fake_home).expect("create fake home");
+
+        let keys = ["WAYLAND_HOME", "XDG_DATA_HOME", "HOME"];
+        let prev: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        unsafe {
+            std::env::remove_var("WAYLAND_HOME");
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::set_var("HOME", &fake_home);
+        }
+        let with_home_only = wayland_config_dir();
+
+        // The remedy, measured in the same test so the claim "pin WAYLAND_HOME
+        // instead" is proven rather than asserted.
+        unsafe { std::env::set_var("WAYLAND_HOME", &fake_home) };
+        let with_wayland_home = wayland_config_dir();
+
+        for (k, v) in prev {
+            match v {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+
+        assert_eq!(
+            with_wayland_home, fake_home,
+            "WAYLAND_HOME must relocate the config dir on every platform — it is \
+             the first branch of wayland_config_dir()"
+        );
+
+        if cfg!(windows) {
+            assert!(
+                !with_home_only.starts_with(&fake_home),
+                "HOME appears to relocate the config dir on Windows (got {}). If \
+                 that is now genuinely true, the isolation advice in this test's \
+                 doc comment and in harness_regression's r012 is stale and must \
+                 be rewritten — do not just delete this assertion.",
+                with_home_only.display()
+            );
+        } else {
+            assert!(
+                with_home_only.starts_with(&fake_home),
+                "HOME no longer relocates the config dir on this Unix host (got \
+                 {}); the Windows-only nature of this trap is what this arm pins",
+                with_home_only.display()
+            );
+        }
+    }
+
     // -------------------------------------------------------------------------
     // profile_home() — canonical ~/.wayland resolution (B1)
     // -------------------------------------------------------------------------
