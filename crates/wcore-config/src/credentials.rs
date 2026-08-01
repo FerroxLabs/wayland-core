@@ -4248,9 +4248,9 @@ mod tests {
         assert_eq!(
             keyring_ops,
             vec![
-                "get:k".to_string(),   // ladder read: keyring miss
-                "put:k".to_string(),   // 1. write-new
-                "get:k".to_string(),   // 2. verify-readback
+                "get:k".to_string(), // ladder read: keyring miss
+                "put:k".to_string(), // 1. write-new
+                "get:k".to_string(), // 2. verify-readback
             ],
             "unexpected keyring op sequence: {keyring_ops:?}"
         );
@@ -4418,7 +4418,9 @@ mod tests {
             legacy_path.clone(),
         );
 
-        ladder.put("k", "v").expect("the vault must catch the write");
+        ladder
+            .put("k", "v")
+            .expect("the vault must catch the write");
         assert_eq!(
             vault.snapshot(),
             vec![("k".to_string(), "v".to_string())],
@@ -4546,7 +4548,10 @@ mod tests {
         // The directory the store created must be 0700 (kimi-code's umask
         // lesson: create_dir_all's mode is masked and only applies on create).
         let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(dir_mode, 0o700, "the vault directory must be 0700, got {dir_mode:#o}");
+        assert_eq!(
+            dir_mode, 0o700,
+            "the vault directory must be 0700, got {dir_mode:#o}"
+        );
 
         // Now loosen it and require a refusal.
         std::fs::set_permissions(&cipher, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -4554,7 +4559,9 @@ mod tests {
             .get("k")
             .expect_err("a world-readable vault must be refused");
         assert!(
-            error.to_string().contains("readable by accounts other than its owner"),
+            error
+                .to_string()
+                .contains("readable by accounts other than its owner"),
             "the refusal must say why and how to fix it: {error}"
         );
     }

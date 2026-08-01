@@ -403,7 +403,10 @@ fn add_cmd(
     let mut doc = load_doc(config_path)?;
     let slug = provider.slug();
     let Some(slot) = store_slot(provider) else {
-        bail!("{} authenticates out-of-band and has no API key slot", provider.label());
+        bail!(
+            "{} authenticates out-of-band and has no API key slot",
+            provider.label()
+        );
     };
 
     let store = credentials_store(config_path, &doc)?;
@@ -468,9 +471,9 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
     let removed_store = match (credentials_store(config_path, &doc), store_slot(provider)) {
         (Ok(store), Some(slot)) => {
             let had = store.get(&slot).unwrap_or_default().is_some();
-            store
-                .delete(&slot)
-                .with_context(|| format!("removing the {} API key from the store", provider.label()))?;
+            store.delete(&slot).with_context(|| {
+                format!("removing the {} API key from the store", provider.label())
+            })?;
             had
         }
         (Err(error), _) => {
@@ -796,7 +799,10 @@ mod tests {
         fn scoped(home: &std::path::Path) -> Self {
             let pairs: [(&'static str, Option<String>); 3] = [
                 ("WAYLAND_HOME", Some(home.display().to_string())),
-                ("WAYLAND_VAULT_PASSPHRASE", Some("auth-test-passphrase".into())),
+                (
+                    "WAYLAND_VAULT_PASSPHRASE",
+                    Some("auth-test-passphrase".into()),
+                ),
                 ("WAYLAND_VAULT_PASSPHRASE_FD", None),
             ];
             let saved = pairs
@@ -892,7 +898,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stored_key(&path, "anthropic").as_deref(), Some("sk-ant-NEW"));
+        assert_eq!(
+            stored_key(&path, "anthropic").as_deref(),
+            Some("sk-ant-NEW")
+        );
         let body = fs::read_to_string(&path).unwrap();
         assert!(
             !body.contains("sk-ant-OLD-cleartext"),
@@ -912,21 +921,24 @@ mod tests {
     fn add_refuses_rather_than_writing_cleartext_when_no_secure_tier_exists() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-            ["WAYLAND_HOME", "WAYLAND_VAULT_PASSPHRASE", "WAYLAND_VAULT_PASSPHRASE_FD"]
-                .iter()
-                .map(|key| {
-                    let prior = std::env::var_os(key);
-                    unsafe {
-                        if *key == "WAYLAND_HOME" {
-                            std::env::set_var(key, dir.path());
-                        } else {
-                            std::env::remove_var(key);
-                        }
-                    }
-                    (*key, prior)
-                })
-                .collect();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = [
+            "WAYLAND_HOME",
+            "WAYLAND_VAULT_PASSPHRASE",
+            "WAYLAND_VAULT_PASSPHRASE_FD",
+        ]
+        .iter()
+        .map(|key| {
+            let prior = std::env::var_os(key);
+            unsafe {
+                if *key == "WAYLAND_HOME" {
+                    std::env::set_var(key, dir.path());
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+            (*key, prior)
+        })
+        .collect();
 
         let err = run_with_path(
             AuthCmd::Add {
@@ -953,7 +965,10 @@ mod tests {
             "the refusal must be actionable: {rendered}"
         );
         assert!(
-            !path.exists() || !fs::read_to_string(&path).unwrap().contains("sk-ant-refused"),
+            !path.exists()
+                || !fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("sk-ant-refused"),
             "a refused add must not write the key into config.toml"
         );
         assert!(
@@ -1122,7 +1137,10 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert!(stored_key(&path, "xai").is_none(), "store copy must be gone");
+        assert!(
+            stored_key(&path, "xai").is_none(),
+            "store copy must be gone"
+        );
         assert!(
             legacy_config_key(&load_doc(&path).unwrap(), "xai").is_none(),
             "legacy cleartext copy must be gone too"

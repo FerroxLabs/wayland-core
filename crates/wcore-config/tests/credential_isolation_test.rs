@@ -197,7 +197,9 @@ fn no_passphrase_refuses_the_write_instead_of_downgrading_to_plaintext() {
     // store that is broken for every input.
     let _g3 = EnvGuard::set(&[("WAYLAND_VAULT_PASSPHRASE", PASS)]);
     let store = open_store(&cfg, &h.path().join("credentials.toml")).expect("open with vault");
-    store.put(KEY, "secret-plain").expect("the vault accepts it");
+    store
+        .put(KEY, "secret-plain")
+        .expect("the vault accepts it");
     assert_eq!(
         store.get(KEY).expect("get").as_deref(),
         Some("secret-plain")

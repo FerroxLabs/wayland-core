@@ -219,7 +219,8 @@ fn without_any_secure_tier_a_put_fails_closed_rather_than_downgrading() {
     // remedy. A refusal the operator cannot act on is how they end up reaching
     // for the thing the refusal exists to prevent.
     assert!(
-        message.contains("WAYLAND_VAULT_PASSPHRASE_FD") && message.contains("WAYLAND_VAULT_PASSPHRASE"),
+        message.contains("WAYLAND_VAULT_PASSPHRASE_FD")
+            && message.contains("WAYLAND_VAULT_PASSPHRASE"),
         "the refusal must name the vault passphrase route: {message}"
     );
     assert!(
@@ -296,7 +297,10 @@ fn the_explicit_plaintext_backend_still_works_when_the_operator_names_it() {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "even the opt-in file must be 0600, got {mode:#o}");
+        assert_eq!(
+            mode, 0o600,
+            "even the opt-in file must be 0600, got {mode:#o}"
+        );
     }
 }
 
@@ -323,7 +327,10 @@ fn an_existing_cleartext_install_still_reads_when_no_secure_tier_exists() {
             .put(KEY, SECRET)
             .unwrap();
     }
-    assert!(credentials_path.exists(), "fixture must seed the legacy file");
+    assert!(
+        credentials_path.exists(),
+        "fixture must seed the legacy file"
+    );
 
     // Now open the DEFAULT (Auto) ladder on the same host. No keyring, no vault.
     let _env = home_without_any_secure_tier(home.path());

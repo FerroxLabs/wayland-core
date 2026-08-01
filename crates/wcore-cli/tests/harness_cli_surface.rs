@@ -210,7 +210,10 @@ fn auth_add_without_a_secure_tier_refuses_and_writes_no_cleartext() {
 
     // Now the real assertion: nothing anywhere under HOME, in any file.
     if let Some(leaked) = find_cleartext(home.path(), api_key) {
-        panic!("the refused key was written in cleartext to {}", leaked.display());
+        panic!(
+            "the refused key was written in cleartext to {}",
+            leaked.display()
+        );
     }
 }
 
