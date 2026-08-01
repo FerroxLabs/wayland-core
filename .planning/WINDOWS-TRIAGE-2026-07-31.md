@@ -599,6 +599,103 @@ instead of removing it. A new contract test,
 `wcore-config config::tests::home_alone_isolates_on_unix_and_does_not_isolate_on_windows`,
 pins the platform fact on BOTH arms so the trap cannot go quiet again.
 
+### 9.1b W9's root cause, measured — a 15s sandbox probe on the startup path
+
+Superseding the two "candidate explanations I did not get to test" in §9.1a.
+Both were wrong, and one of the facts §9.1a rests on does not reproduce.
+
+**Step 5 does not reproduce.** Same box, tree at `1d032188` + this lane's
+instrumentation, `D:\w9`, `cargo nextest run -p wcore-cli --no-fail-fast`
+(2400 tests, 151s), then r012 alone immediately after:
+
+| # | what | result |
+|---|---|---|
+| 1 | r012 alone, cold | **PASS [4.731s]** |
+| 2 | full `wcore-cli` suite | r012 **FAIL [31.466s]** |
+| 3 | r012 alone, straight after the full suite | **PASS [2.285s]** |
+
+So the `WAYLAND_HOME` pin DOES hold. §9.1a's step 5 ("plaintext `init_failed`
+again") is not a property of this tree. A direct measurement of what an isolated
+engine launch touches confirms it: snapshotting every file under
+`%APPDATA%\wayland-core`, `%APPDATA%\wayland-core-profiles`,
+`%LOCALAPPDATA%\wayland-core`, `%USERPROFILE%\.wayland` and
+`%USERPROFILE%\.wayland-core` around one `--json-stream` launch with
+`WAYLAND_HOME` pinned reports **`(none)` created, modified or deleted**. Nothing
+on the nextest path reaches ambient config. That hypothesis is closed.
+
+**The real cause was invisible because r012 discarded it.** The ready-event
+layer spawned the engine with `.stderr(Stdio::null())`, so a timeout produced
+the words "no ready event" and nothing else — which is precisely why two lanes
+could not name the mechanism. r012 now pipes and drains the engine's stderr and
+prints it, with the measured elapsed time, in the failure. The first run with
+that change says it outright:
+
+```
+R-012 FAIL: no ready event on stdout within 10s (waited 10.014159s)
+engine stderr:
+  ...
+  2026-08-01T03:25:55.938146Z  WARN not advertising browser_suite: ...
+  2026-08-01T03:26:10.942634Z ERROR AppContainer probe exceeded its hard
+    wall-clock guard — a Win32 setup call (CreateAppContainerProfile /
+    CreateProcessAsUserW) stalled, most likely an AV image scan or
+    profile-service RPC. ... guard_secs=15
+```
+
+`03:25:55.938` → `03:26:10.942` is 15.004s: the probe's own guard, burned in
+full, inside engine startup, before `ready`.
+
+**The chain, in source:**
+
+1. `crates/wcore-agent/src/bootstrap.rs:1079` — every session resolves its
+   sandbox runtime via `SandboxRegistry::required_for_session(...)` during
+   bootstrap, before `ready` is emitted.
+2. `crates/wcore-sandbox/src/lib.rs:407` → `real_platform_backend()`
+   (`lib.rs:651`) → `lib.rs:672` `AppContainerBackend::is_available()`.
+3. `crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs:288`
+   `probe_appcontainer_available()` — a REAL `cmd.exe /c exit 0` through the
+   whole AppContainer pipeline, bounded by `PROBE_WALL_CLOCK` = **15s**
+   (`process.rs:314`).
+
+**Why 15s is the whole bug, not bad luck.** The guard is longer than r012's 10s
+ready deadline, so any run that reaches the guard misses the deadline
+deterministically — there is no threshold at which the test could have been
+lucky. Idle, the same launch reaches `ready` in **750 ms** and r012 finishes in
+2.2s, so this is not gradual degradation under load: it is a hard stall in
+`CreateAppContainerProfile`, which is an RPC into a Windows global service that
+dozens of concurrent engine spawns serialize on. `probe_gate()` single-flights
+the probe WITHIN a process; nothing coordinates ACROSS processes, so a 2400-test
+suite pays it once per engine child.
+
+**It is not only r012.** The same 15s signature accounts for most of the
+Windows suite's remaining reds, all of which spawn an engine and all of which
+die at the guard, not at their own logic:
+
+```
+TRY 2 FAIL [15.044s] wcore-cli::tool_formatter_real_payloads bash_stderr_is_surfaced
+TRY 2 FAIL [15.036s] wcore-cli::tool_formatter_real_payloads bash_success_renders_the_real_exit_code_and_byte_count
+TRY 2 FAIL [15.035s] wcore-cli::tool_formatter_real_payloads bash_failure_never_reports_exit_zero
+TRY 2 FAIL [15.083s] wcore-cli::sandbox_activeness sandbox_exec_confines_a_write_that_escapes_the_workspace
+```
+
+**And it is a product defect, not a test defect.** A Windows user whose AV is
+mid-scan waits 15 seconds for `ready` on every launch, and Wayland Desktop
+consumes `ready` before it can show anything.
+
+**NOT FIXED HERE, and why.** The fix is to take the probe off the readiness
+path: resolve the platform backend lazily behind a once-only cell so the
+verdict is computed at first sandboxed execution rather than at bootstrap. That
+is safe on the fail-closed axis — `required_for_session` already substitutes
+`FailClosedBackend` rather than refusing to start (`lib.rs:407`), so deferral
+does not turn a refusal into a silent bypass. It is NOT safe to land blind,
+because `bootstrap.rs:2909` puts `sandbox_runtime().backend_name()` into the
+`WorkspacePolicyReceipt` a host reads, and `bootstrap.rs:2686`/`:2805` read
+`enforces_read_deny()` for channel tool posture. Deferring the probe therefore
+requires deciding what a host is told about the backend before the verdict
+exists — a protocol-visible decision on a security boundary, on the one platform
+that cannot be exercised locally. Raising r012's deadline past 15s would hide
+exactly this, so it is not done: `READY_DEADLINE` stays at 10s and now carries
+the measurement that justifies it.
+
 Only two `env_remove("WAYLAND_HOME")` sites exist in the workspace; the other
 (`json_stream_startup_refusal.rs:242`) has absent-`WAYLAND_HOME` as its
 condition under test and is correct. The packaged-CLI families

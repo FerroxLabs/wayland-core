@@ -197,6 +197,19 @@ fn maybe_eval_binary() -> Option<std::path::PathBuf> {
     None
 }
 
+/// How long R-012's raw ready-event layer waits for the engine's first line.
+///
+/// MEASURED, not guessed. On an idle Windows box (SeanDesktop, debug build) the
+/// engine answers in ~0.75 s and the whole test finishes in ~2.3 s; on Linux it
+/// is well under that. The deadline is deliberately more than a magnitude above
+/// the measured cost so that a run which crosses it has a real problem — either
+/// the engine refused to start (its stderr is captured and printed) or it was
+/// not scheduled, and the two are now distinguishable in the failure text.
+///
+/// Do NOT raise this to make a contended suite green. The scheduling pressure
+/// belongs in `.config/nextest.toml`; the deadline is the product statement.
+const READY_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Seed a hermetic env suitable for json-stream invocation:
 /// `<root>/.wayland-core/config.toml` with absolute session dir.
 /// Returns (tempdir, sessions_path).
@@ -1260,36 +1273,62 @@ async fn r012_honcho_fallback_on_no_key() {
         .env("RUST_LOG", "info")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        // NOT `Stdio::null()`. When this wait times out, the engine's own
+        // stderr is the only thing that can distinguish "refused to start and
+        // said why" from "started fine but was not scheduled in time", and
+        // discarding it is why W9 survived two lanes as an unexplained
+        // deadline. Piped and drained concurrently below — inheriting it would
+        // interleave with nextest's capture, and leaving a piped stderr
+        // undrained deadlocks the child once the pipe buffer fills.
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .expect("spawn for ready-event check");
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
     let mut reader = BufReader::new(stdout).lines();
+    let stderr_pump = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut collected = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.push(line);
+        }
+        collected.join("\n")
+    });
 
-    let ready_line: Option<String> =
-        tokio::time::timeout(Duration::from_secs(10), reader.next_line())
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .flatten();
+    let started = Instant::now();
+    let ready_line: Option<String> = tokio::time::timeout(READY_DEADLINE, reader.next_line())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten();
+    let ready_elapsed = started.elapsed();
 
     let _ = stdin.write_all(b"{\"type\":\"stop\"}\n").await;
     let _ = stdin.flush().await;
     drop(stdin);
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let engine_stderr = tokio::time::timeout(Duration::from_secs(5), stderr_pump)
+        .await
+        .map(|joined| joined.unwrap_or_default())
+        .unwrap_or_else(|_| "<engine stderr did not close>".to_string());
 
     // Hard, all three steps. Each `if let` that used to guard this chain was a
     // way for the layer to pass by not running: no ready line, unparseable
     // line, or an absent `user_model_backend` field all read as success. F-093
     // is exactly the promise that this field is populated, so its absence is
     // the regression, not an excuse to skip.
-    let line = ready_line.expect(
-        "R-012 FAIL: no ready event on stdout within 10s — the engine did not \
-         reach the ready state, so the F-093 backend tag could not be checked.",
-    );
+    let Some(line) = ready_line else {
+        panic!(
+            "R-012 FAIL: no ready event on stdout within {:?} (waited {ready_elapsed:?}) — \
+             the engine did not reach the ready state, so the F-093 backend tag could not \
+             be checked.\nengine stderr:\n{engine_stderr}",
+            READY_DEADLINE
+        );
+    };
+    eprintln!("[R-012] ready event arrived in {ready_elapsed:?}");
     let event: Value = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("R-012 FAIL: first stdout line is not JSON: {e}\n{line}"));
     let backend = event

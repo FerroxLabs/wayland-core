@@ -26,7 +26,10 @@ use wcore_eval_scenarios::fixtures::remote_execution::{
 };
 use wcore_eval_scenarios::fixtures::repository::{SeededRepository, repository_tree_sha256};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::receipt::{ReceiptVerifier, VerificationPolicy, VerifiedAuthority};
+use wcore_eval_scenarios::receipt::{
+    Evidence, EvidenceReceiptV1, ReceiptVerifier, VerificationPolicy, VerifiedAuthority,
+    milestone_evidence_gaps,
+};
 use wcore_eval_scenarios::receipt_policy::{
     AUTHORITY_POLICY_SCHEMA, AUTHORITY_POLICY_SCHEMA_VERSION, AuthoritativeReceiptPolicyV1,
     AuthorityError, CiProvenanceV1, sign_ci_receipt, verify_authoritative_receipt,
@@ -283,6 +286,20 @@ async fn driver(core: &Path, source: &str, extra_args: &[&str]) -> Output {
     command.output().await.expect("execute wayland-eval driver")
 }
 
+/// Keep a measurement the host actually took; substitute one it cannot take.
+///
+/// Used only to build the positive control for the milestone gate: a host
+/// without a delegated cgroup produces no kernel resource samples at all, so
+/// without this the gate would have no reachable pass state on this machine and
+/// the refusals proved above would be indistinguishable from a gate that always
+/// refuses.
+fn observed_or(evidence: &Evidence<u64>, substitute: u64) -> Evidence<u64> {
+    match evidence {
+        Evidence::Observed { value } => Evidence::observed(*value),
+        Evidence::Unavailable { .. } => Evidence::observed(substitute),
+    }
+}
+
 fn context(output: &Output) -> String {
     format!(
         "status: {}\nstdout:\n{}\nstderr:\n{}",
@@ -316,6 +333,24 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
     let live_script: OpenAiFixtureScript =
         serde_json::from_slice(&fs::read(&openai_path).expect("read bound live OpenAI fixture"))
             .expect("parse bound live OpenAI fixture");
+
+    // The build this run is part of, supplied to the RUN. The signer can only
+    // attest an origin the run recorded for itself, so this file is the single
+    // point at which authoritative provenance enters the evidence chain.
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let provenance = CiProvenanceV1 {
+        repository: "FerroxLabs/wayland-core".to_string(),
+        source_ref: "refs/heads/frontier/m0".to_string(),
+        workflow: "frontier-eval".to_string(),
+        invocation_id: "packaged-driver-gate".to_string(),
+    };
+    let provenance_path = evidence_root.path().join("build-provenance.json");
+    fs::write(
+        &provenance_path,
+        serde_json::to_vec(&provenance).expect("serialize build provenance"),
+    )
+    .expect("write build provenance");
+
     let passing_fixture = live_script
         .start()
         .await
@@ -337,6 +372,8 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
             report_root.to_str().expect("UTF-8 report root"),
             "--fixture-manifest",
             manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--build-provenance",
+            provenance_path.to_str().expect("UTF-8 provenance path"),
         ],
     )
     .await;
@@ -351,12 +388,12 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         .expect("packaged report entry")
         .path()
         .join("receipt.json");
-    let local_json = std::fs::read(&receipt_path).expect("packaged wayland-eval receipt");
-    let local: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
-        serde_json::from_slice(&local_json).expect("parse packaged receipt");
+    let attested_json = std::fs::read(&receipt_path).expect("packaged wayland-eval receipt");
+    let attested: EvidenceReceiptV1 =
+        serde_json::from_slice(&attested_json).expect("parse packaged receipt");
     assert!(
         passed.status.success(),
-        "{}\nreceipt: {local:#?}",
+        "{}\nreceipt: {attested:#?}",
         context(&passed)
     );
     let passed_stdout = String::from_utf8_lossy(&passed.stdout);
@@ -372,26 +409,29 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
     );
 
     assert_eq!(
-        local.body.identity.fixture_sha256, expected_fixture_sha256,
+        attested.body.identity.fixture_sha256, expected_fixture_sha256,
         "wayland-eval did not bind the verified live fixture artifacts"
     );
-    let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let provenance = CiProvenanceV1 {
-        repository: "FerroxLabs/wayland-core".to_string(),
-        source_ref: "refs/heads/frontier/m0".to_string(),
-        workflow: "frontier-eval".to_string(),
-        invocation_id: "packaged-driver-gate".to_string(),
+
+    // ---- the run recorded its own origin, and the signer attests it --------
+    let recorded = match &attested.body.identity.build {
+        Evidence::Observed { value } => value.clone(),
+        other => panic!("--build-provenance did not reach the receipt: {other:#?}"),
     };
+    assert_eq!(recorded.repository, provenance.repository);
+    assert_eq!(recorded.source_ref, provenance.source_ref);
+    assert_eq!(recorded.workflow, provenance.workflow);
+    assert_eq!(recorded.invocation_id, provenance.invocation_id);
     let signed = sign_ci_receipt(
-        &local_json,
+        &attested_json,
         "release-ci",
         BASE64.encode(signing_key.to_bytes()).as_bytes(),
         provenance.clone(),
     )
-    .expect("real wayland-eval receipt must enter the CI signer");
+    .expect("a run that recorded its own provenance must enter the CI signer");
     let mut verifier = ReceiptVerifier::new();
     verifier.trust_ci_key("release-ci", signing_key.verifying_key());
-    let verified = verifier
+    let verification = verifier
         .verify(
             &signed,
             &VerificationPolicy {
@@ -403,7 +443,27 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
             },
         )
         .expect("external trust must verify the packaged receipt signature");
-    assert_eq!(verified.authority, VerifiedAuthority::AuthoritativeCi);
+    assert_eq!(verification.authority, VerifiedAuthority::AuthoritativeCi);
+
+    // Everything a real packaged run can measure on a developer or CI host is
+    // present. The only fields that may still be missing are the kernel
+    // resource samples, which come from the cgroup backend alone and therefore
+    // exist on no macOS or Windows host and on no Linux host without root plus
+    // a delegated cgroup (`process_tree.rs`). Naming the permitted set exactly
+    // is the point: any OTHER gap is a real regression and fails here.
+    let kernel_resource_only: std::collections::BTreeSet<&str> = [
+        "process.peak_memory_bytes",
+        "process.peak_cpu_millis",
+        "process.orphan_count",
+    ]
+    .into_iter()
+    .collect();
+    let gaps = milestone_evidence_gaps(&signed.body);
+    assert!(
+        gaps.iter().all(|gap| kernel_resource_only.contains(gap)),
+        "an attested packaged run must be evidence-complete except for kernel \
+         resource sampling; unexpected gaps: {gaps:?}\nreceipt: {attested:#?}"
+    );
 
     let policy = AuthoritativeReceiptPolicyV1 {
         schema: AUTHORITY_POLICY_SCHEMA.to_string(),
@@ -427,9 +487,32 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         effective_policy_sha256: signed.body.policy.effective_policy_sha256.clone(),
         required_cells: signed.body.required_cells.clone(),
     };
-    let signed_json = serde_json::to_vec(&signed).expect("signed packaged receipt JSON");
+
+    // ---- the reachable PASS -------------------------------------------------
+    //
+    // Supply exactly the kernel resource evidence this host cannot sample,
+    // change nothing else, and the policy accepts the real run. Without this
+    // the refusals proved below would be indistinguishable from a gate that
+    // refuses everything.
+    let mut complete_body = attested.body.clone();
+    complete_body.process.peak_memory_bytes =
+        observed_or(&complete_body.process.peak_memory_bytes, 4 * 1024 * 1024);
+    complete_body.process.peak_cpu_millis = observed_or(&complete_body.process.peak_cpu_millis, 1);
+    complete_body.process.orphan_count = observed_or(&complete_body.process.orphan_count, 0);
+    let complete_signed = sign_ci_receipt(
+        &serde_json::to_vec(
+            &EvidenceReceiptV1::local(complete_body)
+                .expect("structurally valid kernel-complete receipt"),
+        )
+        .expect("serialize kernel-complete receipt"),
+        "release-ci",
+        BASE64.encode(signing_key.to_bytes()).as_bytes(),
+        provenance.clone(),
+    )
+    .expect("kernel-complete attested receipt must enter the CI signer");
+    let signed_json = serde_json::to_vec(&complete_signed).expect("signed packaged receipt JSON");
     verify_authoritative_receipt(&signed_json, &policy)
-        .expect("real packaged receipt must satisfy the authoritative gate");
+        .expect("a kernel-complete attested packaged receipt must satisfy the gate");
 
     let signed_path = evidence_root.path().join("signed-receipt.json");
     let policy_path = evidence_root.path().join("authority-policy.json");
@@ -461,9 +544,71 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         context(&authoritative)
     );
 
-    let mut mislabeled_body = local.body.clone();
+    // ---- the reachable FAIL: a locally produced run ------------------------
+    //
+    // One field back to what the driver writes with no `--build-provenance` —
+    // asserted against a real receipt from exactly such a run at the end of
+    // this test. Nothing else changes, so any refusal below is caused by the
+    // origin of the evidence and by nothing else.
+    let mut local_origin_body = complete_signed.body.clone();
+    local_origin_body.identity.build = Evidence::Unavailable {
+        code: "local_non_authoritative".to_string(),
+    };
+    let local_origin =
+        EvidenceReceiptV1::local(local_origin_body).expect("structurally valid local receipt");
+    assert!(
+        matches!(
+            sign_ci_receipt(
+                &serde_json::to_vec(&local_origin).expect("serialize local-origin receipt"),
+                "release-ci",
+                BASE64.encode(signing_key.to_bytes()).as_bytes(),
+                provenance.clone(),
+            ),
+            Err(AuthorityError::LocalEvidenceOrigin(ref code))
+                if code == "local_non_authoritative"
+        ),
+        "the CI signer must refuse to promote a local run's receipt"
+    );
+    // Signature-first is the other way in, so the release verifier has to
+    // refuse the same receipt without help from the signer.
+    let forged = local_origin.sign_ci("release-ci", &signing_key);
+    let forged_json = serde_json::to_vec(&forged).expect("serialize forged receipt");
+    assert!(
+        matches!(
+            verify_authoritative_receipt(&forged_json, &policy),
+            Err(AuthorityError::Receipt(
+                wcore_eval_scenarios::receipt::ReceiptError::UnsignedAuthoritative
+            ))
+        ),
+        "the authoritative verifier must refuse a signed local-origin receipt"
+    );
+    assert!(
+        milestone_evidence_gaps(&forged.body).contains(&"identity.build"),
+        "the milestone gate must name the local origin as a gap"
+    );
+    let forged_path = evidence_root.path().join("forged-receipt.json");
+    fs::write(&forged_path, &forged_json).expect("write forged packaged receipt");
+    let refused = Command::new(env!("CARGO_BIN_EXE_wayland-receipt"))
+        .args([
+            "verify",
+            "--receipt",
+            forged_path.to_str().expect("UTF-8 forged receipt path"),
+            "--trust-policy",
+            policy_path.to_str().expect("UTF-8 authority policy path"),
+        ])
+        .output()
+        .await
+        .expect("execute authoritative packaged verifier");
+    assert!(!refused.status.success(), "{}", context(&refused));
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("AUTHORITATIVE PASS"),
+        "{}",
+        context(&refused)
+    );
+
+    let mut mislabeled_body = attested.body.clone();
     mislabeled_body.identity.fixture_sha256 = digest(9);
-    let mislabeled_local = wcore_eval_scenarios::receipt::EvidenceReceiptV1::local(mislabeled_body)
+    let mislabeled_local = EvidenceReceiptV1::local(mislabeled_body)
         .expect("structurally valid mislabeled local receipt");
     let mislabeled_signed = sign_ci_receipt(
         &serde_json::to_vec(&mislabeled_local).expect("serialize mislabeled local receipt"),
@@ -480,6 +625,8 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         Err(AuthorityError::PolicyMismatch("fixture_sha256"))
     ));
 
+    // ---- the hard-gate run, and the origin a run records by default --------
+    let failing_report_root = evidence_root.path().join("failing-reports");
     let failing_fixture = OpenAiFixtureScript::new([OpenAiStep::text("WRONG")])
         .start()
         .await
@@ -496,6 +643,10 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
             "--base-url",
             &failing_base_url,
             "--fixture-cost-is-free",
+            "--report-dir",
+            failing_report_root
+                .to_str()
+                .expect("UTF-8 failing report root"),
         ],
     )
     .await;
@@ -514,6 +665,29 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
     assert!(
         failing_observation.complete(),
         "real packaged Core did not consume the hard-gate fixture"
+    );
+
+    // This run was launched WITHOUT `--build-provenance`, which is what a
+    // developer checkout looks like. It is the evidence that the one-field
+    // ablation above reproduces a real receipt rather than an invented one.
+    let failing_receipt_path = std::fs::read_dir(&failing_report_root)
+        .expect("hard-gate report root")
+        .next()
+        .expect("one hard-gate report cell")
+        .expect("hard-gate report entry")
+        .path()
+        .join("receipt.json");
+    let failing_receipt: EvidenceReceiptV1 = serde_json::from_slice(
+        &std::fs::read(&failing_receipt_path).expect("hard-gate wayland-eval receipt"),
+    )
+    .expect("parse hard-gate receipt");
+    assert!(
+        matches!(
+            &failing_receipt.body.identity.build,
+            Evidence::Unavailable { code } if code == "local_non_authoritative"
+        ),
+        "a run with no --build-provenance must record a local origin: {:#?}",
+        failing_receipt.body.identity.build
     );
 }
 #[cfg(target_os = "linux")]
@@ -585,7 +759,7 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
         .expect("attack report entry")
         .path()
         .join("receipt.json");
-    let receipt: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
+    let receipt: EvidenceReceiptV1 =
         serde_json::from_slice(&std::fs::read(receipt_path).expect("attack receipt JSON"))
             .expect("parse attack receipt");
     let bash = receipt
@@ -598,7 +772,7 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
         assert!(!output.status.success(), "{}", context(&output));
         assert!(matches!(
             receipt.body.boundaries.egress_attempted,
-            wcore_eval_scenarios::receipt::Evidence::Unavailable { ref code }
+            Evidence::Unavailable { ref code }
                 if code == "managed_http_egress_recorder_incomplete"
         ));
         assert!(
