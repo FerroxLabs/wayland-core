@@ -14,10 +14,17 @@ use wcore_agent::session_journal::{
     LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION, ProviderAttemptNotStartedReason,
     ProviderAttemptPurpose, ProviderStreamEvent, SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent,
     SessionJournal, SessionSnapshot, StoredToolInput, ToolEffectState, ToolNotStartedReason,
-    TurnState, canonical_journal_root, decode_prepared_provider_request_snapshot, load_snapshot,
+    TurnState, decode_prepared_provider_request_snapshot, load_snapshot,
     prepared_provider_request_snapshot, provider_request_digest, replay_from_snapshot,
     replay_state, snapshot_path_for, state_payload_digest, verify_chain,
 };
+// Used only by the `#[cfg(unix)]` symlink cases in `foundation_cases.rs`, which
+// this file pulls in via `include!`. Ungated, the import is dead on Windows and
+// `clippy -D warnings` fails the whole leg there -- which is exactly how it
+// stayed hidden: the Linux and macOS-target clippy gates both compile the
+// `cfg(unix)` arm, so neither can see it.
+#[cfg(unix)]
+use wcore_agent::session_journal::canonical_journal_root;
 use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
 use wcore_types::cache_tier::CacheTier;
 use wcore_types::llm::{LlmRequest, RoutingHint, ThinkingConfig};
