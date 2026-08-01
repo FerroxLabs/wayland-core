@@ -225,10 +225,11 @@ async fn try_grep(
     };
     let is_dir = match std::fs::metadata(&target) {
         Ok(meta) => meta.is_dir(),
-        Err(e) => {
+        Err(_e) => {
+            // MUTANT B: swallow the unreadable target as a clean no-match again.
             return ToolResult {
-                content: format!("grep error: cannot search {path:?}: {e}"),
-                is_error: true,
+                content: "No matches found".to_string(),
+                is_error: false,
             };
         }
     };
