@@ -261,11 +261,8 @@ async fn try_grep(
         // scoped to its intended directory.)
         let resolved = std::path::absolute(&target).unwrap_or_else(|_| target.clone());
         let resolved = resolved.to_string_lossy().into_owned();
-        let spec = if is_dir {
-            format!("{}\\*", resolved.trim_end_matches(['\\', '/']))
-        } else {
-            resolved
-        };
+        // MUTANT A: drop the file/directory split — always lower to `<path>\*`.
+        let spec = format!("{}\\*", resolved.trim_end_matches(['\\', '/']));
         let cflag = format!("/C:{pattern}");
         let mut args: Vec<&str> = vec!["/N", "/R"];
         if is_dir {
