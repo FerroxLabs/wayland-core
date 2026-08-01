@@ -383,9 +383,25 @@ impl MacProcessGroupAuthority {
                 // `root_state` is the value the DECISION was made on. Calling
                 // `recheck()` again here would let the diagnostic disagree
                 // with the branch that produced it.
+                //
+                // Destructured rather than `{root_state:?}` so the io::Error
+                // inside `Unreadable` actually reaches a human. Derived Debug
+                // does NOT count as a read for dead-code analysis, so the
+                // `{:?}` form left field 0 unread — which is a `-D warnings`
+                // error on macOS, and it meant the one variant that carries a
+                // diagnosis was the one that discarded it.
                 format!(
                     "macOS process-group authority changed while containment was attached \
-                     (sentinel in group: {sentinel_holds_the_group}, root: {root_state:?})"
+                     (sentinel in group: {sentinel_holds_the_group}, root: {})",
+                    match &root_state {
+                        MacIdentityRecheck::Same =>
+                            "same generation, but NOT in its own group".to_owned(),
+                        MacIdentityRecheck::Corpse => "exited".to_owned(),
+                        MacIdentityRecheck::Recycled =>
+                            "REPLACED by a different process".to_owned(),
+                        MacIdentityRecheck::Unreadable(error) =>
+                            format!("could not be read: {error}"),
+                    }
                 ),
             ));
         }
