@@ -4940,10 +4940,21 @@ mod tests {
     /// FIX 1 regression: building the `openai-chatgpt` provider through the
     /// runtime builder must NOT hit the `create_native_provider` panic — the
     /// exact path the `/provider openai-chatgpt` rebind now takes. We seed a
-    /// tempdir-rooted `~/.wayland` token (via HOME) so `OAuthStorage::from_home`
-    /// resolves into the tempdir, then assert the build returns `Ok` (a working
-    /// provider Arc) rather than panicking. Serial + HOME-scoped because
-    /// `from_home` is not otherwise redirectable.
+    /// tempdir-rooted login through the REAL `OAuthStorage::from_home` (an
+    /// end-to-end exercise of the production write path, into a real encrypted
+    /// vault), then assert the build returns `Ok` (a working provider Arc)
+    /// rather than panicking.
+    ///
+    /// Env scoping, all three of them, and each is load-bearing:
+    /// * `HOME` — the legacy oauth dir.
+    /// * `WAYLAND_HOME` — the credentials root AND the switch that suppresses
+    ///   the OS keyring rung. Without it this test would write a token into the
+    ///   developer's real Keychain / Credential Manager on any host that has
+    ///   one, because the keyring service name is process-global.
+    /// * `WAYLAND_VAULT_PASSPHRASE` — mounts the in-home encrypted vault, the
+    ///   only secure rung a headless runner has. Without it the store fails
+    ///   closed, which is correct behaviour and would make this test unable to
+    ///   seed anything.
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
@@ -4956,11 +4967,15 @@ mod tests {
         use wcore_config::config::ProviderType;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // Point HOME at the tempdir so `from_home` writes under it, not the
-        // real home. Restore the prior value before returning.
         let saved = std::env::var_os("HOME");
-        // SAFETY: serial test; HOME reverted before exit.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let saved_wh = std::env::var_os("WAYLAND_HOME");
+        let saved_pass = std::env::var_os("WAYLAND_VAULT_PASSPHRASE");
+        // SAFETY: serial test; all three reverted before exit.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::set_var("WAYLAND_HOME", tmp.path().join("wayland-home"));
+            std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "test-vault-passphrase");
+        }
 
         // Seed a valid token so the store the provider's bearer source reads is
         // present (the build itself does not load it, but this mirrors a real
@@ -4989,6 +5004,23 @@ mod tests {
             )
             .expect("seed token");
 
+        // The PRODUCTION writer just ran against a real on-disk encrypted
+        // vault. Assert what it left behind: a login that reads back through a
+        // freshly opened store, and no cleartext token file anywhere.
+        let oauth_dir = wcore_config::config::profile_home().join("oauth");
+        assert!(
+            !oauth_dir.join("chatgpt.json").exists(),
+            "from_home().store() must not write a cleartext token file"
+        );
+        assert!(
+            OAuthStorage::from_home()
+                .expect("reopen")
+                .load(PROVIDER)
+                .expect("load")
+                .is_some(),
+            "the seeded login must read back out of the vault"
+        );
+
         let config = Config {
             provider_label: "openai-chatgpt".into(),
             provider: ProviderType::OpenAIChatGpt,
@@ -5003,9 +5035,16 @@ mod tests {
         let inner = build_native_or_chatgpt_provider(&config);
         let wrapped = create_provider_with_oauth(&config);
 
-        match saved {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
+        for (key, prior) in [
+            ("HOME", saved),
+            ("WAYLAND_HOME", saved_wh),
+            ("WAYLAND_VAULT_PASSPHRASE", saved_pass),
+        ] {
+            // SAFETY: serial test; restoring what we saved above.
+            match prior {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
 
         let inner = inner.expect("chatgpt inner build must not panic and must succeed");
