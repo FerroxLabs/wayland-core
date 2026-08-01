@@ -125,6 +125,21 @@ pub(super) fn settled_verdict() -> Option<bool> {
         .settled()
 }
 
+/// Single-flighted availability, BLOCKING for up to the probe's wall-clock
+/// guard on a cold cache.
+///
+/// A free function rather than only a trait method so the async `execute` gate
+/// can hand it to `spawn_blocking` — a 15s guarded spawn must never run on a
+/// tokio worker thread.
+fn availability() -> bool {
+    super::super::probe_single_flight(
+        probe_cache(),
+        probe_gate(),
+        NEGATIVE_PROBE_TTL,
+        probe_appcontainer_available,
+    )
+}
+
 /// Whether a backend admitted WITHOUT a startup probe may still claim its
 /// containment properties, given only what the probe has settled.
 ///
@@ -204,12 +219,7 @@ impl SandboxBackend for AppContainerBackend {
         // ONE real AppContainer spawn instead of stampeding it (#754). The
         // logic lives in a platform-independent helper so it is unit-tested
         // on every target; here it is driven by the real Win32 probe.
-        super::super::probe_single_flight(
-            probe_cache(),
-            probe_gate(),
-            NEGATIVE_PROBE_TTL,
-            probe_appcontainer_available,
-        )
+        availability()
     }
 
     fn enforces_read_deny(&self) -> bool {
@@ -284,7 +294,15 @@ impl SandboxBackend for AppContainerBackend {
         // the same verdict. `is_available` is single-flighted and its positive
         // result is sticky, so the guarded probe is paid at most once per
         // retry window — never per command, and never before `ready`.
-        if !self.is_available() {
+        //
+        // On `spawn_blocking` because a cold probe blocks for up to its 15s
+        // wall-clock guard, and a guarded Win32 spawn must never occupy a
+        // tokio worker thread. A join failure is treated as unavailable —
+        // fail closed, never "assume it worked".
+        if !tokio::task::spawn_blocking(availability)
+            .await
+            .unwrap_or(false)
+        {
             return Err(unavailable_refusal());
         }
         let manifest = manifest.clone();
