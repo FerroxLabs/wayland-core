@@ -173,6 +173,34 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # ── Python, for the account CI actually runs as ───────────────────────
+      # `wcore-cli::portability_hostile_corpus` shells to `python` to mint its
+      # corpus. All 23 tests in that binary failed on Windows with
+      # `NotFound { message: "program not found" }` — the ENTIRE binary, and no
+      # wayland-core code ran in any of them.
+      #
+      # The box is not missing Python. MEASURED on SEANDESKTOP 2026-08-01:
+      #   as user `seand`:  python -> C:\Users\seand\AppData\Local\Programs\Python\Python312\python.exe
+      #   MACHINE PATH python entries: NONE
+      #   USER PATH python entries:    5, all under C:\Users\seand\...
+      #   all three runner services:   StartName = NT AUTHORITY\NetworkService
+      # Python 3.12/3.13 are installed PER-USER in Sean's profile and are on his
+      # USER path only, so the NetworkService account the runner runs as cannot
+      # see them. Same root fact as the `.install-action` cleanup below, which
+      # already reaches into `/c/WINDOWS/ServiceProfiles/NetworkService`.
+      #
+      # setup-python provisions into the runner's own tool cache, so it works
+      # for whatever account the service uses and needs no admin and no service
+      # reconfiguration. Deliberately UNCONDITIONAL: a `runner.os == 'Windows'`
+      # guard would be correct today, but a dead `runner.os == 'Linux'` guard in
+      # this exact job is what kept the anti-vacuity gate from ever running, so
+      # this job gets no new platform conditionals. macOS already ships python3;
+      # pinning it here just makes the version explicit on both legs.
+      - name: Setup Python (corpus generators shell to it)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Setup vx (installs Rust + just from vx.toml)
         uses: loonghao/vx@v0.9.17
         with:
