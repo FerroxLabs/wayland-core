@@ -3265,6 +3265,51 @@ pub struct MissingApiKey;
 /// ([`lookup_store_api_key`], consumed by [`resolve_api_key`]) and the write
 /// path ([`store_provider_api_key`]) go through it, so a key written here is
 /// guaranteed to be the key resolution later reads back.
+/// The provider whose credentials-store slot an ENV VAR NAME stands for, or
+/// `None` when the name is a tool key with no store slot at all.
+///
+/// The reverse of [`resolve_api_key_from_env`]'s per-provider chain, and it must
+/// stay that way — `env_var_to_provider_round_trips_the_resolver` pins the two
+/// together. Exists so the credentials surfaces that are keyed by env-var NAME
+/// (the TUI provider catalog) can route a provider key into the credential
+/// ladder instead of writing cleartext to `~/.wayland/.env`.
+///
+/// `API_KEY` is deliberately absent: it is the resolver's provider-agnostic
+/// override and belongs to no single slot, so writing it into one would silently
+/// bind a global to a provider.
+///
+/// Tool keys (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `ELEVENLABS_API_KEY`, …)
+/// return `None` because nothing reads them from the credentials store — they
+/// are resolved from the process environment only. Routing them into the store
+/// would make them unreadable, which is worse than the cleartext they have now;
+/// their disposition is recorded in `.planning/CREDENTIAL-STORAGE-DESIGN.md` §7.
+#[must_use]
+pub fn provider_for_credential_env_var(name: &str) -> Option<ProviderType> {
+    Some(match name {
+        "ANTHROPIC_API_KEY" => ProviderType::Anthropic,
+        "OPENAI_API_KEY" => ProviderType::OpenAI,
+        "GEMINI_API_KEY" | "GOOGLE_API_KEY" => ProviderType::Gemini,
+        "AZURE_OPENAI_API_KEY" => ProviderType::AzureOpenAI,
+        "TOGETHER_API_KEY" => ProviderType::Together,
+        "FIREWORKS_API_KEY" => ProviderType::Fireworks,
+        "NVIDIA_API_KEY" => ProviderType::Nvidia,
+        "PERPLEXITY_API_KEY" => ProviderType::Perplexity,
+        "CEREBRAS_API_KEY" => ProviderType::Cerebras,
+        "OPENROUTER_API_KEY" => ProviderType::OpenRouter,
+        "FLUX_API_KEY" => ProviderType::FluxRouter,
+        "DEEPSEEK_API_KEY" => ProviderType::Deepseek,
+        "XAI_API_KEY" => ProviderType::Xai,
+        "GROQ_API_KEY" => ProviderType::Groq,
+        "MOONSHOT_API_KEY" => ProviderType::Moonshot,
+        "DASHSCOPE_API_KEY" | "ALIBABA_API_KEY" => ProviderType::Qwen,
+        "MISTRAL_API_KEY" => ProviderType::Mistral,
+        "COHERE_API_KEY" => ProviderType::Cohere,
+        "MINIMAX_API_KEY" => ProviderType::MiniMax,
+        "SAKANA_API_KEY" => ProviderType::Sakana,
+        _ => return None,
+    })
+}
+
 pub fn credentials_store_key(provider: ProviderType) -> Option<String> {
     let key = match provider {
         ProviderType::Anthropic => "providers.anthropic.api_key",

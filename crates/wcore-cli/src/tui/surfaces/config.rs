@@ -1727,8 +1727,26 @@ impl CredentialsModal {
         self.entry().env_vars.get(self.var_idx).copied()
     }
 
-    /// Attempt to save the buffer to `~/.wayland/.env`. Sets `status`
-    /// + `last_ok` for the render path. Returns whether a write happened.
+    /// Save the buffer.
+    ///
+    /// TWO DESTINATIONS, chosen by whether the env var this row edits names a
+    /// provider that HAS a credentials-store slot:
+    ///
+    /// * **It does** (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) → the credential
+    ///   ladder (`store_provider_api_key`): OS keyring, else encrypted vault,
+    ///   else a refusal. This was the primary interactive way a user handed us
+    ///   an API key and it wrote CLEARTEXT to `~/.wayland/.env`, bypassing the
+    ///   credentials backend entirely. It also fixes the F21 note below for
+    ///   these keys: `resolve_api_key` DOES read the store, so the value applies
+    ///   on the next rebind instead of being invisible until a restart.
+    /// * **It does not** (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, …) → still
+    ///   `~/.wayland/.env`, because nothing reads a tool key from the
+    ///   credentials store; routing it there would make it unreadable. That is
+    ///   an accepted cleartext sink, and the status line now SAYS SO rather
+    ///   than implying the key was stored securely.
+    ///
+    /// Sets `status` + `last_ok` for the render path. Returns whether a write
+    /// happened.
     pub fn save(&mut self) -> bool {
         let Some(key) = self.var_name() else {
             self.status = "This provider has no env-var-based credentials.".into();
@@ -1741,6 +1759,30 @@ impl CredentialsModal {
             self.last_ok = false;
             return false;
         }
+
+        // Provider keys go to the ladder, never to cleartext.
+        if let Some(provider) = wcore_config::config::provider_for_credential_env_var(key)
+            && wcore_config::config::credentials_store_key(provider).is_some()
+        {
+            return match wcore_config::config::store_provider_api_key(provider, value.trim()) {
+                Ok(()) => {
+                    self.status = "Saved to the encrypted credentials store · applies on \
+                                   the next rebind"
+                        .into();
+                    self.last_ok = true;
+                    true
+                }
+                Err(e) => {
+                    // The ladder's refusal is the actionable one; surface it
+                    // verbatim rather than degrading to the `.env` file, which
+                    // is the downgrade this whole change removes.
+                    self.status = format!("Couldn't save the key: {e}");
+                    self.last_ok = false;
+                    false
+                }
+            };
+        }
+
         let env_path = match dirs::home_dir() {
             Some(h) => h.join(".wayland").join(".env"),
             None => {
@@ -1754,8 +1796,10 @@ impl CredentialsModal {
                 // F21: `resolve_api_key` reads cli→config→store→process-env and
                 // never the `.env` file, so a key written here is invisible until
                 // a restart reloads `.env` into the process env. The status must
-                // not claim a live application that does not happen.
-                self.status = "Saved to ~/.wayland/.env · applies on next launch".into();
+                // not claim a live application that does not happen — nor imply
+                // encryption this path does not provide.
+                self.status =
+                    "Saved UNENCRYPTED to ~/.wayland/.env (0600) · applies on next launch".into();
                 self.last_ok = true;
                 true
             }
