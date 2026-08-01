@@ -239,11 +239,6 @@ jobs:
       # `--no-run` or an explicit executed-count assertion. Pure text scan,
       # ~50ms, so it runs on Linux only. Self-test:
       # `python3 scripts/check-no-vacuous-cargo-test.py --self-test`.
-      - name: No vacuous `cargo test` invocations
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/check-no-vacuous-cargo-test.py --self-test
-          python3 scripts/check-no-vacuous-cargo-test.py
 
       - name: Clippy (warnings = errors)
         run: vx just lint
@@ -539,6 +534,23 @@ jobs:
       # wcore-cli for no reason.
       DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
+      # ── anti-vacuity gate ─────────────────────────────────────────────
+      # THIS STEP USED TO BE DEAD. It lived in the `ci` matrix job guarded by
+      # `if: runner.os == 'Linux'`, but that job's matrix is
+      # ["macos-latest", [self-hosted Windows]] — no Linux entry — so the
+      # condition never held and the gate never ran once. A gate guarding
+      # against zero-test runs, that itself never ran, while the Windows leg
+      # executed zero tests for EIGHT consecutive runs.
+      #
+      # It lives here now because this job genuinely `runs-on: ubuntu-latest`.
+      # It is a ~50ms pure text scan placed FIRST, so nothing earlier can
+      # shadow it, and it self-tests before it scans so a broken checker fails
+      # loudly rather than passing everything.
+      - name: No vacuous `cargo test` invocations
+        run: |
+          python3 scripts/check-no-vacuous-cargo-test.py --self-test
+          python3 scripts/check-no-vacuous-cargo-test.py
+
       # ── macOS runner budget report ────────────────────────────────────
       # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
       # green having never touched macOS and looks identical to a fully covered

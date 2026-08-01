@@ -116,6 +116,9 @@ jobs:
           # must not itself contain the token the gate looks for.
           docker info || echo "docker info FAILED — the cases below cannot execute"
           docker pull alpine:3.19 || echo "alpine:3.19 pull FAILED"
+          # vacuity-checked: the executed count is asserted downstream by the
+          # "Assert every case executed and did not skip" step, which greps
+          # `running N test` out of the tee'd log and fails on a zero.
           vx cargo test -p wcore-sandbox --features live-docker --lib -- \
             --ignored --test-threads=1 --nocapture --exact \
             backends::docker::tests::required_live_macos_retained_transport_roundtrips_output_and_deletion \
@@ -127,6 +130,9 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
+          # vacuity-checked: the executed count is asserted downstream by the
+          # "Assert every case executed and did not skip" step, which greps
+          # `running N test` out of the tee'd log and fails on a zero.
           vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
             --test workspace_authority -- \
             --ignored --test-threads=1 --nocapture --exact \
@@ -146,6 +152,9 @@ jobs:
           set -uo pipefail
           docker pull ghcr.io/tradecanyon/wcore-sandbox:base \
             || echo "delegated base image pull FAILED — see workflow header"
+          # vacuity-checked: the executed count is asserted downstream by the
+          # "Assert every case executed and did not skip" step, which greps
+          # `running N test` out of the tee'd log and fails on a zero.
           vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
             --test dispatch_smoke -- \
             --ignored --test-threads=1 --nocapture --exact \
@@ -157,6 +166,9 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
+          # vacuity-checked: the executed count is asserted downstream by the
+          # "Assert every case executed and did not skip" step, which greps
+          # `running N test` out of the tee'd log and fails on a zero.
           vx cargo test -p wcore-swarm --features wcore-sandbox/live-docker \
             --test worker_runtime_limits -- \
             --ignored --test-threads=1 --nocapture --exact \
