@@ -477,7 +477,9 @@ mod tests {
             env,
             "rustc:1.999.0",
             inputs,
-            vec![PathBuf::from("/srv/wayland/private/scratch")],
+            vec![absolute_test_path(&[
+                "srv", "wayland", "private", "scratch",
+            ])],
         )
     }
 
@@ -499,27 +501,36 @@ mod tests {
         }
     }
 
-    /// An absolute candidate root that is NOT under the global temp dir (the
-    /// denied location this module's stage-3 arm uses).
+    /// An absolute path made of `segments`, outside the global temp dir (the
+    /// denied location the stage-3 arm below uses).
     ///
-    /// Built from the temp dir's own root component rather than written as a
-    /// literal, because the hard-containment stage calls `is_absolute()` on it:
-    /// a literal `/srv/...` is absolute on Unix but NOT on Windows, so there
-    /// the filesystem stage refused it first and stage 5 — the only stage the
-    /// arm using this exists to exercise — was never reached. Yields exactly
-    /// `/srv/wayland/candidate/checkout` on Unix (unchanged) and
-    /// `<drive>\srv\wayland\candidate\checkout` on Windows.
-    fn absolute_candidate_root() -> PathBuf {
+    /// The hard containment stage calls `is_absolute()` on BOTH the candidate
+    /// root and every writable root, and a literal `/srv/...` is absolute on
+    /// Unix but NOT on Windows. Both were literals, so on Windows the
+    /// filesystem stage refused them first and stage 5 — the only stage the arm
+    /// using them exists to exercise — was never reached:
+    ///
+    /// ```text
+    /// stage 5: Filesystem(PathDenied("hard-containment candidate must be
+    ///          absolute: /srv/wayland/candidate/checkout"))
+    /// stage 5: Filesystem(PathDenied("hard-containment writable root must be
+    ///          absolute: /srv/wayland/private/scratch"))
+    /// ```
+    ///
+    /// Taking the root component from the temp dir keeps this absolute on every
+    /// platform without assuming a drive letter exists. Byte-identical to the
+    /// old literals on Unix; drive-qualified on Windows.
+    fn absolute_test_path(segments: &[&str]) -> PathBuf {
         let temp = std::env::temp_dir();
-        let root = temp
+        let mut path = temp
             .ancestors()
             .last()
             .unwrap_or_else(|| Path::new("/"))
             .to_path_buf();
-        root.join("srv")
-            .join("wayland")
-            .join("candidate")
-            .join("checkout")
+        for segment in segments {
+            path.push(segment);
+        }
+        path
     }
 
     /// A fake live-candidate source. Production uses the real seal; the fail
@@ -662,7 +673,12 @@ mod tests {
         // real absolute candidate root outside any denied location so stages 3/4
         // pass and the mint stage is the one that refuses.
         let live = FakeCandidate {
-            root: Ok(absolute_candidate_root()),
+            root: Ok(absolute_test_path(&[
+                "srv",
+                "wayland",
+                "candidate",
+                "checkout",
+            ])),
         };
         let error = executor
             .execute_gate(
