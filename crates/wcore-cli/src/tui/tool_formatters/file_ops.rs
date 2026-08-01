@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::{first_line_preview, join_facts, opt_str, opt_u64, raw_text};
+use super::{elided_line_preview, join_facts, opt_str, opt_u64, raw_text};
 use crate::tui::theme::Theme;
 
 /// Max chars of a plain-text result echoed on the summary line.
@@ -77,7 +77,12 @@ impl ToolResultFormatter for FileOpsFormatter {
         // anything reassembled from parts, so use it verbatim. Read's body is
         // the file, so report its size instead of dumping it.
         if let Some(text) = raw_text(payload) {
-            let head = first_line_preview(text, RAW_PREVIEW);
+            // Elide the MIDDLE, not the tail: these status lines put the
+            // filename and the line/occurrence count LAST ("Created <path>
+            // (12 lines)"), so head-truncation drops exactly the two facts the
+            // card exists to show. Only Linux tempdir paths were short enough
+            // to hide this; any real project path tripped it on every platform.
+            let head = elided_line_preview(text, RAW_PREVIEW);
             // A `Read` result is the file itself; the first line is content,
             // not a status, so summarise rather than quote it.
             if looks_like_read_body(text) {

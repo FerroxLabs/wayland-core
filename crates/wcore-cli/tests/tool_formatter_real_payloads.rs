@@ -197,6 +197,53 @@ fn write_then_edit_then_read_render_the_tools_own_words() {
 }
 
 #[test]
+fn write_summary_keeps_the_filename_at_a_realistic_project_path_depth() {
+    // The short-path case above passes on Linux by accident: a bare
+    // `/tmp/.tmpXXXXXX/uat_t3.txt` line is ~44 chars, under the 60-char
+    // preview budget, so no truncation happens at all. macOS and Windows
+    // tempdirs are longer, which is the ONLY reason the defect showed up
+    // there first. Any real checkout path — `crates/<crate>/src/<module>/…` —
+    // blows the budget on every platform, so pin the invariant with a path
+    // deep enough to truncate everywhere.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir
+        .path()
+        .join("crates")
+        .join("wcore-agent")
+        .join("src")
+        .join("orchestration")
+        .join("workflow");
+    std::fs::create_dir_all(&nested).expect("nested dirs");
+    let path = nested.join("runner.rs");
+    let path_s = path.to_string_lossy().to_string();
+    assert!(
+        format!("Created {path_s} (2 lines)").chars().count() > 60,
+        "fixture path is too short to exercise truncation: {path_s}"
+    );
+
+    let (summary, _) = render_real(
+        &wcore_tools::write::WriteTool::new(None),
+        serde_json::json!({ "file_path": path_s, "content": "alpha\nbeta\n" }),
+    );
+    assert!(
+        summary.contains("runner.rs"),
+        "write summary lost the filename at project-path depth: {summary}"
+    );
+    assert!(
+        summary.contains("(2 lines)"),
+        "write summary lost the line count at project-path depth: {summary}"
+    );
+    assert!(
+        summary.starts_with("Created"),
+        "write summary lost the verb: {summary}"
+    );
+    assert!(
+        summary.chars().count() <= 60,
+        "write summary blew the preview budget: {summary}"
+    );
+}
+
+#[test]
 fn formatter_never_invents_on_an_empty_payload() {
     // A card with no output yet (running / cancelled) must not render a
     // completed-looking summary for ANY tool the dispatcher knows.

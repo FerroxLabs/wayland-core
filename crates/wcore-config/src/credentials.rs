@@ -19,7 +19,9 @@
 //! test-only in-memory store. Lookups go through `Config::resolve_*`
 //! helpers (env > store > config); puts/deletes are explicit operations.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,32 +126,68 @@ pub trait CredentialsStore: Send + Sync {
 pub struct ConfidentialCredentialsStore {
     inner: Box<dyn CredentialsStore>,
     key_creation_lock_path: PathBuf,
+    pin: Option<ConfidentialPinConfirmation>,
+}
+
+/// Everything needed to promote this profile's backend pin from advisory to
+/// absolute the first time material is actually observed in it.
+struct ConfidentialPinConfirmation {
+    marker_path: PathBuf,
+    selection: ConfidentialBackendSelection,
+    recorded: std::sync::atomic::AtomicBool,
 }
 
 impl ConfidentialCredentialsStore {
-    fn new(inner: Box<dyn CredentialsStore>, key_creation_lock_path: PathBuf) -> Self {
+    fn new(
+        inner: Box<dyn CredentialsStore>,
+        key_creation_lock_path: PathBuf,
+        pin: Option<ConfidentialPinConfirmation>,
+    ) -> Self {
         Self {
             inner,
             key_creation_lock_path,
+            pin,
         }
     }
 
     pub(crate) fn key_creation_lock_path(&self) -> &Path {
         &self.key_creation_lock_path
     }
+
+    /// Material was observed in the selected backend. Record it once per
+    /// process; after this the pin is honoured absolutely.
+    fn observed_material(&self) {
+        let Some(pin) = &self.pin else {
+            return;
+        };
+        if pin.recorded.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        confirm_confidential_backend_pin(&pin.marker_path, &pin.selection);
+    }
 }
 
 impl CredentialsStore for ConfidentialCredentialsStore {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-        self.inner.get(key)
+        let value = self.inner.get(key)?;
+        if value.is_some() {
+            self.observed_material();
+        }
+        Ok(value)
     }
 
     fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
-        self.inner.get_many(keys)
+        let values = self.inner.get_many(keys)?;
+        if values.iter().any(Option::is_some) {
+            self.observed_material();
+        }
+        Ok(values)
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-        self.inner.put(key, value)
+        self.inner.put(key, value)?;
+        self.observed_material();
+        Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
@@ -340,16 +378,74 @@ impl CredentialsStore for KeyringCredentialsStore {
 // Auto backend (keyring primary, plaintext fallback) — the default
 // ---------------------------------------------------------------------------
 
-/// Probe whether the OS keyring is actually usable on this host. Returns
-/// `false` on headless Linux without a running Secret Service, in CI, etc., so
-/// the [`CredentialsBackend::Auto`] default can fall back to plaintext rather
-/// than error. A `NoEntry` result means the keyring works (the probe key simply
-/// does not exist); any other error means the keyring is unavailable.
+/// Key used by the keyring writability probe. Never holds a secret; the value
+/// exists only long enough for the probe to prove a write landed.
+const KEYRING_PROBE_KEY: &str = "__wayland_core_keyring_probe__";
+const KEYRING_PROBE_VALUE: &str = "probe";
+
+/// Probe whether the OS keyring is actually usable **for writes** on this host.
+///
+/// Returns `false` on headless Linux without a running Secret Service, in CI,
+/// etc., so the [`CredentialsBackend::Auto`] default can fall back rather than
+/// error.
+///
+/// The probe MUST write, not just read. A read-only probe (`get_password`,
+/// accepting `NoEntry` as "works") reports the keyring available on a Windows
+/// service account — `CredRead` succeeds there — while the very next
+/// `CredWrite` fails with `Windows error code 8`. That combination made the
+/// confidential opener pin the keyring and then refuse every durable-session
+/// write with "secure recovery storage is unavailable", instead of falling
+/// through to the already-unlocked encrypted vault. Proving writability is the
+/// only probe that answers the question the caller is actually asking.
+///
+/// Cached per service for the life of the process: the answer is a property of
+/// the host + account, and re-probing would put one write/delete round trip on
+/// every credential open.
 fn keyring_available(service: &str) -> bool {
-    match keyring::Entry::new(service, "__wayland_core_keyring_probe__") {
-        Ok(entry) => matches!(entry.get_password(), Ok(_) | Err(keyring::Error::NoEntry)),
-        Err(_) => false,
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(service)
+    {
+        return *cached;
     }
+    let writable = keyring_probe_is_writable(service);
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(service.to_string(), writable);
+    writable
+}
+
+/// The uncached round trip behind [`keyring_available`]: write a probe value,
+/// then remove it.
+fn keyring_probe_is_writable(service: &str) -> bool {
+    let Ok(entry) = keyring::Entry::new(service, KEYRING_PROBE_KEY) else {
+        return false;
+    };
+    if let Err(error) = entry.set_password(KEYRING_PROBE_VALUE) {
+        tracing::debug!(
+            target: "wcore_credentials",
+            error = %error,
+            "keyring write probe failed; treating the keyring as unavailable"
+        );
+        return false;
+    }
+    // Leave nothing behind. A probe entry that resists deletion is still proof
+    // of a writable keyring, so a delete failure must NOT flip the verdict —
+    // that would be the read-only probe's mistake in the other direction.
+    if let Err(error) = entry.delete_credential()
+        && !matches!(error, keyring::Error::NoEntry)
+    {
+        tracing::debug!(
+            target: "wcore_credentials",
+            error = %error,
+            "keyring probe entry could not be removed"
+        );
+    }
+    true
 }
 
 /// Build a stable, profile-isolated keyring service identity.
@@ -438,6 +534,34 @@ enum ConfidentialBackendSelection {
 struct ConfidentialBackendMarker {
     version: u8,
     selection: ConfidentialBackendSelection,
+    /// `true` once the profile's confidential material has been OBSERVED in
+    /// `selection` — a write that succeeded, or a read that returned a value.
+    ///
+    /// This is what makes the pin safe to honour absolutely. The pin exists to
+    /// stop oscillation from orphaning secrets; if nothing has ever been
+    /// observed in the pinned backend there is nothing to orphan, so an
+    /// unconfirmed pin is advisory and may be re-selected when its backend is
+    /// unavailable. That is the only thing that heals a profile which pinned
+    /// the OS keyring on a host where `CredRead` succeeds and `CredWrite`
+    /// fails: the pinning boot could not write, so it never confirmed.
+    ///
+    /// Absent in markers written before this field existed, hence
+    /// `default` — those deserialize as unconfirmed, which is exactly the
+    /// treatment the affected population needs. Only serialized when `true`,
+    /// so an unconfirmed marker stays byte-identical to the pre-field shape.
+    #[serde(default, skip_serializing_if = "is_false")]
+    confirmed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A loaded pin plus whether it is backed by observed material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedConfidentialBackend {
+    selection: ConfidentialBackendSelection,
+    confirmed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -464,16 +588,26 @@ fn selection_is_available(
     }
 }
 
-/// Resolve one confidential backend without ever replacing an existing pin.
-/// Availability is injected so oscillation behavior can be proven without
-/// touching an operator's real keyring.
+/// Resolve one confidential backend, never replacing a pin that is backed by
+/// observed material. Availability is injected so oscillation behavior can be
+/// proven without touching an operator's real keyring.
+///
+/// A CONFIRMED pin is absolute: if its backend is unavailable this errors
+/// rather than move, because moving would orphan the secrets already stored
+/// there (`load_or_create_confidential_blob_key_from_store` would mint a fresh
+/// key and every previously sealed blob would stop decrypting).
+///
+/// An UNCONFIRMED pin is advisory. Nothing has ever been observed in it, so
+/// re-selecting costs nothing and is the only way a profile that pinned a
+/// write-incapable keyring on its very first boot can ever recover.
 fn select_confidential_backend(
-    pinned: Option<&ConfidentialBackendSelection>,
+    pinned: Option<&PinnedConfidentialBackend>,
     mode: &ConfidentialBackendMode,
     keyring_is_available: &impl Fn(&str) -> bool,
     vault_is_available: bool,
 ) -> Result<ConfidentialBackendSelection, CredentialsError> {
-    if let Some(pinned) = pinned {
+    if let Some(pin) = pinned {
+        let pinned = &pin.selection;
         match mode {
             ConfidentialBackendMode::Auto { keyring, vault }
                 if pinned != keyring && pinned != vault =>
@@ -503,12 +637,22 @@ fn select_confidential_backend(
                 selection_is_available(pinned, keyring_is_available, vault_is_available)
             }
         };
-        if !available {
+        if available {
+            return Ok(pinned.clone());
+        }
+        // Unavailable. Only an unconfirmed Auto pin may be re-selected; an
+        // explicit backend is an operator instruction, not a preference.
+        if !(pin.confirmed || matches!(mode, ConfidentialBackendMode::Explicit(_))) {
+            tracing::warn!(
+                target: "wcore_credentials",
+                "the profile's pinned confidential backend is unavailable and holds no \
+                 observed material; re-selecting an available backend"
+            );
+        } else {
             return Err(confidential_backend_unavailable(
                 "the profile's pinned confidential credential backend is unavailable",
             ));
         }
-        return Ok(pinned.clone());
     }
 
     match mode {
@@ -543,7 +687,7 @@ fn select_confidential_backend(
 
 fn load_confidential_backend_marker(
     marker_path: &Path,
-) -> Result<Option<ConfidentialBackendSelection>, CredentialsError> {
+) -> Result<Option<ConfidentialBackendMarker>, CredentialsError> {
     let bytes = match std::fs::read(marker_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -557,16 +701,46 @@ fn load_confidential_backend_marker(
             "confidential backend marker version is unsupported",
         ));
     }
-    Ok(Some(marker.selection))
+    Ok(Some(marker))
 }
 
-fn resolve_confidential_backend_with_availability(
-    mode: &ConfidentialBackendMode,
-    plaintext_path: &Path,
-    keyring_is_available: &impl Fn(&str) -> bool,
-    vault_is_available: bool,
-) -> Result<ConfidentialBackendSelection, CredentialsError> {
-    let marker_path = plaintext_path.with_file_name(".credentials.confidential-backend.json");
+/// Load the pin and settle whether it is backed by material.
+///
+/// On-disk evidence outranks the recorded flag: a vault cipher file that
+/// EXISTS holds the profile's secrets no matter what any earlier process
+/// wrote, so such a pin is confirmed even if the marker predates the flag.
+/// There is no equivalent cheap check for an OS keyring, which is precisely
+/// why the flag exists.
+fn load_pinned_confidential_backend(
+    marker_path: &Path,
+) -> Result<Option<PinnedConfidentialBackend>, CredentialsError> {
+    Ok(
+        load_confidential_backend_marker(marker_path)?.map(|marker| {
+            let confirmed = marker.confirmed
+                || match &marker.selection {
+                    ConfidentialBackendSelection::EncryptedFile { cipher_path, .. } => {
+                        cipher_path.exists()
+                    }
+                    ConfidentialBackendSelection::Keyring { .. } => false,
+                };
+            PinnedConfidentialBackend {
+                selection: marker.selection,
+                confirmed,
+            }
+        }),
+    )
+}
+
+fn confidential_backend_marker_path(credentials_path: &Path) -> PathBuf {
+    credentials_path.with_file_name(".credentials.confidential-backend.json")
+}
+
+/// Open the marker's advisory lock file. Held (via [`acquire_marker_lock`]) by
+/// both the resolver and the confirmation path so the two can never interleave
+/// a read-modify-write of the marker.
+fn open_confidential_backend_marker_lock(
+    marker_path: &Path,
+) -> Result<fd_lock::RwLock<std::fs::File>, CredentialsError> {
     let lock_path = marker_path.with_extension("lock");
     if let Some(parent) = marker_path.parent()
         && !parent.as_os_str().is_empty()
@@ -579,7 +753,19 @@ fn resolve_confidential_backend_with_availability(
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    let mut lock = fd_lock::RwLock::new(file);
+    Ok(fd_lock::RwLock::new(file))
+}
+
+/// Run `body` while holding the marker's exclusive advisory lock.
+///
+/// A closure rather than a returned guard: `fd_lock`'s guard borrows the
+/// `RwLock` mutably, and a retry loop that returns the guard across a function
+/// boundary is not expressible under NLL.
+fn with_marker_lock<T>(
+    marker_path: &Path,
+    body: impl FnOnce() -> Result<T, CredentialsError>,
+) -> Result<T, CredentialsError> {
+    let mut lock = open_confidential_backend_marker_lock(marker_path)?;
     let _guard = loop {
         match lock.write() {
             Ok(guard) => break guard,
@@ -591,25 +777,77 @@ fn resolve_confidential_backend_with_availability(
             }
         }
     };
+    body()
+}
 
-    let pinned = load_confidential_backend_marker(&marker_path)?;
-    let selected = select_confidential_backend(
-        pinned.as_ref(),
-        mode,
-        keyring_is_available,
-        vault_is_available,
-    )?;
-    if pinned.is_none() {
-        let marker = ConfidentialBackendMarker {
-            version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
-            selection: selected.clone(),
-        };
-        let bytes = serde_json::to_vec(&marker).map_err(|_| {
-            confidential_backend_unavailable("confidential backend marker serialization failed")
-        })?;
-        crate::atomic_write(&marker_path, &bytes)?;
+fn write_confidential_backend_marker(
+    marker_path: &Path,
+    marker: &ConfidentialBackendMarker,
+) -> Result<(), CredentialsError> {
+    let bytes = serde_json::to_vec(marker).map_err(|_| {
+        confidential_backend_unavailable("confidential backend marker serialization failed")
+    })?;
+    crate::atomic_write(marker_path, &bytes)?;
+    Ok(())
+}
+
+/// Record that the profile's confidential material has been observed in
+/// `selection`, making the pin absolute from here on.
+///
+/// Idempotent and best-effort: this is a durability hint, not a correctness
+/// gate, so a failure to record it must never fail the caller's read or write.
+fn confirm_confidential_backend_pin(marker_path: &Path, selection: &ConfidentialBackendSelection) {
+    let record = || {
+        with_marker_lock(marker_path, || {
+            let Some(mut marker) = load_confidential_backend_marker(marker_path)? else {
+                return Ok(());
+            };
+            if marker.confirmed || &marker.selection != selection {
+                return Ok(());
+            }
+            marker.confirmed = true;
+            write_confidential_backend_marker(marker_path, &marker)
+        })
+    };
+    if let Err(error) = record() {
+        tracing::debug!(
+            target: "wcore_credentials",
+            error = %error,
+            "could not record confidential backend pin confirmation"
+        );
     }
-    Ok(selected)
+}
+
+fn resolve_confidential_backend_with_availability(
+    mode: &ConfidentialBackendMode,
+    plaintext_path: &Path,
+    keyring_is_available: &impl Fn(&str) -> bool,
+    vault_is_available: bool,
+) -> Result<ConfidentialBackendSelection, CredentialsError> {
+    let marker_path = confidential_backend_marker_path(plaintext_path);
+    with_marker_lock(&marker_path, || {
+        let pinned = load_pinned_confidential_backend(&marker_path)?;
+        let selected = select_confidential_backend(
+            pinned.as_ref(),
+            mode,
+            keyring_is_available,
+            vault_is_available,
+        )?;
+        // Write the marker on a first pin, and REWRITE it when an unconfirmed
+        // pin was re-selected away from — otherwise the healed profile would
+        // re-enter the same dead end on its next boot.
+        if pinned.as_ref().map(|pin| &pin.selection) != Some(&selected) {
+            write_confidential_backend_marker(
+                &marker_path,
+                &ConfidentialBackendMarker {
+                    version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+                    selection: selected.clone(),
+                    confirmed: false,
+                },
+            )?;
+        }
+        Ok(selected)
+    })
 }
 
 /// The [`CredentialsBackend::Auto`] store: keyring primary, plaintext fallback.
@@ -1506,10 +1744,10 @@ pub fn confidential_backend_available(
     let Ok((credentials_path, mode)) = confidential_backend_plan(cfg, plaintext_path) else {
         return false;
     };
-    let marker_path = credentials_path.with_file_name(".credentials.confidential-backend.json");
+    let marker_path = confidential_backend_marker_path(&credentials_path);
     // A marker that cannot be read is treated as absent: this is a query, and
     // the opener holds the lock that makes marker reads authoritative.
-    let pinned = load_confidential_backend_marker(&marker_path).unwrap_or_default();
+    let pinned = load_pinned_confidential_backend(&marker_path).unwrap_or_default();
     select_confidential_backend(
         pinned.as_ref(),
         &mode,
@@ -1532,13 +1770,34 @@ pub fn open_confidential_store(
     cfg: &CredentialsStorageConfig,
     plaintext_path: &Path,
 ) -> Result<ConfidentialCredentialsStore, CredentialsError> {
+    open_confidential_store_with_availability(cfg, plaintext_path, &keyring_available)
+}
+
+/// [`open_confidential_store`] with keyring availability injected.
+///
+/// Mirrors the seam [`resolve_confidential_backend_with_availability`] already
+/// exposes, so the vault branch can be exercised on a host whose OS keyring
+/// genuinely works (macOS, a logged-in Windows desktop) without writing into
+/// the operator's real credential store. Without this, a "the vault is used"
+/// test only holds on headless Linux and silently asserts nothing elsewhere.
+fn open_confidential_store_with_availability(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+    keyring_is_available: &impl Fn(&str) -> bool,
+) -> Result<ConfidentialCredentialsStore, CredentialsError> {
     let (credentials_path, mode) = confidential_backend_plan(cfg, plaintext_path)?;
     let selected = resolve_confidential_backend_with_availability(
         &mode,
         &credentials_path,
-        &keyring_available,
+        keyring_is_available,
         vault_unlock_material_present(),
     )?;
+
+    let pin = Some(ConfidentialPinConfirmation {
+        marker_path: confidential_backend_marker_path(&credentials_path),
+        selection: selected.clone(),
+        recorded: std::sync::atomic::AtomicBool::new(false),
+    });
 
     match selected {
         ConfidentialBackendSelection::Keyring { service } => {
@@ -1547,6 +1806,7 @@ pub fn open_confidential_store(
             Ok(ConfidentialCredentialsStore::new(
                 Box::new(KeyringCredentialsStore::new(service)),
                 key_creation_lock_path,
+                pin,
             ))
         }
         ConfidentialBackendSelection::EncryptedFile {
@@ -1559,6 +1819,7 @@ pub fn open_confidential_store(
             Ok(ConfidentialCredentialsStore::new(
                 Box::new(store),
                 key_creation_lock_path,
+                pin,
             ))
         }
     }
@@ -2472,6 +2733,23 @@ mod tests {
         }
     }
 
+    /// A pin that is backed by observed material.
+    fn confirmed_pin(selection: &ConfidentialBackendSelection) -> PinnedConfidentialBackend {
+        PinnedConfidentialBackend {
+            selection: selection.clone(),
+            confirmed: true,
+        }
+    }
+
+    /// A pin recorded at selection time that has never held anything — the
+    /// shape a Windows service account's first boot leaves behind.
+    fn unconfirmed_pin(selection: &ConfidentialBackendSelection) -> PinnedConfidentialBackend {
+        PinnedConfidentialBackend {
+            selection: selection.clone(),
+            confirmed: false,
+        }
+    }
+
     #[test]
     fn confidential_auto_vault_pin_refuses_keyring_appearance() {
         let dir = tempdir().unwrap();
@@ -2481,8 +2759,11 @@ mod tests {
             keyring: original_keyring,
             vault: original_vault.clone(),
         };
-        let pinned = select_confidential_backend(None, &initial_mode, &|_| false, true).unwrap();
-        assert_eq!(pinned, original_vault);
+        let selected = select_confidential_backend(None, &initial_mode, &|_| false, true).unwrap();
+        assert_eq!(selected, original_vault);
+        // The pin only becomes authoritative once material has been observed
+        // in it; that is the state this anti-oscillation guarantee protects.
+        let pinned = confirmed_pin(&selected);
 
         let restart_mode = ConfidentialBackendMode::Auto {
             keyring: test_keyring_selection("keyring-original"),
@@ -2494,7 +2775,7 @@ mod tests {
         ));
         assert_eq!(
             select_confidential_backend(Some(&pinned), &restart_mode, &|_| true, true).unwrap(),
-            pinned,
+            selected,
             "the original vault paths remain authoritative"
         );
     }
@@ -2507,8 +2788,9 @@ mod tests {
             keyring: original_keyring.clone(),
             vault: test_vault_selection(dir.path(), "vault-original"),
         };
-        let pinned = select_confidential_backend(None, &initial_mode, &|_| true, true).unwrap();
-        assert_eq!(pinned, original_keyring);
+        let selected = select_confidential_backend(None, &initial_mode, &|_| true, true).unwrap();
+        assert_eq!(selected, original_keyring);
+        let pinned = confirmed_pin(&selected);
 
         let restart_mode = ConfidentialBackendMode::Auto {
             keyring: test_keyring_selection("keyring-original"),
@@ -2526,8 +2808,129 @@ mod tests {
                 true,
             )
             .unwrap(),
-            pinned,
+            selected,
             "the original keyring service remains authoritative"
+        );
+    }
+
+    /// P2. An UNCONFIRMED pin on an unavailable backend must be re-selected.
+    ///
+    /// Without this, the write-capable probe fixes nothing for the population
+    /// that already has the problem: their profile pinned the keyring on the
+    /// boot whose `CredWrite` failed, and every later boot re-validated that
+    /// pin and refused again. Nothing was ever stored there, so there is
+    /// nothing the move can orphan.
+    #[test]
+    fn confidential_auto_unconfirmed_pin_heals_onto_an_available_backend() {
+        let dir = tempdir().unwrap();
+        let keyring = test_keyring_selection("keyring-unwritable");
+        let vault = test_vault_selection(dir.path(), "vault-fallback");
+        let mode = ConfidentialBackendMode::Auto {
+            keyring: keyring.clone(),
+            vault: vault.clone(),
+        };
+
+        // Keyring unwritable, vault unlocked → heal onto the vault.
+        assert_eq!(
+            select_confidential_backend(Some(&unconfirmed_pin(&keyring)), &mode, &|_| false, true)
+                .unwrap(),
+            vault,
+            "an unconfirmed pin on an unavailable backend must not be a dead end"
+        );
+        // ...but still fail closed when there is nowhere to heal TO.
+        assert!(matches!(
+            select_confidential_backend(Some(&unconfirmed_pin(&keyring)), &mode, &|_| false, false),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+        // ...and never move a pin whose backend still works.
+        assert_eq!(
+            select_confidential_backend(Some(&unconfirmed_pin(&keyring)), &mode, &|_| true, true)
+                .unwrap(),
+            keyring,
+            "an available pin must be honoured whether or not it is confirmed"
+        );
+        // An EXPLICIT backend is an operator instruction, not a preference:
+        // healing must not silently override it.
+        assert!(matches!(
+            select_confidential_backend(
+                Some(&unconfirmed_pin(&keyring)),
+                &ConfidentialBackendMode::Explicit(keyring.clone()),
+                &|_| false,
+                true
+            ),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+    }
+
+    /// P2, end to end through the marker file: a profile that is ALREADY
+    /// pinned to a write-incapable keyring on disk boots onto the vault, and
+    /// the marker is rewritten so it does not re-enter the dead end.
+    #[test]
+    #[serial_test::serial(vault_passphrase_env, wayland_home_env)]
+    fn an_already_pinned_write_incapable_profile_recovers_on_next_boot() {
+        let _passphrase = EnvPassphraseGuard::set("heal-pin-passphrase");
+        let dir = tempdir().unwrap();
+        let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
+        let _passphrase_fd = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE_FD");
+        let plaintext_path = dir.path().join("credentials.toml");
+        let (cipher_path, _params_path) = default_vault_paths(&plaintext_path);
+        let marker_path = confidential_backend_marker_path(&plaintext_path);
+
+        // Boot 1, on the old read-only probe: the keyring looks available, so
+        // the profile pins it. The write then fails, so nothing is confirmed.
+        let (credentials_path, mode) =
+            confidential_backend_plan(&CredentialsStorageConfig::default(), &plaintext_path)
+                .unwrap();
+        let ConfidentialBackendMode::Auto { keyring, .. } = &mode else {
+            panic!("default config must plan Auto");
+        };
+        write_confidential_backend_marker(
+            &confidential_backend_marker_path(&credentials_path),
+            &ConfidentialBackendMarker {
+                version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+                selection: keyring.clone(),
+                confirmed: false,
+            },
+        )
+        .unwrap();
+
+        // Boot 2, with the write-capable probe reporting the truth.
+        let store = open_confidential_store_with_availability(
+            &CredentialsStorageConfig::default(),
+            &plaintext_path,
+            &|_| false,
+        )
+        .expect("an unconfirmed keyring pin must not strand the profile");
+        store.put("recovery.sealing_key", "healed-key").unwrap();
+
+        assert!(
+            cipher_path.exists(),
+            "the healed profile must actually be using the vault"
+        );
+        assert_eq!(
+            store.get("recovery.sealing_key").unwrap().as_deref(),
+            Some("healed-key")
+        );
+
+        // The marker was rewritten to the vault AND confirmed by the write, so
+        // the keyring can never reclaim this profile. Read the RAW marker, not
+        // the derived pin: `load_pinned_confidential_backend` also infers
+        // confirmation from an existing cipher file, which would mask a
+        // regression in the confirm-on-observation path.
+        let healed = load_confidential_backend_marker(&marker_path)
+            .unwrap()
+            .expect("marker must still exist");
+        assert!(
+            matches!(
+                healed.selection,
+                ConfidentialBackendSelection::EncryptedFile { .. }
+            ),
+            "marker was not rewritten: {:?}",
+            healed.selection
+        );
+        assert!(
+            healed.confirmed,
+            "a successful write must confirm the pin so it stops being advisory"
         );
     }
 
@@ -2553,6 +2956,7 @@ mod tests {
             let marker = ConfidentialBackendMarker {
                 version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
                 selection,
+                confirmed: true,
             };
             crate::atomic_write(&marker_path, &serde_json::to_vec(&marker).unwrap()).unwrap();
             assert!(matches!(
@@ -2592,6 +2996,7 @@ mod tests {
         let unsupported = ConfidentialBackendMarker {
             version: CONFIDENTIAL_BACKEND_MARKER_VERSION + 1,
             selection: test_keyring_selection("strict-marker"),
+            confirmed: false,
         };
         crate::atomic_write(&marker_path, &serde_json::to_vec(&unsupported).unwrap()).unwrap();
         assert!(matches!(
@@ -2605,16 +3010,35 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn concurrent_confidential_backend_selection_creates_one_authority() {
+    /// Race two selectors with OPPOSITE availability views over one profile.
+    ///
+    /// DELIBERATE GUARANTEE CHANGE (P2). This case used to assert that exactly
+    /// one of the two ever succeeds, for a brand-new profile. That is no longer
+    /// true and cannot be: a pin that has never held material is advisory, and
+    /// making it absolute from the instant it is written is precisely what
+    /// stranded every Windows service-account profile — the boot that pinned
+    /// the keyring is the boot whose `CredWrite` failed.
+    ///
+    /// What still holds, and is asserted here:
+    ///  * once the pin is CONFIRMED (material observed), it is absolute and
+    ///    exactly one of the two concurrent selectors succeeds — that is the
+    ///    anti-oscillation guarantee, undamaged;
+    ///  * while UNCONFIRMED, both may proceed, but the marker is never torn:
+    ///    it ends as exactly one of the profile's two candidate backends, and
+    ///    it matches one of the returned selections.
+    ///
+    /// The unconfirmed divergence is only reachable when two processes on one
+    /// host disagree about keyring availability, which this test manufactures
+    /// and a real host does not produce — availability is a property of the
+    /// host and account, not of the process.
+    fn race_two_selectors(
+        credentials_path: &Path,
+        mode: &ConfidentialBackendMode,
+    ) -> [Result<ConfidentialBackendSelection, CredentialsError>; 2] {
         use std::sync::{Arc, Barrier};
 
-        let dir = tempdir().unwrap();
-        let credentials_path = Arc::new(dir.path().join("credentials.toml"));
-        let mode = Arc::new(ConfidentialBackendMode::Auto {
-            keyring: test_keyring_selection("concurrent-keyring"),
-            vault: test_vault_selection(dir.path(), "concurrent-vault"),
-        });
+        let credentials_path = Arc::new(credentials_path.to_path_buf());
+        let mode = Arc::new(mode.clone());
         let barrier = Arc::new(Barrier::new(2));
 
         let keyring_thread = {
@@ -2645,8 +3069,33 @@ mod tests {
                 )
             })
         };
+        [keyring_thread.join().unwrap(), vault_thread.join().unwrap()]
+    }
 
-        let results = [keyring_thread.join().unwrap(), vault_thread.join().unwrap()];
+    #[test]
+    fn concurrent_confidential_backend_selection_creates_one_authority() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+        let keyring = test_keyring_selection("concurrent-keyring");
+        let vault = test_vault_selection(dir.path(), "concurrent-vault");
+        let mode = ConfidentialBackendMode::Auto {
+            keyring: keyring.clone(),
+            vault: vault.clone(),
+        };
+        let marker_path = confidential_backend_marker_path(&credentials_path);
+
+        // A CONFIRMED pin is absolute: the selector whose view contradicts it
+        // must fail rather than open a second authority.
+        write_confidential_backend_marker(
+            &marker_path,
+            &ConfidentialBackendMarker {
+                version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+                selection: keyring.clone(),
+                confirmed: true,
+            },
+        )
+        .unwrap();
+        let results = race_two_selectors(&credentials_path, &mode);
         let successful = results
             .iter()
             .filter_map(|result| result.as_ref().ok())
@@ -2654,14 +3103,52 @@ mod tests {
         assert_eq!(
             successful.len(),
             1,
-            "exactly one concurrent selector owns the pin"
+            "exactly one concurrent selector owns a confirmed pin"
         );
-        let marker_path = dir.path().join(".credentials.confidential-backend.json");
-        assert_eq!(
-            load_confidential_backend_marker(&marker_path)
-                .unwrap()
-                .as_ref(),
-            Some(*successful.first().unwrap())
+        assert_eq!(*successful[0], keyring);
+        let after = load_confidential_backend_marker(&marker_path)
+            .unwrap()
+            .expect("marker survives the race");
+        assert_eq!(after.selection, keyring, "a confirmed pin never moves");
+        assert!(after.confirmed);
+    }
+
+    #[test]
+    fn concurrent_unconfirmed_selection_leaves_one_untorn_marker() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+        let keyring = test_keyring_selection("concurrent-keyring");
+        let vault = test_vault_selection(dir.path(), "concurrent-vault");
+        let mode = ConfidentialBackendMode::Auto {
+            keyring: keyring.clone(),
+            vault: vault.clone(),
+        };
+        let marker_path = confidential_backend_marker_path(&credentials_path);
+
+        let results = race_two_selectors(&credentials_path, &mode);
+        let successful = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .collect::<Vec<_>>();
+        assert!(
+            !successful.is_empty(),
+            "an empty profile with an available backend must not strand every selector"
+        );
+        let marker = load_confidential_backend_marker(&marker_path)
+            .unwrap()
+            .expect("a marker is always written");
+        assert!(
+            marker.selection == keyring || marker.selection == vault,
+            "marker is torn: {:?}",
+            marker.selection
+        );
+        assert!(
+            successful.iter().any(|s| **s == marker.selection),
+            "the marker must match a selection some selector actually returned"
+        );
+        assert!(
+            !marker.confirmed,
+            "selection alone must never confirm a pin — only observed material does"
         );
     }
 
@@ -2684,9 +3171,19 @@ mod tests {
         );
     }
 
+    /// The keyring is pinned UNAVAILABLE here on purpose. The assertion is
+    /// "when Auto falls to the vault, it really uses the vault and writes no
+    /// plaintext" — but `open_confidential_store` consults the host's real
+    /// keyring, so on macOS and on a logged-in Windows desktop Auto correctly
+    /// picks the keyring and no cipher file is ever written. The test was
+    /// therefore Linux-headless-specific and failed on macOS at the
+    /// `cipher_path.exists()` line for a reason that was not a defect. Pinning
+    /// availability makes the case mean the same thing on all three platforms.
+    /// (Naming: this exercises no plaintext path at all — the never-downgrade
+    /// guarantee is proven by `confidential_auto_never_downgrades_to_plaintext`.)
     #[test]
     #[serial_test::serial(vault_passphrase_env, wayland_home_env)]
-    fn confidential_auto_uses_encrypted_vault_without_plaintext_fallback() {
+    fn confidential_auto_uses_encrypted_vault_when_the_keyring_is_unavailable() {
         let _passphrase = EnvPassphraseGuard::set("confidential-auto-passphrase");
         let dir = tempdir().unwrap();
         let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
@@ -2694,8 +3191,12 @@ mod tests {
         let plaintext_path = dir.path().join("credentials.toml");
         let (cipher_path, params_path) = default_vault_paths(&plaintext_path);
 
-        let store =
-            open_confidential_store(&CredentialsStorageConfig::default(), &plaintext_path).unwrap();
+        let store = open_confidential_store_with_availability(
+            &CredentialsStorageConfig::default(),
+            &plaintext_path,
+            &|_| false,
+        )
+        .unwrap();
         store
             .put("recovery.sealing_key", "base64-key-material")
             .unwrap();
@@ -2707,6 +3208,92 @@ mod tests {
             store.get("recovery.sealing_key").unwrap().as_deref(),
             Some("base64-key-material")
         );
+    }
+
+    /// NON-VACUITY for the write-capable probe.
+    ///
+    /// A probe that always answers "unavailable" would make every
+    /// keyring-falls-to-vault test pass and be completely wrong. This case is
+    /// two-sided and runs on every platform: it establishes ground truth by
+    /// doing the set/get/delete round trip INLINE on a different key, then
+    /// requires [`keyring_available`] to agree with it.
+    ///
+    /// * headless Linux / CI  → ground truth false → the probe MUST say false
+    /// * macOS / logged-in Windows → ground truth true → the probe MUST say true
+    ///
+    /// So neither a probe stuck on `false` nor one stuck on `true` can pass it.
+    #[test]
+    fn keyring_probe_agrees_with_an_independent_write_round_trip() {
+        let service = format!(
+            "wayland-core.probe-nonvacuity.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+
+        // Ground truth, established WITHOUT calling the probe.
+        let ground_truth = match keyring::Entry::new(&service, "__independent_round_trip__") {
+            Ok(entry) => match entry.set_password("round-trip") {
+                Ok(()) => {
+                    let read_back = entry.get_password().ok();
+                    let _ = entry.delete_credential();
+                    read_back.as_deref() == Some("round-trip")
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+
+        assert_eq!(
+            keyring_available(&service),
+            ground_truth,
+            "the availability probe disagrees with a real write round trip on this host; \
+             a probe that is not write-capable (or is hardwired) is exactly the F20 defect"
+        );
+
+        // Cached per service: the second call must not re-probe, and must not
+        // change its mind.
+        assert_eq!(keyring_available(&service), ground_truth);
+    }
+
+    /// A working keyring is still PREFERRED over the vault, and the selector
+    /// still fails closed when neither backend is usable. Together with the
+    /// round-trip test above this pins both halves: the probe tells the truth,
+    /// and a truthful "available" still wins.
+    #[test]
+    fn confidential_auto_prefers_a_working_keyring_and_fails_closed_without_one() {
+        let dir = tempdir().unwrap();
+        let keyring = test_keyring_selection("keyring-writable");
+        let vault = test_vault_selection(dir.path(), "vault-fallback");
+        let mode = ConfidentialBackendMode::Auto {
+            keyring: keyring.clone(),
+            vault: vault.clone(),
+        };
+
+        // Keyring writable + vault unlocked → keyring wins.
+        assert_eq!(
+            select_confidential_backend(None, &mode, &|_| true, true).unwrap(),
+            keyring,
+            "a genuinely writable keyring must still be preferred"
+        );
+        // Keyring writable, no vault material → still the keyring.
+        assert_eq!(
+            select_confidential_backend(None, &mode, &|_| true, false).unwrap(),
+            keyring
+        );
+        // Keyring NOT writable (the Windows service-account case) → vault.
+        assert_eq!(
+            select_confidential_backend(None, &mode, &|_| false, true).unwrap(),
+            vault,
+            "an unwritable keyring must fall through to the unlocked vault"
+        );
+        // Neither → fail closed, never plaintext.
+        assert!(matches!(
+            select_confidential_backend(None, &mode, &|_| false, false),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
     }
 
     impl Drop for EnvVarGuard {
