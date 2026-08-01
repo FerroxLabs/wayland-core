@@ -569,10 +569,14 @@ impl WebTool {
                 .map(|r| format!("{}: {}", r.url, r.reason))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return err_result(&format!(
-                "All {} URL(s) were rejected, nothing was fetched — {detail}",
-                urls.len(),
-            ));
+            // MUTANT C: keep the message but report it as a success again.
+            return ok_result(json!({
+                "success": true,
+                "error": format!(
+                    "All {} URL(s) were rejected, nothing was fetched — {detail}",
+                    urls.len(),
+                ),
+            }));
         }
 
         let req = ExtractRequest {
