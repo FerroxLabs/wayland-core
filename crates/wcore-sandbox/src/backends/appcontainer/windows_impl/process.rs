@@ -55,7 +55,7 @@ use windows_sys::Win32::System::Threading::{
     OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 
 /// `SE_GROUP_INTEGRITY` from `winnt.h`. Not re-exported by windows-sys
@@ -950,24 +950,48 @@ pub(super) fn execute_blocking(
             // is one `unsafe` block and the closures inherit that context.
             let output_bytes = Arc::new(AtomicUsize::new(0));
             let stdout_output_bytes = Arc::clone(&output_bytes);
-            let stdout_reader =
-                std::thread::spawn(move || drain_pipe(stdout_h as _, stdout_output_bytes));
-            let stderr_reader = std::thread::spawn(move || drain_pipe(stderr_h as _, output_bytes));
+            // Wakeup channel for the ceiling crossing. Owned here so it
+            // outlives both reader threads (they are joined below).
+            let exceeded_event = create_output_exceeded_event();
+            let exceeded_event_raw = exceeded_event
+                .as_ref()
+                .map(|e| e.as_raw() as usize)
+                .unwrap_or(0);
+            let stdout_reader = std::thread::spawn(move || {
+                drain_pipe(stdout_h as _, stdout_output_bytes, exceeded_event_raw as _)
+            });
+            let stderr_reader = std::thread::spawn(move || {
+                drain_pipe(stderr_h as _, output_bytes, exceeded_event_raw as _)
+            });
 
             let timeout_ms: u32 = match manifest.timeout {
                 Some(d) => clamp_timeout_ms(d),
                 None => 60_000,
             };
 
-            let wait_res = WaitForSingleObject(process.as_raw(), timeout_ms);
+            // Wait for EITHER the child to exit or the output ceiling to be
+            // crossed. Waiting only on the process (the pre-fix behaviour) let
+            // an offender that floods and then sleeps run out the full timeout:
+            // host memory was bounded because `drain_pipe` discards the excess,
+            // but the process was never killed and the failure was reported as
+            // a Timeout. Linux kills in milliseconds; this closes the gap.
+            const EXCEEDED_WAIT_INDEX: u32 = WAIT_OBJECT_0 + 1;
+            let wait_res = if let Some(event) = exceeded_event.as_ref() {
+                let waits = [process.as_raw(), event.as_raw()];
+                WaitForMultipleObjects(waits.len() as u32, waits.as_ptr(), 0, timeout_ms)
+            } else {
+                WaitForSingleObject(process.as_raw(), timeout_ms)
+            };
             let timed_out = wait_res == WAIT_TIMEOUT;
-            // A wait result other than OBJECT_0 / TIMEOUT is a hard error, but we
-            // must NOT return before the reap + join below: the detached reader
-            // threads hold raw read-handles owned by this scope's OwnedHandles,
-            // so an early return would leak the threads and drop the handles out
-            // from under them. Capture the failure and surface it after the join.
-            // Snapshot GetLastError() now — TerminateJobObject clobbers it.
-            let wait_err = if !timed_out && wait_res != WAIT_OBJECT_0 {
+            let output_exceeded_wakeup = wait_res == EXCEEDED_WAIT_INDEX;
+            // A wait result other than OBJECT_0 / OBJECT_0+1 / TIMEOUT is a hard
+            // error, but we must NOT return before the reap + join below: the
+            // detached reader threads hold raw read-handles owned by this
+            // scope's OwnedHandles, so an early return would leak the threads
+            // and drop the handles out from under them. Capture the failure and
+            // surface it after the join. Snapshot GetLastError() now —
+            // TerminateJobObject clobbers it.
+            let wait_err = if !timed_out && !output_exceeded_wakeup && wait_res != WAIT_OBJECT_0 {
                 Some((wait_res, GetLastError()))
             } else {
                 None
@@ -980,6 +1004,7 @@ pub(super) fn execute_blocking(
             // reap + join.
             let mut exit_code: u32 = 0;
             let exitcode_err = if !timed_out
+                && !output_exceeded_wakeup
                 && wait_err.is_none()
                 && GetExitCodeProcess(process.as_raw(), &mut exit_code) == 0
             {
@@ -999,7 +1024,14 @@ pub(super) fn execute_blocking(
             // pipes EOF; bytes already written stay readable and the threads have
             // been draining them all along. The short wait lets the kernel finish
             // closing the handles before the threads see EOF.
-            TerminateJobObject(job.as_raw(), if timed_out { 1 } else { exit_code });
+            TerminateJobObject(
+                job.as_raw(),
+                if timed_out || output_exceeded_wakeup {
+                    1
+                } else {
+                    exit_code
+                },
+            );
             WaitForSingleObject(process.as_raw(), 2_000);
 
             // Now that every write-end is closed the reader threads reach EOF;
@@ -1061,13 +1093,19 @@ pub(super) fn execute_blocking(
                 "child exited"
             );
 
-            if timed_out {
-                return Err(SandboxError::Timeout);
-            }
-            if stdout_exceeded || stderr_exceeded {
+            // Output exhaustion is checked BEFORE the timeout. The abuse case
+            // this exists for — flood the pipe, then sit there — trips both
+            // conditions, and the timeout used to win, making
+            // `OutputLimitExceeded` unreachable for exactly the input it was
+            // written to describe. Exhaustion is the cause; the timeout (when
+            // it still happens at all) is a consequence.
+            if output_exceeded_wakeup || stdout_exceeded || stderr_exceeded {
                 return Err(SandboxError::OutputLimitExceeded {
                     limit_bytes: super::super::super::BUFFERED_OUTPUT_LIMIT_BYTES,
                 });
+            }
+            if timed_out {
+                return Err(SandboxError::Timeout);
             }
 
             Ok(SandboxOutput {

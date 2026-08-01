@@ -48,13 +48,13 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
-    BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, CreateProcessAsUserW,
+    BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, CreateEventW, CreateProcessAsUserW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 
 /// RAII helper that closes a HANDLE on drop. Skips closing if the handle
@@ -255,7 +255,21 @@ pub(super) fn allocate_sid(authority: [u8; 6], subauthorities: &[u32]) -> Result
     Ok(OwnedSid(sid))
 }
 
-pub(super) unsafe fn drain_pipe(h: HANDLE, output_bytes: Arc<AtomicUsize>) -> (Vec<u8>, bool) {
+/// Drain one pipe to EOF, bounding host memory and WAKING THE WAITER the
+/// first time the output ceiling is crossed.
+///
+/// `exceeded_event` is signalled once, on the transition into the exceeded
+/// state. Without it the caller could only learn about exhaustion by joining
+/// this thread, which happens after the wait — so an offender that floods and
+/// then sleeps (the `flood_worker_fixture` shape) was never killed, and the
+/// failure was reported as a Timeout instead of `OutputLimitExceeded`. Linux
+/// gets this for free: `read_bounded` returns `Err(OutputLimitExceeded)` the
+/// moment the ceiling is hit.
+pub(super) unsafe fn drain_pipe(
+    h: HANDLE,
+    output_bytes: Arc<AtomicUsize>,
+    exceeded_event: HANDLE,
+) -> (Vec<u8>, bool) {
     let mut out: Vec<u8> = Vec::new();
     let mut exceeded = false;
     let mut buf = [0u8; 4096];
@@ -278,12 +292,41 @@ pub(super) unsafe fn drain_pipe(h: HANDLE, output_bytes: Arc<AtomicUsize>) -> (V
             out.extend_from_slice(&buf[..read]);
         } else {
             // Keep draining after the ceiling is hit so the child does not
-            // deadlock on a full pipe. Discarding the excess bounds host
-            // memory while still allowing the owned job to exit normally.
-            exceeded = true;
+            // deadlock on a full pipe while the waiter tears the job down.
+            // Discarding the excess bounds host memory.
+            if !exceeded {
+                exceeded = true;
+                // Signal once, on the transition. The waiter reaps the job,
+                // which EOFs this pipe and ends the loop.
+                if !exceeded_event.is_null() {
+                    unsafe {
+                        SetEvent(exceeded_event);
+                    }
+                }
+            }
         }
     }
     (out, exceeded)
+}
+
+/// Create the auto-reset, initially-unsignalled event `drain_pipe` uses to
+/// wake the process waiter when the output ceiling is crossed.
+///
+/// Returns `None` when the kernel refuses; the caller then degrades to the
+/// pre-existing wait-for-the-process-only behaviour rather than failing the
+/// command, so a probe-time hiccup cannot make every sandboxed command error.
+pub(super) fn create_output_exceeded_event() -> Option<OwnedHandle> {
+    let handle = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+    if handle.is_null() {
+        tracing::warn!(
+            target: "wcore_sandbox",
+            last_err = format!("{:#x}", unsafe { GetLastError() }),
+            "CreateEventW for the output-limit wakeup failed; output exhaustion \
+             will only be detected after the child exits or times out"
+        );
+        return None;
+    }
+    Some(OwnedHandle::new(handle))
 }
 
 pub(super) fn clamp_timeout_ms(d: Duration) -> u32 {

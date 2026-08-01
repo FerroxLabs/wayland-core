@@ -242,6 +242,34 @@ pub(crate) fn first_line_preview(text: &str, max: usize) -> String {
     }
 }
 
+/// A one-line, width-clamped preview that elides the MIDDLE rather than the
+/// tail.
+///
+/// [`first_line_preview`] keeps the head, which is wrong for any status line
+/// whose identifying detail sits at the end — `WriteTool` emits
+/// `"Created <path> (<n> lines)"`, so head-truncation drops the filename AND
+/// the line count and leaves only a directory prefix. Keeping both ends
+/// preserves the verb and the filename+count for any path length; only the
+/// interior directory run is sacrificed. The clamp is by `char`, so multi-byte
+/// output cannot be split mid-codepoint, and the result is never longer than
+/// `max` chars.
+pub(crate) fn elided_line_preview(text: &str, max: usize) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = line.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= max {
+        return trimmed.to_string();
+    }
+    // One char of the budget pays for the ellipsis; split the rest so the tail
+    // (filename + counts) is never the side that loses a char.
+    let budget = max.saturating_sub(1);
+    let head_len = budget / 2;
+    let tail_len = budget - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}…{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +405,34 @@ mod tests {
         let c = formatter_for("web_fetch").summary_line(&p, Duration::ZERO);
         assert_eq!(a, b);
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn elided_line_preview_keeps_both_ends_and_respects_the_budget() {
+        // Under budget: byte-identical to the input line, no ellipsis.
+        assert_eq!(
+            elided_line_preview("Created /a/b.txt (2 lines)", 60),
+            "Created /a/b.txt (2 lines)"
+        );
+
+        // Over budget: the verb AND the trailing filename+count survive —
+        // this is the whole point, and what head-truncation could not do.
+        let long = "Created /home/ci/work/wayland-core/crates/wcore-agent/src/orchestration/workflow/runner.rs (2 lines)";
+        let out = elided_line_preview(long, 60);
+        assert!(out.starts_with("Created "), "lost the verb: {out}");
+        assert!(out.ends_with("runner.rs (2 lines)"), "lost the tail: {out}");
+        assert!(out.contains('…'), "no elision marker: {out}");
+        assert_eq!(out.chars().count(), 60, "budget not honoured: {out}");
+        assert_ne!(
+            out,
+            first_line_preview(long, 60),
+            "head truncation and middle elision must differ here"
+        );
+
+        // Multi-byte input must not be split mid-codepoint on either side.
+        let wide = "★".repeat(200);
+        let out = elided_line_preview(&wide, 21);
+        assert_eq!(out.chars().count(), 21);
+        assert_eq!(out.chars().filter(|c| *c == '★').count(), 20);
     }
 }
