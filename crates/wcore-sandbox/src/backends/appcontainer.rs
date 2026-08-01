@@ -293,6 +293,30 @@ mod probe_cache_tests {
         assert!(c.needs_probe(t0 + Duration::from_secs(31)));
     }
 
+    /// The same property against the REAL clock, so it cannot be satisfied by
+    /// a synthetic-time convention.
+    ///
+    /// A one-millisecond retry window is guaranteed to have lapsed after the
+    /// sleep. Under the old semantics — where the window erased the answer —
+    /// the verdict here reads "no verdict", which is what a containment
+    /// predicate reads as "still fine". It must read `false`.
+    #[test]
+    fn a_negative_verdict_survives_a_lapsed_retry_window_on_the_real_clock() {
+        let mut c = ProbeCache::new();
+        c.record(false, Instant::now(), Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(
+            c.settled(),
+            Some(false),
+            "the answer must outlive its retry window — a lapsed window means \
+             `probe again`, never `never mind`"
+        );
+        assert!(
+            c.needs_probe(Instant::now()),
+            "the lapsed window must still permit a fresh probe"
+        );
+    }
+
     #[test]
     fn late_negative_never_downgrades_a_sticky_positive() {
         // Two concurrent probes race the first fill: A succeeds and records
