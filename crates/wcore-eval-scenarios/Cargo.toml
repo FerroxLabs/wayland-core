@@ -71,6 +71,12 @@ serde_json   = { workspace = true }
 toml         = { workspace = true }
 # Hermetic tempdirs for per-scenario session-dir / cwd hermeticity (C-3).
 tempfile     = { workspace = true }
+# Workspace-evidence hashing must recognise the RESOLVED spelling of the
+# workspace, because that is the one the binary under test prints. On Windows
+# `canonicalize` returns the verbatim `\\?\C:\…` form, which the binary never
+# emits; `dunce::simplified` reduces it to the ordinary `C:\…` form that it
+# does. Already in the tree via wcore-agent and wcore-swarm — adds nothing new.
+dunce        = "1"
 # Error plumbing.
 anyhow       = { workspace = true }
 thiserror    = { workspace = true }
