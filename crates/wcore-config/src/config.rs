@@ -3250,12 +3250,66 @@ fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
 /// still abort visibly (D011 dataloss guard). The `Display` text is the
 /// original user-facing guidance, unchanged, so callers that match on the
 /// message keep working.
+/// No API key resolved anywhere in the chain.
+///
+/// The remedy this names is `auth add`, NOT "the config file". It used to say
+/// "Provide via --api-key, config file, or environment variable", and the config
+/// file means `[providers.<slug>].api_key` — a CLEARTEXT sink. A product that
+/// fails closed on a cleartext write and then, one screen later, tells the user
+/// to go and hand-write the key in cleartext has not closed anything. `auth add`
+/// routes through the credential ladder.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "No API key found. Provide via --api-key, config file, or environment variable \
-     (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)."
+    "No API key found. Add one with `wayland-core auth add <provider> <key>` (stored in \
+     the OS keyring or the encrypted vault), pass --api-key for a one-off, or set an \
+     environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)."
 )]
 pub struct MissingApiKey;
+
+/// The provider whose credentials-store slot an ENV VAR NAME stands for, or
+/// `None` when the name is a tool key with no store slot at all.
+///
+/// The reverse of [`resolve_api_key_from_env`]'s per-provider chain, and it must
+/// stay that way — `provider_for_credential_env_var_round_trips_the_resolver`
+/// pins the two together. Exists so the credentials surfaces that are keyed by
+/// env-var NAME (the TUI provider catalog) can route a provider key into the
+/// credential ladder instead of writing cleartext to `~/.wayland/.env`.
+///
+/// `API_KEY` is deliberately absent: it is the resolver's provider-agnostic
+/// override and belongs to no single slot, so writing it into one would silently
+/// bind a global to a provider.
+///
+/// Tool keys (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `ELEVENLABS_API_KEY`, …)
+/// return `None` because nothing reads them from the credentials store — they
+/// are resolved from the process environment only. Routing them into the store
+/// would make them unreadable, which is worse than the cleartext they have now;
+/// their disposition is recorded in `.planning/CREDENTIAL-STORAGE-DESIGN.md` §7.
+#[must_use]
+pub fn provider_for_credential_env_var(name: &str) -> Option<ProviderType> {
+    Some(match name {
+        "ANTHROPIC_API_KEY" => ProviderType::Anthropic,
+        "OPENAI_API_KEY" => ProviderType::OpenAI,
+        "GEMINI_API_KEY" | "GOOGLE_API_KEY" => ProviderType::Gemini,
+        "AZURE_OPENAI_API_KEY" => ProviderType::AzureOpenAI,
+        "TOGETHER_API_KEY" => ProviderType::Together,
+        "FIREWORKS_API_KEY" => ProviderType::Fireworks,
+        "NVIDIA_API_KEY" => ProviderType::Nvidia,
+        "PERPLEXITY_API_KEY" => ProviderType::Perplexity,
+        "CEREBRAS_API_KEY" => ProviderType::Cerebras,
+        "OPENROUTER_API_KEY" => ProviderType::OpenRouter,
+        "FLUX_API_KEY" => ProviderType::FluxRouter,
+        "DEEPSEEK_API_KEY" => ProviderType::Deepseek,
+        "XAI_API_KEY" => ProviderType::Xai,
+        "GROQ_API_KEY" => ProviderType::Groq,
+        "MOONSHOT_API_KEY" => ProviderType::Moonshot,
+        "DASHSCOPE_API_KEY" | "ALIBABA_API_KEY" => ProviderType::Qwen,
+        "MISTRAL_API_KEY" => ProviderType::Mistral,
+        "COHERE_API_KEY" => ProviderType::Cohere,
+        "MINIMAX_API_KEY" => ProviderType::MiniMax,
+        "SAKANA_API_KEY" => ProviderType::Sakana,
+        _ => return None,
+    })
+}
 
 /// The credentials-store key under which `provider`'s API key is stored, or
 /// `None` for providers that authenticate out-of-band (Bedrock/Vertex via cloud
@@ -4200,8 +4254,28 @@ pub fn effective_config_toml_with_provenance(
 /// True if a TOML key name designates a secret value that must be redacted.
 /// Matched case-insensitively as a substring so compound names
 /// (`webhook_secret`, `bot_token`, `Authorization`) are covered.
+///
+/// The needle list is a DENYLIST, and a denylist's failure mode is the omission
+/// nobody notices. Two were found by audit and are fixed here:
+///
+/// * `service_account_json` ([`VertexConfig`]) — an inline GCP service-account
+///   document, private-key PEM included. Matched no needle: not "secret", not
+///   "credential", not "private_key", not "auth".
+/// * `access_key_id` / `secret_access_key` ([`BedrockConfig`]) — the second
+///   matched "secret", the first matched nothing.
+///
+/// Both structs' hand-written `Debug` impls DO redact these fields, so the
+/// tracing surface was clean while the effective-config preview rendered them
+/// in cleartext. Two surfaces disagreeing is how this survived; a test now pins
+/// them together.
+///
+/// Inverting to an allowlist of renderable keys is the structurally correct fix
+/// and is deliberately NOT done here: the config surface is large and an
+/// allowlist built in this change would silently mask ordinary fields, trading
+/// a leak for an unreadable preview. Recorded as a follow-up in
+/// `.planning/CREDENTIAL-STORAGE-DESIGN.md` §7.
 fn is_secret_key(key: &str) -> bool {
-    const NEEDLES: [&str; 9] = [
+    const NEEDLES: [&str; 12] = [
         "api_key",
         "apikey",
         "token",
@@ -4211,6 +4285,14 @@ fn is_secret_key(key: &str) -> bool {
         "credential",
         "private_key",
         "auth",
+        // Matches `access_key_id` AND `secret_access_key`.
+        "access_key",
+        // Matches `service_account_json` and any sibling that carries the
+        // account document itself.
+        "service_account",
+        // Catches the `*_key_id` / `*_key` family generally, e.g. a future
+        // `signing_key`, without matching ordinary words containing "key".
+        "_key",
     ];
     let lowered = key.to_ascii_lowercase();
     NEEDLES.iter().any(|n| lowered.contains(n))
@@ -6534,6 +6616,105 @@ mod tests {
         let storage = crate::credentials::CredentialsStorageConfig::default();
         let result = resolve_api_key(None, None, ProviderType::Vertex, &storage).unwrap();
         assert_eq!(result, "");
+    }
+
+    /// Every env var name [`provider_for_credential_env_var`] claims for a
+    /// provider must be one [`resolve_api_key_from_env`] actually reads for that
+    /// provider.
+    ///
+    /// The two are a forward/reverse pair written by hand in different places,
+    /// and the reverse one now decides WHERE the TUI credentials modal sends a
+    /// key: a name mapped to the wrong provider writes the secret into the wrong
+    /// store slot, where resolution never looks for it. Drift here is silent —
+    /// the save reports success and the key simply never applies.
+    ///
+    /// Driven off the real resolver, not off a second copy of the table, so a
+    /// resolver change that this map does not follow FAILS instead of going
+    /// quiet. Also asserts the reverse direction (`name -> provider`), so a
+    /// mapping that points at a provider whose chain happens to accept the same
+    /// var cannot pass by coincidence.
+    #[test]
+    #[serial_test::serial(provider_env_vars)]
+    fn provider_for_credential_env_var_round_trips_the_resolver() {
+        const PAIRS: &[(&str, ProviderType)] = &[
+            ("ANTHROPIC_API_KEY", ProviderType::Anthropic),
+            ("OPENAI_API_KEY", ProviderType::OpenAI),
+            ("GEMINI_API_KEY", ProviderType::Gemini),
+            ("GOOGLE_API_KEY", ProviderType::Gemini),
+            ("AZURE_OPENAI_API_KEY", ProviderType::AzureOpenAI),
+            ("TOGETHER_API_KEY", ProviderType::Together),
+            ("FIREWORKS_API_KEY", ProviderType::Fireworks),
+            ("NVIDIA_API_KEY", ProviderType::Nvidia),
+            ("PERPLEXITY_API_KEY", ProviderType::Perplexity),
+            ("CEREBRAS_API_KEY", ProviderType::Cerebras),
+            ("OPENROUTER_API_KEY", ProviderType::OpenRouter),
+            ("FLUX_API_KEY", ProviderType::FluxRouter),
+            ("DEEPSEEK_API_KEY", ProviderType::Deepseek),
+            ("XAI_API_KEY", ProviderType::Xai),
+            ("GROQ_API_KEY", ProviderType::Groq),
+            ("MOONSHOT_API_KEY", ProviderType::Moonshot),
+            ("DASHSCOPE_API_KEY", ProviderType::Qwen),
+            ("ALIBABA_API_KEY", ProviderType::Qwen),
+            ("MISTRAL_API_KEY", ProviderType::Mistral),
+            ("COHERE_API_KEY", ProviderType::Cohere),
+            ("MINIMAX_API_KEY", ProviderType::MiniMax),
+            ("SAKANA_API_KEY", ProviderType::Sakana),
+        ];
+
+        // Every var this test touches, saved once and restored once, so the
+        // process environment is exactly as it was afterwards.
+        let mut touched: Vec<&str> = PAIRS.iter().map(|(name, _)| *name).collect();
+        touched.push("API_KEY");
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = touched
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+
+        let mut failures = Vec::new();
+        for (name, provider) in PAIRS {
+            // Reverse direction.
+            assert_eq!(
+                provider_for_credential_env_var(name),
+                Some(*provider),
+                "{name} must map to {provider:?}"
+            );
+            // Every mapped provider must have a store slot — a name that routes
+            // to a slot-less provider would send the modal's key nowhere.
+            assert!(
+                credentials_store_key(*provider).is_some(),
+                "{name} maps to {provider:?}, which has no credentials-store slot"
+            );
+
+            // Forward direction, through the REAL resolver. Clear every mapped
+            // var first: the per-provider chains are ordered (Gemini tries
+            // GEMINI_API_KEY then GOOGLE_API_KEY; Qwen tries DASHSCOPE then
+            // ALIBABA) and `API_KEY` short-circuits all of them, so a leftover
+            // would let the wrong var satisfy the assertion.
+            for other in &touched {
+                unsafe { std::env::remove_var(other) };
+            }
+            let expected = format!("value-for-{name}");
+            unsafe { std::env::set_var(name, &expected) };
+            match resolve_api_key_from_env(*provider) {
+                Ok(resolved) if resolved == expected => {}
+                other => failures.push(format!("{name} -> {provider:?}: got {other:?}")),
+            }
+        }
+
+        for (name, prior) in saved {
+            unsafe {
+                match prior {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "the reverse env-var map has drifted from the resolver:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]

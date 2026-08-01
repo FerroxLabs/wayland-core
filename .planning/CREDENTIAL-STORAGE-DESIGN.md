@@ -137,3 +137,123 @@ warning. It is never reached by a fallback edge.
 - GCM configuration — https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md
 - `resources/kimi-code/packages/oauth/src/storage.ts` (0700/0600, atomic, re-chmod)
 - `resources/gemini-cli/packages/core/src/code_assist/oauth2.ts:765-767` (0600 + chmod)
+
+---
+
+## 7. Scope — every credential sink, with a disposition
+
+§1–§5 govern exactly ONE edge: `FallbackCredentialsStore::put`. That is not the
+whole attack surface, and a design that fixes one sink while leaving the paths a
+typical user actually takes untouched is worse than no design — it converts an
+open problem into a closed-looking one.
+
+This section is the inventory. **An omission here is indistinguishable from
+coverage, so every sink is listed even when the disposition is "not fixed".**
+Dispositions are exactly three:
+
+- **governed** — writes go through the credential ladder; cleartext is
+  unreachable without an explicit `CredentialsBackend::Plaintext`.
+- **accepted-plaintext** — writes cleartext by design, because nothing can read
+  it from anywhere else. Requires an explicit user action and a loud statement
+  at the point of the write.
+- **deferred** — a real cleartext sink, not fixed here, with the reason and the
+  follow-up named.
+
+| # | sink | who writes it | disposition | where |
+|---|------|---------------|-------------|-------|
+| 1 | `credentials.toml` `[secrets]` via `Auto` | `open_store` → ladder | **governed** | `credentials.rs` `LadderCredentialsStore` |
+| 2 | `credentials.toml` `[secrets]` via `backend = "plaintext"` | operator opt-in | **accepted-plaintext** | `credentials.rs` `warn_explicit_plaintext_backend` |
+| 3 | `config.toml` `[providers.<slug>].api_key` | `auth add` | **governed** | `auth.rs` `add_cmd` |
+| 4 | `~/.wayland/.env` — provider keys | TUI credentials modal | **governed** | `tui/surfaces/config.rs` `save` |
+| 5 | `~/.wayland/.env` — tool keys | TUI credentials modal | **accepted-plaintext** | same |
+| 6 | `~/.wayland/oauth/*.json` | OAuth login | **deferred** | `wcore-agent/src/oauth/storage.rs` |
+| 7 | `config.toml` `[providers].api_key` | `migrate --include-credentials` | **deferred** | `wcore-cli/src/migrate/hermes.rs:252` |
+| 8 | OS keychain, ACP auth | `wcore-config::keychain` | **deferred** (already fail-closed, but no vault tier and it leaks) | `keychain.rs`, `wcore-acp/src/auth.rs` |
+| 9 | `[bedrock]` / `[vertex]` secrets in `config.toml` | hand-edited | **deferred** | `config.rs:93`, `config.rs:123` |
+
+### Per-sink detail
+
+**1–2 — the credentials store.** The subject of §1–§5. `Auto` is now
+keyring → encrypted vault → refuse. The legacy cleartext file is mounted
+READ-ONLY so an existing install keeps resolving its keys; there is no edge on
+which a `put` reaches it. `backend = "plaintext"` still works and warns.
+
+**3 — `auth add`, and it was the main path.** `add_cmd` wrote
+`[providers.<slug>].api_key` into `config.toml` in cleartext. Worse, that key
+**outranks the credentials store** in `resolve_api_key` (cli → config → store →
+env, `config.rs`), so even a correct store write was shadowed by it. Now: the key
+goes to the ladder, the write is read back before success is reported, and a
+pre-existing cleartext copy is STRIPPED (otherwise it would shadow the new one).
+`auth list` reports WHERE each key lives and names the cleartext ones; `auth
+remove` clears both locations.
+
+> **PRECEDENCE IS NOT CHANGED, and that is a reported risk, not an oversight.**
+> `[providers.<slug>].api_key` still outranks the store for a key nobody
+> re-adds. Inverting the order would silently change WHICH key an existing user
+> authenticates with — a config value they can see losing to a store value they
+> cannot — and that is not a change to make in the same commit as the storage
+> rework. `auth add` migrating the key off cleartext is the safe half; the
+> precedence flip needs its own change and its own migration note.
+
+**4–5 — `~/.wayland/.env`.** The TUI credentials modal was the primary
+INTERACTIVE way a user hands us a key, and it wrote cleartext to `.env`. Its own
+F21 comment in `wcore-cli/src/tui/surfaces/config.rs` records that
+`resolve_api_key` reads cli → config → store → process-env and never the `.env`
+file, so the key was invisible until a restart reloaded `.env` into the process
+environment. Provider keys (those with a
+`credentials_store_key` slot) now go to the ladder and apply on the next rebind.
+Tool keys (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `ELEVENLABS_API_KEY`, …)
+still go to `.env` because **nothing reads a tool key from the credentials
+store** — routing them there would make them unreadable, which is a worse
+outcome than the cleartext they have today. That is accepted-plaintext, and the
+status line now says `Saved UNENCRYPTED to ~/.wayland/.env (0600)` rather than
+implying a secure store. The file's own hygiene is good (parent forced 0700,
+0600 before and after an atomic rename, control characters rejected, name-only
+logging) — it is the *choice of destination* that was wrong, not the writing.
+
+**6 — OAuth tokens.** `~/.wayland/oauth/{provider}.json`, 0700 dir / 0600 file,
+atomic. A refresh token is a credential and it is at rest in cleartext. NOT
+fixed here: the OAuth store has its own lifecycle (refresh-on-expiry, per-
+provider files, an import path from the Codex CLI), and routing it through a
+key/value credential store is a redesign rather than a redirect. Follow-up.
+
+**7 — `migrate --include-credentials`.** Lifts a provider key out of a foreign
+tool's `.env` and writes it into the migrated profile's `config.toml` as
+`[providers.<slug>].api_key` — sink 3, reached from a different direction. NOT
+fixed here only because the migrate planner is a preview/apply pipeline whose
+plan is rendered and diffed before it runs; making one step of it write to the
+ladder without also teaching the preview about the ladder would produce a plan
+that does not describe what happens. Follow-up, and it should reuse `auth add`'s
+path when it lands.
+
+**8 — the ACP keychain surface.** `wcore_config::keychain` is keyring-only:
+`store_secret`/`get_secret`/`delete_secret` with no plaintext fallback, so it is
+already fail-closed and is NOT a cleartext sink. Two defects remain, both
+recorded rather than fixed: (a) it has no vault tier, so on a keyring-less host
+ACP auth is simply unavailable with an unactionable message, where the ladder
+would give it the vault; (b) it writes under its own `SERVICE_PREFIX` and nothing
+deletes those entries on profile removal — **the same P3 leak shape** closed for
+the confidential blob key, in a second place. `wcore-acp/src/auth.rs:10-12`
+additionally claims "the keychain has fallback env-var lookup behavior in
+`wcore-config::keychain`"; it does not — the comment is stale and describes a
+behaviour that is not in the code.
+
+**9 — hand-edited cloud secrets.** `[bedrock].secret_access_key`,
+`[vertex].service_account_json` and friends are read from `config.toml` and have
+no store slot at all. Nothing in the product WRITES them — they are placed by
+hand — so there is no write path to govern; the exposure is that they are read
+from, and rendered from, a cleartext file. Partially addressed here: they were
+also being rendered in CLEARTEXT by the effective-config preview, because
+`is_secret_key`'s denylist matched neither `service_account_json` nor
+`access_key_id` while both structs' hand-written `Debug` impls DID redact them.
+The needles are added. **The denylist itself is the defect** — inverting it to an
+allowlist of renderable keys is the structural fix and is deliberately deferred:
+built in this change it would silently mask ordinary fields and trade a leak for
+an unreadable preview.
+
+### Residual, stated plainly
+
+- Sinks 6, 7, 8 and 9 are open. Three of them can still put a credential in
+  cleartext on disk (6, 7, 9-by-hand).
+- Config-over-store precedence (sink 3) is unchanged.
+- `is_secret_key` remains a denylist.

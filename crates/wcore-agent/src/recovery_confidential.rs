@@ -12,7 +12,10 @@ use wcore_config::confidential_blob::{
 };
 use wcore_config::config::Config;
 
-const KEY_REF: &str = "wayland-core.recovery.prepared-request.v1";
+/// The single source of this identifier is `wcore_config`, so the profile-delete
+/// purge (`purge_profile_confidential_keys`) deletes exactly what this writes.
+/// Two independent spellings is how a key ends up with a writer and no deleter.
+const KEY_REF: &str = wcore_config::credentials::RECOVERY_PREPARED_REQUEST_KEY_REF;
 const PURPOSE: &str = "recovery.prepared-provider-request.v1";
 const ENVELOPE_VERSION: u8 = 1;
 const ALGORITHM: &str = "xchacha20-poly1305";
