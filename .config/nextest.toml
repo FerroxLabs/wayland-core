@@ -72,9 +72,42 @@ retries = 1
 slow-timeout = { period = "30s", terminate-after = 2 }
 test-threads = "num-cpus"
 
+# ── junit.path is relative to the PROFILE STORE DIR, not the workspace root ──
+#
+# All four `junit.path` keys in this file used to read
+# `path = "target/nextest/<profile>/junit.xml"`. That is the doubled form.
+# nextest resolves `junit.path` against the profile's store directory, which is
+# ALREADY `target/nextest/<profile>/`, so those values produced
+#   target/nextest/ci/target/nextest/ci/junit.xml
+# and the path every consumer looks at, `target/nextest/ci/junit.xml`, has never
+# existed on any platform in this repository's history.
+#
+# Measured on hetzner-dsm 2026-08-01, both directions on the same tree:
+#   before: find target/nextest -name junit.xml
+#             -> target/nextest/ci/target/nextest/ci/junit.xml        (2.7 MB)
+#             -> target/nextest/default/target/nextest/default/junit.xml
+#           ls target/nextest/ci/junit.xml -> No such file or directory
+#   after (path = "junit.xml"), one real `--profile ci` run:
+#             -> target/nextest/ci/junit.xml                          (21 KB)
+#
+# What this silently broke, everywhere, for as long as it has been wrong:
+#   * `Upload nextest JUnit report` uploaded NOTHING on every leg. It carries
+#     `if-no-files-found: ignore`, so it reported success while producing no
+#     artifact.
+#   * The per-leg `Assert this leg produced test signal` gate could never pass.
+#     Worse, it fails with the text "cargo-nextest never ran on this leg ...
+#     a shell/interpreter mismatch on Windows does exactly this" — on the very
+#     run where Windows executed 13,352 tests. A gate that cannot pass, whose
+#     failure text names the wrong cause, is worse than no gate.
+#   * The aggregate `Assert test evidence exists` gate in the `report` job
+#     counts downloaded *.xml and fails closed at zero — so it too could never
+#     pass, and `Publish test report` had nothing to publish.
+#
+# If you ever change these, verify by RUNNING nextest and looking at where the
+# file lands. Do not reason about it from the key name.
 [profile.default.junit]
 # Generate JUnit XML for local tooling if wanted
-path = "target/nextest/default/junit.xml"
+path = "junit.xml"
 
 # Per-test overrides (same philosophy as the CI profile): the genuinely-heavy
 # tests get an explicit, documented exception instead of loosening everyone's
@@ -193,7 +226,7 @@ filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
 slow-timeout = { period = "120s", terminate-after = 4 }
 
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
 
 # ── E2E profile ─────────────────────────────────────────────────────────────
 # Run with: cargo nextest run --profile e2e --test e2e
@@ -210,7 +243,7 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 test-threads = 1
 
 [profile.e2e.junit]
-path = "target/nextest/e2e/junit.xml"
+path = "junit.xml"
 
 # ── EVAL profile ─────────────────────────────────────────────────────────────
 # Per cross-audit M-6 (serialize per-provider to avoid hammering provider
@@ -231,7 +264,7 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 test-threads = 1
 
 [profile.eval.junit]
-path = "target/nextest/eval/junit.xml"
+path = "junit.xml"
 
 # ── Native Windows live-containment serialization (F20-43, belt-and-braces) ──
 # The `#![cfg(windows)]` `#[ignore]`d native containment / ACL acceptance
