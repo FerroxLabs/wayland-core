@@ -5856,6 +5856,33 @@ mod tests {
         );
     }
 
+    /// The headless cron daemon has no resolved `Config` — it reads the merged
+    /// config FILE directly (`build_headless_cron_handler_with_channels`),
+    /// because the `Config::default()` it otherwise works from always carries
+    /// `read_only = false` and would silently ignore the operator's setting.
+    /// This asserts the source it reads actually carries a project-level
+    /// posture, in both directions.
+    #[test]
+    fn a_project_config_read_only_reaches_the_merged_file_the_cron_daemon_reads() {
+        fn merged_read_only(body: &str) -> bool {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(".wayland-core.toml"), body).expect("write project cfg");
+            load_merged_config_file(Some(dir.path()))
+                .expect("load merged config")
+                .default
+                .read_only
+        }
+
+        assert!(
+            merged_read_only("[default]\nread_only = true\n"),
+            "a project config that asks for read_only must reach the merged file"
+        );
+        assert!(
+            !merged_read_only("[default]\n"),
+            "and a project config that says nothing must not invent it"
+        );
+    }
+
     #[test]
     fn test_provider_type_from_str_openai() {
         let result = parse_builtin_provider("openai");
