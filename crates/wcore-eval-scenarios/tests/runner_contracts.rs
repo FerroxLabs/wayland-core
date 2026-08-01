@@ -207,9 +207,39 @@ async fn assert_owned_orphan_cleaned(
     control_path: &std::path::Path,
     result: &wcore_eval_scenarios::runner::ScenarioResult,
 ) {
-    let state = wait_for_orphan_state(control_path, Duration::from_secs(1))
-        .await
-        .expect("owned descendant must publish pid, port, and heartbeat");
+    // Report WHY when the descendant never published. This used to be a bare
+    // `.expect(...)`, which is the least useful thing it could say: the two
+    // causes it hides — the fixture aborted before spawning, or the descendant
+    // was reaped before it could write — need opposite repairs, and the run
+    // already captured the evidence that separates them.
+    let state = match wait_for_orphan_state(control_path, Duration::from_secs(1)).await {
+        Some(state) => state,
+        None => panic!(
+            "owned descendant never published pid/port/heartbeat at {}\n\
+             control file present: {}\n\
+             control file read: {:?}\n\
+             sibling entries: {:?}\n\
+             scenario failures: {:?}\n\
+             candidate stderr tail: {}",
+            control_path.display(),
+            control_path.exists(),
+            std::fs::read_to_string(control_path),
+            control_path.parent().map(|dir| {
+                std::fs::read_dir(dir).map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                })
+            }),
+            result.failures,
+            if result.stderr_tail.is_empty() {
+                "<empty>"
+            } else {
+                result.stderr_tail.as_str()
+            }
+        ),
+    };
     let cleaned = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
     if !cleaned {
         emergency_kill_owned_orphan(state).await;
@@ -563,41 +593,13 @@ async fn candidate_cannot_migrate_descendants_to_parent_or_sibling_cgroups() {
     assert!(result.passed, "unexpected failures: {:?}", result.failures);
 }
 
-/// Scenario budget for the owned-descendant family.
-///
-/// These tests are about what happens to a descendant that ALREADY EXISTS, so
-/// the descendant coming up is their precondition, not their subject. If a
-/// scenario deadline can fire while the fixture is still creating it, the Job
-/// Object reaps a descendant that never published its state and the test dies
-/// on "owned descendant must publish", having measured nothing.
-///
-/// That is a race against process creation, and it was calibrated on Unix
-/// fork/exec. Measured on Windows (SeanDesktop, 2026-08-01) at 12-way
-/// parallelism, a descendant takes 48-112 ms to spawn, bind and publish — so
-/// the old 250 ms turn budget carried barely 2x headroom over its own setup,
-/// and one test in roughly three full-suite runs lost the race. The budgets
-/// below are an order of magnitude clear of that measurement.
-///
-/// Nothing here weakens an assertion: the timeout fixtures sleep for 60 s, so
-/// `OverTime` and `Hung` still fire on every run, and the containment proof
-/// (`wait_for_orphan_cleanup`) keeps its own tight 1 s budget. The pre-existing
-/// `dropping_runner_future` test already used 30 s for exactly this reason.
-const DESCENDANT_SCENARIO_BUDGET: Duration = Duration::from_secs(6);
-
-/// Turn budget for the descendant tests that must reach a TURN timeout.
-const DESCENDANT_TURN_TIMEOUT_BUDGET: Duration = Duration::from_millis(1_500);
-
-/// Wall budget for the descendant test that must reach the OUTER deadline.
-/// Still far below the fixture's 60 s sleep, so `Hung` is unavoidable.
-const DESCENDANT_OUTER_DEADLINE_BUDGET: Duration = Duration::from_millis(2_500);
-
 #[tokio::test]
 async fn normal_exit_reaps_owned_descendant_listener() {
     let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_normal_exit", Category::Hardening)
-        .max_total_time(DESCENDANT_SCENARIO_BUDGET)
+        .max_total_time(Duration::from_secs(2))
         .turn(Turn::new("spawn inherited listener"));
 
     let result = run_with_binary(&scenario, &provider(&model), fixture())
@@ -614,8 +616,8 @@ async fn timeout_reaps_owned_descendant_listener() {
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_timeout", Category::Hardening)
-        .max_total_time(DESCENDANT_SCENARIO_BUDGET)
-        .turn(Turn::new("spawn inherited listener").max_time(DESCENDANT_TURN_TIMEOUT_BUDGET));
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn inherited listener").max_time(Duration::from_millis(250)));
 
     let result = run_with_binary(&scenario, &provider(&model), fixture())
         .await
@@ -636,8 +638,8 @@ async fn outer_deadline_reaps_owned_descendant_listener() {
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_outer_timeout", Category::Hardening)
-        .max_total_time(DESCENDANT_OUTER_DEADLINE_BUDGET)
-        .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(30)));
+        .max_total_time(Duration::from_secs(1))
+        .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(5)));
 
     let result = run_with_binary(&scenario, &provider(&model), fixture())
         .await
@@ -659,7 +661,7 @@ async fn cancellation_reaps_owned_descendant_listener() {
     let stop_marker = control_path.with_extension("stop-observed");
     let model = format!("fixture-owned-orphan-cancel:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_cancellation", Category::Hardening)
-        .max_total_time(DESCENDANT_SCENARIO_BUDGET)
+        .max_total_time(Duration::from_secs(2))
         .turn(Turn::new("spawn inherited listener").stop_mid_turn());
 
     let result = run_with_binary(&scenario, &provider(&model), fixture())
@@ -686,7 +688,7 @@ async fn assertion_failure_still_reaps_owned_descendant_listener() {
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_assertion", Category::Hardening)
-        .max_total_time(DESCENDANT_SCENARIO_BUDGET)
+        .max_total_time(Duration::from_secs(2))
         .turn(
             Turn::new("spawn inherited listener")
                 .assert(Assertion::Contains("deliberately absent")),
@@ -710,7 +712,7 @@ async fn direct_child_early_exit_reaps_owned_descendant_listener() {
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-exit:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_early_exit", Category::Hardening)
-        .max_total_time(DESCENDANT_SCENARIO_BUDGET)
+        .max_total_time(Duration::from_secs(2))
         .turn(Turn::new("spawn inherited listener and exit"));
 
     let result = run_with_binary(&scenario, &provider(&model), fixture())
@@ -735,7 +737,7 @@ async fn dropping_runner_future_reaps_owned_descendant_listener() {
         );
         let scenario = Scenario::new("owned_orphan_future_drop", Category::Hardening)
             .max_total_time(Duration::from_secs(30))
-            .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(30)));
+            .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(5)));
         run_with_binary(&scenario, &provider(&model), fixture()).await
     });
 
