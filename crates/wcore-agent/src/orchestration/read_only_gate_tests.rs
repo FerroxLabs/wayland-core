@@ -312,16 +312,19 @@ async fn read_only_refuses_the_skill_so_its_embedded_shell_cannot_write() {
     )
     .await;
 
-    let text = refusal_text(&result);
-    assert!(
-        text.contains("read-only"),
-        "the refusal must name the posture; got: {text}"
-    );
+    // The disk is checked FIRST and deliberately: this assertion, not the
+    // refusal text, is the security claim. If the gate ever regresses, the
+    // failure that surfaces should name the file that appeared.
     assert!(
         !artifact.exists(),
         "the skill's embedded shell created {} in a read-only session — this is \
          the reported bypass",
         artifact.display()
+    );
+    let text = refusal_text(&result);
+    assert!(
+        text.contains("read-only"),
+        "the refusal must name the posture; got: {text}"
     );
 }
 
@@ -371,12 +374,13 @@ async fn skill_tool_refuses_without_a_dispatcher_in_the_path() {
     )
     .await;
     assert!(
-        refused.is_error,
-        "direct execute must refuse under read_only"
+        !artifact.exists(),
+        "the cron path's skill shell created {} in a read-only session",
+        artifact.display()
     );
     assert!(
-        !artifact.exists(),
-        "no shell may run on the dispatcher-less path"
+        refused.is_error,
+        "direct execute must refuse under read_only"
     );
 
     let allowed = wcore_tools::Tool::execute(
