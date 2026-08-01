@@ -654,6 +654,7 @@ mod tests {
         };
         let write_to = |target: std::path::PathBuf| {
             let manifest = manifest.clone();
+            let cwd = canonical.clone();
             async move {
                 SandboxExecBackend::new()
                     .execute(
@@ -664,7 +665,7 @@ mod tests {
                                 "-c".into(),
                                 format!("echo MARKER > {}", target.display()),
                             ],
-                            cwd: Some(canonical.clone()),
+                            cwd: Some(cwd),
                         },
                     )
                     .await
