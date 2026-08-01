@@ -850,49 +850,273 @@ fn resolve_confidential_backend_with_availability(
     })
 }
 
-/// The [`CredentialsBackend::Auto`] store: keyring primary, plaintext fallback.
+/// The actionable refusal emitted when no secure tier can hold a write.
 ///
-/// Reads check the keyring first, then plaintext, so pre-existing plaintext
-/// keys remain resolvable after the default flips to keyring. Writes prefer the
-/// keyring and fall back to plaintext only if the keyring write fails. Built
-/// only when [`keyring_available`] returned `true`; otherwise `open_store` uses
-/// a bare [`PlaintextCredentialsStore`].
-struct FallbackCredentialsStore {
-    keyring: KeyringCredentialsStore,
-    plaintext: PlaintextCredentialsStore,
+/// GCM's shape (`fatal: No credential backing store has been selected`), with
+/// the two ways forward named. A refusal that does not tell the operator how to
+/// proceed is indistinguishable from a bug, and an operator who cannot proceed
+/// reaches for the thing this refusal exists to prevent.
+fn no_secure_backend_for_write(key: &str) -> CredentialsError {
+    CredentialsError::BackendUnavailable(format!(
+        "refusing to store credential '{key}': no secure credential backend is available on \
+         this host. The OS keyring is not writable here, and the encrypted vault is locked. \
+         Either unlock the vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file \
+         descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or opt in to unencrypted \
+         storage explicitly with [storage.credentials] backend = \"plaintext\" in config.toml. \
+         Wayland will never write a secret in cleartext without that opt-in."
+    ))
 }
 
-impl FallbackCredentialsStore {
-    fn new(service: String, plaintext_path: PathBuf) -> Self {
+/// Warn ONCE that the operator explicitly opted in to unencrypted credentials.
+///
+/// Docker's model, and the only place in the codebase where it is acceptable:
+/// the operator asked for it by name. `Once`-guarded because `open_store` runs
+/// once per credential lookup.
+fn warn_explicit_plaintext_backend(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "WARNING: [storage.credentials] backend = \"plaintext\" is configured. Secrets \
+             are written UNENCRYPTED to {} (mode 0600). Anyone who can read that file, or a \
+             backup of it, has your API keys. Remove the setting to use the OS keyring or \
+             the encrypted vault instead.",
+            path.display()
+        );
+    });
+}
+
+/// The [`CredentialsBackend::Auto`] store: the ordered credential ladder.
+///
+/// ```text
+///   1. OS keyring          — present only when the WRITE probe succeeded.
+///   2. Encrypted vault     — present only when unlock material was supplied.
+///   3. legacy plaintext    — READ AND DELETE ONLY. Never written.
+///   4. otherwise           — the write FAILS, with `no_secure_backend_for_write`.
+/// ```
+///
+/// The plaintext tier exists solely so a host that already has a
+/// `credentials.toml` from before this ladder keeps resolving its keys; it is
+/// not a write target and there is no edge on which a `put` reaches it. Writing
+/// cleartext requires `CredentialsBackend::Plaintext`, which the operator has to
+/// name (see [`warn_explicit_plaintext_backend`]).
+///
+/// The probe is a HINT and the actual write is authoritative: probe→write is a
+/// TOCTOU window by construction, so a keyring write that fails mid-session
+/// descends the same ladder rather than taking a special branch.
+///
+/// RE-MIGRATION. A downgrade must not be permanent. When a read is satisfied by
+/// a lower tier while a higher one is available, the value is promoted into the
+/// higher tier and the lower copy removed — so a host whose keyring comes back
+/// (a Windows service account that gains a logon session, a Linux box that
+/// starts its Secret Service) heals on the next read instead of staying
+/// downgraded forever.
+struct LadderCredentialsStore {
+    /// `Some` iff [`keyring_available`] proved a write landed.
+    keyring: Option<KeyringCredentialsStore>,
+    /// `Some` iff [`vault_unlock_material_present`] — otherwise opening it
+    /// would block on an interactive passphrase prompt.
+    vault: Option<EncryptedFileCredentialsStore>,
+    /// Legacy cleartext file. Read and delete only.
+    legacy: PlaintextCredentialsStore,
+}
+
+impl LadderCredentialsStore {
+    fn new(
+        keyring: Option<KeyringCredentialsStore>,
+        vault: Option<EncryptedFileCredentialsStore>,
+        plaintext_path: PathBuf,
+    ) -> Self {
         Self {
-            keyring: KeyringCredentialsStore::new(service),
-            plaintext: PlaintextCredentialsStore::new(plaintext_path),
+            keyring,
+            vault,
+            legacy: PlaintextCredentialsStore::new(plaintext_path),
+        }
+    }
+
+    /// Move `value` up to the highest available tier and drop the copy that
+    /// `found_in` left behind. Best-effort: a promotion that fails leaves the
+    /// lower copy in place and readable, which is strictly better than losing
+    /// the secret to a half-completed move.
+    fn promote(&self, key: &str, value: &str, found_in: LadderTier) {
+        let target = if self.keyring.is_some() {
+            LadderTier::Keyring
+        } else if self.vault.is_some() {
+            LadderTier::Vault
+        } else {
+            return;
+        };
+        if target >= found_in {
+            return;
+        }
+        let written = match target {
+            LadderTier::Keyring => self.keyring.as_ref().map(|k| k.put(key, value)),
+            LadderTier::Vault => self.vault.as_ref().map(|v| v.put(key, value)),
+            LadderTier::Legacy => None,
+        };
+        if !matches!(written, Some(Ok(()))) {
+            return;
+        }
+        // Only now is it safe to drop the lower copy: the value is readable
+        // from the higher tier.
+        let removed = match found_in {
+            LadderTier::Keyring => Ok(()),
+            LadderTier::Vault => self.vault.as_ref().map_or(Ok(()), |v| v.delete(key)),
+            LadderTier::Legacy => self.delete_legacy(key),
+        };
+        match removed {
+            Ok(()) => tracing::info!(
+                target: "wcore_credentials",
+                key,
+                "a secure credential tier became available again; the credential was \
+                 promoted and the lower-tier copy removed"
+            ),
+            Err(error) => tracing::warn!(
+                target: "wcore_credentials",
+                key,
+                error = %error,
+                "credential promoted to a higher tier but the lower-tier copy could not \
+                 be removed; it will be retried on the next read"
+            ),
         }
     }
 }
 
-impl CredentialsStore for FallbackCredentialsStore {
-    fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-        // Keyring first; a keyring read error must not hide a plaintext key.
-        if let Ok(Some(v)) = self.keyring.get(key) {
-            return Ok(Some(v));
+impl LadderCredentialsStore {
+    /// Delete from the legacy cleartext file WITHOUT materializing it.
+    ///
+    /// `PlaintextCredentialsStore::delete` is a load-modify-save, and on a
+    /// missing file the save leg CREATES an empty `credentials.toml`. On the
+    /// ladder that would mean a delete (or a promotion off the legacy tier) on
+    /// a host that has no cleartext file conjures one — a cleartext credentials
+    /// file appearing as a side effect of the code whose job is to stop
+    /// cleartext credentials files existing.
+    fn delete_legacy(&self, key: &str) -> Result<(), CredentialsError> {
+        if !self.legacy.path().exists() {
+            return Ok(());
         }
-        self.plaintext.get(key)
+        self.legacy.delete(key)
+    }
+}
+
+/// Ordering is the ladder itself: `Keyring > Vault > Legacy`, so "is this tier
+/// above the one the value was found in" is a comparison rather than a match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LadderTier {
+    Legacy,
+    Vault,
+    Keyring,
+}
+
+impl CredentialsStore for LadderCredentialsStore {
+    fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+        // A read error in one tier must never hide a value held by a lower one.
+        if let Some(keyring) = &self.keyring
+            && let Ok(Some(value)) = keyring.get(key)
+        {
+            return Ok(Some(value));
+        }
+        if let Some(vault) = &self.vault
+            && let Ok(Some(value)) = vault.get(key)
+        {
+            self.promote(key, &value, LadderTier::Vault);
+            return Ok(Some(value));
+        }
+        let legacy = self.legacy.get(key)?;
+        if let Some(value) = &legacy {
+            self.promote(key, value, LadderTier::Legacy);
+        }
+        Ok(legacy)
     }
 
-    fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-        match self.keyring.put(key, value) {
-            Ok(()) => Ok(()),
-            // Keyring became unavailable mid-session — persist to plaintext so
-            // the write is not silently lost.
-            Err(_) => self.plaintext.put(key, value),
+    /// One snapshot per tier rather than one per key. The vault re-derives its
+    /// Argon2id key on every `load_secrets`, so the default `get_many` (a `get`
+    /// per key) would put one KDF run per provider on the model picker's path.
+    fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
+        let mut out = vec![None; keys.len()];
+        let mut missing: Vec<usize> = (0..keys.len()).collect();
+
+        for (tier, values) in [
+            (
+                LadderTier::Keyring,
+                self.keyring.as_ref().and_then(|keyring| {
+                    let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
+                    keyring.get_many(&subset).ok()
+                }),
+            ),
+            (
+                LadderTier::Vault,
+                self.vault.as_ref().and_then(|vault| {
+                    let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
+                    vault.get_many(&subset).ok()
+                }),
+            ),
+        ] {
+            let Some(values) = values else { continue };
+            let mut still_missing = Vec::new();
+            for (slot, value) in missing.iter().copied().zip(values) {
+                match value {
+                    Some(value) => {
+                        if tier != LadderTier::Keyring {
+                            self.promote(keys[slot], &value, tier);
+                        }
+                        out[slot] = Some(value);
+                    }
+                    None => still_missing.push(slot),
+                }
+            }
+            missing = still_missing;
+            if missing.is_empty() {
+                return Ok(out);
+            }
         }
+
+        let subset: Vec<&str> = missing.iter().map(|i| keys[*i]).collect();
+        for (slot, value) in missing.iter().copied().zip(self.legacy.get_many(&subset)?) {
+            if let Some(value) = &value {
+                self.promote(keys[slot], value, LadderTier::Legacy);
+            }
+            out[slot] = value;
+        }
+        Ok(out)
+    }
+
+    /// Descend the ladder and FAIL rather than downgrade. There is deliberately
+    /// no plaintext arm here — that is the whole point of the type.
+    fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+        if let Some(keyring) = &self.keyring {
+            match keyring.put(key, value) {
+                Ok(()) => return Ok(()),
+                Err(error) => tracing::warn!(
+                    target: "wcore_credentials",
+                    error = %error,
+                    "the OS keyring accepted a write probe but refused this write; \
+                     descending to the encrypted vault"
+                ),
+            }
+        }
+        if let Some(vault) = &self.vault {
+            match vault.put(key, value) {
+                Ok(()) => return Ok(()),
+                Err(error) => tracing::warn!(
+                    target: "wcore_credentials",
+                    error = %error,
+                    "the encrypted vault refused this write"
+                ),
+            }
+        }
+        Err(no_secure_backend_for_write(key))
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
-        // Remove from both so a deleted key cannot resurface from the fallback.
-        let _ = self.keyring.delete(key);
-        self.plaintext.delete(key)
+        // Remove from EVERY tier, including the read-only legacy one, so a
+        // deleted key cannot resurface from below.
+        if let Some(keyring) = &self.keyring {
+            let _ = keyring.delete(key);
+        }
+        if let Some(vault) = &self.vault {
+            let _ = vault.delete(key);
+        }
+        self.delete_legacy(key)
     }
 }
 
@@ -1155,6 +1379,10 @@ impl EncryptedFileCredentialsStore {
     fn unlock(&self) -> Result<parking_lot::MappedMutexGuard<'_, UnlockedVault>, CredentialsError> {
         let mut guard = self.unlocked.lock();
         if guard.is_none() {
+            // Check perms BEFORE prompting for a passphrase: a vault that will
+            // be refused must not first extract a secret from the operator.
+            refuse_if_world_readable(&self.cipher_path)?;
+            refuse_if_world_readable(&self.key_params_path)?;
             let passphrase = Self::read_passphrase()?;
             let params = if self.key_params_path.exists() {
                 encrypted_file::load_key_params(&self.key_params_path)
@@ -1191,6 +1419,10 @@ impl EncryptedFileCredentialsStore {
         if !self.cipher_path.exists() {
             return Ok(toml::Table::new());
         }
+        // Re-checked on every load, not only at unlock: the unlock cache is
+        // process-lifetime, so a `chmod 644` applied by anything else while the
+        // process runs would otherwise never be noticed.
+        refuse_if_world_readable(&self.cipher_path)?;
         let blob = std::fs::read(&self.cipher_path)?;
         let pt = encrypted_file::decrypt(&blob, vault.passphrase.expose(), &vault.params).map_err(
             |e| CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}")),
@@ -1220,17 +1452,19 @@ impl EncryptedFileCredentialsStore {
             CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
         })?;
 
-        // Ensure both files share a parent directory and that it exists.
-        if let Some(parent) = self.cipher_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
+        // Ensure both files' parent directories exist AND are 0700 before any
+        // ciphertext lands in them. `atomic_write` writes a sibling temp file,
+        // so a loose parent dir is a window on the temp file too.
+        if let Some(parent) = self.cipher_path.parent() {
+            secure_credential_dir(parent)?;
         }
-        if let Some(parent) = self.key_params_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
+        if let Some(parent) = self.key_params_path.parent() {
+            secure_credential_dir(parent)?;
         }
+        // atomic_write → chmod AFTER, in that order: the tempfile round trip
+        // creates the destination inode itself, and the process umask can strip
+        // bits during that create. Re-applying 0600 afterwards is the same
+        // discipline kimi-code applies at storage.ts:106-108.
         crate::atomic_write(&self.cipher_path, &blob)?;
         secure_credential_file(&self.cipher_path)?;
         encrypted_file::save_key_params(&vault.params, &self.key_params_path)
@@ -1360,22 +1594,25 @@ fn default_vault_paths(plaintext_path: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
-/// Warn ONCE, to stderr, that an isolated profile is persisting secrets as a
-/// plaintext-0600 file because no vault unlock material was supplied. The D1
-/// "warned fallback": secrets are still `0o600` and in-home, but not encrypted
-/// at rest. `Once`-guarded because `open_store` is called repeatedly per run
-/// (once per provider key lookup) and an unguarded warning would spam stderr.
-fn warn_isolated_plaintext_fallback(path: &Path) {
+/// Warn ONCE, to stderr, that the ladder has no secure rung on this host, so
+/// reads of any existing `credentials.toml` still work but WRITES will be
+/// refused.
+///
+/// This replaces the old "storing credentials as plaintext-0600" notice, which
+/// described the silent downgrade that has been removed. `Once`-guarded because
+/// `open_store` is called repeatedly per run (once per provider key lookup) and
+/// an unguarded warning would spam stderr.
+fn warn_no_secure_credential_tier(path: &Path) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         eprintln!(
-            "warning: WAYLAND_HOME is set (isolated profile) but no vault \
-             passphrase was supplied; storing credentials as plaintext-0600 at \
-             {}. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a \
-             passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE \
-             (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS \
-             keyring are not auto-imported into isolated profiles — re-enter \
-             them for this profile.",
+            "warning: no secure credential backend is available here — the OS keyring is \
+             not writable and the encrypted vault is locked. Existing secrets in {} remain \
+             readable, but saving a new credential will be REFUSED rather than written in \
+             cleartext. To store credentials, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase \
+             file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via \
+             /proc/<pid>/environ) to unlock the vault, or opt in to unencrypted storage \
+             explicitly with [storage.credentials] backend = \"plaintext\".",
             path.display()
         );
     });
@@ -1591,61 +1828,63 @@ pub fn open_store(
     plaintext_path: &Path,
 ) -> Result<Box<dyn CredentialsStore>, CredentialsError> {
     match &cfg.backend {
-        // Default: keyring primary + plaintext fallback when a keyring exists;
-        // a bare plaintext store on headless/CI hosts where it does not. (F16)
+        // Default: the ordered ladder — keyring, then encrypted vault, then a
+        // refusal. Cleartext is never a rung; the legacy plaintext file is
+        // mounted read-only so pre-existing keys stay resolvable. (F16, P1)
         CredentialsBackend::Auto => {
             // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
             // keyring: the keyring service is a process-global constant
             // ("wayland-core") that bleeds secrets across every profile on the
-            // host (C4 / D1). For an isolated home, prefer the in-home encrypted
-            // vault when unlock material is supplied out-of-band; otherwise fall
-            // back to a stderr-warned plaintext-0600 file in-home — never the
-            // keyring. The legacy single (non-profile) home is unchanged below.
-            if std::env::var_os("WAYLAND_HOME").is_some() {
-                if vault_unlock_material_present() {
-                    let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
-                    let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
-                    // #183: import any pre-existing plaintext secrets into the
-                    // vault once. On failure, keep serving the plaintext store
-                    // so existing secrets stay resolvable (never lost).
-                    match migrate_plaintext_into_vault(plaintext_path, &store) {
-                        Ok(()) => return Ok(Box::new(store)),
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "wcore_credentials",
-                                error = %e,
-                                "plaintext→vault migration failed; keeping existing \
-                                 plaintext credentials store unchanged"
-                            );
-                            return Ok(Box::new(PlaintextCredentialsStore::new(
-                                plaintext_path.to_path_buf(),
-                            )));
-                        }
-                    }
-                }
-                warn_isolated_plaintext_fallback(plaintext_path);
-                return Ok(Box::new(PlaintextCredentialsStore::new(
-                    plaintext_path.to_path_buf(),
-                )));
-            }
-            let service = cfg
-                .service_name
-                .clone()
-                .unwrap_or_else(|| "wayland-core".to_string());
-            if keyring_available(&service) {
-                Ok(Box::new(FallbackCredentialsStore::new(
-                    service,
-                    plaintext_path.to_path_buf(),
-                )))
+            // host (C4 / D1). Such a profile's top rung is the in-home vault.
+            let isolated = std::env::var_os("WAYLAND_HOME").is_some();
+
+            let keyring = if isolated {
+                None
             } else {
-                Ok(Box::new(PlaintextCredentialsStore::new(
-                    plaintext_path.to_path_buf(),
-                )))
+                let service = cfg
+                    .service_name
+                    .clone()
+                    .unwrap_or_else(|| "wayland-core".to_string());
+                keyring_available(&service).then(|| KeyringCredentialsStore::new(service))
+            };
+
+            let vault = if vault_unlock_material_present() {
+                let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
+                let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+                // #183: import any pre-existing plaintext secrets into the
+                // vault once. On failure the legacy tier keeps serving them, so
+                // no secret is ever lost — but the vault stays mounted, because
+                // dropping it would turn a migration hiccup into a refusal to
+                // write at all.
+                if let Err(error) = migrate_plaintext_into_vault(plaintext_path, &store) {
+                    tracing::warn!(
+                        target: "wcore_credentials",
+                        error = %error,
+                        "plaintext→vault migration failed; the existing plaintext file \
+                         stays readable and the vault remains the write target"
+                    );
+                }
+                Some(store)
+            } else {
+                None
+            };
+
+            if keyring.is_none() && vault.is_none() {
+                warn_no_secure_credential_tier(plaintext_path);
             }
+
+            Ok(Box::new(LadderCredentialsStore::new(
+                keyring,
+                vault,
+                plaintext_path.to_path_buf(),
+            )))
         }
-        CredentialsBackend::Plaintext => Ok(Box::new(PlaintextCredentialsStore::new(
-            plaintext_path.to_path_buf(),
-        ))),
+        CredentialsBackend::Plaintext => {
+            warn_explicit_plaintext_backend(plaintext_path);
+            Ok(Box::new(PlaintextCredentialsStore::new(
+                plaintext_path.to_path_buf(),
+            )))
+        }
         CredentialsBackend::Keyring => {
             let base_service = cfg
                 .service_name
@@ -1822,6 +2061,77 @@ fn open_confidential_store_with_availability(
                 pin,
             ))
         }
+    }
+}
+
+/// The credentials-store key under which durable session recovery persists its
+/// prepared-request sealing key.
+///
+/// Lives here, in the crate that owns the store, rather than in the consumer
+/// (`wcore_agent::recovery_confidential`) so that the WRITER and the DELETER
+/// name the same string by construction. A per-profile key whose deleter has to
+/// re-spell its identifier is a deleter that stops matching the day the writer
+/// is renamed — and that silent mismatch is the exact shape of the P3 leak.
+pub const RECOVERY_PREPARED_REQUEST_KEY_REF: &str = "wayland-core.recovery.prepared-request.v1";
+
+/// Every key ref [`purge_profile_confidential_keys`] must remove. One stable
+/// target name per logical key; a new confidential key ref MUST be added here in
+/// the same change that introduces it.
+const CONFIDENTIAL_KEY_REFS: &[&str] = &[RECOVERY_PREPARED_REQUEST_KEY_REF];
+
+/// Remove a profile's confidential keys from the OS keyring before its home
+/// directory is deleted (P3).
+///
+/// Driven by the profile's own backend marker, which records the exact
+/// `ConfidentialBackendSelection` that was pinned — so this deletes from the
+/// service the profile actually used, not from a service name recomputed from
+/// ambient state (`WAYLAND_HOME` points at the CALLER's profile during a
+/// `profile delete`, so a recomputed name would purge the wrong profile, or
+/// nothing).
+///
+/// Only the keyring selection is purged, deliberately. A vault-pinned profile
+/// keeps its key in `credentials.enc` beside `credentials.toml`, which the
+/// caller is about to remove with the rest of the tree; and if an operator has
+/// explicitly pointed `EncryptedFile` at a path outside the profile home, then
+/// deleting the profile is not licence to write to a file they placed elsewhere
+/// (nor to prompt them for its passphrase to do so).
+///
+/// Best-effort by contract: it returns the first error for the caller to log,
+/// but a profile whose keyring entries cannot be reached must still be
+/// deletable. Never errors when there is no marker — a profile that never
+/// opened a confidential store has nothing to purge.
+pub fn purge_profile_confidential_keys(credentials_path: &Path) -> Result<(), CredentialsError> {
+    let credentials_path = absolute_confidential_path(credentials_path)?;
+    let marker_path = confidential_backend_marker_path(&credentials_path);
+    let Some(marker) = load_confidential_backend_marker(&marker_path)? else {
+        return Ok(());
+    };
+    let ConfidentialBackendSelection::Keyring { service } = marker.selection else {
+        return Ok(());
+    };
+
+    let store = ConfidentialCredentialsStore::new(
+        Box::new(KeyringCredentialsStore::new(service)),
+        credentials_path.with_file_name(".credentials.confidential-key.lock"),
+        None,
+    );
+    let mut first_error = None;
+    for key_ref in CONFIDENTIAL_KEY_REFS {
+        if let Err(error) = crate::confidential_blob::delete_confidential_blob_key(&store, key_ref)
+        {
+            tracing::warn!(
+                target: "wcore_credentials",
+                key_ref,
+                error = %error,
+                "could not remove a profile confidential key from the OS keyring; it will \
+                 be orphaned there"
+            );
+            first_error.get_or_insert(CredentialsError::Keyring(error.to_string()));
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -2182,6 +2492,74 @@ pub fn secure_credential_file(path: &Path) -> std::io::Result<()> {
     {
         let _ = path;
     }
+    Ok(())
+}
+
+/// Create (if needed) and harden the directory that holds credential material.
+///
+/// `0o700` on Unix, applied AFTER `create_dir_all` and not only through its
+/// `mode` argument: `create_dir_all` applies its mode only to directories it
+/// actually creates, and the process umask masks the bits on the way in. This
+/// is kimi-code's lesson (`resources/kimi-code/packages/oauth/src/storage.ts:49-53`
+/// — `mkdirSync(dir, { mode: 0o700 })` followed by an unconditional
+/// `chmodSync(dir, 0o700)`), and it is the difference between a vault directory
+/// that is 0700 and one that is 0755 on any host with a permissive umask.
+///
+/// On Windows this is `create_dir_all` only, for the same reason
+/// [`secure_credential_file`] is a no-op there: `%APPDATA%` is already
+/// per-user, and explicit ACL work needs a dependency this crate does not take.
+pub fn secure_credential_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// REFUSE to read credential material out of a file any other account can read.
+///
+/// The counterpart to [`warn_if_world_readable`], and deliberately a different
+/// decision. Warning is right for the legacy cleartext file, whose contents are
+/// already exposed and where refusing would only strand the operator. It is
+/// wrong for the encrypted vault: a world-readable vault means the ciphertext,
+/// the KDF params and the salt are all harvestable, so every future write to it
+/// is an offline-crackable artifact handed to whoever is watching. Loading it
+/// anyway would let the ladder keep reporting "stored securely" while it is not.
+///
+/// Group and other bits are both checked (`0o077`): "world-readable" in the
+/// threat model is "readable by an account that is not the owner", and a shared
+/// group on a build host is exactly such an account.
+#[cfg(unix)]
+fn refuse_if_world_readable(path: &Path) -> Result<(), CredentialsError> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        // Absent (or unstattable) is not "insecure" — a vault that does not
+        // exist yet is the ordinary first-write case.
+        return Ok(());
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(CredentialsError::BackendUnavailable(format!(
+            "refusing to open the encrypted credential vault at {}: it has permissions \
+             {mode:#o} and is readable by accounts other than its owner. Run `chmod 600 {}` \
+             (and `chmod 700` on its directory) after confirming no other account has \
+             already copied it; if one may have, rotate the secrets it holds.",
+            path.display(),
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn refuse_if_world_readable(path: &Path) -> Result<(), CredentialsError> {
+    let _ = path;
     Ok(())
 }
 

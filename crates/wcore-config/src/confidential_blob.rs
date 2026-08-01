@@ -100,6 +100,31 @@ pub fn load_confidential_blob_key(
     load_confidential_blob_key_from_store(store, key_ref)
 }
 
+/// Remove a profile's confidential-blob key from its backing store.
+///
+/// P3 — the leak this closes. `load_or_create_confidential_blob_key` was the
+/// ONLY production writer of this value and nothing anywhere deleted it, so
+/// every isolated profile minted one credential (under its own
+/// `wayland-core.profile.<digest>` keyring service) and kept it forever. Deleting
+/// the profile directory removed the vault files but could not reach the OS
+/// keyring, so keyring-backed profiles accumulated one orphan per profile for the
+/// life of the machine. On Windows that filled the credential store and made
+/// `CredWrite` fail with error code 8 (`ERROR_NOT_ENOUGH_MEMORY`) — which is the
+/// host condition that made the removed plaintext downgrade reachable in the
+/// first place.
+///
+/// Idempotent: a key that is already gone is success, matching
+/// [`CredentialsStore::delete`]'s contract on every backend.
+pub fn delete_confidential_blob_key(
+    store: &ConfidentialCredentialsStore,
+    key_ref: &str,
+) -> Result<(), ConfidentialKeyStoreError> {
+    validate_key_ref(key_ref)?;
+    store
+        .delete(key_ref)
+        .map_err(|_| ConfidentialKeyStoreError::WriteFailed)
+}
+
 fn load_or_create_confidential_blob_key_with_lock(
     store: &dyn CredentialsStore,
     key_ref: &str,

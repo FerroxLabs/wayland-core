@@ -616,6 +616,24 @@ pub fn delete_profile_dir(name: &str) -> Result<(), ProfileOpError> {
     if !dir.is_dir() {
         return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
     }
+    // P3 — purge the profile's confidential keys from the OS keyring FIRST.
+    // `remove_dir_all` reaches everything in the tree and nothing outside it, so
+    // a keyring-backed profile would otherwise leave its per-profile credential
+    // behind forever; one orphan per deleted profile is what filled the Windows
+    // credential store. Deliberately best-effort: a keyring we cannot reach must
+    // not make the profile undeletable, because an undeletable profile is how
+    // the orphans accumulate in the first place.
+    if let Err(error) =
+        crate::credentials::purge_profile_confidential_keys(&dir.join("credentials.toml"))
+    {
+        tracing::warn!(
+            target: "wcore_profile",
+            profile = name,
+            error = %error,
+            "could not purge this profile's confidential keys from the OS keyring; \
+             deleting the profile directory anyway"
+        );
+    }
     std::fs::remove_dir_all(&dir).map_err(ProfileOpError::io("remove profile dir"))
 }
 
