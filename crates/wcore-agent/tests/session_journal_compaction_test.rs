@@ -1,9 +1,22 @@
 use serde_json::json;
 use wcore_agent::session_journal::{
     JournalError, LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SessionEvent, SessionJournal,
-    SessionSnapshot, TurnCompletion, replay_from_snapshot, replay_state, snapshot_path_for,
-    state_payload_digest, write_private_snapshot_fixture,
+    SessionSnapshot, TurnCompletion, canonical_journal_root, replay_from_snapshot, replay_state,
+    snapshot_path_for, state_payload_digest, write_private_snapshot_fixture,
 };
+
+/// A fixture journal path spelled the way the journal REPORTS it.
+///
+/// `tempfile` builds under `$TMPDIR`, which macOS spells through the
+/// `/var` -> `/private/var` symlink and Windows can hand back as an 8.3 short
+/// name. Every journal entry point reports the resolved spelling, so a fixture
+/// that kept the raw one would compare two different names for the same file
+/// and fail for a reason that has nothing to do with the guard under test.
+fn fixture_journal_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    canonical_journal_root(dir.path())
+        .expect("fixture tempdir must resolve")
+        .join("s1.journal")
+}
 
 // Exact schema-v4 bytes emitted by the predecessor journal/snapshot writer.
 // These are intentionally immutable wire fixtures: constructing current types
@@ -124,7 +137,7 @@ fn create_published_snapshot(path: &std::path::Path) {
 #[test]
 fn restart_rejects_oversize_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let file = std::fs::OpenOptions::new()
@@ -144,13 +157,67 @@ fn restart_rejects_oversize_snapshot() {
     ));
 }
 
+/// R4: `open` normalized its path while `replay` / `recovered_state` used the
+/// caller's raw one, so the same file was reported under two names depending on
+/// which entry point failed. `lease.rs` documents that invariant and closed it
+/// only for the Windows `\\?\` prefix; it was false for every path reached
+/// through a symlinked directory.
+///
+/// The alias is built explicitly rather than relying on macOS's
+/// `/var` -> `/private/var`, so the property is measured on every unix host
+/// instead of only where the bug happens to reproduce.
+#[cfg(unix)]
+#[test]
+fn every_entry_point_reports_one_spelling_for_the_same_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonical_journal_root(dir.path()).unwrap();
+    let real = root.join("real");
+    let alias = root.join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+    let path = real.join("s1.journal");
+    create_published_snapshot(&path);
+    let expected_snapshot = snapshot_path_for(&path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&expected_snapshot)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+
+    // Same file, addressed through the aliased directory.
+    let aliased = alias.join("s1.journal");
+    assert_ne!(aliased, path, "fixture is dead: the alias must differ");
+
+    let reader = SessionJournal::recovered_state(&aliased);
+    assert!(
+        matches!(&reader, Err(JournalError::SnapshotTooLarge { path: rejected, .. })
+            if *rejected == expected_snapshot),
+        "the read-only entry point must report the resolved spelling, got {reader:?}"
+    );
+    let writer = SessionJournal::open(&aliased, "s1");
+    assert!(
+        matches!(&writer, Err(JournalError::SnapshotTooLarge { path: rejected, .. })
+            if *rejected == expected_snapshot),
+        "the writer entry point must report the same spelling, got {writer:?}"
+    );
+    let replayed = SessionJournal::replay(&aliased);
+    assert!(
+        matches!(&replayed, Err(JournalError::SnapshotTooLarge { path: rejected, .. })
+            if *rejected == expected_snapshot),
+        "replay must report the same spelling, got {replayed:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn restart_rejects_symlinked_snapshot() {
     use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let target = dir.path().join("snapshot.target");
@@ -173,7 +240,7 @@ fn restart_rejects_symlinked_snapshot() {
     use std::os::windows::fs::symlink_file;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let target = dir.path().join("snapshot.target");
@@ -194,7 +261,7 @@ fn restart_rejects_symlinked_snapshot() {
 #[test]
 fn restart_rejects_hard_linked_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     std::fs::hard_link(&snapshot_path, dir.path().join("snapshot.alias")).unwrap();
@@ -215,7 +282,7 @@ fn restart_rejects_public_snapshot_permissions() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -243,7 +310,7 @@ fn restart_rejects_public_snapshot_dacl() {
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let mut options = std::fs::OpenOptions::new();
@@ -294,7 +361,7 @@ fn restart_rejects_foreign_snapshot_owner_when_root() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let c_path = std::ffi::CString::new(snapshot_path.as_os_str().as_bytes()).unwrap();
@@ -315,7 +382,7 @@ fn restart_rejects_foreign_snapshot_owner_when_root() {
 #[test]
 fn restart_rejects_snapshot_path_replacement() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s1.journal");
+    let path = fixture_journal_path(&dir);
     create_published_snapshot(&path);
     let snapshot_path = snapshot_path_for(&path);
     let accepted = wcore_agent::session_journal::load_snapshot(&snapshot_path).unwrap();

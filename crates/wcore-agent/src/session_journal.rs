@@ -895,7 +895,9 @@ impl SessionJournal {
     /// Replay and verify all complete records. An unterminated final fragment is
     /// ignored; opening the writer heals that fragment before the next append.
     pub fn replay(path: impl AsRef<Path>) -> Result<Vec<JournalEnvelope>, JournalError> {
-        let path = path.as_ref();
+        // Report the same pathname `open` reports for this file — see
+        // `lease::reported_path`.
+        let path = &lease::reported_path(path.as_ref());
         let bytes = read_journal_if_present(path)?;
         let parsed = parse_complete_frames(path, &bytes)?;
         let snapshot = snapshot::load_snapshot_if_present(snapshot_path_for(path))?;
@@ -907,7 +909,9 @@ impl SessionJournal {
     /// Recover the complete committed state from a full log or a validated
     /// companion snapshot plus compacted suffix.
     pub fn recovered_state(path: impl AsRef<Path>) -> Result<ReducedSessionState, JournalError> {
-        let path = path.as_ref();
+        // Report the same pathname `open` reports for this file — see
+        // `lease::reported_path`.
+        let path = &lease::reported_path(path.as_ref());
         let bytes = read_journal_if_present(path)?;
         let parsed = parse_complete_frames(path, &bytes)?;
         let snapshot = snapshot::load_snapshot_if_present(snapshot_path_for(path))?;
@@ -926,6 +930,23 @@ impl SessionJournal {
     ) -> Result<SessionStorageLease, JournalError> {
         SessionStorageLease::acquire(path.as_ref(), session_id)
     }
+}
+
+/// The directory spelling every journal entry point reports for files inside
+/// `directory`.
+///
+/// Exposed for this crate's integration tests, alongside
+/// [`write_private_snapshot_fixture`]. A fixture built from
+/// `tempfile::tempdir()` carries whatever spelling `$TMPDIR` has — macOS routes
+/// it through the `/var` -> `/private/var` symlink, Windows can hand back an 8.3
+/// short name — while the journal reports the resolved one. Comparing a journal
+/// error path against a raw fixture path is therefore comparing two names for
+/// one file. Deriving the fixture root from here keeps that comparison EXACT;
+/// the alternative, dropping the path equality and matching only the error
+/// variant, would retire the guard instead of fixing it.
+#[doc(hidden)]
+pub fn canonical_journal_root(directory: &Path) -> Result<PathBuf, JournalError> {
+    lease::canonical_simplified_dir(directory)
 }
 
 /// Write self-consistent snapshot bytes for offline fixtures and inspection.

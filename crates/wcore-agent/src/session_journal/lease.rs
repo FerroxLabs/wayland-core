@@ -158,6 +158,39 @@ pub(super) fn canonical_simplified_dir(directory: &Path) -> Result<PathBuf, Jour
     Ok(dunce::simplified(&canonical).to_path_buf())
 }
 
+/// The pathname this crate REPORTS for `path`, resolving nothing on disk.
+///
+/// [`normalized_path`] is the WRITER-side normalizer: it also creates the parent
+/// and rejects a symlinked target, because `SessionJournal::open` is about to
+/// take authority over the file. The read-only entry points (`replay`,
+/// `recovered_state`) must do neither — but they must report the SAME pathname,
+/// or one call names `/private/var/…/s.journal` and the next names `/var/…` for
+/// the same file and a caller cannot compare or display journal error paths.
+/// That is exactly the hazard [`canonical_simplified_dir`] documents for Windows
+/// verbatim prefixes; it was closed there with `dunce` and never closed for the
+/// `/var` -> `/private/var` symlink macOS puts in front of every temp path.
+///
+/// Anything that cannot be resolved is returned unchanged: reading a journal
+/// that does not exist yet is a legitimate empty read, not an error, so this
+/// must not manufacture one.
+pub(super) fn reported_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return path.to_path_buf(),
+        }
+    };
+    let (Some(parent), Some(file_name)) = (absolute.parent(), absolute.file_name()) else {
+        return absolute;
+    };
+    match canonical_simplified_dir(parent) {
+        Ok(canonical_parent) => canonical_parent.join(file_name),
+        Err(_) => absolute,
+    }
+}
+
 pub(super) fn normalized_path(path: &Path) -> Result<PathBuf, JournalError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
