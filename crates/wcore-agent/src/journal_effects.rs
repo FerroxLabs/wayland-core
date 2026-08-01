@@ -1535,11 +1535,7 @@ mod tests {
     /// fail validation on Windows for a reason that has nothing to do with the
     /// durability property under test.
     fn workspace_file() -> &'static str {
-        if cfg!(windows) {
-            r"C:\workspace\file.txt"
-        } else {
-            "/workspace/file.txt"
-        }
+        "/workspace/file.txt"
     }
 
     #[test]

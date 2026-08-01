@@ -150,21 +150,7 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
         Some(root) => root.join(path),
         None => PathBuf::from(path),
     };
-    match tokio::fs::try_exists(&resolved).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return ToolResult {
-                content: format!("grep error: no such file or directory: {path}"),
-                is_error: true,
-            };
-        }
-        Err(error) => {
-            return ToolResult {
-                content: format!("grep error: cannot access {path}: {error}"),
-                is_error: true,
-            };
-        }
-    }
+    let _ = &resolved; // MUTATION PROOF ONLY
 
     // Try ripgrep first, fallback to grep.
     match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {

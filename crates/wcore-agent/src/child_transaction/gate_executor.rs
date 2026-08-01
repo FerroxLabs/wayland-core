@@ -662,11 +662,7 @@ mod tests {
         // Same fixture defect, same fix, as `wcore_sandbox`'s
         // `hard_fixture_root`. The path is never created on disk.
         let live = FakeCandidate {
-            root: Ok(if cfg!(windows) {
-                PathBuf::from(r"C:\srv\wayland\candidate\checkout")
-            } else {
-                PathBuf::from("/srv/wayland/candidate/checkout")
-            }),
+            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
         };
         let error = executor
             .execute_gate(
