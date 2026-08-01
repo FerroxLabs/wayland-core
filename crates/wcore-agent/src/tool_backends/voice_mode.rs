@@ -57,6 +57,19 @@ use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 
+/// Re-export of the audio backend this module is built on, so an
+/// integration test can open a capture stream **without going through
+/// [`CpalAudioRecorder`]**.
+///
+/// That independence is the whole point and it is load-bearing:
+/// `tests/voice_live_capture_mac.rs` has to tell "this host hands the
+/// process digital silence" (an environment fact — no microphone, or a
+/// macOS TCC grant the runner never received) apart from "the recorder
+/// is broken" (a product defect). Probing through the recorder itself
+/// would conflate the two and turn a real regression into a skip. Only
+/// compiled under `voice`, where `cpal` is already linked.
+pub use ::cpal;
+
 use wcore_tools::voice_mode::{
     AudioPlayer, AudioRecorder, OsAudioEnvironmentProbe, RecordingOutcome, SAMPLE_RATE,
     TranscriptionBackend, TranscriptionOutcome, VoiceMode,

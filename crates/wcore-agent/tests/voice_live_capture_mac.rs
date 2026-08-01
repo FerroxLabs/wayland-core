@@ -34,15 +34,42 @@
 //! the test reports **INDETERMINATE** and fails loudly — it never silently
 //! skips, because a silent skip is the self-passing shape this programme keeps
 //! being bitten by.
+//!
+//! # The one precondition that is allowed to skip, and why it is not a hole
+//!
+//! Every macOS host presents *some* input device. A GitHub-hosted macOS runner
+//! enumerates `Apple Virtual Sound Device` — which `system_profiler` reports as
+//! `Transport: Built-in`, `Input Source: Microphone`, i.e. **indistinguishable
+//! from real hardware by inventory alone** — and hands out buffers that are
+//! exactly zero. So "is a capture device present?" cannot be answered by
+//! looking; it has to be answered by *listening*.
+//!
+//! [`probe_host_audio`] therefore opens a capture stream **directly on `cpal`,
+//! not through [`CpalAudioRecorder`]**, and asks whether a single non-zero
+//! sample arrives. That split is the point:
+//!
+//! * raw stream silent  ⇒ the **host** gives this process nothing. Skip, loudly,
+//!   with the measurement in the line. Says nothing about the product.
+//! * raw stream live but the recorder returns silence ⇒ a **product defect**,
+//!   and the `rms > 0.0` assertion below fires exactly as it did before.
+//!
+//! Nothing about the assertions is relaxed. The skip is printed as
+//! [`SKIP_MARKER`], which is deliberately un-passlike and is asserted on in
+//! `.github/workflows/voice-live-capture-mac.yml` — the hosted leg requires the
+//! marker (proving the skip fires and is visible), the self-hosted leg requires
+//! its absence (proving the arms really ran).
 
 #![cfg(all(feature = "voice", target_os = "macos"))]
 
 use std::f64::consts::PI;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wcore_agent::tool_backends::voice_mode::CpalAudioRecorder;
+use wcore_agent::tool_backends::voice_mode::cpal;
+use wcore_agent::tool_backends::voice_mode::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use wcore_tools::voice_mode::{AudioRecorder, RecordingOutcome};
 
 // ---------------------------------------------------------------------------
@@ -76,6 +103,175 @@ const TONE_ABSENT_RATIO: f64 = 3.0;
 
 /// Capture duration for each acoustic arm.
 const ARM_SECONDS: u64 = 3;
+
+/// How long the hardware precondition listens on a raw stream before
+/// concluding the host is handing this process digital silence. 2 s is
+/// ~96_000 frames at 48 kHz: a live microphone cannot produce that many
+/// consecutive exact zeros — even a muted one emits dither, and an empty
+/// room emits self-noise (the very fact that made the withdrawn RMS-5
+/// claim ambiguous). Exact zero is the signature of a path that is not
+/// connected at all.
+const PROBE_SECONDS: u64 = 2;
+
+/// Printed by, and only by, a live arm that declined to run. Deliberately
+/// shouty and deliberately NOT the word "ok": the workflow greps for it, and a
+/// human scanning a log must not be able to mistake it for a pass.
+const SKIP_MARKER: &str = "SKIPPED-NO-LIVE-AUDIO-INPUT";
+
+// ---------------------------------------------------------------------------
+// 0. Hardware precondition, measured through a product-independent stream.
+// ---------------------------------------------------------------------------
+
+/// What the host will actually hand this process, measured — never declared.
+enum HostAudio {
+    /// A raw `cpal` stream delivered at least one non-zero sample.
+    Live {
+        device: String,
+        samples: usize,
+        peak: f64,
+    },
+    /// Nothing usable arrived. `reason` is printed verbatim on the skip line.
+    Dead { reason: String },
+}
+
+/// Open a capture stream on the default input device **directly on `cpal`**,
+/// bypassing [`CpalAudioRecorder`] entirely, and report whether any audio
+/// reaches this process.
+///
+/// Bypassing the recorder is what keeps this from being a hole. Everything the
+/// product owns — the ring buffer, the resample loop, the `is_recording` gate,
+/// the WAV writer — is downstream of this probe, so a regression in any of them
+/// leaves the probe LIVE and lets the arms' own assertions fire.
+fn probe_host_audio() -> HostAudio {
+    let host = cpal::default_host();
+    let Some(device) = host.default_input_device() else {
+        return HostAudio::Dead {
+            reason: format!(
+                "no default input device on this host (cpal host {:?} enumerated none) — \
+                 there is no capture hardware to test against",
+                host.id()
+            ),
+        };
+    };
+    let name = device.name().unwrap_or_else(|_| "<unnamed>".to_string());
+    let supported = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => {
+            return HostAudio::Dead {
+                reason: format!("default input device {name:?} has no usable input config: {e}"),
+            };
+        }
+    };
+    let config: cpal::StreamConfig = supported.config();
+
+    // (count, peak-abs) accumulated straight off the driver callback.
+    let acc = Arc::new(Mutex::new((0usize, 0.0f64)));
+    let acc_cb = Arc::clone(&acc);
+    let stream = device.build_input_stream(
+        &config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let mut g = acc_cb.lock().expect("probe accumulator poisoned");
+            g.0 += data.len();
+            for &s in data {
+                let a = f64::from(s).abs();
+                if a > g.1 {
+                    g.1 = a;
+                }
+            }
+        },
+        |e| eprintln!("precondition probe: stream error: {e}"),
+        None,
+    );
+    let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            return HostAudio::Dead {
+                reason: format!("could not open a capture stream on {name:?}: {e}"),
+            };
+        }
+    };
+    if let Err(e) = stream.play() {
+        return HostAudio::Dead {
+            reason: format!("capture stream on {name:?} would not start: {e}"),
+        };
+    }
+    std::thread::sleep(Duration::from_secs(PROBE_SECONDS));
+    drop(stream);
+
+    let (samples, peak) = *acc.lock().expect("probe accumulator poisoned");
+    classify(name, samples, peak)
+}
+
+/// The verdict, split out of the I/O so it can carry a known-positive.
+///
+/// This split is not cosmetic. On every host reachable from CI the probe
+/// returns `Dead`, so [`HostAudio::Live`] would otherwise be a branch that has
+/// never executed anywhere — and a precondition stuck at `Dead` would skip the
+/// arms on a perfectly good machine while looking exactly like this. The
+/// discipline the rest of this file applies to the Goertzel detector applies
+/// here too: `precondition_verdict_self_test` drives both directions.
+fn classify(name: String, samples: usize, peak: f64) -> HostAudio {
+    if samples == 0 {
+        return HostAudio::Dead {
+            reason: format!(
+                "default input device {name:?} produced ZERO callbacks in {PROBE_SECONDS}s — \
+                 the driver is not delivering buffers at all"
+            ),
+        };
+    }
+    if peak == 0.0 {
+        return HostAudio::Dead {
+            reason: format!(
+                "default input device {name:?} delivered {samples} samples in {PROBE_SECONDS}s \
+                 and EVERY ONE IS EXACTLY 0.0 (peak=0). A live microphone cannot do that — even \
+                 a muted one emits dither and an empty room emits self-noise — so nothing is \
+                 connected to this process's capture path. Measured causes on this programme: \
+                 (a) a hosted macOS runner, whose 'Apple Virtual Sound Device' reports \
+                 Transport: Built-in and returns silence, and (b) a real Mac whose GitHub \
+                 Actions runner has no microphone grant, because macOS TCC is per-process and a \
+                 background service cannot present the consent prompt (AVCaptureDevice \
+                 authorizationStatus = notDetermined) — an unauthorised process is handed \
+                 silence, not an error. THIS IS A STATEMENT ABOUT THE HOST, NOT THE PRODUCT: \
+                 the probe never touched CpalAudioRecorder."
+            ),
+        };
+    }
+    HostAudio::Live {
+        device: name,
+        samples,
+        peak,
+    }
+}
+
+/// Gate a live arm on the precondition. `true` means the host is feeding this
+/// process real audio and the arm must run its assertions; `false` means it
+/// printed [`SKIP_MARKER`] and the caller must return without asserting.
+#[must_use]
+fn has_live_audio_input(test: &str) -> bool {
+    match probe_host_audio() {
+        HostAudio::Live {
+            device,
+            samples,
+            peak,
+        } => {
+            println!(
+                "PRECONDITION LIVE [{test}]: raw cpal probe on {device:?} took {samples} samples \
+                 in {PROBE_SECONDS}s, peak={peak:.6}. The host feeds this process real audio, so \
+                 any silence measured below belongs to the product."
+            );
+            true
+        }
+        HostAudio::Dead { reason } => {
+            println!("{SKIP_MARKER} [{test}] :: {reason}");
+            println!(
+                "{SKIP_MARKER} [{test}] :: NOT A PASS. Every assertion in this test was skipped. \
+                 Remedy: run on a host with a real microphone that has granted microphone access \
+                 to the running process (System Settings -> Privacy & Security -> Microphone)."
+            );
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Goertzel tone detector
@@ -240,6 +436,58 @@ fn dither_samples(n: usize, target_rms: f64) -> Vec<i16> {
         .collect()
 }
 
+/// Known-positive and known-negative for the hardware precondition itself.
+///
+/// Needs no hardware, so it runs on every host — which is the point: without
+/// it, [`HostAudio::Live`] is a branch no reachable machine executes, and a
+/// precondition that answered `Dead` unconditionally would silently disarm all
+/// three live arms while producing a log that looks exactly like a device-less
+/// host. Same reasoning as `goertzel_instrument_self_test` below.
+#[test]
+fn precondition_verdict_self_test() {
+    // (1) KNOWN-POSITIVE. The smallest non-zero sample a 32-bit float mic can
+    //     emit must still read as LIVE — the discriminator is "is anything
+    //     other than exact zero present", not "is it loud".
+    match classify("probe-mic".to_string(), 96_000, f64::from(f32::EPSILON)) {
+        HostAudio::Live {
+            device,
+            samples,
+            peak,
+        } => {
+            assert_eq!(device, "probe-mic");
+            assert_eq!(samples, 96_000);
+            assert!(peak > 0.0, "Live must carry the measured peak, got {peak}");
+        }
+        HostAudio::Dead { reason } => panic!(
+            "known-positive failed: a stream carrying a non-zero sample was classified DEAD \
+             ({reason}). Every live arm would skip on a working microphone."
+        ),
+    }
+
+    // (2) KNOWN-NEGATIVE. All-zero is the dead-path signature.
+    match classify("probe-mic".to_string(), 96_000, 0.0) {
+        HostAudio::Dead { reason } => assert!(
+            reason.contains("EXACTLY 0.0"),
+            "the all-zero verdict must say so in the skip line, got: {reason}"
+        ),
+        HostAudio::Live { peak, .. } => panic!(
+            "known-negative failed: an all-zero stream was classified LIVE (peak={peak}). \
+             The arms would then report the host's silence as a product defect."
+        ),
+    }
+
+    // (3) A stream that never called back is dead for a DIFFERENT reason, and
+    //     must not be folded into (2) — they point at different faults.
+    match classify("probe-mic".to_string(), 0, 0.0) {
+        HostAudio::Dead { reason } => assert!(
+            reason.contains("ZERO callbacks"),
+            "a stream with no callbacks must be reported as such, got: {reason}"
+        ),
+        HostAudio::Live { .. } => panic!("a stream with zero samples was classified LIVE"),
+    }
+    println!("PRECONDITION SELF-TEST: live/silent/no-callback all discriminated");
+}
+
 // ---------------------------------------------------------------------------
 // 1. Instrument self-test — three assertions, per LANE-BRIEF §6b-ii.
 // ---------------------------------------------------------------------------
@@ -389,6 +637,10 @@ async fn capture_arm(label: &str, tone_wav: Option<&Path>) -> Arm {
 /// duration, differing only in whether a known tone was injected.
 #[tokio::test(flavor = "multi_thread")]
 async fn live_capture_contains_known_tone_and_control_arm_does_not() {
+    if !has_live_audio_input("live_capture_contains_known_tone_and_control_arm_does_not") {
+        return;
+    }
+
     let dir = std::env::temp_dir();
     let tone_path = dir.join("wl-c4-probe-1khz.wav");
     // 44.1 kHz for the playback file — the output device is whatever the host
@@ -461,6 +713,10 @@ async fn live_capture_contains_known_tone_and_control_arm_does_not() {
 /// or is dropping buffers, the retained tail will not contain the tone.
 #[tokio::test(flavor = "multi_thread")]
 async fn capture_survives_ring_buffer_overflow_past_60s() {
+    if !has_live_audio_input("capture_survives_ring_buffer_overflow_past_60s") {
+        return;
+    }
+
     const TOTAL_SECS: u64 = 70;
     const TONE_TAIL_SECS: f64 = 4.0;
 
@@ -628,6 +884,10 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
 /// "it stopped" is not free.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_discards_a_stream_proven_to_be_flowing() {
+    if !has_live_audio_input("cancel_discards_a_stream_proven_to_be_flowing") {
+        return;
+    }
+
     let rec = CpalAudioRecorder::try_default().expect("no default input device");
 
     rec.start().await.expect("start failed");

@@ -1,0 +1,284 @@
+# Phase 27 C4 — the live microphone capture suite, and the proof that its
+# hardware precondition is real.
+#
+# What was broken
+# ---------------
+# `crates/wcore-agent/tests/voice_live_capture_mac.rs` asserts that a real
+# capture path delivers non-silent audio. On a GitHub-hosted macOS runner all
+# three live arms failed with
+#
+#   one or both arms captured digital silence (control rms=0.0, tone rms=0.0)
+#   -- the capture path is dead, not quiet.
+#
+# which is a TRUE statement about that host and a useless one about the product.
+# A hosted runner has no microphone. The assertion is not the problem; running
+# it somewhere with no hardware is.
+#
+# What was measured before designing the fix (run 30699861197 + 30699973809,
+# both legs, 2026-08-01)
+# ----------------------------------------------------------------------------
+#   macos-latest (hosted VM)
+#     input devices : "Apple Virtual Sound Device", "Null Audio Device"
+#     system_profiler on the FIRST of those says Transport: Built-in,
+#                     Input Source: Microphone  <- looks exactly like real
+#                     hardware; inventory cannot tell them apart
+#     AVCaptureDevice authorizationStatus(.audio) = authorized
+#     raw cpal capture, 3 s, 1 kHz tone playing : 302080 samples, peak 0.000000000
+#
+#   sean-mac-arm64 (self-hosted, real Apple silicon, three real input devices)
+#     input devices : HyperX QuadCast 2 (default), Xiaomi Desktop Speaker-3831,
+#                     MacBook Pro Microphone
+#     AVCaptureDevice authorizationStatus(.audio) = notDetermined
+#     raw cpal capture, 3 s, 1 kHz tone playing, EVERY device : peak 0.000000000
+#
+# Two consequences, both load-bearing:
+#
+#  1. "Does an input device exist?" is not answerable by enumeration on macOS —
+#     the hosted VM's virtual device is indistinguishable from a built-in mic in
+#     `system_profiler`. The test therefore probes by LISTENING, on a raw cpal
+#     stream that does not go through `CpalAudioRecorder`, and skips only when
+#     literally every sample is 0.0. A regression anywhere the product owns
+#     (ring buffer, resampler, is_recording gate, WAV writer) leaves that probe
+#     LIVE, so the `rms > 0.0` assertion still fires. Nothing is weakened.
+#
+#  2. The self-hosted Mac cannot run these arms TODAY either, and not because of
+#     hardware: macOS TCC grants microphone access per process, and the Actions
+#     runner is a background service that can never present the consent prompt,
+#     so CoreAudio hands it silence rather than an error. That is a one-time
+#     owner action (System Settings -> Privacy & Security -> Microphone, add the
+#     runner's `Runner.Listener`/`Runner.Worker`), not something a lane can fix.
+#     Until it lands, `selfhosted-live` reports the blocker instead of pretending.
+#
+# Why the hosted leg is kept rather than deleted
+# ----------------------------------------------
+# It is the NEGATIVE CONTROL for the skip. A skip that nobody exercises is the
+# self-passing shape this programme keeps being bitten by, so the hosted job
+# asserts the marker IS printed, three times, one per live arm — and that the
+# non-hardware self-test still executed its assertions. If the precondition ever
+# stops firing, or the arms stop being collected, this job goes red.
+#
+# The two legs assert OPPOSITE things about the same string, so neither can be
+# satisfied by a suite that silently does nothing.
+#
+# Exit status is taken out of PIPESTATUS and read back in a separate gate step,
+# never off the tail of a pipe — `cmd | tee` reports tee's status, not cmd's.
+
+name: Voice live capture (macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/voice-live-capture-mac.yml'
+      - 'crates/wcore-agent/tests/voice_live_capture_mac.rs'
+      - 'crates/wcore-agent/src/tool_backends/voice_mode.rs'
+      - 'crates/wcore-tools/src/voice_mode.rs'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  # `--test-threads=1` is not optional: all three live arms open the one default
+  # input device, and the overflow arm holds it for 70 s.
+  SUITE_ARGS: "-- --test-threads=1 --nocapture"
+
+jobs:
+  # ── Negative control: the skip must fire, and must be visible ─────────────
+  hosted-skip-control:
+    name: hosted macOS (skip control)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Host audio facts (recorded before any test result is trusted)
+        run: |
+          set -uo pipefail
+          sw_vers || true
+          system_profiler SPAudioDataType 2>&1 || true
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # vacuity-checked: the executed count and the skip count are both pinned
+      # in the dedicated gate step below, which reads /tmp/voice.log back.
+      - name: Run voice_live_capture_mac
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-agent --features voice --test voice_live_capture_mac \
+            $SUITE_ARGS 2>&1 | tee /tmp/voice.log
+          echo "rc=${PIPESTATUS[0]}" | tee /tmp/voice.rc
+
+      - name: Assert the suite ran and every live arm skipped, loudly
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          test -s /tmp/voice.log || { echo "FAIL: no log — the suite never ran"; exit 1; }
+
+          grep -q "running 5 tests" /tmp/voice.log \
+            || { echo "FAIL: expected 'running 5 tests' — cases were filtered away"; fail=1; }
+          grep -qE "test result: ok\. 5 passed; 0 failed" /tmp/voice.log \
+            || { echo "FAIL: expected '5 passed; 0 failed'"; fail=1; }
+
+          n="$(grep -c 'SKIPPED-NO-LIVE-AUDIO-INPUT \[' /tmp/voice.log || true)"
+          # Two lines per skipped arm (reason + "NOT A PASS"), three live arms.
+          if [ "${n}" -ne 6 ]; then
+            echo "FAIL: expected 6 skip lines (2 per live arm x 3 arms), saw ${n}."
+            echo "      A hosted runner has no microphone, so all three MUST skip."
+            fail=1
+          fi
+          for t in live_capture_contains_known_tone_and_control_arm_does_not \
+                   capture_survives_ring_buffer_overflow_past_60s \
+                   cancel_discards_a_stream_proven_to_be_flowing; do
+            grep -q "SKIPPED-NO-LIVE-AUDIO-INPUT \[${t}\]" /tmp/voice.log \
+              || { echo "FAIL: ${t} did not print the skip marker"; fail=1; }
+          done
+
+          # The two cases that need no hardware must still have asserted. The
+          # precondition self-test is the one that proves HostAudio::Live is
+          # reachable at all — without it a probe stuck at Dead would disarm
+          # every live arm and this job would still report a clean pass.
+          grep -q "SELF-TEST(4):" /tmp/voice.log \
+            || { echo "FAIL: goertzel_instrument_self_test did not run its assertions"; fail=1; }
+          grep -q "PRECONDITION SELF-TEST:" /tmp/voice.log \
+            || { echo "FAIL: precondition_verdict_self_test did not run its assertions"; fail=1; }
+          grep -qE "SKIPPED-NO-LIVE-AUDIO-INPUT \[(goertzel_instrument_self_test|precondition_verdict_self_test)\]" /tmp/voice.log \
+            && { echo "FAIL: a hardware-free self-test skipped — the gate is over-broad"; fail=1; }
+
+          echo "=== verdict lines ==="
+          grep -E "running [0-9]+ tests|test result|SKIPPED-NO-LIVE-AUDIO-INPUT|PRECONDITION LIVE|PRECONDITION SELF-TEST|SELF-TEST\(4\)" /tmp/voice.log || true
+          cat /tmp/voice.rc || true
+          [ "${fail}" -eq 0 ] || { echo "GATE: FAILED"; exit 1; }
+          echo "GATE: PASSED — suite executed, self-test asserted, all three live arms skipped with a stated reason"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voice-live-capture-hosted-log
+          path: |
+            /tmp/voice.log
+            /tmp/voice.rc
+          if-no-files-found: warn
+
+  # ── The real home: a Mac with three real microphones and a speaker ────────
+  # OPT-IN, for two reasons. It occupies the owner's personal machine for ~4
+  # minutes of wall clock with audio playing out of its speakers, and until the
+  # runner receives a microphone grant it cannot pass — so firing it on every
+  # push that touches the voice surface would hand lanes a red they cannot fix.
+  # `workflow_dispatch` alone is not enough: GitHub resolves dispatchable
+  # workflows off the DEFAULT branch, so a workflow that has not reached `main`
+  # cannot be dispatched. Hence the `[voice-live]` commit token, the same idiom
+  # `ci.yml` already uses for `[ci-darwin]`.
+  selfhosted-live:
+    name: self-hosted macOS (live microphone)
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[voice-live]')
+    runs-on: [self-hosted, macOS, ARM64]
+    concurrency:
+      group: voice-live-selfhosted-${{ github.ref }}
+      cancel-in-progress: true
+    timeout-minutes: 30
+    steps:
+      # Runs before checkout: a mislabelled runner is rejected before it is
+      # handed any repository code. Same Rosetta trap guard as ci.yml's
+      # build-darwin-selfhosted — a label is a claim, `uname -m` is the check.
+      - name: Assert this runner really is Apple silicon
+        run: |
+          set -euo pipefail
+          echo "runner_name=${RUNNER_NAME:-<unset>} runner_arch=${RUNNER_ARCH:-<unset>}"
+          UNAME_M="$(uname -m)"
+          [ "${UNAME_M}" = "arm64" ] || {
+            echo "::error title=Runner arch mismatch::uname -m reports '${UNAME_M}', expected arm64"
+            exit 1
+          }
+
+      - uses: actions/checkout@v6
+
+      - name: Host audio facts + microphone authorization
+        run: |
+          set -uo pipefail
+          echo "whoami=$(whoami)"
+          system_profiler SPAudioDataType 2>&1 || true
+          cat > "$RUNNER_TEMP/micauth.swift" <<'EOF'
+          import AVFoundation
+          let s = AVCaptureDevice.authorizationStatus(for: .audio)
+          let name: String
+          switch s {
+          case .authorized: name = "authorized"
+          case .denied: name = "denied"
+          case .restricted: name = "restricted"
+          case .notDetermined: name = "notDetermined"
+          @unknown default: name = "unknown"
+          }
+          print("MIC_AUTH_STATUS=\(name)")
+          EOF
+          if command -v swift >/dev/null 2>&1; then
+            swift "$RUNNER_TEMP/micauth.swift" 2>&1 || echo "MIC_AUTH_STATUS=probe-failed"
+          else
+            echo "MIC_AUTH_STATUS=unmeasured (no swift on PATH)"
+          fi
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # The acoustic arms play a tone out of the default output device and
+      # listen for it. Set a known output level so a muted desktop is not
+      # mistaken for a broken capture path.
+      - name: Raise output volume for the acoustic arms
+        run: osascript -e 'set volume output volume 60' || echo "could not set output volume"
+
+      # vacuity-checked: executed count and skip-absence are pinned in the gate
+      # step below, which reads /tmp/voice.log back.
+      - name: Run voice_live_capture_mac
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-agent --features voice --test voice_live_capture_mac \
+            $SUITE_ARGS 2>&1 | tee /tmp/voice.log
+          echo "rc=${PIPESTATUS[0]}" | tee /tmp/voice.rc
+
+      - name: Assert the live arms actually ran against the microphone
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          test -s /tmp/voice.log || { echo "FAIL: no log — the suite never ran"; exit 1; }
+
+          grep -q "running 5 tests" /tmp/voice.log \
+            || { echo "FAIL: expected 'running 5 tests' — cases were filtered away"; fail=1; }
+          grep -qE "test result: ok\. 5 passed; 0 failed" /tmp/voice.log \
+            || { echo "FAIL: expected '5 passed; 0 failed'"; fail=1; }
+
+          if grep -q "SKIPPED-NO-LIVE-AUDIO-INPUT" /tmp/voice.log; then
+            grep "SKIPPED-NO-LIVE-AUDIO-INPUT" /tmp/voice.log
+            echo "::error title=No live microphone on the self-hosted runner::This leg exists to run the arms against real hardware and they skipped. This machine HAS three input devices, so the cause is almost certainly the macOS microphone grant: TCC is per-process and the Actions runner is a background service that cannot show the consent prompt, so CoreAudio hands it digital silence. Remedy (one-time, owner-only): System Settings -> Privacy & Security -> Microphone, enable the runner (Runner.Listener / Runner.Worker under the actions-runner install dir), then re-run. Verify with the MIC_AUTH_STATUS line above: it must read 'authorized'."
+            fail=1
+          fi
+          # Positive evidence the arms measured something, not just that they ran.
+          grep -q "PRECONDITION LIVE" /tmp/voice.log \
+            || { echo "FAIL: no PRECONDITION LIVE line — no arm confirmed a live capture path"; fail=1; }
+          grep -q "DISCRIMINATION: control ratio=" /tmp/voice.log \
+            || { echo "FAIL: the tone/control discrimination line was never printed"; fail=1; }
+
+          echo "=== verdict lines ==="
+          grep -E "running [0-9]+ tests|test result|PRECONDITION LIVE|ARM |DISCRIMINATION|OVERFLOW|PRE-CANCEL|SKIPPED-NO-LIVE-AUDIO-INPUT" /tmp/voice.log || true
+          cat /tmp/voice.rc || true
+          [ "${fail}" -eq 0 ] || { echo "GATE: FAILED"; exit 1; }
+          echo "GATE: PASSED — all four cases executed against a live microphone, nothing skipped"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voice-live-capture-selfhosted-log
+          path: |
+            /tmp/voice.log
+            /tmp/voice.rc
+          if-no-files-found: warn
