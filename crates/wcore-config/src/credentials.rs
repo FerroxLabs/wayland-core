@@ -4553,29 +4553,30 @@ mod tests {
         );
 
         // The production writer mints and persists the key.
-        let created = crate::confidential_blob::load_or_create_confidential_blob_key(
+        crate::confidential_blob::load_or_create_confidential_blob_key(
             &store,
             RECOVERY_PREPARED_REQUEST_KEY_REF,
         )
         .expect("the writer must create a key");
-        // NON-VACUITY: it is really there, and really readable, before the
-        // purge. Without this the assertion below passes on an empty store.
+        // NON-VACUITY: it is really there, under the ref the purge targets, and
+        // really readable, BEFORE the purge. Without this the assertions below
+        // pass on a store that was empty all along.
         assert_eq!(
             backing.snapshot().len(),
             1,
             "the writer must have persisted exactly one entry: {:?}",
             backing.snapshot()
         );
-        let reloaded = crate::confidential_blob::load_confidential_blob_key(
+        assert_eq!(
+            backing.snapshot()[0].0,
+            RECOVERY_PREPARED_REQUEST_KEY_REF,
+            "the writer must use the ref the purge deletes — two spellings is the P3 leak"
+        );
+        crate::confidential_blob::load_confidential_blob_key(
             &store,
             RECOVERY_PREPARED_REQUEST_KEY_REF,
         )
         .expect("the key must load back before the purge");
-        assert_eq!(
-            created.as_bytes(),
-            reloaded.as_bytes(),
-            "fixture sanity: the same key must round trip"
-        );
 
         purge_confidential_keys_from(&store).expect("purge");
 
