@@ -1831,7 +1831,11 @@ async fn a_session_whose_key_is_gone_is_refused_by_name_and_only_that_session() 
         false,
     )
     .await;
-    let seeded = profile_contents(env.home());
+    let journal_path = env
+        .home()
+        .join("sessions")
+        .join(format!("{session_id}.journal"));
+    let seeded_journal = fs::read(&journal_path).expect("read the seeded journal");
     let seeded_sessions = session_directory_entries(env.home());
     assert_ne!(
         seeded_sessions, 0,
@@ -1909,13 +1913,22 @@ async fn a_session_whose_key_is_gone_is_refused_by_name_and_only_that_session() 
         );
     }
 
-    // THE JOURNAL IS EVIDENCE. A refusal that consumed, truncated or rotated
-    // what it could not read would destroy the only record of the interrupted
-    // turn — and would make arm 3 impossible.
+    // THE JOURNAL IS EVIDENCE. A refusal that consumed, truncated, rotated or
+    // appended to what it could not read would destroy the only record of the
+    // interrupted turn — and would make arm 3 impossible.
+    //
+    // Scoped to the journal FILE rather than the whole profile deliberately:
+    // opening a session acquires a writer lease, so a refused launch can
+    // legitimately create and release a lock file. Asserting over the whole
+    // home would red on that and say nothing about the property that matters.
     assert_eq!(
-        profile_contents(env.home()),
-        seeded,
-        "the refused resume modified the profile it could not read"
+        fs::read(&journal_path).expect("read the journal after the refusal"),
+        seeded_journal,
+        "the refused resume modified the journal it could not read"
+    );
+    assert!(
+        !sealed_request_artifacts(env.home()).is_empty(),
+        "the refused resume destroyed the sealed material that made it refuse"
     );
 
     // ARM 2 — NOT A BRICK. Same host, same profile, same missing key, one
