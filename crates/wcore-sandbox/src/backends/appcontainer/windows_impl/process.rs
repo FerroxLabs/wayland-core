@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 
 use super::super::super::SandboxBackend;
-use super::super::appcontainer_acl_lease::ExecutionIdentity;
+use super::super::appcontainer_acl_lease::{ExecutionIdentity, MUTATION_LOCK_WAIT_NANOS};
 use super::super::{NEGATIVE_PROBE_TTL, ProbeCache};
 use crate::directory_authority::DirectoryNameLease;
 use crate::error::{Result, SandboxError};
@@ -14,10 +14,10 @@ use std::ffi::OsStr;
 use std::mem;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::ptr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -426,7 +426,7 @@ pub(super) fn probe_appcontainer_available() -> bool {
         return false;
     }
 
-    match rx.recv_timeout(PROBE_WALL_CLOCK) {
+    match recv_probe_result(&rx, PROBE_WALL_CLOCK) {
         Ok(Ok(out)) if out.exit_code == 0 => true,
         Ok(Ok(out)) => {
             tracing::error!(
@@ -473,6 +473,80 @@ pub(super) fn probe_appcontainer_available() -> bool {
                 "AppContainer probe thread ended without a result; sandbox disabled."
             );
             false
+        }
+    }
+}
+
+/// Wait for the probe worker under a guard that bounds STALL, not QUEUE.
+///
+/// `PROBE_WALL_CLOCK` exists to catch one thing: a Win32 setup call
+/// (`CreateAppContainerProfile`, `CreateProcessAsUserW`) that hangs — an AV
+/// image scan, a wedged profile-service RPC (#125). It used to be a flat
+/// `recv_timeout`, which also counted time the worker spent BLOCKED ON THE
+/// MACHINE-WIDE ACL MUTATION LOCK. That lock is taken three times per
+/// sandboxed execution and is contended across every process on the host, so
+/// two or three concurrent commands — `cargo nextest` runs one process per
+/// test — routinely put more than 15s of other people's critical sections
+/// ahead of the probe. The probe then reported "stalled", `is_available()`
+/// went false, and the command was REFUSED with `sandbox UNAVAILABLE` after
+/// exactly 15.0s. Nothing had stalled; the host was merely busy.
+///
+/// So: extend the deadline by however long this process is provably blocked
+/// waiting for that lock. Time inside a Win32 call never touches the counter,
+/// which is what keeps the guard able to fire on a real stall. The extension
+/// is itself capped, so a pathological queue still terminates.
+///
+/// The counter is per-PROCESS, not per-execution, and that is only sound here
+/// because `is_available` is single-flighted: while a probe is running this
+/// process has exactly one sandboxed execution in flight, so every nanosecond
+/// the counter gains during the probe window belongs to the probe. The same
+/// discount is deliberately NOT applied to the general `execute` ceiling,
+/// where concurrent in-process executions would credit each other's queueing
+/// and weaken a defense-in-depth bound.
+pub(super) fn recv_probe_result(
+    rx: &mpsc::Receiver<Result<SandboxOutput>>,
+    guard: Duration,
+) -> std::result::Result<Result<SandboxOutput>, mpsc::RecvTimeoutError> {
+    /// Ceiling on the queue time the guard will forgive, so a host that is
+    /// permanently oversubscribed still gets an answer instead of hanging.
+    const MAX_QUEUE_CREDIT: Duration = Duration::from_secs(240);
+
+    let started = Instant::now();
+    let queue_at_start = MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed);
+    loop {
+        let credit = Duration::from_nanos(
+            MUTATION_LOCK_WAIT_NANOS
+                .load(Ordering::Relaxed)
+                .saturating_sub(queue_at_start),
+        )
+        .min(MAX_QUEUE_CREDIT);
+        let deadline = guard.saturating_add(credit);
+        let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        };
+        match rx.recv_timeout(remaining) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Re-read the counter: the worker may have started queueing
+                // after the last sample, in which case the deadline moves and
+                // this was not a stall.
+                let grown = Duration::from_nanos(
+                    MUTATION_LOCK_WAIT_NANOS
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(queue_at_start),
+                )
+                .min(MAX_QUEUE_CREDIT);
+                if grown <= credit {
+                    return Err(mpsc::RecvTimeoutError::Timeout);
+                }
+                tracing::warn!(
+                    target: "wcore_sandbox",
+                    queued_secs = grown.as_secs(),
+                    "AppContainer probe is queued behind another sandboxed execution's \
+                     ACL mutation lock; extending its stall guard by the queue time \
+                     rather than declaring the sandbox unavailable."
+                );
+            }
+            other => return other,
         }
     }
 }

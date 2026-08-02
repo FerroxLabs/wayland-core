@@ -807,3 +807,69 @@ fn the_containment_claim_is_withdrawn_only_by_a_settled_negative_verdict() {
         "a settled-unavailable backend must withdraw the containment claim"
     );
 }
+
+/// The probe's wall-clock guard must fire on a STALL and only on a stall.
+///
+/// `PROBE_WALL_CLOCK` exists to catch a hung `CreateAppContainerProfile` /
+/// `CreateProcessAsUserW`. Before this fix it was a flat `recv_timeout`, so it
+/// also fired on time the worker spent queued on the machine-wide ACL mutation
+/// lock — and the host then refused the command with `sandbox UNAVAILABLE`
+/// after exactly 15.0s, which is the shape the Windows formatter tests kept
+/// failing in under `cargo nextest` (one process per test, three sandboxed
+/// commands at once).
+///
+/// Both directions are asserted, because only asserting the forgiving one
+/// would pass an implementation that never times out at all.
+#[test]
+fn the_probe_guard_forgives_lock_queueing_and_still_catches_a_real_stall() {
+    use super::super::appcontainer_acl_lease::MUTATION_LOCK_WAIT_NANOS;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    const GUARD: Duration = Duration::from_millis(300);
+
+    // 1. A worker that is BLOCKED ON THE LOCK, not stalled: the counter grows
+    //    while the guard elapses, so the deadline must move with it and the
+    //    eventual result must be delivered rather than discarded.
+    let (tx, rx) = mpsc::channel::<crate::error::Result<crate::SandboxOutput>>();
+    let feeder = std::thread::spawn(move || {
+        for _ in 0..6 {
+            std::thread::sleep(GUARD / 2);
+            MUTATION_LOCK_WAIT_NANOS.fetch_add((GUARD / 2).as_nanos() as u64, Ordering::Relaxed);
+        }
+        let _ = tx.send(Ok(crate::SandboxOutput {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        }));
+    });
+    let started = Instant::now();
+    let queued = recv_probe_result(&rx, GUARD);
+    assert!(
+        queued.is_ok(),
+        "a worker queued on the mutation lock was reported as a stalled Win32 call"
+    );
+    assert!(
+        started.elapsed() > GUARD,
+        "the case did not actually outlive the guard, so it proves nothing"
+    );
+    feeder.join().unwrap();
+
+    // 2. A worker that is genuinely STALLED: nothing touches the counter, so
+    //    the guard must still fire, at roughly its nominal value.
+    let (stalled_tx, stalled_rx) = mpsc::channel::<crate::error::Result<crate::SandboxOutput>>();
+    let started = Instant::now();
+    let verdict = recv_probe_result(&stalled_rx, GUARD);
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(verdict, Err(mpsc::RecvTimeoutError::Timeout)),
+        "a stalled Win32 setup call must still trip the guard"
+    );
+    assert!(
+        elapsed < GUARD * 4,
+        "the guard took {elapsed:?} to fire on a stall with no queueing at all"
+    );
+    drop(stalled_tx);
+}

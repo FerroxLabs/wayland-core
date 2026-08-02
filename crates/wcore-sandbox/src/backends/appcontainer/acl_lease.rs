@@ -15,6 +15,11 @@ mod storage;
 #[path = "acl_lease/tests.rs"]
 mod tests;
 
+/// Re-exported for `windows_impl::process`: the AppContainer probe's hard
+/// wall-clock guard must discount time spent queued on this machine-wide lock,
+/// or ordinary concurrency is misreported as a stalled Win32 setup call and the
+/// whole sandbox is declared unavailable.
+pub(super) use self::mutation_lock::MUTATION_LOCK_WAIT_NANOS;
 use self::mutation_lock::MutationLock;
 use self::sha256::sha256_hex;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use super::*;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::WAIT_ABANDONED;
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SE_KERNEL_OBJECT, SetEntriesInAclW,
@@ -16,7 +17,55 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, MUTEX_ALL_ACCESS, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
 };
 
-const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long ONE holder may keep the mutation lock before we call it wedged.
+///
+/// The critical section is bounded, purely local work by this product's own
+/// code: a lease-directory recovery pass, `CreateAppContainerProfile`, a few
+/// synced lease writes, and DACL edits on paths `validate_local_canonical_path`
+/// has already proven are local (never UNC, never a device path). Nothing in it
+/// waits on a child process, a network, or an untrusted peer. A holder that
+/// *dies* releases the mutex as abandoned, which [`MutationLock::acquire`]
+/// already treats as an acquisition. So exceeding this budget for a single
+/// holder means the OS itself stalled — not that the machine is busy.
+const MUTATION_LOCK_HOLDER_BUDGET: Duration = Duration::from_secs(15);
+
+/// How many holders may legitimately be queued ahead of us before we stop
+/// waiting.
+///
+/// This is the whole of the fix for the 15-second cliff. `MUTATION_LOCK_TIMEOUT`
+/// used to be a flat 15s, which is a budget on *queue depth* wearing the
+/// costume of a wedge detector: the lock is contended machine-wide (one mutex
+/// per user, named `Global\…`) while every sandboxed execution takes it THREE
+/// times (setup, exit-marking, cleanup) and each hold pays a
+/// `CreateAppContainerProfile`/`DeleteAppContainerProfile` pair plus several
+/// `FlushFileBuffers`-class lease writes. Three concurrent executions is
+/// therefore ~18 serialized critical sections, and on a loaded host that
+/// exceeds 15s — at which point the product did not queue, it FAILED, and the
+/// caller saw `sandbox UNAVAILABLE … refusing to run`.
+///
+/// Concurrency is not a fault. Waiting is the designed behaviour ("Profile
+/// creation and DACL changes are serialized…", see the module docs on
+/// `acl_lease`), so the deadline is now expressed as what it actually bounds:
+/// a per-holder stall budget times a bound on how deep the queue may be.
+///
+/// Stated honestly, because a Win32 mutex gives a waiter no way to observe
+/// hand-offs: this does NOT distinguish sixteen holders taking a second each
+/// from one holder wedged for four minutes. It trades a slower verdict on the
+/// (OS-level, unfixable-here) wedge for not failing the ordinary case, and it
+/// makes the wait loud — every elapsed budget logs a warning naming the
+/// elapsed time — so a wedge is visible long before the deadline.
+const MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 16;
+
+/// Total nanoseconds this PROCESS has spent blocked waiting for the mutation
+/// lock.
+///
+/// Read by `windows_impl::process::probe_appcontainer_available` so its hard
+/// wall-clock guard keeps bounding what it says it bounds — a stalled Win32
+/// setup call — instead of counting time spent queued behind another
+/// execution's critical section as a stall. Monotonic, so a caller can take a
+/// delta across a window; never reset.
+pub(crate) static MUTATION_LOCK_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const LOCAL_SYSTEM_RID: u32 = 18;
 
@@ -80,16 +129,56 @@ impl MutationLock {
         }
         let handle = OwnedHandle(handle);
         validate_mutex_security(handle.0, token_user.sid(), system_sid.sid())?;
-        let wait =
-            unsafe { WaitForSingleObject(handle.0, MUTATION_LOCK_TIMEOUT.as_millis() as u32) };
-        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-            return Err(if wait == WAIT_TIMEOUT {
-                exec_error("timed out acquiring AppContainer ACL mutation lock".into())
-            } else {
-                last_error("WaitForSingleObject(AppContainer ACL mutation lock)")
-            });
-        }
+        wait_for_mutation_mutex(handle.0)?;
         Ok(Self(handle))
+    }
+}
+
+/// Block until this process owns `handle`, tolerating a queue but not a stall.
+///
+/// Waits in [`MUTATION_LOCK_HOLDER_BUDGET`] slices up to
+/// [`MUTATION_LOCK_MAX_QUEUED_HOLDERS`] of them, adding every nanosecond spent
+/// blocked to [`MUTATION_LOCK_WAIT_NANOS`]. The accounting is what lets the
+/// AppContainer probe's wall-clock guard keep meaning "a Win32 setup call
+/// stalled" rather than "this host is running more than one sandboxed command".
+fn wait_for_mutation_mutex(handle: HANDLE) -> Result<()> {
+    let started = Instant::now();
+    let slice = MUTATION_LOCK_HOLDER_BUDGET.as_millis() as u32;
+    let mut outcome = None;
+    for elapsed_budgets in 0..MUTATION_LOCK_MAX_QUEUED_HOLDERS {
+        let wait = unsafe { WaitForSingleObject(handle, slice) };
+        if wait != WAIT_TIMEOUT {
+            outcome = Some(wait);
+            break;
+        }
+        tracing::warn!(
+            target: "wcore_sandbox",
+            waited_secs = started.elapsed().as_secs(),
+            budgets_remaining = MUTATION_LOCK_MAX_QUEUED_HOLDERS - elapsed_budgets - 1,
+            "still queued for the AppContainer ACL mutation lock — another sandboxed \
+             execution on this machine holds it. This is serialization, not a failure; \
+             it becomes one only if no holder ever releases."
+        );
+    }
+    // Charge the wait BEFORE returning, on the failure path too: a caller that
+    // discounts queue time must be able to see the queue that killed it.
+    MUTATION_LOCK_WAIT_NANOS.fetch_add(
+        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    match outcome {
+        Some(wait) if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED => Ok(()),
+        Some(_) => Err(last_error(
+            "WaitForSingleObject(AppContainer ACL mutation lock)",
+        )),
+        None => Err(exec_error(format!(
+            "timed out acquiring AppContainer ACL mutation lock after {}s. The lock is \
+             machine-wide (one per user) and every sandboxed execution takes it, so this \
+             is either far more concurrent sandboxed commands than {} at once, or one \
+             holder wedged inside a Win32 call.",
+            started.elapsed().as_secs(),
+            MUTATION_LOCK_MAX_QUEUED_HOLDERS
+        ))),
     }
 }
 
@@ -316,14 +405,26 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Seconds the helper child keeps the mutation lock once it has it.
+    ///
+    /// Parameterised (rather than the previous hard-coded 2s) so a test can put
+    /// a hold LONGER than the old flat 15-second timeout in front of the
+    /// parent — which is the only way to observe whether a waiter queues or
+    /// gives up.
+    const HELPER_HOLD_SECS_ENV: &str = "WCORE_MUTEX_HELPER_HOLD_SECS";
+
     #[test]
     fn mutation_lock_helper_entry() {
         let Some(marker) = std::env::var_os("WCORE_MUTEX_HELPER_MARKER") else {
             return;
         };
+        let hold = std::env::var(HELPER_HOLD_SECS_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(2);
         let _lock = MutationLock::acquire().unwrap();
         fs::write(marker, b"locked").unwrap();
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(hold));
     }
 
     #[test]
@@ -357,6 +458,70 @@ mod tests {
             "parent acquired while child still held the cross-process mutex"
         );
         drop(lock);
+        assert!(child.wait().unwrap().success());
+    }
+
+    /// The regression for the 15-second cliff.
+    ///
+    /// A holder that keeps the machine-wide lock for longer than the OLD flat
+    /// `MUTATION_LOCK_TIMEOUT` (15s) used to fail every other execution on the
+    /// host with `timed out acquiring AppContainer ACL mutation lock`. On real
+    /// hardware that holder is not a contrived helper: it is three or four
+    /// ordinary sandboxed commands queued ahead of you, each paying a
+    /// `CreateAppContainerProfile`/`DeleteAppContainerProfile` pair and several
+    /// synced lease writes, three times over.
+    ///
+    /// The hold is deliberately > 15s so this test cannot pass under the old
+    /// constant. It also pins the accounting the AppContainer probe's stall
+    /// guard depends on: the wait must be CHARGED to
+    /// [`MUTATION_LOCK_WAIT_NANOS`], or the guard has nothing to discount and
+    /// contention is still reported as "sandbox UNAVAILABLE".
+    #[test]
+    #[ignore = "explicit native Windows AppContainer acceptance"]
+    fn acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget() {
+        assert_eq!(
+            std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+            Some(OsStr::new("1"))
+        );
+        const HOLD: Duration = Duration::from_secs(22);
+        assert!(
+            HOLD > Duration::from_secs(15),
+            "the hold must exceed the old flat timeout or this test cannot fail"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("locked");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("mutation_lock_helper_entry")
+            .arg("--nocapture")
+            .env("WCORE_MUTEX_HELPER_MARKER", &marker)
+            .env(HELPER_HOLD_SECS_ENV, HOLD.as_secs().to_string())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(marker.exists(), "child never acquired global mutex");
+
+        let charged_before = MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed);
+        let started = Instant::now();
+        let lock = MutationLock::acquire()
+            .expect("a waiter must QUEUE behind a busy host, not fail it: this is the 15s cliff");
+        let waited = started.elapsed();
+        drop(lock);
+
+        assert!(
+            waited >= Duration::from_secs(15),
+            "parent acquired in {waited:?}, before the old cliff — the holder was not \
+             actually still holding, so this run proves nothing"
+        );
+        let charged = MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed) - charged_before;
+        assert!(
+            Duration::from_nanos(charged) >= Duration::from_secs(15),
+            "wait was not charged to MUTATION_LOCK_WAIT_NANOS ({charged}ns); the probe's \
+             stall guard has nothing to discount"
+        );
         assert!(child.wait().unwrap().success());
     }
 }
