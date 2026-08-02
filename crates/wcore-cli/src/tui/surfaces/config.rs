@@ -1172,6 +1172,14 @@ pub(crate) enum ProviderStatus {
     OAuthConnected,
     /// OAuth tokens stored but expired (Google Meet only).
     OAuthExpired,
+    /// A login IS stored for this provider and the secure credential store
+    /// cannot produce it — a locked vault, or a keyring that is not running.
+    ///
+    /// Distinct from `NotConfigured` and the distinction is the whole point.
+    /// "Not configured" tells a signed-in user they are signed out and sends
+    /// them to re-authenticate; this one tells them their credential store is
+    /// shut, which is both true and fixable without touching the login.
+    OAuthStoreLocked,
     /// Device available (voice_mode cpal probe).
     DeviceAvailable,
     /// Device unavailable (voice_mode cpal probe failed).
@@ -1206,6 +1214,7 @@ impl ProviderStatus {
             ProviderStatus::NotConfigured => "⚠ not configured",
             ProviderStatus::OAuthConnected => "✓ oauth connected",
             ProviderStatus::OAuthExpired => "⚠ oauth token expired",
+            ProviderStatus::OAuthStoreLocked => "⚠ signed in — credential store locked",
             ProviderStatus::DeviceAvailable => "✓ device ready",
             ProviderStatus::DeviceUnavailable => "⚠ no audio device",
             ProviderStatus::DeviceUnprobed => "· device not probed",
@@ -1216,15 +1225,22 @@ impl ProviderStatus {
 
     /// The remedy line for a status the user cannot fix by changing config.
     ///
-    /// Only [`ProviderStatus::NotCompiledIn`] has one: every other state is
-    /// actionable from the running binary (set an env var, plug in a mic, run
-    /// an OAuth flow), whereas an uncompiled feature needs a different build.
-    /// Returning `None` elsewhere keeps the render path from inventing advice.
+    /// [`ProviderStatus::NotCompiledIn`] needs a different build, and
+    /// [`ProviderStatus::OAuthStoreLocked`] needs the credential store opened —
+    /// neither is fixable by editing config, and both would otherwise read as
+    /// an unexplained warning. Every other state is actionable from the running
+    /// binary (set an env var, plug in a mic, run an OAuth flow), and returning
+    /// `None` there keeps the render path from inventing advice.
     pub fn remedy(self) -> Option<String> {
         match self {
             ProviderStatus::NotCompiledIn { feature } => Some(format!(
                 "    not compiled into this binary — rebuild with `--features {feature}`"
             )),
+            ProviderStatus::OAuthStoreLocked => Some(
+                "    the login is stored but the credential store is shut — set \
+                 WAYLAND_VAULT_PASSPHRASE, or start your OS keyring, then reopen"
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -1502,23 +1518,21 @@ pub(crate) enum GoogleMeetTokenStatus {
     Expired,
 }
 
-/// Decode the stored Google Meet token file's expiry without depending on
-/// `wcore-agent`. The file is the serialised `OAuthTokens` struct; we only
-/// read `expires_at_unix_secs` (unix epoch seconds, `Option<u64>`).
+/// Classify a stored Google Meet token by its `expires_at_unix_secs` (unix
+/// epoch seconds).
 ///
-/// - File missing / unreadable / unparsable → `Absent`.
-/// - No `expires_at_unix_secs` field (provider returned no `expires_in`) →
-///   `Valid` (mirrors the engine's `token_is_fresh`, which treats a missing
-///   expiry as fresh).
+/// - No token → `Absent`.
+/// - No `expires_at_unix_secs` (provider returned no `expires_in`) → `Valid`
+///   (mirrors the engine's `token_is_fresh`, which treats a missing expiry as
+///   fresh).
 /// - Expiry in the past relative to wall-clock → `Expired`; otherwise `Valid`.
-pub(crate) fn google_meet_token_status(path: &std::path::Path) -> GoogleMeetTokenStatus {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+pub(crate) fn google_meet_token_status(
+    tokens: Option<&wcore_agent::oauth::OAuthTokens>,
+) -> GoogleMeetTokenStatus {
+    let Some(tokens) = tokens else {
         return GoogleMeetTokenStatus::Absent;
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return GoogleMeetTokenStatus::Absent;
-    };
-    match json.get("expires_at_unix_secs").and_then(|v| v.as_u64()) {
+    match tokens.expires_at_unix_secs {
         None => GoogleMeetTokenStatus::Valid,
         Some(exp) => {
             let now = std::time::SystemTime::now()
@@ -1588,13 +1602,60 @@ fn resolve_chatgpt_status() -> ProviderStatus {
     chatgpt_status_from_storage(&storage)
 }
 
+/// Resolve the `google_meet` OAuth status from the credential ladder.
+///
+/// This row used to `stat` `~/.wayland/oauth/google_meet.json` directly. Once
+/// OAuth tokens moved into the ladder that file stops existing after the first
+/// load, so a signed-in Meet user rendered "not configured" — display-only (the
+/// Meet tools authenticate through `storage.load` and kept working) but wrong,
+/// and wrong in the direction that makes a working integration look broken.
+/// Reading through [`wcore_agent::oauth::OAuthStorage`] is what keeps this badge
+/// and the tool that actually authenticates on the same source.
+fn resolve_google_meet_status() -> ProviderStatus {
+    let Ok(storage) = wcore_agent::oauth::OAuthStorage::from_home() else {
+        return ProviderStatus::NotConfigured;
+    };
+    google_meet_status_from_storage(&storage)
+}
+
+/// Classify the Google Meet OAuth status from an explicit token store. Split
+/// from [`resolve_google_meet_status`] for the same reason as the ChatGPT pair:
+/// tests mount an `OAuthStorage::at_root` tempdir instead of racing on
+/// process-global `HOME` / `WAYLAND_HOME`.
+fn google_meet_status_from_storage(storage: &wcore_agent::oauth::OAuthStorage) -> ProviderStatus {
+    match storage.load(wcore_agent::tool_backends::google_meet::PROVIDER) {
+        Ok(tokens) => match google_meet_token_status(tokens.as_ref()) {
+            GoogleMeetTokenStatus::Valid => ProviderStatus::OAuthConnected,
+            GoogleMeetTokenStatus::Expired => ProviderStatus::OAuthExpired,
+            GoogleMeetTokenStatus::Absent => ProviderStatus::NotConfigured,
+        },
+        Err(error) => oauth_error_status(error),
+    }
+}
+
+/// Map a token-store failure to a badge.
+///
+/// A store that cannot be opened is NOT "not configured": the user is signed in
+/// and the credential store is what is unavailable. Rendering that as
+/// `NotConfigured` is the silent sign-out this release closed everywhere else,
+/// so the badge gets its own state and carries the store's own remedy text.
+fn oauth_error_status(error: wcore_agent::oauth::OAuthStorageError) -> ProviderStatus {
+    match error {
+        wcore_agent::oauth::OAuthStorageError::SecureStoreUnavailable { .. } => {
+            ProviderStatus::OAuthStoreLocked
+        }
+        _ => ProviderStatus::NotConfigured,
+    }
+}
+
 /// Classify the ChatGPT OAuth status from an explicit token store. Split from
 /// [`resolve_chatgpt_status`] so tests can inject an `OAuthStorage::at_root`
 /// tempdir instead of racing on process-global `HOME`/`WAYLAND_HOME` env vars.
 fn chatgpt_status_from_storage(storage: &wcore_agent::oauth::OAuthStorage) -> ProviderStatus {
-    let status = wcore_agent::oauth::chatgpt_login_status(storage)
-        .ok()
-        .flatten();
+    let status = match wcore_agent::oauth::chatgpt_login_status(storage) {
+        Ok(status) => status,
+        Err(error) => return oauth_error_status(error),
+    };
     let Some(status) = status else {
         return ProviderStatus::NotConfigured;
     };
@@ -1625,24 +1686,13 @@ pub(crate) fn resolve_provider_status(entry: &ProviderEntry) -> ProviderStatus {
         return resolve_voice_mode_status();
     }
     if entry.name == "google_meet" {
-        // OAuth status is driven by the stored token file, not the client
-        // env vars: a stored token is what actually authenticates the call.
-        // We decode the token's `expires_at_unix_secs` (unix epoch seconds,
-        // as serialised by `wcore_agent::oauth::OAuthTokens`) so an expired
-        // token reaches `OAuthExpired` instead of falsely rendering "oauth
-        // connected" (D030). Decoding is a plain serde_json read of a single
-        // field — no `wcore-agent` dependency is needed.
-        let tokens_path =
-            dirs::home_dir().map(|h| h.join(".wayland").join("oauth").join("google_meet.json"));
-        let token_status = tokens_path
-            .as_ref()
-            .map(|p| google_meet_token_status(p))
-            .unwrap_or(GoogleMeetTokenStatus::Absent);
-        return match token_status {
-            GoogleMeetTokenStatus::Valid => ProviderStatus::OAuthConnected,
-            GoogleMeetTokenStatus::Expired => ProviderStatus::OAuthExpired,
-            GoogleMeetTokenStatus::Absent => ProviderStatus::NotConfigured,
-        };
+        // OAuth status is driven by the STORED TOKEN, not the client env vars:
+        // a stored token is what actually authenticates the call. The token
+        // lives in the credential ladder, so this reads it back the same way
+        // the Meet backend does, and decodes `expires_at_unix_secs` so an
+        // expired token reaches `OAuthExpired` instead of falsely rendering
+        // "oauth connected" (D030).
+        return resolve_google_meet_status();
     }
     if entry.name == "openai-chatgpt" {
         // OAuth-backed: status is driven by the stored ChatGPT token, decoded
@@ -3943,56 +3993,130 @@ mod tests {
         }
     }
 
-    // ── D030: google_meet token expiry decode ───────────────────────────
+    // ── D030: google_meet token expiry, read through the ladder ─────────
 
-    fn write_meet_token(dir: &std::path::Path, expires_at: Option<u64>) -> std::path::PathBuf {
-        let path = dir.join("google_meet.json");
-        let body = match expires_at {
-            Some(exp) => format!(
-                r#"{{"access_token":"tok","refresh_token":"r","expires_at_unix_secs":{exp},"token_type":"Bearer"}}"#
-            ),
-            None => {
-                r#"{"access_token":"tok","refresh_token":"r","token_type":"Bearer"}"#.to_string()
-            }
-        };
-        std::fs::write(&path, body).expect("write token file");
-        path
+    /// Build a tempdir-rooted `OAuthStorage` over an in-memory secure tier and
+    /// classify the Meet row exactly the way `/config` does.
+    ///
+    /// `token`:
+    /// - `None` → nothing stored (not signed in).
+    /// - `Some(None)` → a token with no `expires_at_unix_secs`.
+    /// - `Some(Some(exp))` → a token whose expiry is `exp`.
+    ///
+    /// The token is written through `storage.store`, i.e. through the credential
+    /// ladder — NOT as a `google_meet.json` file. That is the point: after the
+    /// ladder change no such file exists, and a badge that stats one reports a
+    /// signed-in user as unconfigured.
+    fn meet_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("oauth storage at tempdir root");
+        if let Some(expires_at) = token {
+            storage
+                .store(
+                    wcore_agent::tool_backends::google_meet::PROVIDER,
+                    &wcore_agent::oauth::OAuthTokens {
+                        access_token: "tok".into(),
+                        refresh_token: Some("r".into()),
+                        expires_at_unix_secs: expires_at,
+                        token_type: "Bearer".into(),
+                        scope: None,
+                        id_token: None,
+                    },
+                )
+                .expect("store the meet login through the ladder");
+        }
+        google_meet_status_from_storage(&storage)
     }
 
     #[test]
-    fn google_meet_token_status_absent_when_file_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("nope.json");
-        assert_eq!(
-            google_meet_token_status(&missing),
-            GoogleMeetTokenStatus::Absent
-        );
+    fn google_meet_status_not_configured_when_no_stored_login() {
+        assert_eq!(meet_status_with_token(None), ProviderStatus::NotConfigured);
     }
 
     #[test]
-    fn google_meet_token_status_expired_when_past_expiry() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn google_meet_status_expired_when_past_expiry() {
         // expiry of 1 (1970) is unambiguously in the past.
-        let path = write_meet_token(dir.path(), Some(1));
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Expired
+            meet_status_with_token(Some(Some(1))),
+            ProviderStatus::OAuthExpired
         );
     }
 
+    /// THE REGRESSION. A Meet login stored through the ladder leaves NO
+    /// `~/.wayland/oauth/google_meet.json`, so the old file-stat badge rendered
+    /// "not configured" for a user who was signed in and whose Meet tools were
+    /// working. Route the badge back through the store the tools read.
+    ///
+    /// MUTATION TARGET. Point `resolve_google_meet_status` back at a file stat
+    /// and this fails with `NotConfigured`.
     #[test]
-    fn google_meet_token_status_valid_when_future_expiry() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn google_meet_status_connected_for_a_ladder_stored_login() {
         let far_future = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
             + 3600;
-        let path = write_meet_token(dir.path(), Some(far_future));
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Valid
+            meet_status_with_token(Some(Some(far_future))),
+            ProviderStatus::OAuthConnected
         );
+    }
+
+    /// A locked credential store is NOT "not configured": the login is there
+    /// and the store is shut. Both OAuth rows must say so, and both must carry
+    /// a remedy rather than a bare warning.
+    #[test]
+    fn a_locked_credential_store_is_not_reported_as_not_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("oauth");
+        for provider in [
+            wcore_agent::tool_backends::google_meet::PROVIDER,
+            wcore_agent::oauth::chatgpt::PROVIDER,
+        ] {
+            let signed_in = wcore_agent::oauth::OAuthStorage::at_root(
+                root.clone(),
+                Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+            )
+            .expect("storage");
+            signed_in
+                .store(
+                    provider,
+                    &wcore_agent::oauth::OAuthTokens {
+                        access_token: "hdr.e30.sig".into(),
+                        refresh_token: Some("r".into()),
+                        expires_at_unix_secs: None,
+                        token_type: "Bearer".into(),
+                        scope: None,
+                        id_token: None,
+                    },
+                )
+                .expect("store");
+        }
+
+        // A fresh in-memory tier is exactly the "the vault is not mounted"
+        // state: the login record is on disk, the store holds nothing.
+        let locked = wcore_agent::oauth::OAuthStorage::at_root(
+            root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("storage");
+
+        for status in [
+            google_meet_status_from_storage(&locked),
+            chatgpt_status_from_storage(&locked),
+        ] {
+            assert_eq!(status, ProviderStatus::OAuthStoreLocked);
+            assert!(!status.is_ok(), "a locked store must not read as ready");
+            let remedy = status.remedy().expect("a locked store must name a remedy");
+            assert!(
+                remedy.contains("WAYLAND_VAULT_PASSPHRASE") && remedy.contains("keyring"),
+                "unhelpful remedy: {remedy}"
+            );
+        }
     }
 
     // ── FIX 3: openai-chatgpt OAuth status row ───────────────────────────
@@ -4009,8 +4133,11 @@ mod tests {
     fn chatgpt_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
         let tmp = tempfile::tempdir().expect("tempdir");
         let oauth_dir = tmp.path().join("oauth");
-        let storage = wcore_agent::oauth::OAuthStorage::at_root(oauth_dir.clone())
-            .expect("oauth storage at tempdir root");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(
+            oauth_dir.clone(),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("oauth storage at tempdir root");
         if let Some(expires_at) = token {
             // A JWT-less access_token is fine: the plan decode just yields None,
             // and the status row only reads expiry. The struct must round-trip
@@ -4069,25 +4196,12 @@ mod tests {
     }
 
     #[test]
-    fn google_meet_token_status_valid_when_no_expiry_field() {
+    fn google_meet_status_connected_when_no_expiry_field() {
         // No `expires_at_unix_secs` (provider returned no `expires_in`) is
         // treated as fresh — mirrors the engine's `token_is_fresh`.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write_meet_token(dir.path(), None);
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Valid
-        );
-    }
-
-    #[test]
-    fn google_meet_token_status_absent_when_unparsable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("google_meet.json");
-        std::fs::write(&path, "{ not json").expect("write");
-        assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Absent
+            meet_status_with_token(Some(None)),
+            ProviderStatus::OAuthConnected
         );
     }
 

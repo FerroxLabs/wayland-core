@@ -80,6 +80,11 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 wiremock.workspace   = true
+# tests/keyring_blob_size_live.rs writes through a BARE `keyring::Entry` as the
+# positive control for the Windows Credential Manager blob cap — the unspanned
+# path `KeyringCredentialsStore` used to take. An integration test links only
+# the crate plus its dev-dependencies, so the direct dep is needed here too.
+keyring.workspace    = true
 tokio-test.workspace = true
 # S11 — env-var-driven tests in credentials::tests must not race.
 serial_test.workspace = true

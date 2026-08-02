@@ -152,8 +152,35 @@ managed entirely by the engine:
 
 ### Token Storage & Security
 
-- Tokens are stored encrypted at `~/.wayland/oauth/{provider}.json`, with
-  directory mode `0700` and file mode `0600` on Unix.
+- Tokens are stored through the same credential ladder as API keys: the OS
+  keyring first, then the encrypted vault
+  (`WAYLAND_VAULT_PASSPHRASE_FD` / `WAYLAND_VAULT_PASSPHRASE`), and a refusal if
+  neither is available. There is no cleartext rung — on a host with no keyring
+  and a locked vault, `auth login` fails with the remedy rather than writing
+  your refresh token to disk in the clear. `backend = "plaintext"` does not
+  apply to OAuth tokens.
+- A token file written by a build before v0.12.26
+  (`~/.wayland/oauth/{provider}.json`, directory mode `0700` and file mode
+  `0600` on Unix) still works. The first time the engine reads it, the token is
+  written into the ladder, verified by reading it back, and only then is the
+  cleartext file removed. If no secure tier is available the file is left alone
+  and you stay signed in.
+- Migration is **one-way**, so the engine refuses rather than lying about it.
+  Every verified store drops a non-secret marker at
+  `~/.wayland/oauth/{provider}.stored`. If a later run finds that marker but
+  neither tier can produce the token — a locked vault, a keyring that is not
+  running — the load fails with a message naming all three ways out, instead of
+  reporting "not signed in" to a user who is signed in. `/config` shows the same
+  state as `⚠ signed in — credential store locked`.
+- On Windows a token set is larger than one Credential Manager entry can hold
+  (`CRED_MAX_CREDENTIAL_BLOB_SIZE` is 2560 bytes, and values are stored as
+  UTF-16). The keyring backend spans an oversized value across sibling entries
+  under a manifest, so the cap is not a limit on what can be stored. Nothing
+  changes for values that fit.
+- `wayland-core auth logout chatgpt` clears all of it — the ladder entry, any
+  leftover file, and the marker. It works even when the credential store cannot
+  be opened, which is what makes it a usable escape hatch from the refusal
+  above.
 - PKCE (S256) and a CSRF `state` token are mandatory on the login flow; the
   callback compares `state` in constant time.
 - Refresh is engine-managed: concurrent refreshes coalesce into a single

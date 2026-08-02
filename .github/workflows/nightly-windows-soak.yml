@@ -209,6 +209,81 @@ jobs:
             }
 
   # --------------------------------------------------------------------------
+  # The OAuth-sized-secret leg: does a real Windows Credential Manager hold a
+  # whole token set?
+  #
+  # Windows caps `CredentialBlob` at CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes)
+  # and the `keyring` crate encodes the value as UTF-16, so ONE entry holds 1280
+  # code units — several times smaller than a ChatGPT token set (access JWT + id
+  # JWT + refresh token). When OAuth tokens moved onto the credential ladder the
+  # keyring rung started refusing every login, and a Windows desktop with no
+  # WAYLAND_VAULT_PASSPHRASE had no rung left: `auth login` was refused outright
+  # where it had previously succeeded.
+  #
+  # This is a property of the HOST's credential store, so no Linux or macOS run
+  # can observe it — hence a Windows job. It lives here rather than in its own
+  # workflow so it runs on every nightly tick, not only when someone remembers
+  # to dispatch it.
+  #
+  # Hosted `windows-2022`, deliberately: the self-hosted msvc box is shared and
+  # contended, and this leg needs a plain interactive-logon credential store,
+  # not AppContainer capability.
+  keyring-blob-size:
+    name: OAuth-sized secret through the real Credential Manager (windows-2022)
+    if: github.event.inputs.f20_candidate != 'true'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the tree under test
+        shell: pwsh
+        run: git log --oneline -1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-reg-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-windows-
+
+      # `cargo test -- --ignored` exits 0 when it selects NOTHING, so the exit
+      # status alone is a gate that cannot go red on the failure mode that
+      # actually happens here (a renamed, unbuilt or unselected test). Require
+      # the test's own PASS marker AND its REFUSED single-entry control, so a
+      # run that did not exercise the cap fails instead of passing quietly.
+      - name: Live keyring blob-size test
+        shell: pwsh
+        run: |
+          cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath keyring-blob.log
+          $rc = $LASTEXITCODE
+          Get-Content keyring-blob.log | Select-String -Pattern 'MEASURED|PASS an_oauth'
+          if ($rc -ne 0) { throw "cargo test exited ${rc}" }
+          if (-not (Select-String -Path keyring-blob.log -Pattern 'PASS an_oauth_sized_secret_survives_the_hosts_real_keyring' -Quiet)) {
+            throw "the live keyring test did not run to its PASS marker - NOT MEASURED"
+          }
+          if (-not (Select-String -Path keyring-blob.log -Pattern 'single_entry_write=REFUSED' -Quiet)) {
+            throw "the single-entry positive control was not REFUSED - this run did not exercise the Windows blob cap"
+          }
+
+      - name: Upload the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyring-blob-log-${{ github.run_id }}
+          path: keyring-blob.log
+
+  # --------------------------------------------------------------------------
   # 20A-01 Wiring C — the native Windows live-acceptance ignored set.
   #
   # crates/wcore-sandbox/tests/live_fs_acl.rs holds twelve Windows-only

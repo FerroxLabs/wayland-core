@@ -37,6 +37,7 @@ use wcore_agent::oauth::{
 };
 
 use wcore_config::compat::ProviderCompat;
+use wcore_config::credentials::InMemoryCredentialsStore;
 use wcore_config::debug::DebugConfig;
 use wcore_providers::openai_chatgpt::{AsyncBearerSource, BearerCreds};
 use wcore_providers::{LlmProvider, OpenAIChatGptProvider, ProviderError};
@@ -47,6 +48,18 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── fixtures ──────────────────────────────────────────────────────────────
+
+/// A token store over a hermetic in-memory secure tier.
+///
+/// OAuth logins live in the credential ladder now, so a test store needs a
+/// secure tier to write into. It must NOT be the host's OS keyring: that is a
+/// machine-global singleton shared with the developer's real credentials and
+/// with every other test process. `secure` is cloned, not moved, so a caller
+/// can re-open a second `OAuthStorage` over the same tier and prove a value
+/// written through one handle is readable through the other.
+fn storage_at(root: std::path::PathBuf, secure: &InMemoryCredentialsStore) -> OAuthStorage {
+    OAuthStorage::at_root(root, Box::new(secure.clone())).expect("oauth storage")
+}
 
 /// A 3-segment JWT whose payload decodes to the given ChatGPT account id (and,
 /// optionally, a top-level `exp`). The signature segment is a placeholder —
@@ -186,7 +199,8 @@ async fn end_to_end_fresh_token_streams_codex_turn() {
     // OAuthStorage but isolated from the real ~/.wayland. No token endpoint is
     // mounted — a fresh token must be served from disk without a refresh.
     let tmp = TempDir::new().unwrap();
-    let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+    let secure = InMemoryCredentialsStore::new();
+    let storage = storage_at(tmp.path().join("oauth"), &secure);
     storage
         .store(
             PROVIDER,
@@ -261,7 +275,8 @@ async fn end_to_end_expired_token_refreshes_then_streams() {
 
     // 3) Seed an EXPIRED token (exp=0) → manager refreshes on get().
     let tmp = TempDir::new().unwrap();
-    let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+    let secure = InMemoryCredentialsStore::new();
+    let storage = storage_at(tmp.path().join("oauth"), &secure);
     storage
         .store(
             PROVIDER,
@@ -288,8 +303,7 @@ async fn end_to_end_expired_token_refreshes_then_streams() {
     );
 
     // The rotated single-use refresh token must have been persisted (C4).
-    let on_disk = OAuthStorage::at_root(tmp.path().join("oauth"))
-        .unwrap()
+    let on_disk = storage_at(tmp.path().join("oauth"), &secure)
         .load(PROVIDER)
         .unwrap()
         .expect("token present");
@@ -315,7 +329,8 @@ async fn end_to_end_response_done_terminal_closes_cleanly() {
         .await;
 
     let tmp = TempDir::new().unwrap();
-    let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+    let secure = InMemoryCredentialsStore::new();
+    let storage = storage_at(tmp.path().join("oauth"), &secure);
     storage
         .store(
             PROVIDER,
@@ -363,7 +378,8 @@ async fn end_to_end_no_token_surfaces_login_guidance() {
         .await;
 
     let tmp = TempDir::new().unwrap();
-    let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+    let secure = InMemoryCredentialsStore::new();
+    let storage = storage_at(tmp.path().join("oauth"), &secure);
     // Nothing stored. Isolate CODEX_HOME to an empty dir so the #293 Codex-CLI
     // fallback can't backfill the empty store from a real host login (CI runners
     // may carry a live ~/.codex/auth.json). Restored before the assertions so a

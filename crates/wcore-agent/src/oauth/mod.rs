@@ -12,8 +12,10 @@
 //! - CSRF `state` token is 32 random bytes from `OsRng`, compared with
 //!   `subtle::ConstantTimeEq` on the callback so timing leaks cannot
 //!   forge a valid replay.
-//! - Token storage at `~/.wayland/oauth/{provider}.json` enforces dir
-//!   mode `0700` + file mode `0600` on Unix.
+//! - Token storage goes through the credential ladder (OS keyring →
+//!   encrypted vault → REFUSE); `~/.wayland/oauth/{provider}.json` is a
+//!   pre-migration artifact that `storage` reads, promotes and deletes.
+//!   See [`storage`] for the migration and refusal contract.
 //! - Single-flight refresh ensures N concurrent refresh calls coalesce
 //!   into one network round-trip.
 //! - Callback listener has a 5-minute idle timeout so a user who closes
