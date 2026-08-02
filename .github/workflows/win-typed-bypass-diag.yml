@@ -1,0 +1,66 @@
+---
+# TEMPORARY lane diagnostic for `typed_bypass_executes_bash_inside_required_sandbox`.
+#
+# The self-hosted Windows runners are the only Windows CI this repo normally
+# uses, and they are saturated. This job runs the same two test targets on a
+# GitHub-hosted `windows-latest` so the red can be observed and the layer where
+# the sandboxed child's stdout is lost can be identified. It is scoped to one
+# lane branch and deleted with the lane.
+name: win-typed-bypass-diag
+
+on:
+  push:
+    branches:
+      - lane/win-typed-bypass
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          cargo -vV
+
+      - name: Host identity
+        run: |
+          whoami
+          echo "USERPROFILE=$env:USERPROFILE"
+          echo "LOCALAPPDATA=$env:LOCALAPPDATA"
+          echo "TEMP=$env:TEMP"
+          [System.Environment]::OSVersion.Version.ToString()
+
+      - name: Build the two test targets
+        run: >
+          cargo test -p wcore-agent
+          --test typed_execution_policy_e2e_test
+          --test win_bash_path_diag
+          --no-run
+
+      - name: RED - the failing test, run 3x
+        continue-on-error: true
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Output "########## ATTEMPT $i ##########"
+            cargo test -p wcore-agent --test typed_execution_policy_e2e_test `
+              typed_bypass_executes_bash_inside_required_sandbox `
+              -- --nocapture --test-threads=1
+            Write-Output "########## ATTEMPT $i exit=$LASTEXITCODE ##########"
+          }
+
+      - name: DIFFERENTIAL - which layer loses the bytes
+        continue-on-error: true
+        run: >
+          cargo test -p wcore-agent --test win_bash_path_diag
+          -- --ignored --nocapture --test-threads=1
