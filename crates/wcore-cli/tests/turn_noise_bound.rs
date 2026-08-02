@@ -4,18 +4,23 @@
 //!
 //! A trivial 9-turn `--no-tui` run on a host with no usable OS keyring emitted
 //! **573 bytes of stderr per turn**, of which **448** were one paragraph
-//! reprinted verbatim on every turn: "durable session persistence is OFF for
-//! this run…". The condition it reports —
-//! `wcore_config::config::durable_sessions_disabled_by_host()` — is resolved
+//! reprinted verbatim on every turn. The condition it reports —
+//! `wcore_config::config::replay_protection_unavailable()` — is resolved
 //! once at startup and cannot change while the process lives, so every repeat
 //! after the first carried no information at all.
 //!
 //! The operator had *already* been told, on the same stderr, by
-//! `wcore_config::config`'s `warn_durable_sessions_disabled_once`, whose own
-//! doc comment says the point is that they hear it "ONCE, at a moment that is
-//! about configuration — **not repeatedly, attached to a message they were
+//! `wcore_config::config`'s `warn_replay_protection_unavailable_once`, whose
+//! own doc comment says the point is that they hear it "ONCE, at a moment that
+//! is about configuration — **not repeatedly, attached to a message they were
 //! trying to answer**". The engine's per-turn announcement re-introduced
 //! exactly what that `Once` guard exists to prevent, one layer up.
+//!
+//! What the paragraph SAYS has since changed — ADR 0003's third decision let a
+//! keyless host journal, so the notice now reports that crash replay is off
+//! rather than that the turn goes unrecorded, and the record moved with it.
+//! The repeat is what this file measures, not the wording; both matchers below
+//! were re-pointed at the current text and neither was widened while doing it.
 //!
 //! A single-turn run cannot tell a startup notice from a per-turn notice, so
 //! every test here runs THREE turns. That is also why the assertions are
@@ -31,8 +36,8 @@
 //!    This is the leg that refuses "quieted by deletion". Quieting the terminal
 //!    is only legitimate because the forensic record moved to a durable,
 //!    size-bounded file (`wcore_cli::log_rotate`) instead of a terminal that
-//!    scrolls; a gateway operator asking "which of last week's messages went
-//!    unrecorded" reads that file.
+//!    scrolls; a gateway operator asking "which of last week's messages could
+//!    not have been replayed" reads that file.
 //! 3. **A known-repeating line still repeats three times.** The positive
 //!    control. Without it, leg 1 is equally consistent with the run having
 //!    executed one turn, or none — and a count of 1 proves nothing about
@@ -40,7 +45,7 @@
 //!
 //! The per-turn frame a `--json-stream` host receives is deliberately NOT
 //! changed and is asserted elsewhere, by
-//! `f14_sigkill_recovery::without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`,
+//! `f14_sigkill_recovery::without_secure_store_the_default_journals_every_effect_but_seals_nothing`,
 //! which drives two turns for the same reason this file drives three. A host
 //! consumes `ProtocolEvent::Info` by machine and correlates it to a `msg_id`;
 //! a human at a terminal does neither.
@@ -64,13 +69,26 @@ const FIXTURE_MODEL: &str = "fixture-chat-v1";
 const FIXTURE_KEY: &str = "fixture-local-token";
 const TURNS: usize = 3;
 
-/// The immutable host fact. Matched on the distinctive clause rather than the
-/// whole paragraph so a wording edit does not silently turn the count into 0
-/// and paint the defect green.
-const DEGRADE_NOTICE: &str = "This turn is not being recorded";
+/// The immutable host fact, as the ENGINE's per-turn notice states it. Matched
+/// on a distinctive clause rather than the whole paragraph so a wording edit
+/// cannot silently turn the count into 0 and paint the defect green — it turns
+/// it into 0 loudly, against an `== 1`, which is how this const was last found
+/// to be stale.
+///
+/// It must NOT be the paragraph's opening words. `warn_replay_protection_unavailable_once`
+/// prints its own startup notice to the same stderr, and that notice opens with
+/// the same "crash replay protection is OFF for this run" clause; counting on
+/// that prefix would score two surfaces as one and read a correct run as a
+/// repeat. `This turn IS being recorded` appears only in the engine's per-turn
+/// text — the startup notice speaks of the run, not of a turn.
+const DEGRADE_NOTICE: &str = "This turn IS being recorded";
 
 /// The same fact as it reaches the size-bounded diagnostics log, once per turn.
-const DEGRADE_RECORD: &str = "this turn is NOT being recorded";
+/// A separate string from [`DEGRADE_NOTICE`] on purpose: the record and the
+/// notice are written by two different calls and only one of them is allowed to
+/// repeat, so a matcher that could satisfy leg 2 with leg 1's text would let a
+/// deleted record hide behind a surviving notice.
+const DEGRADE_RECORD: &str = "this turn cannot be replayed if it is interrupted";
 
 /// A line the engine emits once per completed turn, unrelated to this change.
 /// The positive control for the counting method itself.
@@ -194,8 +212,8 @@ async fn the_degrade_notice_is_announced_once_while_its_per_turn_record_survives
     assert_eq!(
         count(&log, DEGRADE_RECORD),
         TURNS,
-        "the diagnostics log holds {} per-turn undurable-turn records for \
-         {TURNS} undurable turns. Quieting the terminal is only legitimate \
+        "the diagnostics log holds {} per-turn unreplayable-turn records for \
+         {TURNS} unreplayable turns. Quieting the terminal is only legitimate \
          while the record survives in the size-bounded log.\nlog was:\n{log}",
         count(&log, DEGRADE_RECORD)
     );
