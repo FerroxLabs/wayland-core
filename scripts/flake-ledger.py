@@ -94,9 +94,25 @@ SUMMARY_RE = re.compile(
 )
 
 
+# `crates/wcore-swarm/tests/common/mod.rs` lets these tests SKIP when no sandbox
+# backend can host delegated dispatch, and a skip returns early — so the test
+# PASSES. nextest captures a passing test's output, so the skip is invisible in
+# the run that matters; the module therefore appends a record to this file
+# inside the cargo target dir. Reading it back is the only way this harness can
+# tell "ran and passed" from "declined to run and reported a pass".
+#
+# This matters most under exactly the condition being measured: the Windows
+# AppContainer backend's availability probe is a real spawn, and a spawn probe
+# that fails under load resolves the registry to `fail_closed`, which
+# `admit_delegated_backend` rejects. Load can therefore convert these tests into
+# vacuous greens rather than failures, and a ledger that could not see that
+# would report the wrong verdict in the safest-looking direction.
+SKIP_LEDGER_NAME = "swarm-delegated-skips.txt"
+
+
 @dataclass
 class Outcome:
-    verdict: str  # PASS | FAIL | NOTRUN | ERROR
+    verdict: str  # PASS | FAIL | SKIPPED | NOTRUN | ERROR
     seconds: float
     rc: int
     detail: str = ""
@@ -148,9 +164,29 @@ def list_count(root: str, profile: str, expr: str) -> int:
     return sum(1 for line in proc.stdout.splitlines() if line.strip())
 
 
+def skip_ledger_path(root: str) -> str:
+    return os.path.join(
+        os.environ.get("CARGO_TARGET_DIR") or os.path.join(root, "target"),
+        SKIP_LEDGER_NAME,
+    )
+
+
+def read_skips(root: str) -> str:
+    try:
+        with open(skip_ledger_path(root), errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
 def run_nextest(
     root: str, profile: str, expr: str, expected: int, timeout: int
 ) -> tuple[Outcome, str]:
+    # Clear the skip ledger so what it holds afterwards belongs to THIS run.
+    try:
+        os.remove(skip_ledger_path(root))
+    except OSError:
+        pass
     cmd = [
         "cargo",
         "nextest",
@@ -201,7 +237,19 @@ def run_nextest(
             ),
             blob,
         )
+    skips = read_skips(root)
     if failed == 0 and passed == expected:
+        if skips.strip():
+            # It "passed" by declining to run. That is not a pass.
+            return (
+                Outcome(
+                    "SKIPPED",
+                    elapsed,
+                    proc.returncode,
+                    " | ".join(skips.split("\n"))[:400],
+                ),
+                blob + "\n=== delegated skip ledger ===\n" + skips,
+            )
         return Outcome("PASS", elapsed, proc.returncode), blob
     fails = [
         line.strip()
@@ -342,6 +390,13 @@ def main() -> int:
             for row in present:
                 if out.verdict in ("ERROR", "NOTRUN"):
                     per = Outcome(out.verdict, out.seconds, out.rc, out.detail)
+                elif out.verdict == "SKIPPED":
+                    per = Outcome(
+                        "SKIPPED" if row.test in out.detail else "PASS",
+                        out.seconds,
+                        out.rc,
+                        out.detail,
+                    )
                 elif row.test in out.detail:
                     per = Outcome("FAIL", out.seconds, out.rc, out.detail)
                 elif out.verdict == "FAIL":
@@ -370,9 +425,17 @@ def main() -> int:
             n = len(outs)
             p = sum(1 for o in outs if o.verdict == "PASS")
             f = sum(1 for o in outs if o.verdict == "FAIL")
-            other = n - p - f
+            s = sum(1 for o in outs if o.verdict == "SKIPPED")
+            other = n - p - f - s
             if other == n and n:
                 verdict = outs[0].verdict  # NOTRUN / ERROR throughout
+            elif s and f == 0 and p == 0:
+                verdict = "SKIPPED (no delegated backend)"
+            elif s:
+                # A skip is not a pass and it is not a failure either; it is a
+                # measurement that did not happen, and it must never be summed
+                # into either column silently.
+                verdict = f"MIXED ({p} pass / {f} fail / {s} skipped)"
             elif f == 0:
                 verdict = "GREEN"
             elif p == 0:
@@ -383,6 +446,7 @@ def main() -> int:
                 "runs": n,
                 "passes": p,
                 "failures": f,
+                "skipped": s,
                 "other": other,
                 "verdict": verdict,
                 "details": [o.detail for o in outs if o.detail][:4],

@@ -169,6 +169,7 @@ jobs:
             windows-flake-ledger.json
             flake-ledger.txt
             flake-ledger-logs/
+            target/swarm-delegated-skips.txt
           retention-days: 14
           # A measurement job that uploaded nothing measured nothing.
           if-no-files-found: error
