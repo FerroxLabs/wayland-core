@@ -5923,20 +5923,31 @@ mod chunk_read_fault_verification {
     /// entry.
     #[test]
     fn the_per_entry_ceiling_is_the_backends_own() {
-        let measured_windows_cap = 1280;
-        assert!(
-            keyring_max_utf16_units_per_entry() <= measured_windows_cap,
-            "a threshold above the Windows blob cap would make `auth login` fail there"
-        );
+        let ceiling = keyring_max_utf16_units_per_entry();
         if cfg!(windows) {
-            assert_eq!(keyring_max_utf16_units_per_entry(), 1000);
-        } else {
-            // Measured floor on macOS Keychain and Linux Secret Service.
+            // MEASURED: Windows Credential Manager refuses above 1280 UTF-16
+            // units. A threshold at or above that makes `auth login` fail.
             assert!(
-                keyring_max_utf16_units_per_entry() <= 1_024_000 / 8,
+                ceiling < 1280,
+                "the threshold must stay under the measured Windows blob cap"
+            );
+            assert_eq!(ceiling, WINDOWS_MAX_UTF16_UNITS_PER_ENTRY);
+        } else {
+            // MEASURED: macOS Keychain and Linux Secret Service both accepted
+            // 1,024,000 units in one entry. Stay an order of magnitude under
+            // that floor — the probe proved they accept AT LEAST that much, not
+            // that it is the limit...
+            assert!(
+                ceiling <= 1_024_000 / 8,
                 "keep a wide margin under the measured floor"
             );
-            assert!(keyring_max_utf16_units_per_entry() > 20_000);
+            // ...and far enough above the Windows figure that no realistic
+            // credential is spanned at all.
+            assert!(
+                ceiling > 20_000,
+                "applying the Windows figure here is what put macOS and Linux on \
+                 the spanned path for a value that fits in one entry"
+            );
         }
     }
 
