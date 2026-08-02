@@ -2081,16 +2081,50 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
     BTreeMap::from([
         (
             // The frame a Desktop host meets on a keyring-less server: current
-            // producer, current capabilities, current policy — and no durable
-            // session to name. Identical to `events/ready.json` apart from the
-            // two fields this posture changes, including the contract
-            // descriptor `insert_negotiation_fixtures` stamps onto both.
+            // producer, current capabilities, current policy — a REAL, named,
+            // resumable session, and no crash replay behind it. Identical to
+            // `events/ready.json` apart from the one field this posture
+            // changes, including the contract descriptor
+            // `insert_negotiation_fixtures` stamps onto both.
+            //
+            // REPLACES `compat/events/ready.degraded.json`, which carried
+            // `session_id: null` + `disabled_by_host`. That fixture described
+            // the shape a keyring-less host produced when it responded to a
+            // missing key by journaling nothing. It no longer journals nothing,
+            // so the corpus was publishing an example of a frame this producer
+            // cannot emit — the same defect the `session_persistence` field
+            // exists to prevent, one layer up. The legacy shape survives below,
+            // under a name that says what it is.
             //
             // It is a REAL serialization of `ProtocolEvent::Ready`, not a JSON
             // edit of the durable fixture, so a producer that goes back to
-            // dropping `session_id` under `None` produces a fixture missing
-            // its correlation key and the corpus schema check reds.
-            "compat/events/ready.degraded.json".into(),
+            // dropping `session_id` under `None`, or back to calling this
+            // posture `durable`, produces a fixture the corpus check reds on.
+            "compat/events/ready.journaled-without-replay.json".into(),
+            ProtocolEvent::Ready {
+                version: "0.12.25".into(),
+                session_id: Some("2f3a5c7e9b1d4f608a2c4e6081b3d5f7".into()),
+                session_persistence: SessionPersistence::JournaledWithoutReplay,
+                capabilities: capabilities(),
+                contract: None,
+                execution_policy: Some(initial_policy.clone()),
+            },
+        ),
+        (
+            // LEGACY, and retained for exactly one reason: `disabled_by_host`
+            // was published on the wire, so a 0.12.x Core still sends it and a
+            // host may hold it against a session it is still tracking. The
+            // schema must therefore keep ACCEPTING it, and a corpus with no
+            // example of a value its schema accepts leaves the host to take
+            // that on trust.
+            //
+            // This producer can no longer emit it — enforced, not asserted, by
+            // `session_persistence_for`'s own test in `protocol_sink.rs`, which
+            // requires no input combination to yield it. The filename carries
+            // the same statement to anyone reading the corpus rather than the
+            // code, because a fixture is read as an example of what a producer
+            // does unless it says otherwise.
+            "compat/events/ready.disabled-by-host.legacy.json".into(),
             ProtocolEvent::Ready {
                 version: "0.12.25".into(),
                 session_id: None,
@@ -2187,7 +2221,7 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
             // Still the LEGACY minimum — no `contract`, no `execution_policy`,
             // so it has never satisfied the current `ready` schema branch and
             // is not meant to. The keyring-less PRODUCTION shape is
-            // `compat/events/ready.degraded.json`, derived in
+            // `compat/events/ready.journaled-without-replay.json`, derived in
             // `insert_negotiation_fixtures` with the descriptor stamped.
             "compat/events/ready.minimal.json".into(),
             ProtocolEvent::Ready {

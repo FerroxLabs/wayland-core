@@ -21,8 +21,8 @@ use super::spec::{
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 11;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/12";
+pub const CONTRACT_MINOR: u64 = 12;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/13";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -201,8 +201,25 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         // that rejects the degraded frame Core really emits, i.e. the published
         // contract calling a valid Core frame malformed.
         ("ready", "session_id") => nullable_schema(json!({"type": "string"})),
+        // CLOSED, deliberately: a future value must not be able to arrive as
+        // free text and be accepted by a host that has never heard of it. The
+        // cost of that choice is that widening the vocabulary is a contract
+        // event, which is why `session_persistence_v2` exists below — the
+        // widening is announced rather than smuggled.
+        //
+        // `disabled_by_host` stays in the enum although this producer can no
+        // longer emit it. The schema is what a host validates FRAMES against,
+        // and an older Core still sends that value; dropping it would make the
+        // published contract call a genuine 0.12.x frame malformed. Emission
+        // and acceptance are different questions and this is the one where the
+        // legacy value still belongs.
         ("ready", "session_persistence") => json!({
-            "enum": ["durable", "disabled_by_operator", "disabled_by_host"],
+            "enum": [
+                "durable",
+                "journaled_without_replay",
+                "disabled_by_operator",
+                "disabled_by_host"
+            ],
             "type": "string"
         }),
         ("continue_with_budget" | "budget_grant_result", "request_id") => json!({
@@ -1168,7 +1185,8 @@ fn fixtures_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> ContractResult<Stri
         }
         let mut bytes = bytes.clone();
         if path == "events/ready.json"
-            || path == "compat/events/ready.degraded.json"
+            || path == "compat/events/ready.journaled-without-replay.json"
+            || path == "compat/events/ready.disabled-by-host.legacy.json"
             || path == "adversarial/events/version-mismatch.jsonl"
             || path == "adversarial/events/schema-mismatch.jsonl"
             || path == "adversarial/events/fixture-mismatch.jsonl"
@@ -1244,8 +1262,36 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // there is no session) and `session_persistence` states the cause.
         // Undeclared => an older Core, whose missing `session_id` means
         // nothing in particular.
+        //
+        // RETAINED, not replaced by v2, and the distinction is the whole
+        // argument. v1's declared guarantee is about the FRAME SHAPE — the
+        // correlation key never vanishes, and a sibling always states the
+        // cause — and both of those are still exactly true. Retiring v1 would
+        // revoke a promise this producer still keeps, and a host pinned on it
+        // would see the capability disappear and fall back to "a missing
+        // session_id means nothing in particular", which is strictly worse than
+        // where it started.
         (
             "session_persistence_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // v2 is the VOCABULARY, and it is additive for the same reason v1 is
+        // retained. What changed is not the shape but the value set: a host
+        // that feature-detected on v1 minted its switch when the enum had three
+        // values, and `journaled_without_replay` did not exist. Since the enum
+        // is closed, such a host's own validator would reject a frame this
+        // producer now legitimately emits, so it needs a way to ask "does this
+        // Core use the wider vocabulary?" that is distinct from "does this Core
+        // publish the field at all?".
+        //
+        // Declared => `session_persistence` may be `journaled_without_replay`:
+        // a real, resumable, fully journaled session whose interrupted turns do
+        // NOT resume themselves. A host that treats that as `durable` will wait
+        // for an auto-recovery that never comes.
+        // Undeclared but v1 declared => the three-value vocabulary, on a
+        // producer where a keyless host journaled nothing.
+        (
+            "session_persistence_v2".into(),
             ContractCapabilityStatus::Available,
         ),
         (
@@ -1300,20 +1346,34 @@ fn insert_negotiation_fixtures(
     ready["contract"] = serde_json::to_value(descriptor)?;
     artifacts.insert("events/ready.json".into(), canonical_json(&ready)?);
 
-    // The keyring-less frame gets the SAME descriptor stamp as the durable
-    // one. It lives in the corpus because Desktop validates Core frames
-    // against this corpus: without it, the one deployment shape where
-    // `session_id` is null is the one shape the host contract has no example
-    // of, and a host that tests only `events/ready.json` ships a session
-    // tracker that has never seen a null. Its body comes from
-    // `compatibility_event_values`, i.e. a real `ProtocolEvent` serialization.
-    let degraded_path = "compat/events/ready.degraded.json";
-    let degraded = artifacts
-        .get(degraded_path)
-        .ok_or_else(|| std::io::Error::other("degraded Ready fixture is missing"))?;
-    let mut degraded: Value = serde_json::from_slice(degraded)?;
-    degraded["contract"] = serde_json::to_value(descriptor)?;
-    artifacts.insert(degraded_path.into(), canonical_json(&degraded)?);
+    // The two non-default `ready` postures get the SAME descriptor stamp as
+    // the durable one. They live in the corpus because Desktop validates Core
+    // frames against it, and each covers a shape `events/ready.json` cannot:
+    //
+    // * `journaled-without-replay` is the keyring-less PRODUCTION frame — a
+    //   named session with no crash replay. A host that tests only the durable
+    //   fixture ships a session tracker that has never seen this posture and
+    //   will wait for an auto-recovery that never arrives.
+    // * `disabled-by-host` is the one `session_id: null` example in the corpus,
+    //   and the only one of a value the schema must still ACCEPT but this
+    //   producer no longer emits. Stamped, so it genuinely exercises the
+    //   current schema branch rather than failing it for an unrelated reason —
+    //   the way `ready.minimal.json` does — because the property being proved
+    //   is that the enum still admits the legacy value.
+    //
+    // Both bodies come from `compatibility_event_values`, i.e. real
+    // `ProtocolEvent` serializations, never hand-edited JSON.
+    for path in [
+        "compat/events/ready.journaled-without-replay.json",
+        "compat/events/ready.disabled-by-host.legacy.json",
+    ] {
+        let fixture = artifacts
+            .get(path)
+            .ok_or_else(|| std::io::Error::other("a non-default Ready fixture is missing"))?;
+        let mut fixture: Value = serde_json::from_slice(fixture)?;
+        fixture["contract"] = serde_json::to_value(descriptor)?;
+        artifacts.insert(path.into(), canonical_json(&fixture)?);
+    }
 
     let mut unsupported_major = descriptor.clone();
     unsupported_major.major += 1;

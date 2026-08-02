@@ -459,21 +459,35 @@ fn event_schema_distinguishes_correlated_and_legacy_child_shapes() {
     );
 }
 
-/// The published schema must accept the DEGRADED `ready`, and the corpus must
-/// contain one.
+/// The published schema must accept EVERY `ready` posture the corpus carries,
+/// and the corpus must carry one of each.
 ///
 /// `ready.session_id` is `ready`'s declared correlation key and is null on any
-/// host with no OS keyring and no unlocked vault. The schema is inferred from
-/// a single fixture, and `events/ready.json` names a session — so without an
+/// run the operator turned sessions off for. The schema is inferred from a
+/// single fixture, and `events/ready.json` names a session — so without an
 /// explicit nullable rule the published contract would say `session_id` is a
 /// string and reject a frame Core genuinely emits. A host validating Core
-/// against Core's own corpus would then call a valid degraded frame malformed:
-/// the same lie as omitting the key, moved into the schema.
+/// against Core's own corpus would then call a valid frame malformed: the same
+/// lie as omitting the key, moved into the schema.
 ///
 /// The `session_persistence` half is asserted with the same rigour, because a
-/// null nobody can attribute is only marginally better than a missing key.
+/// value nobody can interpret is only marginally better than a missing key.
+///
+/// # Why three fixtures and not two
+///
+/// `journaled-without-replay` REPLACED the old `ready.degraded.json`. That one
+/// carried `session_id: null` + `disabled_by_host` and described what a
+/// keyring-less host produced when it answered a missing key by journaling
+/// nothing. It journals now, so publishing that as the keyless example would
+/// have been an example of a frame this producer cannot emit.
+///
+/// `disabled-by-host.legacy` keeps the value on the ACCEPT side. It was
+/// published on the wire, a 0.12.x Core still sends it, and a host may hold it
+/// against a session it is tracking — so the schema must keep admitting it even
+/// though nothing here emits it. Ceasing to send a value and removing it from
+/// the contract are different operations, and only the first one happened.
 #[test]
-fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
+fn the_published_schema_accepts_every_ready_posture_and_pins_its_vocabulary() {
     let event_schema = generated_json("schema/core-event.schema.json");
 
     let durable = generated_json("events/ready.json");
@@ -481,19 +495,42 @@ fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
     assert!(durable["session_id"].is_string());
     assert!(schema_accepts(&event_schema, &durable));
 
-    let degraded = generated_json("compat/events/ready.degraded.json");
-    assert_eq!(
-        degraded["session_id"],
-        Value::Null,
-        "the corpus lost its degraded ready; nothing below proves anything: {degraded}"
-    );
-    assert_eq!(degraded["session_persistence"], "disabled_by_host");
+    // THE KEYLESS PRODUCTION FRAME: a real session, no crash replay.
+    let unsealed = generated_json("compat/events/ready.journaled-without-replay.json");
     assert!(
-        schema_accepts(&event_schema, &degraded),
-        "the published schema rejects a ready frame Core really emits: {degraded}"
+        unsealed["session_id"].is_string(),
+        "a keyless host journals, so its ready frame names a session: {unsealed}"
     );
-    // It is the durable frame in every OTHER respect — same contract, same
-    // policy, same capabilities. A degrade is not a different protocol.
+    assert_eq!(
+        unsealed["session_persistence"], "journaled_without_replay",
+        "the corpus lost its keyless ready; nothing below proves anything: {unsealed}"
+    );
+    assert!(
+        schema_accepts(&event_schema, &unsealed),
+        "the published schema rejects a ready frame Core really emits: {unsealed}"
+    );
+    assert_ne!(
+        unsealed["session_persistence"], durable["session_persistence"],
+        "the two session-naming postures collapsed, so a host cannot tell whether \
+         to wait for an auto-recovery"
+    );
+
+    // THE LEGACY FRAME: no longer emitted, still accepted.
+    let by_host = generated_json("compat/events/ready.disabled-by-host.legacy.json");
+    assert_eq!(
+        by_host["session_id"],
+        Value::Null,
+        "the legacy host-degrade frame must still be the null-session example: {by_host}"
+    );
+    assert_eq!(by_host["session_persistence"], "disabled_by_host");
+    assert!(
+        schema_accepts(&event_schema, &by_host),
+        "the published schema rejects a value an older Core still sends, so a host \
+         validating a 0.12.x frame would call it malformed: {by_host}"
+    );
+
+    // Both are the durable frame in every OTHER respect — same contract, same
+    // policy, same capabilities. A posture is not a different protocol.
     for shared in [
         "type",
         "version",
@@ -501,15 +538,23 @@ fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
         "contract",
         "execution_policy",
     ] {
-        assert_eq!(
-            degraded[shared], durable[shared],
-            "the degraded ready diverged from the durable one on {shared}"
-        );
+        for (label, frame) in [
+            ("journaled-without-replay", &unsealed),
+            ("disabled-by-host", &by_host),
+        ] {
+            assert_eq!(
+                frame[shared], durable[shared],
+                "the {label} ready diverged from the durable one on {shared}"
+            );
+        }
     }
 
-    // A null correlation key is only legible because a sibling explains it, so
-    // the sibling is mandatory and its vocabulary is closed.
-    let mut without_persistence = degraded.clone();
+    // A session_id is only legible because a sibling explains it, so the
+    // sibling is mandatory and its vocabulary is CLOSED. Closed is what stops a
+    // future value arriving as free text at a host that has never heard of it —
+    // which is also why widening the enum had to be announced with
+    // `session_persistence_v2` rather than smuggled in.
+    let mut without_persistence = unsealed.clone();
     without_persistence
         .as_object_mut()
         .unwrap()
@@ -519,7 +564,7 @@ fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
         "a ready without session_persistence must not validate"
     );
 
-    let mut invented = degraded.clone();
+    let mut invented = unsealed.clone();
     invented["session_persistence"] = Value::String("degraded".into());
     assert!(
         !schema_accepts(&event_schema, &invented),
@@ -527,18 +572,23 @@ fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
     );
 
     // And the key itself cannot go back to vanishing.
-    let mut omitted = degraded.clone();
+    let mut omitted = by_host.clone();
     omitted.as_object_mut().unwrap().remove("session_id");
     assert!(
         !schema_accepts(&event_schema, &omitted),
         "a ready that omits its correlation key must not validate"
     );
 
-    // The descriptor is what dates the guarantee for a host.
-    assert_eq!(
-        durable["contract"]["capabilities"]["session_persistence_v1"],
-        "available"
-    );
+    // The descriptor is what dates the guarantee for a host. BOTH are declared:
+    // v1 is the frame-shape promise, which this producer still keeps, and v2 is
+    // the wider vocabulary. Retiring v1 would revoke a promise still kept and
+    // leave a host pinned on it inferring nothing at all from a null.
+    for capability in ["session_persistence_v1", "session_persistence_v2"] {
+        assert_eq!(
+            durable["contract"]["capabilities"][capability], "available",
+            "{capability} must be declared for a host to feature-detect on it"
+        );
+    }
 }
 
 #[test]

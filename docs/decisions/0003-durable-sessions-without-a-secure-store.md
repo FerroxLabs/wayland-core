@@ -418,10 +418,23 @@ on the same host in the same second, so suppressing a keyring is not an availabi
 is the mirror of the downgrade abuse this posture exists to prevent, and is what a global
 refuse-to-start would have created.
 
-### Note for whoever lands the typed `ready` field
+### The typed `ready` field, resolved in the same lane
 
-`lane/ready-session-id` proposes `session_persistence: durable | disabled_by_operator |
-disabled_by_host`. After this change `disabled_by_host` is **unreachable**: a keyless host no
-longer disables anything. The state it should describe instead is a session that is journaled and
-resumable but not automatically replayable, which `durable` over-claims. A fourth variant is
-needed and it requires a contract regeneration — see that lane's coordination note.
+`lane/ready-session-id` shipped `session_persistence: durable | disabled_by_operator |
+disabled_by_host` while this work was in flight. Merging option D on top of it would have made
+`disabled_by_host` unreachable — a keyless host no longer disables anything — and would have made
+`durable` over-claim for the host this change creates, which is a wire value that cannot express a
+state the product reaches: the same defect the field was added to fix.
+
+So the fourth value landed here, in the same lane, rather than as a follow-up:
+
+- **`journaled_without_replay`** — `session_id` is a real, resumable id; the journal is complete;
+  the sealed provider request is not persisted. A host must not wait for auto-recovery on it.
+- **`disabled_by_host` becomes decode-only.** It was published on the wire, so an older Core still
+  sends it and a host may hold it against a session it is tracking. Ceasing to emit a value and
+  removing it from the contract are different operations, and only the first one happened. The
+  schema still accepts it and the corpus still carries an example, under a name that says so.
+- **`session_persistence_v2` is additive, not a replacement for v1.** v1's declared guarantee is
+  about the frame SHAPE and is still kept, so retiring it would revoke a live promise and leave a
+  host pinned on it inferring nothing from a null. v2 announces the wider VOCABULARY, which a
+  closed enum makes a contract event rather than a silent widening.

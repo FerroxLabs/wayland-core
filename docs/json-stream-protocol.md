@@ -87,19 +87,52 @@ line on the stream. See the pinned corpus at
 correlation key, and a host keys its own session tracking on it — so a producer
 that drops the key hands the host `undefined` with no accompanying signal, and
 the host cannot tell a degraded Core from a malformed frame from a Core too old
-to know. `session_persistence` states which of the two causes produced a null:
+to know. `session_persistence` states which cause produced the value it holds:
 
-| Value | Meaning |
-|-------|---------|
-| `durable` | `session_id` names a journaled session. It survives a restart and can be resumed |
-| `disabled_by_operator` | `session_id` is `null` because `[session] enabled = false`. Nothing is journaled, by request |
-| `disabled_by_host` | `session_id` is `null` because this host has no usable OS keyring and no unlocked credentials vault, so Core forced durable sessions off rather than journaling into storage it cannot seal. The operator did not ask for this: unlock the vault with `WAYLAND_VAULT_PASSPHRASE_FD`, or run on a host with a keyring. Set `[session] require_durability = true` to make Core refuse to start instead |
+| Value | `session_id` | Meaning |
+|-------|--------------|---------|
+| `durable` | string | A journaled session with crash replay. It survives a restart, can be resumed, and a turn interrupted mid-dispatch resumes itself from the sealed provider request |
+| `journaled_without_replay` | string | A journaled session **without** crash replay. History, provider attempts, tool calls, approvals and deliveries are all recorded and survive a restart; what is missing is the sealed copy of the exact provider request, because this host has no usable OS keyring and no unlocked credentials vault |
+| `disabled_by_operator` | `null` | `[session] enabled = false`. Nothing is journaled, by request |
+| `disabled_by_host` | `null` | **Decode-only, from a producer older than contract minor 12.** Such a Core answered a missing key by turning durable sessions off. A current Core journals instead and never sends this |
 
-Feature-detect via `ready.contract.capabilities.session_persistence_v1`: when
-it is `available`, both guarantees above hold. A Core that does not
-declare it may omit `session_id` entirely, and its absence means nothing in
-particular. The keyring-less frame is pinned byte-exact at
-`crates/wcore-protocol/contracts/desktop/v1/compat/events/ready.degraded.json`.
+### What a host should do with `journaled_without_replay`
+
+Treat the session as durable for history and audit: list it, offer resume, keep
+it. Do **not** show auto-recovery affordances or wait on one.
+
+- A turn interrupted mid-dispatch does not resume itself. The next message on
+  that session is refused with a reconciliation error naming the interrupted
+  turn — surface a resume / reconcile / cancel choice, not a retry spinner.
+- Every turn on such a session also carries a per-turn `info` frame saying
+  replay is off, correlated to that turn's `msg_id`.
+- A `--resume` of a session whose sealed state cannot be opened is refused
+  **by name**, as a single non-retryable `error` frame with **no preceding
+  `ready`**. That session is LOCKED pending a key, not corrupt: leave its
+  journal alone, because restoring `WAYLAND_VAULT_PASSPHRASE_FD` and resuming
+  again recovers it. Only that session is refused — a launch that does not name
+  it starts and journals normally.
+
+To refuse to run this way at all, set `[session] require_durability = true`;
+Core then declines to start rather than accepting turns it could not recover.
+
+Feature-detect via two capabilities on `ready.contract.capabilities`, and they
+are **additive rather than successive**:
+
+- `session_persistence_v1` — the frame SHAPE: `session_id` is always on the
+  wire and `session_persistence` always states the cause. A current Core still
+  declares it, because it still keeps that promise. A Core that declares
+  neither may omit `session_id` entirely, and its absence means nothing in
+  particular.
+- `session_persistence_v2` — the wider VOCABULARY: `session_persistence` may be
+  `journaled_without_replay`. A host that feature-detected on v1 alone minted
+  its switch when the enum had three values; since the enum is closed, such a
+  host must detect v2 before it can accept the fourth.
+
+The keyring-less frame is pinned byte-exact at
+`crates/wcore-protocol/contracts/desktop/v1/compat/events/ready.journaled-without-replay.json`,
+and the legacy value the schema must still accept at
+`.../compat/events/ready.disabled-by-host.legacy.json`.
 
 | Field | Type | Description |
 |-------|------|-------------|

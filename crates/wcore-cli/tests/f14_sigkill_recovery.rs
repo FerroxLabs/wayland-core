@@ -1232,6 +1232,16 @@ async fn launch_keyless(
         "a keyless host still journals, so its ready frame must name the session \
          it opened: {ready}"
     );
+    // …and it must NOT call that session `durable`. This is the assertion the
+    // whole fourth enum value exists for, made against the real binary rather
+    // than a unit mapping: `durable` is what a host reads to decide whether to
+    // WAIT for an interrupted turn to recover itself, and this session cannot.
+    // Naming the session while over-claiming its recovery is the same defect as
+    // dropping the key, moved one field along.
+    assert_eq!(
+        ready["session_persistence"], "journaled_without_replay",
+        "a keyless host names its session but must not promise crash replay: {ready}"
+    );
     (process, ready)
 }
 
@@ -1290,7 +1300,23 @@ async fn launch_sessions_off(
     env: &TempEnv,
     fixture: &RunningOpenAiFixture,
 ) -> (CoreProcess, Value) {
-    spawn_keyless(keyless_command(env, fixture, None)).await
+    let (process, ready) = spawn_keyless(keyless_command(env, fixture, None)).await;
+    // THE THIRD LIVE POSTURE, and the one that keeps the other two honest. This
+    // profile is on the SAME keyring-less host as `launch_keyless` — the only
+    // difference is `[session] enabled = false` — so if the producer attributed
+    // a null session to the host rather than the operator, this is where it
+    // would show. It would send an operator hunting for a keyring to restore a
+    // journal they switched off themselves.
+    assert_eq!(
+        ready["session_id"],
+        Value::Null,
+        "an operator who turned sessions off has no session to name: {ready}"
+    );
+    assert_eq!(
+        ready["session_persistence"], "disabled_by_operator",
+        "a keyless host must not claim credit for a choice the operator made: {ready}"
+    );
+    (process, ready)
 }
 
 /// Declare `[session] enabled = false` in a hermetic profile.
