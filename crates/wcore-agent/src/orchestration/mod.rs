@@ -28,6 +28,28 @@ fn tool_dispatch_timeout(category: ToolCategory) -> Duration {
     }
 }
 
+/// The `not_started` policy label journalled for a `[default] read_only`
+/// refusal. Stable — the journal reducer and the acceptance tests key on it.
+pub(crate) const READ_ONLY_POLICY: &str = "read_only";
+
+/// The refusal a read-only session returns instead of running `tool`.
+///
+/// Every clause here is load-bearing and must stay true of the code:
+/// the gate really does sit ahead of the PreToolUse hook block in
+/// [`execute_single_with_streaming`], so no operator hook runs for a refused
+/// call; and the allow-set really is the tools that override
+/// [`wcore_tools::Tool::read_only_safe`], not a category or a name list.
+pub(crate) fn read_only_refusal(tool: &str) -> String {
+    format!(
+        "Refused: this session is read-only (`[default] read_only = true`). \
+         `{tool}` is not a read-only tool, so it was not run, and no PreToolUse \
+         hook fired for it. Only tools that declare read-only safety can run \
+         here — that is Read, Grep and Glob; every other tool, including Skill \
+         (whose body can embed shell), is refused. Clear `read_only` in \
+         config.toml to lift this."
+    )
+}
+
 // Anvil — native gated-forge engine (`drive_climb`), sibling of council.
 pub mod anvil;
 // Crucible (Mixture-of-Providers) council: cross-provider proposers + a
@@ -78,6 +100,8 @@ pub mod workflow;
 mod d1_refusal_terminal_tests;
 #[cfg(test)]
 mod f13_durability_tests;
+#[cfg(test)]
+mod read_only_gate_tests;
 
 use crate::confirm::{ConfirmResult, ToolConfirmer};
 use crate::engine::is_hook_lifecycle_line;
@@ -1384,6 +1408,54 @@ async fn execute_single_with_streaming(
             crate::hooks::HookOutcome::default(),
             false,
         );
+    }
+
+    // `[default] read_only` — the session posture gate.
+    //
+    // This runs FIRST, ahead of the PreToolUse hooks below, and that ordering
+    // is the point: a PreToolUse hook is operator-configured arbitrary shell,
+    // and firing it for a call the session is about to refuse means a
+    // read-only session still executes a process on the model's say-so. The
+    // refusal must cost nothing.
+    //
+    // The predicate is `Tool::read_only_safe`, which is default-deny and is
+    // NOT derived from `ToolCategory` or the effect contract. Category was the
+    // first attempt and it leaked: `SkillTool::category_for` returns `Info`
+    // for an inline skill, so `Skill` passed a category gate and then ran the
+    // skill body's embedded `!` shell directives, writing a real file in a
+    // session the operator had been told was read-only. Anything that does not
+    // affirmatively claim read-only safety — including a name this registry
+    // does not know — is refused here.
+    if registry.read_only()
+        && !registry
+            .get(name)
+            .is_some_and(|tool| tool.read_only_safe(input))
+    {
+        let durable = record_tool_not_started(
+            effect_scope,
+            id,
+            ordinal,
+            name,
+            input,
+            input,
+            registry
+                .get(name)
+                .map(|tool| tool.effect_contract(input))
+                .unwrap_or_default(),
+            ToolNotStartedReason::PolicyDenied {
+                policy: READ_ONLY_POLICY.to_string(),
+            },
+            None,
+        );
+        let block = durable.map_or_else(
+            |error| journal_authority_failure(id, error),
+            |()| ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: read_only_refusal(name),
+                is_error: true,
+            },
+        );
+        return (block, None, crate::hooks::HookOutcome::default(), false);
     }
 
     // Run pre-tool-use hooks. A crash-proven retry reuses the pre-hook

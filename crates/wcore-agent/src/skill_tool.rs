@@ -59,6 +59,11 @@ pub struct SkillTool {
     /// (default-deny); bootstrap sets it from the global
     /// `[hooks] trust_project_hooks`. A project can never self-authorize.
     trust_project_hooks: bool,
+    /// `[default] read_only` for the session that owns this tool. When `true`,
+    /// `execute()` refuses before writing artifacts or running the body's
+    /// embedded `!` shell directives. Default `false`; bootstrap and the cron
+    /// skill sinks set it from config.
+    read_only: bool,
 }
 
 impl SkillTool {
@@ -72,6 +77,7 @@ impl SkillTool {
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
             trust_project_hooks: false,
+            read_only: false,
         }
     }
 
@@ -91,6 +97,7 @@ impl SkillTool {
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
             trust_project_hooks: false,
+            read_only: false,
         }
     }
 
@@ -111,6 +118,7 @@ impl SkillTool {
             spawner,
             telemetry_sink: Arc::new(NullTelemetrySink),
             trust_project_hooks: false,
+            read_only: false,
         }
     }
 
@@ -131,6 +139,14 @@ impl SkillTool {
     /// (`false`) when unset, so a cloned repo's skill hooks never run silently.
     pub fn with_trust_project_hooks(mut self, trust: bool) -> Self {
         self.trust_project_hooks = trust;
+        self
+    }
+
+    /// Carry the session's `[default] read_only` posture. Builder method;
+    /// bootstrap and both cron skill sinks chain it from config. Default
+    /// `false`, so nothing changes for a session that never set the flag.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -245,6 +261,35 @@ impl SkillTool {
                 );
             }
             SkillPermission::Allow => {}
+        }
+
+        // `[default] read_only` — second, independent closure of the carve-out.
+        //
+        // The orchestration dispatcher already refuses `Skill` in a read-only
+        // session (`Tool::read_only_safe` is default-deny). This gate exists
+        // because SkillTool is ALSO constructed outside the tool registry —
+        // the cron skill sink builds a transient one and calls `execute()` on
+        // it directly, with no dispatcher in the path. Everything below this
+        // line writes: `write_artifacts` materialises files, and
+        // `prepare_inline_content` runs the body's embedded `!` shell
+        // directives through `sh -c`. Refusing here, before either, is what
+        // makes "a read-only session does not execute a skill's shell" true of
+        // every entry point rather than only the one the dispatcher owns.
+        if self.read_only {
+            return (
+                Some(skill.name.clone()),
+                ToolResult {
+                    content: format!(
+                        "Refused: this session is read-only (`[default] read_only = true`). \
+                         Skill '{}' was not run. A skill body can write declared artifacts \
+                         and can execute embedded `!` shell directives, so skills are \
+                         refused wholesale here rather than inspected. Clear `read_only` \
+                         in config.toml to lift this.",
+                        skill.name
+                    ),
+                    is_error: true,
+                },
+            );
         }
 
         let args = input["args"].as_str();

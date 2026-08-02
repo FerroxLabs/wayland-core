@@ -53,6 +53,17 @@ pub struct ToolRegistry {
     /// install a session runtime cannot inherit process-global bypass state;
     /// production bootstrap replaces it with the resolved session runtime.
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+
+    /// `[default] read_only` for this session. When `true` the orchestration
+    /// dispatcher refuses every tool that does not declare
+    /// [`crate::Tool::read_only_safe`] for its concrete input — BEFORE
+    /// PreToolUse hooks run, so a refused call fires no operator shell.
+    ///
+    /// Carried on the registry for the same reason `tool_vfs` and
+    /// `workspace_policy` are: it is already threaded into every
+    /// orchestration `execute_*` call, so a new dispatch path cannot forget
+    /// to plumb a parameter and silently lose the gate.
+    read_only: bool,
 }
 
 impl Default for ToolRegistry {
@@ -70,7 +81,21 @@ impl ToolRegistry {
             sandbox_runtime: Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
                 wcore_sandbox::FailClosedBackend::new(),
             ))),
+            read_only: false,
         }
+    }
+
+    /// Install the session's `[default] read_only` posture. Set once at
+    /// bootstrap; there is no un-set — a read-only session cannot be talked
+    /// back into mutating.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    /// Whether this session is read-only. Consulted by the orchestration
+    /// dispatcher before anything else happens to a tool call.
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Set the filesystem every dispatched tool's `ToolContext` is built

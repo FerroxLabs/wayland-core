@@ -322,13 +322,16 @@ a pending follow-up.)
   (exiting non-zero if any do not), and `channel probe` asks the platform
   whether the credential authenticates — but nothing walks a first-time
   operator through the three steps in order.
-- Outbound idempotency **on the seven adapters whose platform provides no
-  token for it**. Slack, Matrix and Discord already transmit one and are
-  exactly-once; the other seven cannot be, and the gateway abandons rather
-  than duplicates an outcome-unknown delivery to them. This is a platform
-  limit, not a backlog item — see
-  **[Delivery semantics](delivery-semantics.md)** for the per-adapter table
-  and what to expect on restart.
+- Outbound idempotency **on the nine adapters whose platform will not honour a
+  token**. Matrix is the only exactly-once adapter, and only for a body that
+  fits in one platform message (32,768 chars) — above that cap the body is
+  chunked and sent unkeyed, which is at-least-once. Slack and Discord *do*
+  transmit a token (`Idempotency-Key`, `nonce`), but each was driven at its
+  real API and a replayed key produced **two** messages, so both now declare
+  at-most-once. The gateway abandons rather than duplicates an
+  outcome-unknown delivery to any of the nine. This is a platform limit, not a
+  backlog item — see **[Delivery semantics](delivery-semantics.md)** for the
+  per-adapter table and what to expect on restart.
 - MS Teams inbound webhook **JWT/JWKS** validation (parse exists; host
   exposure gated until then).
 

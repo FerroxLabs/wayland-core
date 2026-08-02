@@ -186,3 +186,113 @@ whole second workspace to answer one question.
    currently sends every user in a circle.
 3. Run the voice interruption on `seandesktop`. It is the only unmet criterion
    with no partial credit at all.
+
+---
+
+# SUPERSEDING BLOCK — 2026-08-01, lane `verdict-truth-text`, base `02575b6f`
+
+**This block supersedes the grades of Criteria 2 and 4 above, and the "successor should do first"
+list.** Criteria 1, 3 and 5 are **not** re-derived here and stand as written; see
+`CRITERIA-STATUS.md` for their current text, which this lane did not re-measure.
+
+**This is the phase where the corrections run in BOTH directions and the net is not comfortable.**
+Two criteria were publishing worse-than-true grades. One of those upgrades makes the product
+**more** exposed, not less, and this block says so first rather than burying it.
+
+**Text only.** Zero files under `crates/`, `.github/`, `docs/` or `scripts/` were changed by the
+lane that wrote this. No cargo was run. Full sweep and method:
+`.planning/VERDICT-TRUTH-2026-08-01.md`.
+
+## Criterion 4 — **NOT MET → PARTIAL, and it is now RELEASE-RELEVANT**
+
+The grade above reads **"NOT MET. NOTHING WAS EXERCISED."** Its load-bearing structural claim,
+carried forward into the gap ledger, was that `voice` is absent from every `default` list — so the
+feature is not in the shipped artifact and the criterion is cheap. **At `02575b6f` that is false:**
+
+```
+crates/wcore-cli/Cargo.toml:31     default = ["remote-registry", "workflow", "monitor", "review_artifact", "voice"]
+crates/wcore-cli/Cargo.toml:62     voice = ["wcore-agent/voice"]
+crates/wcore-agent/Cargo.toml:234  voice = ["dep:cpal", "dep:hound"]
+```
+
+A default `cargo build -p wcore-cli` — which is what the release builds — links voice.
+`CpalAudioPlayer` is production code (`voice_mode.rs:584`, `impl AudioPlayer for CpalAudioPlayer`
+at `:691`), and the device-absent path is a real runtime string at `:823`
+(*"voice_mode: cpal could not bind a default input device — tool hidden"*), which is what makes
+the presence/absence control possible at all.
+
+**Read this correctly: NOT MET → PARTIAL is NOT good news here.** A NOT MET on an unshipped
+feature costs nothing. A **shipped** voice surface whose `voice_mode → transcribe_audio` handoff
+is unproven on all three platforms is exactly the silent-failure class `CRITERIA-GAP-LEDGER.md`
+pre-registered as blocking:
+
+> *"If the `voice` feature is ever enabled in a release build, this criterion becomes blocking
+> immediately, because a shipped voice surface with zero interruption evidence is exactly the
+> silent-failure class that blocks 24-C2."*
+
+It has been enabled. So it is. **The row moved up a grade and up a risk tier at the same time.**
+
+**Still not MET, and this block declines to claim it:** the capture→transcribe handoff is unproven
+end to end; **no product surface enumerates the tool registry headlessly**, so *"the tool is
+REACHABLE"* cannot be observed from the CLI — only that the code is linked, which is the identical
+blindness that let 22-C1 sit at zero call sites; and **#938** (FluxRouter STT returns 402
+`premium_locked` through the product while a direct curl with the same key returns 200) is OPEN.
+
+### A live artefact of the transition, found by this lane and left for an owner
+
+```
+.github/workflows/ci.yml:851   # `voice` is off by default (it hard-links libasound.so.2 on Linux —
+.github/workflows/ci.yml:852   # see crates/wcore-agent/Cargo.toml:234), and `tool_backends::voice_mode`
+```
+
+That comment was true of `wcore-agent` in isolation and is **false of `wcore-cli`, which is what
+ships**. The CI step it annotates is fine — `ci.yml:869-894` runs the voice suite with an explicit
+executed-test floor (`ran $n voice tests, expected >= $min — a suite that exits 0 having run
+nothing is not a suite`). **The step is honest; the comment lies.** Fixing it is a `.github/` edit
+and outside a text lane's fence, so it is reported, not made.
+
+## Criterion 2 — **NOT MET → MET-WITH-STATED-EXCEPTIONS**
+
+The grade above reads *"Nothing is published. Readiness at HEAD is exactly as dishonest as it was
+before this phase ran."* and names a new HIGH: the browser tool's own remediation text pointing at
+`[browser] allowed_origins` when the loader reads `[browser.policy] allowed_origins`, so following
+it verbatim leaves the tool disabled.
+
+**Both halves are closed at `02575b6f`.** The remediation-string defect is not only fixed but
+machine-guarded — `crates/wcore-cli/tests/remedy_advertisements.rs` carries it as row 1 of a census
+(`:14`, *"loader reads `browser.policy.*`; the key parsed cleanly and was **silently discarded**"*)
+with an explicit detectability assertion at `:760`, and `crates/wayland-browser/src/plugin.rs:49`
+now documents the correct `[browser.policy] allowed_origins` form. Readiness is linkage-derived
+rather than hard-coded `true`.
+
+`CRITERIA-STATUS.md` additionally records the three policy baselines closed on **two** platforms,
+and — the more valuable line — that the macOS half of baseline 3 was previously
+`#![cfg(target_os = "linux")]`, compiling to an empty harness that printed
+`test result: ok. 0 passed` and exited **0**. **This phase's Criterion 2 therefore contained one
+gate that could not pass and one that could not fail, at the same time.** Those are the same bug
+wearing different colours, and this file is the place that fact belongs.
+
+**Exceptions, stated not embedded:** Windows is NOT MEASURED for all three baselines; baseline 2's
+real-desktop half has no macOS twin (writing one posts real HID events to the machine Sean is
+using — a deliberate non-attempt, recorded as a gap, not a pass); baseline 3c is `1 ignored` on
+macOS; and the *"must land inside the downloads root"* half is **vacuous in the shipped product**
+because no backend implements `Download`.
+
+## The "successor should do first" list is superseded
+
+1. *"Land SR-27-1..3"* — the seam is landed; readiness is published.
+2. *"Fix `wcore-browser/src/tool.rs:499`"* — done, and regression-guarded by
+   `remedy_advertisements.rs`.
+3. *"Run the voice interruption on `seandesktop`"* — **still the right instruction, and now more
+   urgent than when it was written**, because the surface ships. It is no longer *"the only unmet
+   criterion with no partial credit"*; it is a shipped capability with an unproven handoff.
+
+## What this block does not claim
+
+Criteria 1, 3 and 5 were not re-derived by this lane. In particular, `27-C1` carries an open
+macOS-only HIGH (`F-M1-01` / #937, `media_intake::open_once` refusing every path the platform's
+own temp APIs hand out) **plus two negative arms that are vacuous on macOS**, and `27-C3`'s
+late-MCP shape is still not exercised. Absence from this block is **not** a clean bill of health.
+
+_Corrected 2026-08-01 · base `02575b6f` · lane `verdict-truth-text` · source measurement only,
+two-directional controls, no cargo, no `crates/` edit._

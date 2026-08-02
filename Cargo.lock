@@ -9839,6 +9839,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "dunce",
  "ed25519-dalek",
  "futures",
  "libc",

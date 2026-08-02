@@ -268,3 +268,89 @@ rather than simply restating NOT MET.
 
 _Graded 2026-07-29 · base `861d1b1a` · lane/grade-23a · source + committed-evidence measurement;
 the pending lane's live figures audited, not re-executed._
+
+---
+
+# SUPERSEDING BLOCK — 2026-08-01, lane `verdict-truth-text`, base `02575b6f`
+
+**This block supersedes the front-matter verdict and clauses (a)–(d) above.** The 2026-07-29
+grading was honest **at `861d1b1a`** and it named its own successor: the front matter says
+`pending_work_graded: "lane/23a-c1-governed @ 3a2234d7 (NOT merged) — would plausibly close it"`.
+**It merged.** `git log -- crates/wcore-cli/src/skill_govern.rs` shows `c3f5b4fc`
+(*feat(23A-C1): the implementation half that a masked git-add failure dropped*) and `597c3275`.
+
+**Text only.** Zero files under `crates/`, `.github/`, `docs/` or `scripts/` were changed by the
+lane that wrote this. No cargo was run. Full sweep and method:
+`.planning/VERDICT-TRUTH-2026-08-01.md`.
+
+## Success Criterion 1 — **NOT MET → MET (shipped surface)**
+
+> *"Generated skills cannot execute before governed promotion and can be observed, revoked, and
+> rolled back."*
+
+All four clauses now reach an installed copy of the product.
+
+| Clause | 2026-07-29 at `861d1b1a` | 2026-08-01 at `02575b6f` |
+|---|---|---|
+| (a) cannot execute before promotion | PARTIAL — *"`run_skills_promote` is an unconditional `bail!`"*, so the pre-promotion state was *permanently* inert and the governance semantics were never exercised | **`run_promote` is real.** `crates/wcore-cli/src/skill_govern.rs:256` parses a UUID and dispatches to `promote_procedure` / `promote_named`; `promote_named` binds a grant via `store.promote_existing(&dir, None, AUTHORITY)` at `:268`. There is now a promotion for "before promotion" to be before. |
+| (b) can be observed | PARTIAL — `/skill list` and `/skill show` shipped, but *governance* observation (journal, `live_revocations()`, `history`) had no shipped surface | **`--skills-govern`** (`main.rs:511`, dispatched `:1712` → `run_list`) lists installed skills with promotion status, every revocation in force, and the append-only governance journal. |
+| (c) can be revoked | PARTIAL — *"It reaches no customer."* | **`--skills-revoke SKILL`** (`main.rs:498`, dispatched `:1704` → `run_revoke`). |
+| (d) can be rolled back | PARTIAL — same shipping gap, **plus** a new HIGH: `F23A-C1-H3`, non-atomic restore into the live skills directory | **`--skills-rollback REVOCATION_ID`** (`main.rs:505`, dispatched `:1708` → `run_rollback`), **and `F23A-C1-H3` is closed** — `wcore-skills/src/govern.rs:337 rollback()` now stages and renames, with the reasoning written into the source at `:362-367` (*"the restore is **staged and renamed**, not copied straight into place"*). |
+
+`crates/wcore-cli/src/lib.rs:227` declares `pub mod skill_govern`, and the comment above it
+states the fix in the terms of this very verdict: *"The capability existed in `wcore-skills` and
+in a `wcore-skill-govern` helper that is packaged by nothing, so no installed copy of the product
+could reach it."*
+
+## The gate that produced NOT MET can never pass — and never could
+
+§2.c above grades clause (c) on this, verbatim:
+
+```
+git show 861d1b1a:.github/workflows/release.yml | grep -c "wayland-core"   -> 31   [KNOWN-POSITIVE]
+git show 861d1b1a:.github/workflows/release.yml | grep -c "skill-govern"   ->  0   [the absence]
+```
+
+Re-run against the working tree at `02575b6f`:
+
+```
+grep -c "wayland-core"  .github/workflows/release.yml  -> 45   [KNOWN-POSITIVE — the grep is alive]
+grep -c "skill-govern"  .github/workflows/release.yml  ->  0   [unchanged, and it will stay 0]
+```
+
+**The needle returns 0 while the instrument is demonstrably alive, and the capability ships
+anyway** — because it moved into the binary that `release.yml` names 45 times. The verdict's own
+known-positive control, re-run, shows the shipped surface arrived:
+
+```
+grep -c "skills_revoke"   crates/wcore-cli/src/main.rs  ->  2
+grep -c "skills_archive"  crates/wcore-cli/src/main.rs  ->  4   [the 2026-07-29 KNOWN-POSITIVE]
+```
+
+`crates/wcore-skills/src/bin/wcore-skill-govern.rs` still exists and is **deliberately retained**
+as the harness its own tests drive (`23A-C1-GOVERNED.md:319`, *"Retained as the harness its own
+tests drive"*). It is not the product surface, and by design it will never appear in
+`release.yml`. **So this check can only ever return 0.** It is not measuring whether skills
+governance ships; it is measuring whether a dev-only harness is packaged, which the design
+requires it not to be.
+
+Classification: **MEASURES-WRONG-THING, presenting as CANNOT-PASS.** The check was a reasonable
+proxy on the day it was written — the capability really was only reachable through that binary —
+and it became a permanent red the moment the real wiring made the binary redundant. **A proxy
+that survives the thing it proxies for is a constant.**
+
+## What this does NOT claim
+
+* **`F23-01` is broader than SC-1** and its residual (detect, draft, evaluate, review/policy
+  stages) is unchanged by this block. SC-1 is the criterion; F23-01 is not.
+* This block re-derives **source facts only**. It re-executes none of the live figures in
+  §2 (`govern_revoke_rollback` 15 passed, `govern_cli_drive` 6 passed with the
+  `is_revoked → false` mutation going red); those are inherited, attributed, and were **not**
+  re-run here.
+* The 2026-07-29 verdict's own §6 judgement stands and should not be edited away: the phase's
+  most valuable output was four HIGH findings and two self-passing gates found inside its own
+  instruments. **A criterion arriving late does not retroactively make that grading wrong** — it
+  was correct about a tree that no longer exists.
+
+_Corrected 2026-08-01 · base `02575b6f` · lane `verdict-truth-text` · source measurement only,
+two-directional controls, no cargo, no `crates/` edit._

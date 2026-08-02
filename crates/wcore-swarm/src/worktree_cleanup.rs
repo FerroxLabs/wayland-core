@@ -141,11 +141,37 @@ impl WorktreeManager {
         Ok(total)
     }
 
+    /// Remove one transaction root this manager minted, CONSUMING its authority.
+    ///
+    /// # Why the authority is taken by value
+    ///
+    /// This took `&DirectoryAuthority` and cloned it, which is free on unix and
+    /// fatal on Windows. `DirectoryAuthority` holds its handle in an `Arc`, and
+    /// the Windows `remove_open_dir_all` refuses outright while
+    /// `Arc::strong_count` is above one — deliberately, because Windows will not
+    /// delete a directory object that any handle still names, so proceeding
+    /// would leave a half-deleted root. Cloning here while the caller's binding
+    /// was still alive made that count 2 on EVERY call, so on Windows the
+    /// removal always failed with *"retained Windows directory still has
+    /// outstanding authority handles"* — and both callers swallow that: reclaim
+    /// logs a warning, `cleanup_all` records a failure string.
+    ///
+    /// The effect on a Windows host was that `.swarm-worktrees/` could never be
+    /// emptied. Every killed or completed dispatch left its root and its
+    /// reservation receipt on disk, `reserved_workspace_bytes` kept summing
+    /// them, and once the aggregate ceiling was reached every later dispatch was
+    /// refused with "dispatch aggregate workspace budget is already committed"
+    /// until a human deleted the directory by hand. That is the F-2 defect the
+    /// reclaim path exists to fix, still fully present on the one platform.
+    ///
+    /// Taking the value means the caller's binding is moved in, so the only
+    /// strong reference left is the one `remove_open_dir_all` consumes. The
+    /// signature now enforces the invariant the Windows guard checks.
     fn remove_owned_transaction_root(
         &self,
         owner: &str,
         root: &Path,
-        root_authority: &DirectoryAuthority,
+        root_authority: DirectoryAuthority,
     ) -> Result<()> {
         self.validate_swarm_root()?;
         remove_transaction_root(
@@ -153,7 +179,7 @@ impl WorktreeManager {
             &self.swarm_authority,
             owner,
             root,
-            root_authority.clone(),
+            root_authority,
             &self.control_root,
             &DirectoryAuthority::open(&self.control_root)?,
         )
@@ -262,7 +288,7 @@ impl WorktreeManager {
                 if transaction_is_active(&root_authority, &path)? {
                     continue;
                 }
-                match self.remove_owned_transaction_root(&owner, &path, &root_authority) {
+                match self.remove_owned_transaction_root(&owner, &path, root_authority) {
                     Ok(()) => reclaimed += 1,
                     Err(error) => tracing::warn!(
                         path = %path.display(),
@@ -372,7 +398,7 @@ impl WorktreeManager {
                                     path.display()
                                 ))
                             })?;
-                    match self.remove_owned_transaction_root(owner, &path, &root_authority) {
+                    match self.remove_owned_transaction_root(owner, &path, root_authority) {
                         Ok(()) => continue,
                         Err(error) => {
                             failures.push(format!("{}: {error}", path.display()));
