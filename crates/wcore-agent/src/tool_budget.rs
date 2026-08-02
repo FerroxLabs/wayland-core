@@ -353,6 +353,7 @@ mod tests {
                 },
                 wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
                 process_cleanup_proof: None,
+                daily_authority: None,
             },
         )
         .unwrap()

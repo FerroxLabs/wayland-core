@@ -52,8 +52,11 @@ impl BudgetCap {
 ///   are ignored by this conversion (the existing `ExecutionBudget::from(
 ///   &BudgetConfig)` impl in `wcore-budget::execution` keeps consuming
 ///   them).
-/// - `per_user_daily_usd` has no TOML counterpart today — set it manually
-///   via the builder if needed (e.g. multi-tenant deployments).
+/// - `max_daily_cost_usd` → `per_user_daily_usd`, the only cap here that
+///   binds a caller starting a fresh session per process. Enforcing it
+///   requires a durable ledger, installed with
+///   [`BudgetTracker::set_daily_authority`]; without one the tracker fails
+///   CLOSED rather than pretending the ceiling is in force.
 impl From<&crate::BudgetConfig> for BudgetCap {
     fn from(cfg: &crate::BudgetConfig) -> Self {
         let mut b = BudgetCap::builder();
@@ -73,6 +76,9 @@ impl From<&crate::BudgetConfig> for BudgetCap {
         }
         if let Some(usd) = cfg.max_cost_usd {
             b = b.per_session_usd(usd);
+        }
+        if let Some(usd) = cfg.max_daily_cost_usd {
+            b = b.per_user_daily_usd(usd);
         }
         b.build()
     }
@@ -221,6 +227,10 @@ struct ReservationEntry {
     input_tokens: u64,
     output_tokens: u64,
     usd: f64,
+    /// Claim held against the durable cross-session daily ledger, when one is
+    /// installed. Process-local: a reservation recovered from a snapshot has
+    /// `None` here, and its durable counterpart is reclaimed by lease expiry.
+    daily_grant: Option<crate::daily::DailyGrant>,
 }
 
 /// Opaque admission reservation returned before a provider call starts.
@@ -375,6 +385,10 @@ pub struct BudgetTracker {
     /// a valid Continue operation.
     blocked_sessions: HashSet<String>,
     per_user_daily: HashMap<String, DailyTotals>,
+    /// Durable cross-session daily ceiling. Process-local wiring, exactly like
+    /// `sink`: the authority itself lives in the ledger file, so it is neither
+    /// captured by nor restored from a `BudgetTrackerSnapshot`.
+    daily: Option<crate::daily::DailyAuthority>,
     sink: Option<Arc<dyn BudgetEventSink>>,
     restore_applied: bool,
     /// Reservation ids recovered from durable state and therefore requiring
@@ -412,10 +426,27 @@ impl BudgetTracker {
             applied_budget_grants: HashMap::new(),
             blocked_sessions: HashSet::new(),
             per_user_daily: HashMap::new(),
+            daily: None,
             sink: None,
             restore_applied: false,
             restored_reservations: HashSet::new(),
         }
+    }
+
+    /// Bind this tracker to the durable ledger that enforces
+    /// `per_user_daily_usd` across sessions and across processes.
+    ///
+    /// Without this binding a configured `per_user_daily_usd` refuses every
+    /// reservation on the session-only path (`per_user_daily_identity_required`):
+    /// the tracker will not report a ceiling as enforced when it has no way to
+    /// enforce it.
+    pub fn set_daily_authority(&mut self, daily: crate::daily::DailyAuthority) {
+        self.daily = Some(daily);
+    }
+
+    /// The durable daily ceiling binding, if one is installed.
+    pub fn daily_authority(&self) -> Option<&crate::daily::DailyAuthority> {
+        self.daily.as_ref()
     }
 
     /// Capture caps, extensions, committed usage, user-daily usage, blocked
@@ -556,6 +587,7 @@ impl BudgetTracker {
         }
         let mut restored = build_tracker_from_snapshot(snapshot)?;
         restored.sink = self.sink.take();
+        restored.daily = self.daily.take();
         *self = restored;
         Ok(())
     }
@@ -572,6 +604,7 @@ impl BudgetTracker {
         let current_caps = self.caps.clone();
         let mut restored = Self::from_snapshot_with_current_caps(snapshot, current_caps)?;
         restored.sink = self.sink.take();
+        restored.daily = self.daily.take();
         *self = restored;
         Ok(())
     }
@@ -837,6 +870,17 @@ impl BudgetTracker {
         self.session_usd_cap(session_id).is_some()
     }
 
+    /// Whether ANY monetary ceiling governs this session — the per-session one
+    /// or the durable cross-session daily one.
+    ///
+    /// A caller deciding whether an unpriceable provider call may proceed must
+    /// ask this rather than [`Self::has_session_usd_cap`]: a $0-priced call
+    /// under a daily-only ceiling debits nothing and would slip the ceiling
+    /// entirely.
+    pub fn has_monetary_cap(&self, session_id: &str) -> bool {
+        self.session_usd_cap(session_id).is_some() || self.caps.per_user_daily_usd.is_some()
+    }
+
     /// Reserve worst-case tokens and USD before starting a paid call. Both
     /// committed usage and other in-flight reservations participate in the
     /// admission decision, so concurrent calls cannot each claim the same
@@ -871,7 +915,15 @@ impl BudgetTracker {
                 "session remains blocked after budget exhaustion".to_string(),
             ));
         }
-        if let Some(cap) = self.caps.per_user_daily_usd {
+        // A configured daily ceiling with no durable ledger behind it cannot be
+        // enforced on this session-only path, so it refuses rather than
+        // pretending. Installing a `DailyAuthority` is what makes the ceiling
+        // real; the debit itself happens below, AFTER every in-memory session
+        // check has passed, so a session-cap refusal never strands a claim in
+        // the durable ledger.
+        if let Some(cap) = self.caps.per_user_daily_usd
+            && self.daily.is_none()
+        {
             return Err(self.cap_block(
                 session_id,
                 "per_user_daily_identity_required",
@@ -957,6 +1009,34 @@ impl BudgetTracker {
             ));
         }
 
+        // Cross-session ceiling, last: every in-memory check above has passed,
+        // so the durable claim recorded here is only ever made for a call this
+        // session is otherwise allowed to start.
+        let daily_grant = match (&self.daily, self.caps.per_user_daily_usd) {
+            (Some(daily), Some(cap)) => match daily.reserve(usd, cap, Utc::now()) {
+                Ok(grant) => Some(grant),
+                Err(crate::daily::DailySpendError::Exceeded { limit, observed }) => {
+                    self.blocked_sessions.insert(session_id.to_string());
+                    return Err(self.cap_block(
+                        session_id,
+                        "per_user_daily_usd",
+                        format!("${limit:.4} per day"),
+                        format!("${observed:.4}"),
+                    ));
+                }
+                Err(error) => {
+                    // An unreadable ceiling is not an absent ceiling.
+                    return Err(self.cap_block(
+                        session_id,
+                        "per_user_daily_unavailable",
+                        format!("${cap:.4} per day"),
+                        error.to_string(),
+                    ));
+                }
+            },
+            _ => None,
+        };
+
         let id = self.next_reservation_id;
         self.next_reservation_id = self.next_reservation_id.saturating_add(1);
         let totals = self
@@ -975,6 +1055,7 @@ impl BudgetTracker {
                 input_tokens,
                 output_tokens,
                 usd,
+                daily_grant,
             },
         );
         Ok(BudgetReservation(id))
@@ -1013,6 +1094,22 @@ impl BudgetTracker {
             actual_input_tokens = entry.input_tokens;
             actual_output_tokens = entry.output_tokens;
             actual_usd = entry.usd;
+        }
+        // Convert the durable daily claim into committed daily spend. If the
+        // ledger cannot be written the claim is LEFT in place to expire on its
+        // lease: the reservation is a conservative over-estimate of what was
+        // actually billed, so the ceiling still holds meanwhile.
+        if let (Some(daily), Some(grant)) = (&self.daily, entry.daily_grant.as_ref())
+            && let Err(error) = daily.settle(grant, actual_usd, Utc::now())
+        {
+            self.emit(BudgetEvent::CapBlock {
+                session_id: entry.session_id.clone(),
+                reason: BudgetError::CapExceeded {
+                    kind: "per_user_daily_settlement_deferred".to_string(),
+                    limit: "durable daily ledger write".to_string(),
+                    observed: error.to_string(),
+                },
+            });
         }
         let totals = self
             .per_session
@@ -1101,7 +1198,15 @@ impl BudgetTracker {
 
     /// Release an admission that never reached the provider.
     pub fn release(&mut self, reservation: BudgetReservation) -> bool {
-        self.take_reservation(reservation).is_some()
+        let Some(entry) = self.take_reservation(reservation) else {
+            return false;
+        };
+        // Nothing was billed, so hand the daily authority straight back. A
+        // failed release is harmless: the claim expires on its lease.
+        if let (Some(daily), Some(grant)) = (&self.daily, entry.daily_grant.as_ref()) {
+            let _ = daily.release(grant, Utc::now());
+        }
+        true
     }
 
     fn take_reservation(&mut self, reservation: BudgetReservation) -> Option<ReservationEntry> {
@@ -1478,6 +1583,7 @@ fn build_tracker_from_snapshot(
                 input_tokens: reservation.input_tokens,
                 output_tokens: reservation.output_tokens,
                 usd: reservation.usd,
+                daily_grant: None,
             },
         );
     }
@@ -1521,6 +1627,7 @@ fn build_tracker_from_snapshot(
                 )
             })
             .collect(),
+        daily: None,
         sink: None,
         restore_applied: true,
         restored_reservations,

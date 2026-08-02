@@ -14,8 +14,10 @@ toml.workspace         = true
 thiserror.workspace    = true
 parking_lot.workspace  = true
 chrono.workspace       = true
+fd-lock.workspace      = true
 
 workspace-hack.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace   = true

@@ -4734,6 +4734,18 @@ fn merge_config_files_with_trust(
             .max_tokens_out
             .or(global.budget.max_tokens_out),
         max_cost_usd: project.budget.max_cost_usd.or(global.budget.max_cost_usd),
+        // STRICTEST wins, not project-over-global. Every other cap here is a
+        // per-session convenience the project may legitimately retune; this one
+        // is a cross-session spend ceiling, and a repo-local config file must
+        // never be able to WIDEN a ceiling the machine's owner set globally.
+        max_daily_cost_usd: match (
+            project.budget.max_daily_cost_usd,
+            global.budget.max_daily_cost_usd,
+        ) {
+            (Some(project), Some(global)) => Some(project.min(global)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        },
     };
 
     // Wave SD — storage section: project overrides global if its backend

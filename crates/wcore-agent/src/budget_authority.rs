@@ -41,6 +41,11 @@ pub struct BudgetAuthoritySeed {
     pub execution_policy: ExecutionBudget,
     pub wall_clock: BudgetWallClockAuthority,
     pub process_cleanup_proof: Option<ProcessCleanupProof>,
+    /// Durable ledger enforcing `provider_caps.per_user_daily_usd` ACROSS
+    /// sessions and processes. Required whenever that cap is set: without it
+    /// the tracker refuses every reservation rather than reporting an
+    /// unenforceable ceiling as in force.
+    pub daily_authority: Option<wcore_budget::DailyAuthority>,
 }
 
 impl BudgetAuthoritySeed {
@@ -57,6 +62,7 @@ impl BudgetAuthoritySeed {
             execution_policy: self.execution_policy.clone(),
             wall_clock: self.wall_clock.clone(),
             process_cleanup_proof: self.process_cleanup_proof.clone(),
+            daily_authority: self.daily_authority.clone(),
         }
     }
 
@@ -89,6 +95,10 @@ pub struct BudgetAuthorityConfig {
     pub wall_clock: BudgetWallClockAuthority,
     /// Platform evidence allowing restored process counters to be cleared.
     pub process_cleanup_proof: Option<ProcessCleanupProof>,
+    /// Durable cross-session daily spend ledger. Process-local wiring: it is
+    /// re-installed on every rebind because the authority lives in the ledger
+    /// file, not in the journal.
+    pub daily_authority: Option<wcore_budget::DailyAuthority>,
 }
 
 /// A coordinator cannot resume after a journal commit failure: runtime state
@@ -110,6 +120,17 @@ pub enum BudgetAuthorityError {
 struct ActiveTurnRuntime {
     turn_id: String,
     execution: ExecutionBudgetView,
+}
+
+/// Build a fresh provider tracker already bound to the durable cross-session
+/// daily ceiling, so no construction path can produce a tracker that carries
+/// `per_user_daily_usd` without the ledger that enforces it.
+fn new_tracker(caps: BudgetCap, daily: Option<wcore_budget::DailyAuthority>) -> BudgetTracker {
+    let mut tracker = BudgetTracker::new(caps);
+    if let Some(daily) = daily {
+        tracker.set_daily_authority(daily);
+    }
+    tracker
 }
 
 /// Mutable authority exposed only for the duration of a transaction.
@@ -161,7 +182,7 @@ impl BudgetAuthorityCoordinator {
         let now = unix_millis()?;
         let Some(journal) = config.journal.clone() else {
             return Ok(Self {
-                provider_tracker: BudgetTracker::new(config.provider_caps),
+                provider_tracker: new_tracker(config.provider_caps, config.daily_authority),
                 execution_root: config.execution_policy.start_root(),
                 active_turn: None,
                 budget_session_id: config.budget_session_id,
@@ -192,7 +213,7 @@ impl BudgetAuthorityCoordinator {
         } else {
             require_pristine_authority_free_session(&reduced)?;
             Self {
-                provider_tracker: BudgetTracker::new(config.provider_caps),
+                provider_tracker: new_tracker(config.provider_caps, config.daily_authority),
                 execution_root: config.execution_policy.start_root(),
                 active_turn: None,
                 budget_session_id: config.budget_session_id,
@@ -945,6 +966,11 @@ fn restore(
         )
     }
     .map_err(|error| BudgetAuthorityError::Snapshot(error.to_string()))?;
+    // Re-arm the cross-session ceiling before any admission can run: the
+    // ledger is the authority, and a restored tracker starts without it.
+    if let Some(daily) = config.daily_authority {
+        provider_tracker.set_daily_authority(daily);
+    }
     let mut restored_reservations = reconcile_dispatch_bound_reservations(
         &mut provider_tracker,
         &authority.provider_reservations,
@@ -1163,6 +1189,7 @@ mod tests {
             },
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: None,
         }
     }
 
@@ -1909,6 +1936,7 @@ mod tests {
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: None,
         };
         let shared = seed.detached("bootstrap-session").unwrap();
         let captured = Arc::clone(&shared);
@@ -1951,6 +1979,7 @@ mod tests {
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: None,
         };
         let shared = seed.detached("bootstrap-session").unwrap();
         BudgetAuthorityCoordinator::bind_shared_pristine(
@@ -1982,6 +2011,7 @@ mod tests {
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: None,
         };
         let shared = seed.detached("bootstrap-session").unwrap();
         BudgetAuthorityCoordinator::bind_shared_session(

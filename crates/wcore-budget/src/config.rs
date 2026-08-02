@@ -28,6 +28,8 @@ use thiserror::Error;
 pub enum BudgetConfigError {
     #[error("max_cost_usd must be finite and non-negative, got {0}")]
     InvalidMaxCostUsd(f64),
+    #[error("max_daily_cost_usd must be finite and non-negative, got {0}")]
+    InvalidMaxDailyCostUsd(f64),
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -42,6 +44,18 @@ pub struct BudgetConfig {
     pub max_tokens_in: Option<u64>,
     pub max_tokens_out: Option<u64>,
     pub max_cost_usd: Option<f64>,
+    /// Spend ceiling for one UTC day, enforced ACROSS sessions and across
+    /// processes through the durable [`crate::daily::DailySpendStore`].
+    ///
+    /// Every other cap here is per session, so a caller that starts a fresh
+    /// session per process — a crash-looping daemon, a cron job, a channel
+    /// gateway answering inbound messages — is bounded by none of them: each
+    /// run legitimately gets its own budget. This is the only field that binds
+    /// such a caller.
+    ///
+    /// Opt-in: `None` (and the Smart default) leaves the ceiling absent, which
+    /// is the historical behaviour.
+    pub max_daily_cost_usd: Option<f64>,
 }
 
 impl BudgetConfig {
@@ -50,6 +64,11 @@ impl BudgetConfig {
             && (!usd.is_finite() || usd < 0.0)
         {
             return Err(BudgetConfigError::InvalidMaxCostUsd(usd));
+        }
+        if let Some(usd) = self.max_daily_cost_usd
+            && (!usd.is_finite() || usd < 0.0)
+        {
+            return Err(BudgetConfigError::InvalidMaxDailyCostUsd(usd));
         }
         Ok(())
     }
@@ -66,6 +85,11 @@ impl BudgetConfig {
             max_tokens_in: Some(10_000_000),
             max_tokens_out: Some(1_000_000),
             max_cost_usd: Some(25.0),
+            // Deliberately absent: a cross-session daily ceiling is a
+            // deployment policy, not a session default. Defaulting it would
+            // silently bound long-running multi-session work that has always
+            // been unbounded on this axis.
+            max_daily_cost_usd: None,
         }
     }
 
@@ -84,6 +108,7 @@ impl BudgetConfig {
             max_tokens_in: self.max_tokens_in.or(defaults.max_tokens_in),
             max_tokens_out: self.max_tokens_out.or(defaults.max_tokens_out),
             max_cost_usd: self.max_cost_usd.or(defaults.max_cost_usd),
+            max_daily_cost_usd: self.max_daily_cost_usd.or(defaults.max_daily_cost_usd),
         }
     }
 
@@ -116,6 +141,9 @@ impl BudgetConfig {
             .or(effective.max_tokens_out);
         effective.max_cost_usd =
             strictest_f64(budget.max_cost_usd, session_cap.max_cost_usd).or(effective.max_cost_usd);
+        effective.max_daily_cost_usd =
+            strictest_f64(budget.max_daily_cost_usd, session_cap.max_daily_cost_usd)
+                .or(effective.max_daily_cost_usd);
         effective
     }
 }
@@ -226,6 +254,62 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn daily_cost_cap_has_a_toml_counterpart() {
+        let parsed: BudgetConfig = toml::from_str("max_daily_cost_usd = 12.5").unwrap();
+        assert_eq!(parsed.max_daily_cost_usd, Some(12.5));
+
+        let rendered = toml::to_string(&parsed).unwrap();
+        assert!(
+            rendered.contains("max_daily_cost_usd = 12.5"),
+            "round-trips through TOML: {rendered}"
+        );
+    }
+
+    #[test]
+    fn daily_cost_cap_stays_absent_unless_an_operator_sets_it() {
+        assert_eq!(BudgetConfig::smart_default().max_daily_cost_usd, None);
+        assert_eq!(
+            BudgetConfig::default()
+                .with_smart_defaults()
+                .max_daily_cost_usd,
+            None,
+            "a cross-session ceiling must never appear by default"
+        );
+    }
+
+    #[test]
+    fn daily_cost_cap_rejects_non_finite_and_negative_values() {
+        for usd in [f64::NAN, f64::INFINITY, -0.01] {
+            let config = BudgetConfig {
+                max_daily_cost_usd: Some(usd),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err(), "accepted {usd}");
+        }
+    }
+
+    #[test]
+    fn session_envelope_uses_the_stricter_daily_cap() {
+        let budget = BudgetConfig {
+            max_daily_cost_usd: Some(10.0),
+            ..Default::default()
+        };
+        let session_cap = BudgetConfig {
+            max_daily_cost_usd: Some(4.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            BudgetConfig::effective_session_envelope(&budget, Some(&session_cap))
+                .max_daily_cost_usd,
+            Some(4.0)
+        );
+        assert_eq!(
+            BudgetConfig::effective_session_envelope(&budget, None).max_daily_cost_usd,
+            Some(10.0)
         );
     }
 

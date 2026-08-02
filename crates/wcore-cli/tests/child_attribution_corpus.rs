@@ -285,6 +285,7 @@ fn probe_refund_across_restart() -> (Attribution, String) {
         execution_policy: ExecutionBudget::default(),
         wall_clock: BudgetWallClockAuthority::ActiveRuntime,
         process_cleanup_proof: None,
+        daily_authority: None,
     };
 
     {

@@ -3251,6 +3251,7 @@ mod spawn_task_set_tests {
                 },
                 wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
                 process_cleanup_proof: None,
+                daily_authority: None,
             },
         )
         .unwrap()
@@ -3326,6 +3327,7 @@ mod spawn_task_set_tests {
                 },
                 wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
                 process_cleanup_proof: None,
+                daily_authority: None,
             },
         )
         .unwrap()
