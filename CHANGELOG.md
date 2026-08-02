@@ -1,5 +1,428 @@
 # Changelog
 
+## [0.12.26-rc.1](https://github.com/FerroxLabs/wayland-core/compare/v0.12.25...v0.12.26-rc.1) (2026-08-02)
+
+> **This is a release candidate, not a general release.**
+>
+> The native security, reliability, recovery and resource certification this
+> project publishes was measured against a candidate roughly 2,100 commits behind
+> this tree. In the words of our own drift record: *"It passes and it is stale.
+> Both are true and neither cancels the other. A release cut today would carry a
+> passing certification that never saw the shipped binary."* Do not read that
+> certification as covering these binaries. Re-certification against the actual
+> candidate is the gate for GA.
+>
+> **Read [`.planning/KNOWN-ISSUES-rc.md`](.planning/KNOWN-ISSUES-rc.md) before you
+> deploy this.** It carries measured per-platform test counts, the defects we
+> already know about, and — the part that matters most — which delivery
+> guarantees hold and which do not.
+
+**Release highlights — an operations layer, and the means to tell working from
+appearing to work.**
+
+3,048 commits since `v0.12.25`. This is not a features release. The agent gained
+no new tools, no new LLM providers and no new messaging platforms. What arrived
+is a layer *around* the agent — ten new top-level commands that operate it, two
+new crates, a large body of security repair, and a sustained hunt for the places
+where our own tests and gates could not fail. Several of those places turned out
+to sit under load-bearing claims. Where a claim did not survive being driven at
+the real thing, it was withdrawn rather than softened, and those withdrawals are
+listed first because they are what an integrator most needs.
+
+Entries are aggregated by user-visible outcome; 3,048 commits cannot each get a
+line. Breaking changes are never aggregated. Where a capability was driven
+against real hardware or a real platform it says so; where it was not, the entry
+describes what changed rather than asserting a guarantee.
+
+### Breaking changes and withdrawn guarantees
+
+* **Slack outbound delivery is at-most-once, not exactly-once.** Slack was
+  documented and declared as exactly-once on the strength of a mock. Driven at
+  `slack.com`, a replayed `Idempotency-Key` is ignored by the platform and a
+  kill-and-restart of the gateway put **two messages** in a real workspace from
+  one delivery id. The token stays on the wire; only the guarantee is removed
+  (`28098809`).
+* **Discord outbound delivery is at-most-once, not exactly-once.** Same shape:
+  Discord accepts the `nonce`, echoes it back, and deduplicates on it at no
+  delay including zero. A live kill-and-restart produced two messages in a real
+  channel from one delivery id. `supports_outbound_idempotency()` now returns
+  `false`, so the delivery spine abandons an outcome-unknown delivery instead of
+  re-sending it (`d291b416`).
+* **Matrix exactly-once is conditional, and the condition is now stated.** It
+  holds only for a body that fits in one platform message (32,768 chars). Above
+  that cap the body is chunked and sent unkeyed, which is at-least-once. Matrix
+  remains the only exactly-once adapter of the ten, within that bound.
+* **The two danger flags are now named for what they do** (`51f1ddba`).
+  `--dangerously-skip-permissions` is the canonical tier‑1 spelling with
+  `--force` and `--yolo` as *visible aliases of the same clap field*, so the
+  three spellings are one tier by construction and cannot drift apart. Tier 1
+  bypasses approvals and leaves the OS sandbox **on**. Tier 2 is
+  `--dangerously-skip-permissions-and-sandbox`, with `--dangerous` retained as a
+  deprecated alias. The two tiers refuse to stack. Existing `--force` / `--yolo`
+  invocations keep working with byte-identical stderr; scripts that relied on
+  `--force` being the *canonical* name will see the new spelling in `--help`.
+* **A project-level `config.toml` can no longer touch the egress master switch.**
+  `[security] enabled` is now read from the trusted **global** layer alone. If
+  you were relying on a repository's own `[security]` block to configure egress
+  for that repository, it is now inert by design — see Security below for why.
+* **`/memory nudge` was removed** (`0695c751`). It bounded an event that never
+  fires: `NudgeBudget` had no production caller. The underlying type is retained
+  for the phase that ships delivery. The user-facing replacement for inspecting
+  and controlling what the agent has inferred about you is the new `/usermodel`
+  surface.
+
+### Security
+
+Roughly 185 commits touch core security paths; `wcore-sandbox` alone took 105.
+**No CVE was issued and none was patched** — zero advisories were published
+against this project in the window. Seven RUSTSEC advisories in dependencies were
+addressed.
+
+* **An untrusted cloned repository could switch off the egress boundary**
+  (`510e327e`, HIGH). `security.enabled` was merged `global && project`, and
+  since `enabled = true` means the gate is *on*, `&&` let **either** layer turn
+  the boundary off — the least restrictive merge on that field, sitting under a
+  comment calling it the most restrictive. `restrict_untrusted_project_config`,
+  the function whose entire job is neutralising an untrusted project config,
+  forwarded the field explicitly. A cloned repo shipping `[security] enabled =
+  false` reduced the policy to a literal allow-all. The existing test had **pinned
+  the vulnerability as a property to preserve** and was corrected too. The switch
+  is now read from the trusted global layer alone.
+* **An untrusted project config could raise the operator's resource ceilings.**
+  `max_tokens` and `max_turns` merged in a way that never compared the two
+  values, so a project arriving with a cloned repo raised them past the global
+  cap. Measured before the fix: `100 → 999999` and `5 → 100000`. Both are now
+  trust-gated.
+* **Remote command injection in the ssh execution backend, fixed before it ever
+  shipped** (`6861b3aa`). `backend scan --task-id 'x;id>/tmp/w'` executed as
+  **root** on the far end: `ssh` carries no argv, so the far end's login shell
+  re-parses the string and near-side argv safety buys nothing. The guard that
+  should have caught it passed the whole time **because it grepped its own
+  source**. Closed with `posix_quote` plus a round-trip test carrying its own
+  positive control, proved through the shipped binary. `git tag --contains` was
+  run with the instrument sanity-checked first and returned empty: **this defect
+  was introduced and closed inside this window and was never present in a
+  released build.**
+* **Windows AppContainer `fs_read_deny` was completely inert** (`1fd6c461`). The
+  lowbox check ignores a DENY ACE against the container's own package SID, so a
+  denied secret was disclosed and the process exited 0. Reimplemented as enforced
+  DACL removal, **proven on Windows hardware**.
+* **Cross-user prompt leak, proven on the wire.** The system-prompt render site
+  read the user model from a hardcoded `"default"` bucket while writes keyed
+  `$WAYLAND_USER_ID`. On a shared memory base — the normal shape for a channel
+  gateway serving several people under one OS account, which is the deployment
+  `WAYLAND_USER_ID` exists for — one user's inferred personal traits were placed
+  in another user's system prompt and shipped to a third-party provider. The
+  leaked fingerprint was extracted verbatim from a captured outbound provider
+  body, not argued from source. Read and write buckets are now one binding.
+* **`PolicyGate` had no production callers on the agent path.** ACL machinery
+  that shipped in v0.6.1 was orphan code: a session narrowed away from `Read`
+  produced children that could read files the parent could not. The learned
+  sub-agent policy had the same shape — `cfg.learned_policy` had zero readers
+  anywhere in the workspace, so setting the knob did nothing (`652133a2`). The
+  gate is now consulted first and the learned policy may only subtract from its
+  survivors; an `AllowAlways` rule cannot resurrect a gate denial or skip the
+  approval path.
+* **Spawn `toolsets` were treated as authority.** A bare `Delegate` restored Grep
+  and Glob to a child of a `Full`-posture remote parent that had dropped them
+  precisely because their recursive scan escapes the jail. Every child tool
+  registry is now intersected with the parent's authority.
+* **Plaintext credential fallback replaced with a fail-closed ladder** — keyring,
+  then encrypted vault, then refuse. Three shadowing sinks were closed with it:
+  `auth add` wrote an `api_key` into `config.toml` that *outranked* the store,
+  and the TUI key modal wrote a `.env` the resolver never reads. See Known
+  limitations — the ladder has **not** been exercised against a real OS keyring on
+  any platform, and two of seven sinks are still deferred.
+* **The `backend` command never armed the egress policy.** Cloud and remote
+  backends ran allow-all. The receipt had been disclosing this all along —
+  `"egress_decision": "allow-all-default-no-policy-installed"` — and nobody read
+  it. The boundary is now armed on that path, and armed from defaults rather than
+  refusing when config cannot resolve.
+* **The ssh runner leaked its task root**, leaving task input readable on the far
+  end after a failed task (`01ebc765`). Reproduced live against a real host, and
+  the fix re-proved live (1 → 0 roots, 1 → 0 leaked inputs).
+* **Every release shipped with no manifest**, so the updater refused every
+  install and manifest digests were decorative. The update decision in the
+  shipped updater is now ordered and fail-closed, and the downloaded archive is
+  bound to the digest the manifest signed.
+* **Supply chain:** `cargo deny` exit 5 → 0 and `cargo audit` 4 → 0 **with no
+  ignore list**. `[graph] all-features` was turned on — the previous setting never
+  evaluated optional dependencies at all, so a GPL/AGPL crate arriving through
+  `hf-hub` or `bollard` would have passed every gate. Adds a deterministic
+  CycloneDX SBOM (no clock, no randomness, no environment, no filesystem reads)
+  and a signed release manifest with a role-scoped trust root. See Known
+  limitations: **no release has ever been accepted through this chain.**
+
+### Added
+
+**Ten new top-level command groups.** All ten are new since `v0.12.25`.
+
+| Command | What it does | Evidence |
+|---|---|---|
+| `index` | build / status / search / verify a persistent, git-respecting symbol index | Driven live on **all three platforms**, nonce-bound, SHA-asserted binaries |
+| `backup` | create / verify / restore / recover / digest, over a write-ahead journal | Driven live, including a real Windows long-path fix |
+| `goal` | 7 verbs over durable objectives and the Fleet dispatcher | Survives `kill -9` mid-wave on **Linux and Windows**; effects 12/12/12 |
+| `backend` | 9 verbs over local / container / ssh / cloud execution backends, with receipts | Driven live on 3 of 4 — the **cloud leg is unexercised** |
+| `sandbox` | status / exec against the platform containment backend | 50 green runs, each with a differential activeness observation |
+| `session` | 11 verbs including checkpoint / rewind / fork / export | Driven live on **Linux only** |
+| `gateway` | 12 verbs; launchd / systemd / Windows task service units | Driven live on **Linux only** (systemd-observed recovery) |
+| `node` | 9 verbs, pairing and attested attribution | Driven live on a **single host** — no second machine was available |
+| `channel` | list / probe / health / reload / actions / credential | Implemented; `channel probe` exists only for Discord, email and WhatsApp |
+| `cache` | report / list / show / verify over the cache and compaction ledger | Implemented, not live-proven |
+
+**New verbs on existing commands**
+
+* `plugin` gains ten lifecycle verbs — `new`, `test`, `verify`, `sign`,
+  `publish`, `inspect`, `approve`, `update`, `rollback`, `recover`. Approval is a
+  load-time gate rather than a prompt. Driven live on **Linux and Windows**.
+* `migrate` gains `openclaw`, `grok`, `gemini` and `promote` importers, with
+  every provenance record bound to where the bytes landed, and a journalled
+  rollback that reverse-applies an exact declared scope. Driven live against real
+  Hermes and OpenClaw installations.
+* `cron` gains `publish`, `leases` and `retry`, plus a leased schedule so exactly
+  one process fires a trigger.
+* New governance flags: `--skills-govern`, `--skills-revoke`,
+  `--skills-rollback`, `--allow-host-workspace-grants`,
+  `--allow-host-budget-grants`, `--trust-workspace`, `--untrust-workspace`.
+
+**Two new crates:** `wcore-exec-backend` (provider-neutral execution-backend
+contract plus four reference backends) and `wcore-gateway` (gateway lifecycle
+machine and a Windows-safe instance lock).
+
+**Terminal and agent surfaces**
+
+* `/goal` and `/recover` slash commands.
+* `/usermodel` — see, correct and switch off what the agent has inferred about
+  you. Inferred beliefs are rendered marked by origin, and a user-authored
+  correction layer takes precedence over inference.
+* Memory activation surface: see and switch off what memory is being put into
+  your prompt.
+* Durable Goals are visible and controllable from the terminal.
+
+**Configuration**
+
+* `[execution]` — a global-only administrative floor for execution posture.
+* `[provider_policy]` — allow/deny providers and regions, plus `require_priced`.
+* `[session] require_durability` — refuse to run rather than silently degrade to
+  a non-durable session, and report *why* durability is off rather than only
+  that it is.
+* Per-provider `region` and `organization`; per-provider `compat.image_model`.
+
+**Host protocol (JSON stream)**
+
+* Twenty-five new events (durable Goal snapshots and transitions, runtime
+  diagnostics, session and turn recovery, provider attempt/retry/failover
+  receipts, workflow correlation, capability activation, execution and workspace
+  policy, MCP removal, budget grants, mid-flight monitor decisions) and new
+  host→Core commands covering Goal control, runtime diagnostics, MCP removal,
+  approval and unknown-tool-effect resolution, session resync and workspace
+  capability grants.
+* **Nothing was removed.** Measured against the `v0.12.25` tree: no event or
+  command variant was deleted from `events.rs` or `commands.rs`, no crate was
+  removed, and **zero files under `crates/` were deleted** across the whole
+  window. Hosts written against `v0.12.25` keep working.
+* A machine-checked producer contract (`wcore-contract`) with negotiated
+  fixtures. The contract gate was itself found to be self-passing and repaired
+  mid-window.
+
+**Channels**
+
+* Native message actions: Slack `chat.update` / `chat.delete`, Discord and
+  Telegram edit/delete, Matrix `m.replace` and redaction, MS Teams activity
+  `PUT`/`DELETE` — each driven against its real endpoint — plus a `NativeActions`
+  capability declaration and a cross-adapter conformance matrix.
+* Delivery identity on the wire for Twilio and WhatsApp; an opt-in WhatsApp Node
+  bridge backend (Meta Business remains the default); MS Teams inbound
+  attachment parsing.
+* An operator support bundle, redacted and canary-proved, reachable as
+  `gateway support-bundle`.
+
+**Platform reach**
+
+* The Linux glibc floor was lowered from **2.39 to 2.34** for both Linux targets,
+  live-executed on Ubuntu 22.04, Debian 12, Rocky 9, AlmaLinux 9 and Amazon Linux
+  2023, with a control row proving the old binary still runs on 24.04. Going
+  lower was rejected on measurement, not preference: a glibc 2.28 build emits a
+  binary needing `libssl.so.1.1` and breaks Ubuntu 22.04, Debian 12 and RHEL 9.
+
+### Changed
+
+* **Project-level executable configuration is inert unless you trust the
+  workspace.** Hooks, MCP servers and project skills arriving with a repository
+  no longer take effect by default. `--trust-workspace` records the repository's
+  executable-configuration fingerprint in Core's trust store; a material change
+  to hooks, MCP config or project skills automatically revokes eligibility.
+  `--untrust-workspace` removes it again. This is a behaviour change for anyone
+  upgrading who relied on project hooks or project MCP servers loading
+  automatically.
+* **`plugins.toml` is now loaded from disk at engine boot** (`7075e6f8`). It
+  never was before, which means `enabled = false` did not disable a plugin and
+  `plugin_signature_verification` and `trusted_plugin_keys` bound to nothing. An
+  absent file yields defaults; a **malformed one is now fatal and names the
+  path**, because booting on default policy when the operator's policy is
+  unreadable is the same silent-ignore this fixes. If you have a `plugins.toml`
+  that was previously ignored, it will now take effect — check it before
+  upgrading.
+* **`[default] read_only = true` now genuinely bounds the model**
+  (`4df3ca20`). It previously parsed, merged and round-tripped and was enforced
+  nowhere, because config resolution dropped the field. A read-only session now
+  refuses any tool that does not declare itself read-only-safe for its concrete
+  input — `Read`, `Grep` and `Glob` are the only built-ins that claim it, and an
+  unknown tool name is refused. The gate sits *ahead* of the `PreToolUse` hook,
+  so a read-only session no longer executes operator-configured shell for a call
+  it is about to refuse. Proven live with `--dangerously-skip-permissions`
+  active. Sessions that set this flag and relied on it doing nothing will now be
+  restricted.
+* **Voice ships in the default feature set.** See Known limitations — voice is
+  enabled by default with an open provider-side 402.
+* Anvil, Council, Crucible and workflow runs are routed through the
+  workspace-aware production spawner rather than a separate path.
+* SQLite journal-mode selection is centralised on filesystem class.
+* Provider failover is now semantic, and per-call cost is recorded for billable
+  media generation (transcription, TTS, the three vision backends including
+  `video_analyze`, and the `image` subcommand), with the billing basis declared
+  and token and character units added.
+
+### Fixed
+
+579 `fix:` commits landed in this window against 247 `feat:` commits, and 486
+`test:` commits — this was a repair-and-prove cycle, not a feature cycle. The
+ones a user would notice:
+
+* **Grep could report "no matches" for a target it had never read** (`bf5457f9`).
+  On Windows without ripgrep on `PATH`, `findstr` returns exit 1 with empty
+  stdout for *both* a clean no-match and `Cannot open <path>`, so the existing
+  exit-code guard was a no-op there. Three confirmed consequences on real
+  hardware: an unreadable or nonexistent target reported "No matches found" with
+  `is_error=false` — the failure mode that makes an agent confidently wrong and
+  delete live code it believes undefined; a **single file** returned nothing for a
+  pattern it demonstrably contains; and a path that trimmed to empty produced the
+  spec `\*` and walked **the whole drive** (still running at 25s against 157ms for
+  the intended scan). Targets are now stat'ed before anything is spawned, so
+  "could not look" is unrepresentable as "looked and found nothing" on every
+  platform. The regression guard was `#[cfg(unix)]` and so could never run on the
+  platform the bug lived on; it is now cfg-free.
+* **Windows diagnostics logs stopped writing past 5 MiB.** Rotation called
+  `set_len` on an append-only handle and failed, silently dropping every
+  subsequent record — on the headless gateway. Separately, `.swarm-worktrees/`
+  could never be emptied, so the workspace budget filled until every dispatch was
+  refused.
+* **`--json-stream` could miss its `ready` frame on Windows**, breaking the
+  Desktop app on first launch: a stalled AppContainer probe could delay the frame
+  up to 15s against a 10s deadline. The probe is off the ready path, and an
+  oscillating probe cache that returned two different containment answers on an
+  unchanged host was removed.
+* **A stale AppContainer lease permanently refused all sandboxed execution** on
+  Windows until a human deleted a file nobody knew to look for. The operator text
+  had blamed "transient (AV, disk contention)", which is why the wedge went
+  unrecognised for weeks. Stale leases are now reclaimed, including a 0-byte
+  lease left by an interrupted create.
+* **A clean exit that left a background process alive was graded `Hung`**,
+  erasing the real failure — a descendant had inherited the stdout pipe handle so
+  EOF never arrived. Containment was working; the instrument was lying. Process
+  trees are now owned and reaped.
+* **macOS: Bash could not write to `/tmp`**, and paths crossing a boundary now
+  report one spelling — three macOS failure clusters at the
+  `/var` → `/private/var` canonicalisation seam. One was a real product defect:
+  the F04 gate's content-addressed digest embedded a per-run temp directory name,
+  so the repeatability gate could never pass.
+* **Windows: the AppContainer child working directory** kept its `\\?\` verbatim
+  prefix where the API would not accept it, and `wcore-sandbox` msvc build and
+  child-read paths were repaired.
+* A headless cron daemon read `read_only` off `Config::default()` rather than the
+  operator's config (`e81509a0`).
+* Sessions that exceeded their ceiling unrecoverably are no longer persisted;
+  session cancel authority, session expiry and interrupted-turn state are now
+  sealed.
+* Channel health stopped claiming an unmeasured negative: `channel probe` no
+  longer reports a result it did not measure, `HealthState::Unauthenticated` has
+  a real producer, and the health gate is opt-in.
+* The Slack start-time `auth.test` is bounded so it cannot stall the gateway.
+* MCP: resource-only servers are supported, and a runtime removal lifecycle was
+  added.
+* Documentation: three claims that the code contradicted were corrected — see
+  Removed.
+
+### Removed
+
+* **`--i-accept-exfil-risk` was removed from the documentation** (`add8a3d1`).
+  The flag never existed. The product answered `error: unexpected argument` while
+  README advertised it as half of a two-key interlock, and the code comments had
+  said so all along. The interlock was **deliberately not added**; the README now
+  describes what actually governs egress. There is no CLI flag and no environment
+  variable for the egress master switch — it is the global `[security]` block or
+  nothing.
+* The "exactly-once" claim was removed from `docs/channels.md` for Slack and
+  Discord, and the adapter count corrected from seven to nine. Matrix's guarantee
+  gained its missing precondition in both `README.md` and `docs/channels.md`.
+* `CEILING_IN_FLIGHT` deleted — a clamp operand that could never be the binding
+  one for any cron trigger variant.
+* A dead frozen secret-deny list was deleted off the TUI boot path.
+
+### Known limitations
+
+These are things we found ourselves, not things a user reported. The full list
+with measured numbers is in
+[`.planning/KNOWN-ISSUES-rc.md`](.planning/KNOWN-ISSUES-rc.md); that document is
+authoritative and should be re-read against the final tag.
+
+**Delivery guarantees.** Three of ten channel adapters have ever been driven at
+the real platform: Slack, Discord and Matrix. Slack and Discord are at-most-once
+(above). Matrix is exactly-once only below its 32,768-char cap. **Telegram,
+WhatsApp, SMS, email, Signal, iMessage and MS Teams are implemented and carry
+their own test suites, but no delivery has been replayed at their real
+destination.** That is evidence about our code and none at all about the
+platform's behaviour. Do not read "implemented" as "measured".
+
+**Certification.** Stale by roughly 2,100 commits. See the notice at the top.
+
+**Proof coverage.** `backend`'s cloud leg is unexercised. `session` and `gateway`
+were driven live on Linux only. `node` was driven on a single host because no
+second machine was available.
+
+**Credentials.** The fail-closed ladder landed with test coverage but has **never
+been exercised against a real OS keyring on any platform**. Two of seven
+credential-shadowing sinks remain deferred. OAuth tokens are stored in plaintext
+despite documentation describing them as encrypted, and on Windows the permission
+hardening on those files is a no-op.
+
+**Supply chain did not succeed.** Signing is proved with throwaway keys and **no
+release has ever been accepted through the chain end to end.**
+`release-please.yml`'s release job is never executable — its `on:` is
+dispatch-only while its condition reads `github.event.head_commit.message`. All
+34 historical releases were cut by `workflow_dispatch`.
+
+**Documentation known to be wrong, and not yet corrected.** Both predate this
+release and both are in `docs/advanced.md`:
+* It states a sub-agent max-turn default of **10**. The code default is
+  `DEFAULT_SUB_AGENT_MAX_TURNS = 200` — a 20× understatement of the only
+  documented spend bound. (It was also 200 at `v0.12.25`.)
+* It states each sub-agent has "its own conversation context and full tool set".
+  Sub-agent tool authority is now intersected with the parent's, so this is not
+  true.
+
+**Other known defects.** Ollama (local inference) cannot make tool calls — chat
+only. `[browser.stealth]` keys are parsed and discarded, and
+`allow_cloud_fallback = false` does not prevent a Browserbase fallback. Voice
+ships enabled by default with an open provider-side 402.
+`RealFs::observe_file` is unimplemented off Unix, which leaves the durable
+filesystem-receipt and crash-reconciliation path inert on Windows; a repair
+exists but was **held back from this candidate as insufficiently proven** rather
+than merged on a Linux-only green.
+
+**Read "test added" as weaker than "control fired" in this codebase.** The single
+largest discovery of this window was that **61 of 86 gate scripts had never been
+shown to fail**, including the anti-vacuity control itself, and including a
+shell-injection guard that grepped its own source and a test that asserted the
+egress vulnerability as a property to preserve. `.config/nextest.toml` carried
+`no-tests = "fail"`, which nextest silently ignores — fail-closed behaviour came
+entirely from a CLI default, the exact dependency the key existed to remove. The
+rule adopted from this, and applied to the entries above: *a gate that cannot
+fail and a gate that cannot pass are the same bug wearing different colours*, and
+*a security property that crosses a process, host or trust boundary must be
+proved by driving the boundary, never by inspecting the source on one side of
+it.*
+
 ## [0.12.25](https://github.com/FerroxLabs/wayland-core/compare/v0.12.24...v0.12.25) (2026-07-13)
 
 **Release highlights — Anvil Smart Loops.** The gated forge is on by default:
