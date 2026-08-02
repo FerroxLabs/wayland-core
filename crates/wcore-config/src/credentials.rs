@@ -410,7 +410,8 @@ impl CredentialsStore for RawKeyringEntries {
     }
 }
 
-/// Maximum UTF-16 code units this crate will put in ONE keyring entry.
+/// Maximum UTF-16 code units this crate will put in ONE **Windows Credential
+/// Manager** entry.
 ///
 /// Windows Credential Manager caps a credential's `CredentialBlob` at
 /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` = 2560 bytes, and the `keyring` crate
@@ -431,7 +432,38 @@ impl CredentialsStore for RawKeyringEntries {
 /// 1000 rather than 1280 leaves headroom for the non-ASCII case, where one
 /// `char` costs two UTF-16 units and a split must still land on a `char`
 /// boundary.
-const KEYRING_MAX_UTF16_UNITS_PER_ENTRY: usize = 1000;
+const WINDOWS_MAX_UTF16_UNITS_PER_ENTRY: usize = 1000;
+
+/// The same ceiling everywhere Windows Credential Manager is not the backend.
+///
+/// macOS Keychain and Linux Secret Service were MEASURED against a bare keyring
+/// entry (`crates/wcore-config/tests/keyring_cap_probe_live.rs`) and both
+/// accepted 1,024,000 UTF-16 units — 1024× the Windows number. Applying the
+/// Windows figure to them turned a ~4.3 KB OAuth token set into five parts plus
+/// a manifest where it fits in ONE entry, which is six times the keyring round
+/// trips and, more importantly, put two whole platforms on the spanned write
+/// path for no reason at all.
+///
+/// 128,000 is deliberately an order of magnitude under the measured floor: the
+/// probe proved those hosts accept at least 1,024,000, not that 1,024,000 is the
+/// limit, and no credential this crate stores comes within range of 128,000
+/// anyway. Reading is unaffected either way — [`chunked_get`] is driven by the
+/// stored manifest, so values that an older build spanned still read back, and
+/// the next rewrite collapses them to a single entry and purges the parts.
+const NON_WINDOWS_MAX_UTF16_UNITS_PER_ENTRY: usize = 128_000;
+
+/// Maximum UTF-16 code units this crate will put in ONE keyring entry on THIS
+/// platform.
+///
+/// The single place the per-backend difference lives; every call site reads it
+/// from here rather than branching on the platform itself.
+const fn keyring_max_utf16_units_per_entry() -> usize {
+    if cfg!(windows) {
+        WINDOWS_MAX_UTF16_UNITS_PER_ENTRY
+    } else {
+        NON_WINDOWS_MAX_UTF16_UNITS_PER_ENTRY
+    }
+}
 
 /// Sentinel that marks a primary entry as a manifest rather than a secret.
 ///
@@ -503,53 +535,172 @@ fn chunk_key(key: &str, generation: char, index: usize) -> String {
     format!("{key}.__wlchunk{generation}{index}")
 }
 
-/// Read a value that may span several keyring entries.
-fn chunked_get(raw: &dyn CredentialsStore, key: &str) -> Result<Option<String>, CredentialsError> {
+/// Where the cross-process lock for one keyring service's spanned writes lives.
+///
+/// Lock identity is derived from what identifies the entry **in the OS keyring**
+/// — the service name and the key — and NOT from whichever credentials path the
+/// caller happened to pass. The keyring is a host-global singleton: two openers
+/// can reach one `(service, key)` pair through different `plaintext_path`s
+/// (`build_ladder` and `open_store(Keyring)` both resolve the same default
+/// service), and a path-derived lock would let exactly those two writers race.
+///
+/// The lockfile itself sits in the profile home, which is per-user and, under
+/// `WAYLAND_HOME`, per-profile — the same directory the migration lock and the
+/// confidential key-creation lock already use.
+#[derive(Clone, Debug)]
+struct ChunkWriteLockSite {
+    dir: PathBuf,
+    /// Digested into the lock filename together with the key, so two keyring
+    /// SERVICES sharing one directory never share a lock.
+    namespace: String,
+    policy: LockPolicy,
+}
+
+impl ChunkWriteLockSite {
+    fn for_service(service: &str) -> Self {
+        Self {
+            dir: crate::config::profile_home(),
+            namespace: service.to_string(),
+            policy: LockPolicy::CREDENTIAL_WRITE,
+        }
+    }
+
+    /// A site rooted at an explicit directory, so a test can exercise the real
+    /// lock without writing lockfiles into the developer's profile home.
+    #[cfg(test)]
+    fn in_dir(dir: &Path, policy: LockPolicy) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            namespace: "test".to_string(),
+            policy,
+        }
+    }
+
+    /// One lock per `(service, key)` rather than one per store: two different
+    /// credentials never contend, and the name is a fixed-length digest so a key
+    /// containing characters no filesystem accepts still gets a lock.
+    fn lock_path(&self, key: &str) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(self.namespace.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(key.as_bytes());
+        let digest = hasher.finalize();
+        let name: String = digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.dir.join(format!(".credentials.chunk.{name}.lock"))
+    }
+
+    /// Hold the whole read-decide-write. Acquisition failure is a REFUSAL, never
+    /// a fall-through to an unlocked write: proceeding without the lock is
+    /// precisely the interleave this guards against.
+    fn acquire(&self, key: &str) -> Result<ExclusiveFileLock, CredentialsError> {
+        // The profile home is created lazily elsewhere, and a credential write
+        // can be the first thing that touches it.
+        secure_credential_dir(&self.dir)?;
+        ExclusiveFileLock::acquire(self.lock_path(key), self.policy, "credential write")
+    }
+}
+
+/// The outcome of assembling a spanned value, separated from the error text so
+/// [`chunked_get`] can tell "this generation is torn" from any other failure and
+/// re-read under the write lock before giving up.
+enum ChunkRead {
+    Value(Option<String>),
+    /// The live manifest claims `count` parts and part `index` is not there.
+    Torn {
+        count: usize,
+        index: usize,
+    },
+}
+
+/// One unsynchronised pass: read the manifest, then read the parts it names.
+fn read_chunked(raw: &dyn CredentialsStore, key: &str) -> Result<ChunkRead, CredentialsError> {
     let Some(primary) = raw.get(key)? else {
-        return Ok(None);
+        return Ok(ChunkRead::Value(None));
     };
     let Some(manifest) = parse_chunk_manifest(&primary) else {
-        return Ok(Some(primary));
+        return Ok(ChunkRead::Value(Some(primary)));
     };
     let mut value = String::new();
     for index in 0..manifest.count {
-        let part = raw.get(&chunk_key(key, manifest.generation, index))?;
-        let Some(part) = part else {
-            // A missing part must be an ERROR, never a short string: returning
-            // the prefix of a credential would hand the caller a secret that
-            // authenticates as nothing and reads as a corrupted-token bug.
-            return Err(CredentialsError::Keyring(format!(
-                "the credential for '{key}' spans {} keyring entries and part {index} is \
-                 missing; refusing to return a truncated secret",
-                manifest.count
-            )));
+        let Some(part) = raw.get(&chunk_key(key, manifest.generation, index))? else {
+            return Ok(ChunkRead::Torn {
+                count: manifest.count,
+                index,
+            });
         };
         value.push_str(&part);
     }
-    Ok(Some(value))
+    Ok(ChunkRead::Value(Some(value)))
+}
+
+/// Read a value that may span several keyring entries.
+///
+/// The common path takes no lock — the commit order makes an unlocked read see
+/// either the whole old value or the whole new one. The one gap it leaves is
+/// narrow and transient: a reader that samples the manifest just BEFORE a writer
+/// flips it, then reads the parts just AFTER that writer purged the superseded
+/// generation, finds a part missing. That is a live, intact credential, so
+/// re-reading once under the write lock (which by then is free, or is held by
+/// the writer we are waiting out) settles it. Only a genuinely torn store
+/// survives the retry, and that still refuses rather than returning a prefix.
+fn chunked_get(
+    raw: &dyn CredentialsStore,
+    key: &str,
+    locks: &ChunkWriteLockSite,
+) -> Result<Option<String>, CredentialsError> {
+    if let ChunkRead::Value(value) = read_chunked(raw, key)? {
+        return Ok(value);
+    }
+    let _lock = locks.acquire(key)?;
+    match read_chunked(raw, key)? {
+        ChunkRead::Value(value) => Ok(value),
+        // A missing part must be an ERROR, never a short string: returning the
+        // prefix of a credential would hand the caller a secret that
+        // authenticates as nothing and reads as a corrupted-token bug.
+        ChunkRead::Torn { count, index } => Err(CredentialsError::Keyring(format!(
+            "the credential for '{key}' spans {count} keyring entries and part {index} is \
+             missing; refusing to return a truncated secret"
+        ))),
+    }
 }
 
 /// Write a value, spanning entries when it exceeds `max_units`.
 ///
-/// COMMIT ORDER, and it is not negotiable: **write the parts → flip the
-/// manifest → purge the old parts.** The manifest is the only thing a reader
-/// consults first, so until it flips the reader still sees the OLD value in
-/// full. The new parts go under the OTHER generation for exactly this reason —
-/// reusing the live generation's entry names would let a process killed
-/// mid-write leave a manifest pointing at a mix of old and new parts, which is
-/// a silently corrupt credential rather than an absent one.
+/// SERIALIZED, and it is not negotiable: the whole read-decide-write runs under
+/// one cross-process lock. The target generation is chosen by reading the live
+/// manifest and taking the other letter — an unsynchronised read-modify-write.
+/// Two writers that read the same manifest choose the SAME target and interleave
+/// their parts into it, and because each writer then commits a manifest naming
+/// its OWN part count, the loser's tail stays spliced onto the winner's head and
+/// both writers return `Ok`. No crash and no injected fault is needed; an
+/// ordinary preemption between the last part write and the manifest write is
+/// enough. Two wayland-core processes on one profile (the CLI and the desktop
+/// host, or two sessions) refreshing an OAuth token set near expiry is the
+/// normal case, and those refresh tokens are single-use, so the splice costs the
+/// user their login. The lock spans the manifest READ as well as the writes,
+/// because the read is the half that makes the decision.
+///
+/// COMMIT ORDER, also not negotiable: **write the parts → flip the manifest →
+/// purge the old parts.** The manifest is the only thing a reader consults
+/// first, so until it flips the reader still sees the OLD value in full. The new
+/// parts go under the OTHER generation for exactly this reason — reusing the
+/// live generation's entry names would let a process killed mid-write leave a
+/// manifest pointing at a mix of old and new parts, which is a silently corrupt
+/// credential rather than an absent one. The lock does not change that ordering;
+/// it only stops a second writer from being the thing that interleaves.
 fn chunked_put(
     raw: &dyn CredentialsStore,
     key: &str,
     value: &str,
     max_units: usize,
+    locks: &ChunkWriteLockSite,
 ) -> Result<(), CredentialsError> {
-    let previous = raw
-        .get(key)
-        .ok()
-        .flatten()
-        .as_deref()
-        .and_then(parse_chunk_manifest);
+    let _lock = locks.acquire(key)?;
+    let previous = read_previous_manifest(raw, key)?;
 
     if utf16_units(value) <= max_units {
         raw.put(key, value)?;
@@ -578,14 +729,42 @@ fn chunked_put(
     Ok(())
 }
 
+/// The live manifest, or `None` when the primary entry is genuinely absent or
+/// holds a literal secret.
+///
+/// A read FAULT is neither of those and must abort the caller. Swallowing it
+/// (the `raw.get(key).ok().flatten()` this replaces) reports "no previous
+/// manifest", which selects generation `'a'` — and if the live value already IS
+/// generation `'a'`, the writer then overwrites the live parts IN PLACE under a
+/// manifest still counting the old part total. That is the corruption the commit
+/// order exists to prevent, reached without any concurrency at all. It is
+/// ordinary to reach: the keyring writability probe is cached for the life of
+/// the process, so a keyring that locks AFTER startup — a screen-locked Secret
+/// Service, a denied Keychain prompt, a transient Windows RPC failure — leaves
+/// this the only guard.
+fn read_previous_manifest(
+    raw: &dyn CredentialsStore,
+    key: &str,
+) -> Result<Option<KeyringChunkManifest>, CredentialsError> {
+    Ok(raw.get(key)?.as_deref().and_then(parse_chunk_manifest))
+}
+
 /// Remove a value and every entry it spans.
-fn chunked_delete(raw: &dyn CredentialsStore, key: &str) -> Result<(), CredentialsError> {
-    let previous = raw
-        .get(key)
-        .ok()
-        .flatten()
-        .as_deref()
-        .and_then(parse_chunk_manifest);
+///
+/// Under the same lock as [`chunked_put`], so a delete cannot land between a
+/// concurrent writer's parts and its manifest, and cannot purge a generation
+/// that writer is in the middle of publishing.
+fn chunked_delete(
+    raw: &dyn CredentialsStore,
+    key: &str,
+    locks: &ChunkWriteLockSite,
+) -> Result<(), CredentialsError> {
+    let _lock = locks.acquire(key)?;
+    // Aborting on a read fault matters MORE here than on the write path: with
+    // the manifest unread we would delete the primary and leave the parts, so a
+    // logout would report success while the refresh token's fragments stayed in
+    // the OS keyring, unreferenced and undeletable by any later call.
+    let previous = read_previous_manifest(raw, key)?;
     // Manifest first: once it is gone no reader can reach the parts, so a
     // process killed here leaves orphans rather than a torn read.
     raw.delete(key)?;
@@ -621,36 +800,46 @@ fn purge_chunks(raw: &dyn CredentialsStore, key: &str, manifest: Option<KeyringC
 /// itself as the user — this keeps lookup O(1) and matches the
 /// `keyring` crate's expected shape.
 ///
-/// A value larger than one entry can hold ([`KEYRING_MAX_UTF16_UNITS_PER_ENTRY`])
-/// is spanned across sibling entries under a manifest, so the Windows blob cap
-/// stops being a functional ceiling on what can be stored. Values that fit are
-/// written literally, exactly as before, so entries written by older builds
-/// keep reading back unchanged.
+/// A value larger than one entry can hold
+/// ([`keyring_max_utf16_units_per_entry`]) is spanned across sibling entries
+/// under a manifest, so the Windows blob cap stops being a functional ceiling on
+/// what can be stored. Values that fit are written literally, exactly as before,
+/// so entries written by older builds keep reading back unchanged.
 pub struct KeyringCredentialsStore {
     raw: RawKeyringEntries,
+    /// The cross-process write lock for this service. Two wayland-core
+    /// processes on one profile write to the SAME OS keyring entries, so
+    /// serializing them cannot be done with an in-process mutex.
+    locks: ChunkWriteLockSite,
 }
 
 impl KeyringCredentialsStore {
     pub fn new(service: impl Into<String>) -> Self {
+        let service = service.into();
         Self {
-            raw: RawKeyringEntries {
-                service: service.into(),
-            },
+            locks: ChunkWriteLockSite::for_service(&service),
+            raw: RawKeyringEntries { service },
         }
     }
 }
 
 impl CredentialsStore for KeyringCredentialsStore {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-        chunked_get(&self.raw, key)
+        chunked_get(&self.raw, key, &self.locks)
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-        chunked_put(&self.raw, key, value, KEYRING_MAX_UTF16_UNITS_PER_ENTRY)
+        chunked_put(
+            &self.raw,
+            key,
+            value,
+            keyring_max_utf16_units_per_entry(),
+            &self.locks,
+        )
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
-        chunked_delete(&self.raw, key)
+        chunked_delete(&self.raw, key, &self.locks)
     }
 }
 
@@ -2002,20 +2191,64 @@ fn warn_no_secure_credential_tier(path: &Path) {
     });
 }
 
-/// Exclusive, self-recovering lock guarding the one-shot migration against a
-/// concurrent opener on the same profile home. Held only for the brief
-/// import+verify+delete window.
+/// How long a lockfile may sit untouched before a waiter treats its holder as
+/// crashed and steals it, and how long a waiter spins before giving up.
 ///
-/// It is a create-`O_EXCL` lockfile (atomic on every platform). A concurrent
-/// migrator spins briefly for it; a holder that CRASHED leaves a stale lockfile
-/// that is stolen once it ages past a minute (so a crash defers migration by at
-/// most that long — and until then the plaintext store keeps serving, so no
-/// secret is ever lost). The lockfile is removed on drop.
+/// Both are per-site because the two things this lock guards have different
+/// shapes: a migration that cannot run right now is simply deferred to the next
+/// open, whereas a credential write that cannot take its lock must REFUSE —
+/// writing unlocked is the defect the lock exists to close.
+#[derive(Clone, Copy, Debug)]
+struct LockPolicy {
+    stale_after: std::time::Duration,
+    wait_ceiling: std::time::Duration,
+}
+
+impl LockPolicy {
+    /// A holder that has not finished in a minute is treated as crashed. Long
+    /// enough that no healthy holder is ever stolen from (both the migration and
+    /// a spanned keyring write are sub-second), short enough that a crash costs
+    /// at most that long.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+    /// Poll interval while waiting. The uncontended path never sleeps at all —
+    /// the first `create_new` succeeds.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// Migration: give up quickly. The plaintext store keeps serving in the
+    /// meantime, so deferring to the next open loses nothing.
+    const MIGRATION: Self = Self {
+        stale_after: Self::STALE_AFTER,
+        wait_ceiling: std::time::Duration::from_secs(10),
+    };
+
+    /// Credential writes: out-wait the staleness threshold. A ceiling BELOW
+    /// `stale_after` would turn a crashed holder into a hard refusal for every
+    /// writer until the crash aged out; sitting just past it means the stale
+    /// steal is always reached and the write proceeds instead.
+    const CREDENTIAL_WRITE: Self = Self {
+        stale_after: Self::STALE_AFTER,
+        wait_ceiling: std::time::Duration::from_secs(65),
+    };
+}
+
+/// Exclusive, self-recovering cross-process lock: a create-`O_EXCL` lockfile,
+/// which is atomic on every platform.
 ///
-/// This matters because two migrators that both saw no `.enc`/`.kdf` would
-/// generate DIFFERENT random salts and interleave their two-file writes into a
-/// mismatched (undecryptable) vault — serializing here prevents that.
-struct MigrationLock {
+/// A concurrent holder is spun for; a holder that CRASHED leaves a stale
+/// lockfile that is stolen once it ages past [`LockPolicy::stale_after`]. The
+/// lockfile is removed on drop.
+///
+/// Two callers, one mechanism:
+///
+/// * the one-shot plaintext→vault migration ([`migrate_plaintext_into_vault`]),
+///   because two migrators that both saw no `.enc`/`.kdf` would generate
+///   DIFFERENT random salts and interleave their two-file writes into a
+///   mismatched (undecryptable) vault;
+/// * every spanned keyring write ([`chunked_put`] / [`chunked_delete`]),
+///   because the target generation is chosen by READING the live manifest, and
+///   two writers that read the same manifest would choose the same target and
+///   interleave their parts into it.
+struct ExclusiveFileLock {
     path: PathBuf,
     /// Unique per-acquisition token stamped into the lockfile, so `drop` only
     /// removes a lockfile that is STILL ours — never one a concurrent stealer
@@ -2023,9 +2256,10 @@ struct MigrationLock {
     nonce: String,
 }
 
-impl MigrationLock {
-    fn acquire(dir: &Path) -> Result<Self, CredentialsError> {
-        let path = dir.join(".credentials.migrate.lock");
+impl ExclusiveFileLock {
+    /// `label` names the lock in the busy error, so a caller can tell a wedged
+    /// migration from a wedged credential write.
+    fn acquire(path: PathBuf, policy: LockPolicy, label: &str) -> Result<Self, CredentialsError> {
         // Unique per acquisition (pid + a process-local sequence) so different
         // processes/acquisitions never collide.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2034,9 +2268,8 @@ impl MigrationLock {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        // ~10s ceiling (200 × 50ms) — migration itself is sub-second; this only
-        // waits out a genuinely concurrent migrator.
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + policy.wait_ceiling;
+        loop {
             match std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -2051,37 +2284,39 @@ impl MigrationLock {
                     return Ok(Self { path, nonce });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Self::is_stale(&path) {
+                    if Self::is_stale(&path, policy.stale_after) {
                         // Crashed holder — steal it and re-race the create_new
                         // (whoever wins the atomic create proceeds).
                         let _ = std::fs::remove_file(&path);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
                     }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(CredentialsError::BackendUnavailable(format!(
+                            "the {label} lock at {} is held by another process and did not \
+                             free within {:?}",
+                            path.display(),
+                            policy.wait_ceiling
+                        )));
+                    }
+                    std::thread::sleep(LockPolicy::POLL);
                 }
                 Err(e) => return Err(CredentialsError::Io(e)),
             }
         }
-        Err(CredentialsError::BackendUnavailable(
-            "credentials migration lock is busy; will retry on next open".into(),
-        ))
     }
 
-    /// A lockfile older than a minute is treated as abandoned by a crashed
+    /// A lockfile older than `stale_after` is treated as abandoned by a crashed
     /// holder. Any error reading the mtime (clock skew, missing) → not stale.
-    fn is_stale(path: &Path) -> bool {
+    fn is_stale(path: &Path, stale_after: std::time::Duration) -> bool {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
-            .map(|t| {
-                t.elapsed()
-                    .map(|age| age > std::time::Duration::from_secs(60))
-            })
+            .map(|t| t.elapsed().map(|age| age > stale_after))
             .map(|r| r.unwrap_or(false))
             .unwrap_or(false)
     }
 }
 
-impl Drop for MigrationLock {
+impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
         // Remove ONLY if the lockfile still carries our nonce. If a stale-steal
         // replaced it with another holder's token, deleting it would let a third
@@ -2114,7 +2349,7 @@ impl Drop for MigrationLock {
 ///   * A `.enc` with no `.kdf` can only be a crash artifact of an interrupted
 ///     write (a healthy vault has both); it is permanently undecryptable, and
 ///     the plaintext still holds the truth, so it is discarded and rebuilt.
-///   * The whole sequence runs under [`MigrationLock`] so two concurrent
+///   * The whole sequence runs under an [`ExclusiveFileLock`] so two concurrent
 ///     openers cannot corrupt the vault with mismatched salts.
 ///
 /// Only runs when non-interactive unlock material is present, so `open_store`
@@ -2137,7 +2372,11 @@ fn migrate_plaintext_into_vault(
 
     // Serialize against a concurrent opener on the same home for the whole
     // import → verify → delete window.
-    let _lock = MigrationLock::acquire(dir)?;
+    let _lock = ExclusiveFileLock::acquire(
+        dir.join(".credentials.migrate.lock"),
+        LockPolicy::MIGRATION,
+        "credentials migration",
+    )?;
 
     // Re-read UNDER the lock — a migrator we waited on may have already
     // finished and removed the plaintext file.
@@ -3041,7 +3280,7 @@ pub fn warn_if_world_readable(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     /// The startup availability probe must agree with the opener and must
     /// change nothing while answering.
@@ -4263,7 +4502,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".credentials.migrate.lock");
         {
-            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            let _lock =
+                ExclusiveFileLock::acquire(path.clone(), LockPolicy::MIGRATION, "test").unwrap();
             assert!(path.exists());
             std::fs::write(&path, "another-process-nonce").unwrap();
             // _lock drops here.
@@ -4277,7 +4517,8 @@ mod tests {
         // its own lock on drop.
         std::fs::remove_file(&path).unwrap();
         {
-            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            let _lock =
+                ExclusiveFileLock::acquire(path.clone(), LockPolicy::MIGRATION, "test").unwrap();
             assert!(path.exists());
         }
         assert!(!path.exists(), "drop removes our own lockfile");
@@ -4599,6 +4840,15 @@ mod tests {
         }
     }
 
+    /// A write-lock site rooted in a fresh temp dir. The real cross-process
+    /// lock is exercised — only its LOCATION is redirected, so no test writes a
+    /// lockfile into the developer's profile home.
+    fn chunk_locks() -> (TempDir, ChunkWriteLockSite) {
+        let dir = tempdir().unwrap();
+        let locks = ChunkWriteLockSite::in_dir(dir.path(), LockPolicy::CREDENTIAL_WRITE);
+        (dir, locks)
+    }
+
     /// A realistically sized OAuth token set: access JWT + id JWT + refresh
     /// token. ~3.4 KB, which is what makes this defect a real Windows
     /// regression rather than a theoretical one.
@@ -4629,11 +4879,13 @@ mod tests {
     /// fit, and a Windows user cannot log in.
     #[test]
     fn an_oauth_token_set_round_trips_across_the_windows_blob_cap() {
+        let (_lock_dir, locks) = chunk_locks();
         let raw = CapsBlobLikeWindows::new(1280);
         let value = oauth_token_set_json();
 
-        chunked_put(&raw, "oauth.chatgpt.tokens", &value, 1000).expect("spanned write must land");
-        let read_back = chunked_get(&raw, "oauth.chatgpt.tokens").expect("read");
+        chunked_put(&raw, "oauth.chatgpt.tokens", &value, 1000, &locks)
+            .expect("spanned write must land");
+        let read_back = chunked_get(&raw, "oauth.chatgpt.tokens", &locks).expect("read");
 
         assert_eq!(
             read_back.as_deref(),
@@ -4657,8 +4909,16 @@ mod tests {
     /// builds that predate spanning keep reading back unchanged.
     #[test]
     fn a_small_value_is_stored_literally_and_reads_back() {
+        let (_lock_dir, locks) = chunk_locks();
         let raw = CapsBlobLikeWindows::new(1280);
-        chunked_put(&raw, "providers.anthropic.api_key", "sk-ant-123", 1000).unwrap();
+        chunked_put(
+            &raw,
+            "providers.anthropic.api_key",
+            "sk-ant-123",
+            1000,
+            &locks,
+        )
+        .unwrap();
         assert_eq!(
             raw.entries
                 .lock()
@@ -4669,7 +4929,7 @@ mod tests {
             "a value that fits must not be wrapped in a manifest"
         );
         assert_eq!(
-            chunked_get(&raw, "providers.anthropic.api_key")
+            chunked_get(&raw, "providers.anthropic.api_key", &locks)
                 .unwrap()
                 .as_deref(),
             Some("sk-ant-123")
@@ -4681,15 +4941,16 @@ mod tests {
     /// names and the manifest flip is the commit point.
     #[test]
     fn rewriting_a_spanned_value_alternates_generations_and_purges_the_old_one() {
+        let (_lock_dir, locks) = chunk_locks();
         let raw = CapsBlobLikeWindows::new(1280);
         let first = "A".repeat(4000);
         let second = "B".repeat(5000);
 
-        chunked_put(&raw, "k", &first, 1000).unwrap();
+        chunked_put(&raw, "k", &first, 1000, &locks).unwrap();
         let gen_a = parse_chunk_manifest(&raw.get("k").unwrap().unwrap()).expect("manifest");
         assert_eq!(gen_a.generation, 'a');
 
-        chunked_put(&raw, "k", &second, 1000).unwrap();
+        chunked_put(&raw, "k", &second, 1000, &locks).unwrap();
         let gen_b = parse_chunk_manifest(&raw.get("k").unwrap().unwrap()).expect("manifest");
         assert_eq!(
             gen_b.generation, 'b',
@@ -4697,7 +4958,7 @@ mod tests {
         );
 
         assert_eq!(
-            chunked_get(&raw, "k").unwrap().as_deref(),
+            chunked_get(&raw, "k", &locks).unwrap().as_deref(),
             Some(second.as_str())
         );
         assert!(
@@ -4715,12 +4976,13 @@ mod tests {
     /// and reads to them as a corrupted-token bug rather than a storage fault.
     #[test]
     fn a_missing_part_refuses_rather_than_returning_a_truncated_secret() {
+        let (_lock_dir, locks) = chunk_locks();
         let raw = CapsBlobLikeWindows::new(1280);
         let value = "Z".repeat(4000);
-        chunked_put(&raw, "k", &value, 1000).unwrap();
+        chunked_put(&raw, "k", &value, 1000, &locks).unwrap();
         raw.entries.lock().unwrap().remove(&chunk_key("k", 'a', 2));
 
-        let error = chunked_get(&raw, "k").expect_err("a torn value must not read back");
+        let error = chunked_get(&raw, "k", &locks).expect_err("a torn value must not read back");
         assert!(
             error
                 .to_string()
@@ -4733,17 +4995,18 @@ mod tests {
     /// leftover part is a secret that survived a logout.
     #[test]
     fn deleting_a_spanned_value_removes_every_entry() {
+        let (_lock_dir, locks) = chunk_locks();
         let raw = CapsBlobLikeWindows::new(1280);
-        chunked_put(&raw, "k", &"Q".repeat(4000), 1000).unwrap();
+        chunked_put(&raw, "k", &"Q".repeat(4000), 1000, &locks).unwrap();
         assert!(raw.entries.lock().unwrap().len() > 1);
 
-        chunked_delete(&raw, "k").unwrap();
+        chunked_delete(&raw, "k", &locks).unwrap();
         assert!(
             raw.entries.lock().unwrap().is_empty(),
             "logout left {:?} behind",
             raw.entries.lock().unwrap().keys().collect::<Vec<_>>()
         );
-        assert!(chunked_get(&raw, "k").unwrap().is_none());
+        assert!(chunked_get(&raw, "k", &locks).unwrap().is_none());
     }
 
     /// The split must land on `char` boundaries and must count UTF-16 units,
@@ -5206,6 +5469,894 @@ mod tests {
                 .to_string()
                 .contains("readable by accounts other than its owner"),
             "the refusal must say why and how to fix it: {error}"
+        );
+    }
+}
+
+// ===========================================================================
+// Spanned-write concurrency proofs.
+//
+// `chunked_put` chooses its target generation by READING the live manifest and
+// taking the other letter. Without a lock that is a read-modify-write with no
+// compare-and-swap, so two writers that read the same manifest choose the SAME
+// target and interleave their parts into it — and both return `Ok`. These tests
+// pin the schedule that does it. They contain no injected faults: an ordinary
+// preemption between a writer's last part write and its manifest write is all
+// it takes, and any OS may impose one at any time.
+//
+// Delete the `locks.acquire(key)?` line from `chunked_put` and
+// `a_second_writer_cannot_commit_over_a_parked_writers_parts` fails with
+// `len=9000 tags=[BA]` — B's first 3000 bytes spliced onto A's last 6000.
+// ===========================================================================
+#[cfg(test)]
+mod chunk_write_lock_verification {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    #[derive(Default)]
+    struct Shared {
+        entries: Mutex<HashMap<String, String>>,
+    }
+
+    /// A view of the shared store that can hand control to the other writer at a
+    /// named point. Each individual entry op is atomic, exactly as a keyring
+    /// daemon makes it; only the multi-op SEQUENCE is left unserialised, which is
+    /// the whole question.
+    struct Scheduled {
+        shared: Arc<Shared>,
+        /// Fired the first time this writer is about to commit its manifest.
+        at_manifest: Mutex<Option<Sender<()>>>,
+        /// Waited on before that commit proceeds.
+        resume: Mutex<Option<Receiver<()>>>,
+    }
+
+    impl Scheduled {
+        fn plain(shared: &Arc<Shared>) -> Self {
+            Self {
+                shared: Arc::clone(shared),
+                at_manifest: Mutex::new(None),
+                resume: Mutex::new(None),
+            }
+        }
+    }
+
+    impl CredentialsStore for Scheduled {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            Ok(self.shared.entries.lock().unwrap().get(key).cloned())
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            if value.starts_with(KEYRING_CHUNK_MANIFEST_PREFIX) {
+                // Writer A is preempted here: its parts are all committed, its
+                // manifest is not.
+                if let Some(tx) = self.at_manifest.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.resume.lock().unwrap().take() {
+                    let _ = rx.recv();
+                }
+            }
+            self.shared
+                .entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.shared.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// THE RELEASE BLOCKER. Two token refreshes of one provider, scheduled so
+    /// that the second writer runs entirely inside the first writer's
+    /// read-decide-write window.
+    ///
+    /// The invariant is not "one of them wins" but "the committed value is one
+    /// whole token set". Splicing is worse than losing a write: ChatGPT refresh
+    /// tokens rotate and are single-use, so both are burned server-side, the next
+    /// `load` gets malformed JSON, and the user must re-authenticate.
+    #[test]
+    fn a_second_writer_cannot_commit_over_a_parked_writers_parts() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), LockPolicy::CREDENTIAL_WRITE);
+        let shared = Arc::new(Shared::default());
+        let seeded = "S".repeat(6000);
+
+        // A live spanned value, generation 'a'.
+        chunked_put(&Scheduled::plain(&shared), KEY, &seeded, UNITS, &locks).unwrap();
+
+        let (reached_tx, reached_rx) = channel::<()>();
+        let (resume_tx, resume_rx) = channel::<()>();
+
+        // Writer A: the long token set. Parked just before its manifest commit,
+        // after all nine of its parts have landed.
+        let a_shared = Arc::clone(&shared);
+        let a_locks = locks.clone();
+        let writer_a = std::thread::spawn(move || {
+            let store = Scheduled {
+                shared: a_shared,
+                at_manifest: Mutex::new(Some(reached_tx)),
+                resume: Mutex::new(Some(resume_rx)),
+            };
+            chunked_put(&store, KEY, &"A".repeat(9000), UNITS, &a_locks)
+        });
+        reached_rx
+            .recv()
+            .expect("writer A reaches its manifest commit");
+
+        // Writer B: a short token set, launched while A is parked.
+        let b_shared = Arc::clone(&shared);
+        let b_locks = locks.clone();
+        let (b_entered_tx, b_entered_rx) = channel::<()>();
+        let writer_b = std::thread::spawn(move || {
+            let store = Scheduled::plain(&b_shared);
+            b_entered_tx.send(()).unwrap();
+            chunked_put(&store, KEY, &"B".repeat(3000), UNITS, &b_locks)
+        });
+        b_entered_rx.recv().expect("writer B starts");
+
+        // B must make no progress while A holds the lock. The lock polls every
+        // 50ms, so this gives it several real chances to break in. This can only
+        // fail if the lock does not hold; a slow host makes it MORE likely to
+        // pass, so it is not a timing flake.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            chunked_get(&Scheduled::plain(&shared), KEY, &locks)
+                .unwrap()
+                .as_deref(),
+            Some(seeded.as_str()),
+            "while writer A is inside its read-decide-write, no other writer may commit"
+        );
+
+        resume_tx.send(()).unwrap();
+        writer_a.join().unwrap().expect("writer A reports success");
+        writer_b.join().unwrap().expect("writer B reports success");
+
+        let final_value = chunked_get(&Scheduled::plain(&shared), KEY)
+            .unwrap()
+            .expect("a credential must still be present");
+        let mut tags: Vec<char> = final_value.chars().collect();
+        tags.dedup();
+        let tags: String = tags.into_iter().collect();
+        assert_eq!(
+            final_value,
+            "B".repeat(3000),
+            "the writers must serialize (A whole, then B whole); got len={} tags=[{tags}]",
+            final_value.len()
+        );
+    }
+
+    /// Free-running version of the same thing: no scheduling at all, just many
+    /// rounds of two racing refreshes. Weaker than the pinned schedule above and
+    /// kept for exactly that reason — it is the shape a real host produces.
+    #[test]
+    fn racing_writers_never_yield_a_spliced_credential() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), LockPolicy::CREDENTIAL_WRITE);
+        let candidates = ["A".repeat(9000), "B".repeat(3000)];
+
+        for attempt in 0..50 {
+            let shared = Arc::new(Shared::default());
+            chunked_put(
+                &Scheduled::plain(&shared),
+                KEY,
+                &"S".repeat(6000),
+                UNITS,
+                &locks,
+            )
+            .unwrap();
+
+            let barrier = Arc::new(std::sync::Barrier::new(candidates.len()));
+            let mut handles = Vec::new();
+            for value in candidates.clone() {
+                let shared = Arc::clone(&shared);
+                let barrier = Arc::clone(&barrier);
+                let locks = locks.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    chunked_put(&Scheduled::plain(&shared), KEY, &value, UNITS, &locks)
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap().expect("both writers must succeed");
+            }
+
+            let value = chunked_get(&Scheduled::plain(&shared), KEY)
+                .unwrap()
+                .expect("a credential must still be present");
+            assert!(
+                candidates.contains(&value),
+                "attempt {attempt}: the store committed a value that is NEITHER token set \
+                 (len={})",
+                value.len()
+            );
+        }
+    }
+
+    /// A holder that DIED still holds its lockfile — `abort`, SIGKILL and a power
+    /// cut all skip `Drop`. The lock must recover itself rather than wedge every
+    /// future credential write on the profile.
+    #[test]
+    fn a_dead_holders_lock_is_recovered_rather_than_wedging_writes() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let policy = LockPolicy {
+            stale_after: std::time::Duration::from_millis(50),
+            wait_ceiling: std::time::Duration::from_secs(5),
+        };
+        let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), policy);
+
+        // Exactly what a killed holder leaves behind: the lockfile, another
+        // process's nonce in it, and nobody to remove it.
+        let abandoned = locks.lock_path(KEY);
+        std::fs::create_dir_all(lock_dir.path()).unwrap();
+        std::fs::write(&abandoned, "9999999-0").unwrap();
+
+        let shared = Arc::new(Shared::default());
+        chunked_put(
+            &Scheduled::plain(&shared),
+            KEY,
+            &"R".repeat(4000),
+            UNITS,
+            &locks,
+        )
+        .expect("a write must not be wedged forever by a dead holder");
+        assert_eq!(
+            chunked_get(&Scheduled::plain(&shared), KEY)
+                .unwrap()
+                .as_deref(),
+            Some("R".repeat(4000).as_str())
+        );
+        assert!(
+            !abandoned.exists(),
+            "the recovered lock must be released again on drop"
+        );
+    }
+
+    /// A lock that cannot be taken is a REFUSAL. Falling through to an unlocked
+    /// write would restore the defect precisely when contention is highest.
+    #[test]
+    fn a_write_that_cannot_take_the_lock_refuses_rather_than_racing() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let policy = LockPolicy {
+            // Long enough that the live holder below is never judged stale.
+            stale_after: std::time::Duration::from_secs(60),
+            wait_ceiling: std::time::Duration::from_millis(120),
+        };
+        let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), policy);
+        let shared = Arc::new(Shared::default());
+        chunked_put(
+            &Scheduled::plain(&shared),
+            KEY,
+            &"L".repeat(4000),
+            UNITS,
+            &locks,
+        )
+        .unwrap();
+
+        let _held = locks.acquire(KEY).expect("first acquisition");
+        let error = chunked_put(
+            &Scheduled::plain(&shared),
+            KEY,
+            &"M".repeat(4000),
+            UNITS,
+            &locks,
+        )
+        .expect_err("a write that cannot serialize must not proceed");
+        assert!(
+            error.to_string().contains("credential write"),
+            "the refusal must name the lock it could not take: {error}"
+        );
+        assert_eq!(
+            chunked_get(&Scheduled::plain(&shared), KEY)
+                .unwrap()
+                .as_deref(),
+            Some("L".repeat(4000).as_str()),
+            "the refused write must leave the live credential untouched"
+        );
+    }
+
+    /// Lock identity must track the OS keyring entry, not the caller. Two
+    /// services, or two keys, are two locks; the same pair is one lock however
+    /// many store handles exist.
+    #[test]
+    fn lock_identity_follows_the_service_and_key() {
+        let one = ChunkWriteLockSite::for_service("wayland-core");
+        let two = ChunkWriteLockSite::for_service("wayland-core");
+        let other = ChunkWriteLockSite::for_service("wayland-core.profile.deadbeef");
+
+        assert_eq!(
+            one.lock_path(KEY),
+            two.lock_path(KEY),
+            "two handles on one service+key must contend for ONE lock"
+        );
+        assert_ne!(
+            one.lock_path(KEY),
+            one.lock_path("oauth.claude.tokens"),
+            "different credentials must not contend"
+        );
+        assert_ne!(
+            one.lock_path(KEY),
+            other.lock_path(KEY),
+            "different keyring services address different entries"
+        );
+        // A key that is not a legal filename must still get a lock.
+        let awkward = one.lock_path("oauth./../../etc/passwd\0.tokens");
+        assert_eq!(awkward.parent(), Some(one.dir.as_path()));
+    }
+}
+
+// ===========================================================================
+// A read fault on the primary entry must ABORT the write.
+//
+// `chunked_put` used to open with `raw.get(key).ok().flatten()`, so a read ERROR
+// was indistinguishable from "there is no previous manifest" and selected
+// generation 'a'. When the live value already IS generation 'a' that overwrites
+// the live parts IN PLACE, under a manifest still counting the old part total —
+// the one thing the commit order exists to prevent, reached with no concurrency
+// at all.
+//
+// It is ordinary to reach: `keyring_available` is cached for the life of the
+// process, so a keyring that locks AFTER startup (screen-locked Secret Service,
+// a denied Keychain prompt, a transient Windows RPC failure) lands here.
+// ===========================================================================
+#[cfg(test)]
+mod chunk_read_fault_verification {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    #[derive(Default)]
+    struct FaultingStore {
+        entries: Mutex<HashMap<String, String>>,
+        fail_primary_get: AtomicBool,
+    }
+
+    impl CredentialsStore for FaultingStore {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            if self.fail_primary_get.load(Ordering::SeqCst) && !key.contains("__wlchunk") {
+                return Err(CredentialsError::Keyring("injected read fault".into()));
+            }
+            Ok(self.entries.lock().unwrap().get(key).cloned())
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    fn locks(dir: &std::path::Path) -> ChunkWriteLockSite {
+        ChunkWriteLockSite::in_dir(dir, LockPolicy::CREDENTIAL_WRITE)
+    }
+
+    /// Shrinking is the sharp case: the new value needs FEWER parts than the live
+    /// manifest counts, so an in-place reuse of generation 'a' leaves the reader
+    /// splicing the new head onto the old tail.
+    #[test]
+    fn a_read_fault_on_the_primary_entry_aborts_the_write() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = locks(lock_dir.path());
+        let raw = FaultingStore::default();
+        let live = "O".repeat(9000);
+        chunked_put(&raw, KEY, &live, UNITS, &locks).unwrap();
+
+        raw.fail_primary_get.store(true, Ordering::SeqCst);
+        let error = chunked_put(&raw, KEY, &"N".repeat(2500), UNITS, &locks)
+            .expect_err("a write that cannot read the live manifest must abort");
+        assert!(
+            error.to_string().contains("injected read fault"),
+            "the write must surface the read fault, not invent a fresh generation: {error}"
+        );
+
+        raw.fail_primary_get.store(false, Ordering::SeqCst);
+        assert_eq!(
+            chunked_get(&raw, KEY, &locks).unwrap().as_deref(),
+            Some(live.as_str()),
+            "the live credential must be byte-identical after the aborted write"
+        );
+    }
+
+    /// The same for delete. Proceeding without the manifest would remove the
+    /// primary and strand the parts: a logout reporting success while the refresh
+    /// token's fragments stay in the OS keyring, unreferenced and unreachable by
+    /// any later call.
+    #[test]
+    fn a_read_fault_aborts_a_delete_rather_than_stranding_the_parts() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = locks(lock_dir.path());
+        let raw = FaultingStore::default();
+        chunked_put(&raw, KEY, &"O".repeat(9000), UNITS, &locks).unwrap();
+        let before = raw.entries.lock().unwrap().len();
+
+        raw.fail_primary_get.store(true, Ordering::SeqCst);
+        chunked_delete(&raw, KEY, &locks).expect_err("a blind delete must not proceed");
+
+        raw.fail_primary_get.store(false, Ordering::SeqCst);
+        assert_eq!(
+            raw.entries.lock().unwrap().len(),
+            before,
+            "the refused delete must not have removed anything"
+        );
+
+        // And once the keyring answers again, the delete removes every entry.
+        chunked_delete(&raw, KEY, &locks).unwrap();
+        assert!(
+            raw.entries.lock().unwrap().is_empty(),
+            "logout left {:?} behind",
+            raw.entries.lock().unwrap().keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// An absent primary entry is NOT a fault: a first write must still work.
+    #[test]
+    fn an_absent_primary_entry_is_not_a_read_fault() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = locks(lock_dir.path());
+        let raw = FaultingStore::default();
+        chunked_put(&raw, KEY, &"F".repeat(4000), UNITS, &locks)
+            .expect("a first write has no previous manifest and must succeed");
+        assert_eq!(
+            chunked_get(&raw, KEY, &locks).unwrap().as_deref(),
+            Some("F".repeat(4000).as_str())
+        );
+    }
+
+    /// The per-backend ceiling (c): the Windows number is 1024× too small for
+    /// macOS and Linux, and applying it there put both platforms on the spanned
+    /// path — where the two defects above live — for a value that fits in one
+    /// entry.
+    #[test]
+    fn the_per_entry_ceiling_is_the_backends_own() {
+        let measured_windows_cap = 1280;
+        assert!(
+            keyring_max_utf16_units_per_entry() <= measured_windows_cap,
+            "a threshold above the Windows blob cap would make `auth login` fail there"
+        );
+        if cfg!(windows) {
+            assert_eq!(keyring_max_utf16_units_per_entry(), 1000);
+        } else {
+            // Measured floor on macOS Keychain and Linux Secret Service.
+            assert!(
+                keyring_max_utf16_units_per_entry() <= 1_024_000 / 8,
+                "keep a wide margin under the measured floor"
+            );
+            assert!(keyring_max_utf16_units_per_entry() > 20_000);
+        }
+    }
+
+    /// Defence in depth, stated as a property: an OAuth-sized token set does not
+    /// span on macOS or Linux, and still does on Windows.
+    #[test]
+    fn an_oauth_token_set_only_spans_where_the_backend_forces_it() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = locks(lock_dir.path());
+        let raw = FaultingStore::default();
+        let jwt = format!("hdr.{}.sig", "P".repeat(1400));
+        let token_set = format!(
+            r#"{{"access_token":"{jwt}","id_token":"{jwt}","refresh_token":"{}"}}"#,
+            "R".repeat(500)
+        );
+        assert!(
+            utf16_units(&token_set) > 1280,
+            "the fixture must exceed the Windows cap"
+        );
+
+        chunked_put(
+            &raw,
+            KEY,
+            &token_set,
+            keyring_max_utf16_units_per_entry(),
+            &locks,
+        )
+        .unwrap();
+        let spanned = raw
+            .entries
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains("__wlchunk"));
+        assert_eq!(
+            spanned,
+            cfg!(windows),
+            "a token set must span only where the backend's own ceiling forces it"
+        );
+        assert_eq!(
+            chunked_get(&raw, KEY, &locks).unwrap().as_deref(),
+            Some(token_set.as_str())
+        );
+    }
+
+    /// A value an older build spanned under the 1000-unit threshold must still
+    /// read back after the threshold is raised, and the next rewrite must collapse
+    /// it to one entry and purge the parts.
+    #[test]
+    fn values_spanned_by_an_older_build_still_read_and_then_collapse() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = locks(lock_dir.path());
+        let raw = FaultingStore::default();
+        let legacy = "V".repeat(4000);
+
+        // Written the way the previous build wrote it, everywhere.
+        chunked_put(&raw, KEY, &legacy, 1000, &locks).unwrap();
+        assert!(
+            raw.entries
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|key| key.contains("__wlchunk")),
+            "the fixture must actually be spanned"
+        );
+        assert_eq!(
+            chunked_get(&raw, KEY, &locks).unwrap().as_deref(),
+            Some(legacy.as_str()),
+            "raising the threshold must not orphan values written under the old one"
+        );
+
+        chunked_put(
+            &raw,
+            KEY,
+            &legacy,
+            keyring_max_utf16_units_per_entry(),
+            &locks,
+        )
+        .unwrap();
+        let still_spanned = raw
+            .entries
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains("__wlchunk"));
+        assert_eq!(
+            still_spanned,
+            cfg!(windows),
+            "off Windows the rewrite must collapse to one entry and purge the parts"
+        );
+        assert_eq!(
+            chunked_get(&raw, KEY, &locks).unwrap().as_deref(),
+            Some(legacy.as_str())
+        );
+    }
+}
+
+// ===========================================================================
+// Crash safety, asserted by EXECUTION rather than by reading the commit order.
+//
+// A child process is killed with `abort()` at every mutating step of a spanned
+// write; the parent then reads the store back and demands the complete OLD
+// value, the complete NEW value, or a clean error — never a mix and never a
+// prefix. Ported from the verify-cred lane so the property the write lock must
+// not break keeps being measured after every change to this path.
+// ===========================================================================
+#[cfg(test)]
+mod chunk_crash_injection {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One file per entry, each written temp+rename.
+    ///
+    /// This models what a keyring daemon actually gives us: an individual entry
+    /// commit is atomic and out of our address space, so killing OUR process can
+    /// never leave one ENTRY half-written — it can only leave the SEQUENCE of
+    /// entry writes half-finished. That sequence is precisely what the
+    /// "parts → manifest → purge" order claims to make safe.
+    struct FileStore {
+        dir: PathBuf,
+        /// `abort()` immediately BEFORE the op with this 0-based index, so
+        /// `crash_at = n` means ops 0..n landed and op n never happened.
+        crash_at: usize,
+        ops: AtomicUsize,
+    }
+
+    impl FileStore {
+        fn open(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                crash_at: usize::MAX,
+                ops: AtomicUsize::new(0),
+            }
+        }
+        fn crashing(dir: &Path, crash_at: usize) -> Self {
+            Self {
+                crash_at,
+                ..Self::open(dir)
+            }
+        }
+        fn path(&self, key: &str) -> PathBuf {
+            let mut name = String::new();
+            for byte in key.as_bytes() {
+                name.push_str(&format!("{byte:02x}"));
+            }
+            self.dir.join(name)
+        }
+        /// Count this mutating op; abort the process if it is the injected one.
+        fn tick(&self) {
+            if self.ops.fetch_add(1, Ordering::SeqCst) == self.crash_at {
+                // Hard kill. No unwinding, no Drop (so the write lock is left
+                // exactly as a crashed holder leaves it), no buffer flush — the
+                // closest thing to a power cut a test can produce.
+                std::process::abort();
+            }
+        }
+        fn entry_names(dir: &Path) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|entry| {
+                    let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                    let bytes: Vec<u8> = (0..name.len())
+                        .step_by(2)
+                        .filter_map(|i| u8::from_str_radix(name.get(i..i + 2)?, 16).ok())
+                        .collect();
+                    String::from_utf8(bytes).ok()
+                })
+                .collect();
+            out.sort();
+            out
+        }
+    }
+
+    impl CredentialsStore for FileStore {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            match std::fs::read_to_string(self.path(key)) {
+                Ok(value) => Ok(Some(value)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(CredentialsError::Io(e)),
+            }
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            self.tick();
+            let final_path = self.path(key);
+            let tmp = final_path.with_extension("tmp");
+            std::fs::write(&tmp, value)?;
+            std::fs::rename(&tmp, &final_path)?;
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.tick();
+            match std::fs::remove_file(self.path(key)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    /// The lock a crashed holder leaves behind must not wedge the survivor. A
+    /// short staleness window keeps the sweep quick; only ONE writer is ever live
+    /// here, so nothing is being raced.
+    fn sweep_locks(dir: &Path) -> ChunkWriteLockSite {
+        ChunkWriteLockSite::in_dir(
+            dir,
+            LockPolicy {
+                stale_after: std::time::Duration::from_millis(20),
+                wait_ceiling: std::time::Duration::from_secs(10),
+            },
+        )
+    }
+
+    fn value_of(tag: char, len: usize) -> String {
+        String::from(tag).repeat(len)
+    }
+
+    // -- child mode -------------------------------------------------------
+    // Re-entered as a subprocess by the sweeps below. Not a test in its own
+    // right; it early-returns when the harness env is absent.
+    #[test]
+    fn crash_child() {
+        let Ok(dir) = std::env::var("WLV_DIR") else {
+            return;
+        };
+        let lock_dir = std::env::var("WLV_LOCK_DIR").unwrap();
+        let crash_at: usize = std::env::var("WLV_CRASH_AT").unwrap().parse().unwrap();
+        let new_tag = std::env::var("WLV_NEW_TAG")
+            .unwrap()
+            .chars()
+            .next()
+            .unwrap();
+        let new_len: usize = std::env::var("WLV_NEW_LEN").unwrap().parse().unwrap();
+
+        let store = FileStore::crashing(Path::new(&dir), crash_at);
+        let locks = sweep_locks(Path::new(&lock_dir));
+        let _ = chunked_put(&store, KEY, &value_of(new_tag, new_len), UNITS, &locks);
+        // Reaching here means the injected index was past the end of the write.
+        std::process::exit(0);
+    }
+
+    fn run_child(dir: &Path, lock_dir: &Path, crash_at: usize, new_tag: char, new_len: usize) {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "credentials::chunk_crash_injection::crash_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("WLV_DIR", dir)
+            .env("WLV_LOCK_DIR", lock_dir)
+            .env("WLV_CRASH_AT", crash_at.to_string())
+            .env("WLV_NEW_TAG", new_tag.to_string())
+            .env("WLV_NEW_LEN", new_len.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn crash child");
+        let _ = status;
+    }
+
+    /// Kill a spanned rewrite at EVERY step and demand the store still reads as
+    /// exactly one whole value (or refuses).
+    ///
+    /// `old_len`/`new_len` pick the shape: growing, shrinking and
+    /// literal<->spanned transitions each move the part count differently, and the
+    /// shrink case is the one where reusing a generation would tear.
+    fn sweep(label: &str, old_len: usize, new_len: usize) -> Vec<String> {
+        let old = value_of('O', old_len);
+        let new = value_of('N', new_len);
+        let mut verdicts = Vec::new();
+
+        for crash_at in 0..24usize {
+            let tmp = tempfile::tempdir().unwrap();
+            let lock_tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let lock_dir = lock_tmp.path();
+            let locks = sweep_locks(lock_dir);
+
+            // Seed the OLD value with a clean, uninterrupted write.
+            chunked_put(&FileStore::open(dir), KEY, &old, UNITS, &locks).unwrap();
+            assert_eq!(
+                chunked_get(&FileStore::open(dir), KEY, &locks)
+                    .unwrap()
+                    .as_deref(),
+                Some(old.as_str()),
+                "{label}: seeding is broken"
+            );
+
+            run_child(dir, lock_dir, crash_at, 'N', new_len);
+
+            let read = chunked_get(&FileStore::open(dir), KEY, &locks);
+            let verdict = match &read {
+                Ok(Some(v)) if *v == old => "OLD".to_string(),
+                Ok(Some(v)) if *v == new => "NEW".to_string(),
+                Ok(Some(v)) => {
+                    let tags: String = {
+                        let mut t: Vec<char> = v.chars().collect();
+                        t.dedup();
+                        t.into_iter().collect()
+                    };
+                    format!(
+                        "CORRUPT(len={} of old={old_len}/new={new_len}, tags=[{tags}])",
+                        v.len()
+                    )
+                }
+                Ok(None) => "ABSENT".to_string(),
+                Err(_) => "ERR".to_string(),
+            };
+            verdicts.push(format!("{crash_at}:{verdict}"));
+
+            assert!(
+                !verdict.starts_with("CORRUPT"),
+                "{label}: killing the writer before mutating op {crash_at} produced a value \
+                 that is neither the old secret nor the new one — {verdict}"
+            );
+            assert_ne!(
+                verdict, "ABSENT",
+                "{label}: killing the writer before mutating op {crash_at} DESTROYED the \
+                 credential (the store now reports no value at all)"
+            );
+        }
+        verdicts
+    }
+
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_same_size() {
+        println!(
+            "SWEEP same-size(4000->4000): {:?}",
+            sweep("same-size", 4000, 4000)
+        );
+    }
+
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_growing() {
+        println!(
+            "SWEEP growing(2500->9000): {:?}",
+            sweep("growing", 2500, 9000)
+        );
+    }
+
+    /// The sharp one. The new value needs FEWER parts than the live manifest
+    /// counts, so any in-place reuse of the live generation leaves the reader
+    /// splicing new parts onto an old tail.
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_shrinking() {
+        println!(
+            "SWEEP shrinking(9000->2500): {:?}",
+            sweep("shrinking", 9000, 2500)
+        );
+    }
+
+    #[test]
+    fn spanned_to_literal_survives_a_kill_at_every_step() {
+        println!(
+            "SWEEP spanned->literal(9000->40): {:?}",
+            sweep("spanned->literal", 9000, 40)
+        );
+    }
+
+    #[test]
+    fn literal_to_spanned_survives_a_kill_at_every_step() {
+        println!(
+            "SWEEP literal->spanned(40->9000): {:?}",
+            sweep("literal->spanned", 40, 9000)
+        );
+    }
+
+    /// Do interrupted writes leak entries without bound across many rotations,
+    /// and can an orphan ever be spliced into a later generation?
+    #[test]
+    fn interrupted_rotations_do_not_leak_entries_without_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let lock_dir = lock_tmp.path();
+        let locks = sweep_locks(lock_dir);
+        chunked_put(
+            &FileStore::open(dir),
+            KEY,
+            &value_of('O', 2000),
+            UNITS,
+            &locks,
+        )
+        .unwrap();
+
+        let mut census = Vec::new();
+        for round in 0..40usize {
+            // Alternate long/short so part counts move around, and inject a kill
+            // partway through the part-writing phase every round.
+            let len = if round % 2 == 0 { 12000 } else { 2600 };
+            let tag = char::from(b'A' + (round % 20) as u8);
+            run_child(dir, lock_dir, 2, tag, len);
+
+            // Then a clean write of the same value, so the store settles. It must
+            // not be wedged by the lockfile the aborted child left behind.
+            let settled = value_of(tag, len);
+            chunked_put(&FileStore::open(dir), KEY, &settled, UNITS, &locks).unwrap();
+            assert_eq!(
+                chunked_get(&FileStore::open(dir), KEY, &locks)
+                    .unwrap()
+                    .as_deref(),
+                Some(settled.as_str()),
+                "round {round}: a settled write after an interrupted one did not read back \
+                 as itself — an orphan was spliced in"
+            );
+            census.push(FileStore::entry_names(dir).len());
+        }
+        println!("CENSUS entries-after-each-round: {census:?}");
+        println!("CENSUS final entries: {:?}", FileStore::entry_names(dir));
+
+        let first_half = census[..20].iter().max().copied().unwrap();
+        let second_half = census[20..].iter().max().copied().unwrap();
+        assert_eq!(
+            first_half, second_half,
+            "entry count is still growing after 40 rotations ({first_half} -> {second_half}); \
+             orphans leak without bound"
         );
     }
 }
