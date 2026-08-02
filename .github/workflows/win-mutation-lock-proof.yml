@@ -58,6 +58,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Same provisioning ci.yml uses for this runner. Do not assume a
+      # self-hosted box has the tool: a job that dies on a missing binary after
+      # queueing behind the whole wave costs an hour to learn nothing.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Environment
         shell: pwsh
         run: |
