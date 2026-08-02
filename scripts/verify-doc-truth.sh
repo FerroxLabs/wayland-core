@@ -103,6 +103,92 @@ for doc in README.md docs/channels.md; do
   fi
 done
 
+# ------------------------------------------------------------------ claim (4)
+# The sub-agent turn default. `docs/advanced.md` published 10 while the code has
+# said 200 since before v0.12.25 — a standing documentation error, never a
+# behaviour change. Bind the doc's table cell to the constant.
+turns=$(grep -m1 'DEFAULT_SUB_AGENT_MAX_TURNS: usize =' \
+  "$ROOT/crates/wcore-agent/src/spawn_tool.rs" | grep -oE '[0-9]+')
+if [ "$turns" = "200" ]; then
+  pass "C4-code: DEFAULT_SUB_AGENT_MAX_TURNS == 200 (spawn_tool.rs)"
+else
+  fail "C4-code: DEFAULT_SUB_AGENT_MAX_TURNS is '$turns', not 200; docs/advanced.md must be revisited"
+fi
+
+# Match the table ROW, not the bare number — "200" appears elsewhere in the file
+# and a loose grep would be green against the unfixed tree.
+if grep -qE '^\|[[:space:]]*Sub-agent max turns[[:space:]]*\|[[:space:]]*'"$turns"'[[:space:]]*\|' \
+  "$ROOT/docs/advanced.md"; then
+  pass "C4-doc: docs/advanced.md publishes the sub-agent turn default as $turns"
+else
+  fail "C4-doc: docs/advanced.md's 'Sub-agent max turns' row does not read $turns"
+fi
+
+# ------------------------------------------------------------------ claim (5)
+# A Spawn child is READ-ONLY and its registry is INTERSECTED with the parent's.
+# Two code facts hold this up: the read-only floor's membership, and the fact
+# that the intersection has no skip arm.
+floor=$(grep -m1 'pub const SHARED_READ_ONLY_CHILD_TOOLS' \
+  "$ROOT/crates/wcore-types/src/spawner.rs")
+if printf '%s' "$floor" | grep -q '"Read", "Grep", "Glob"' &&
+  ! printf '%s' "$floor" | grep -qE '"(Bash|Write|Edit)"'; then
+  pass "C5-code: the read-only child floor is exactly Read/Grep/Glob (spawner.rs)"
+else
+  fail "C5-code: SHARED_READ_ONLY_CHILD_TOOLS is no longer Read/Grep/Glob alone: $floor"
+fi
+
+if grep -q 'permitted && parent_tool_authority.contains' \
+  "$ROOT/crates/wcore-agent/src/spawner.rs"; then
+  pass "C5-code: build_tool_registry intersects with parent_tool_authority unconditionally"
+else
+  fail "C5-code: the parent-authority intersection is gone from build_tool_registry"
+fi
+
+# The doc must not promise the child the parent's tools. Flatten first: the
+# claim wrapped across a line break in the original text.
+flat=$(tr '\n' ' ' <"$ROOT/docs/advanced.md" | tr -s ' ')
+if printf '%s' "$flat" | grep -qE 'sub-agent has its own conversation context and full tool set'; then
+  fail "C5-doc: docs/advanced.md still tells the reader each sub-agent gets the full tool set"
+else
+  pass "C5-doc: docs/advanced.md does not claim sub-agents get the full tool set"
+fi
+
+if printf '%s' "$flat" | grep -q 'Spawn children are read-only'; then
+  pass "C5-doc: docs/advanced.md states the read-only floor a Spawn child actually gets"
+else
+  fail "C5-doc: docs/advanced.md does not state that Spawn children are read-only"
+fi
+
+# ------------------------------------------------------------------ claim (6)
+# A sub-agent INHERITS the parent's approval posture. The code fact is the
+# ABSENCE of an auto_approve flip in child_config; bind it to the comment that
+# names the invariant, so deleting the guarantee also reds this check.
+if grep -q 'deliberately does NOT flip `auto_approve`' \
+  "$ROOT/crates/wcore-agent/src/spawner.rs"; then
+  pass "C6-code: child_config does not flip auto_approve (spawner.rs H-7 / M-9)"
+else
+  fail "C6-code: the 'does NOT flip auto_approve' invariant is gone from child_config"
+fi
+
+if grep -qE '^[[:space:]]*config\.tools\.auto_approve[[:space:]]*=[[:space:]]*true' \
+  "$ROOT/crates/wcore-agent/src/spawner.rs"; then
+  fail "C6-code: something in spawner.rs now forces a child's auto_approve = true"
+else
+  pass "C6-code: no path in spawner.rs forces a child's auto_approve = true"
+fi
+
+if grep -q 'Sub-agents auto-approve all tool calls' "$ROOT/docs/advanced.md"; then
+  fail "C6-doc: docs/advanced.md still claims sub-agents auto-approve all tool calls"
+else
+  pass "C6-doc: docs/advanced.md no longer claims sub-agents auto-approve all tool calls"
+fi
+
+if grep -q "inherit the parent's approval posture" "$ROOT/docs/advanced.md"; then
+  pass "C6-doc: docs/advanced.md states that a sub-agent inherits the parent's approval posture"
+else
+  fail "C6-doc: docs/advanced.md does not state the inherited approval posture"
+fi
+
 printf '\n%s\n' "----------------------------------------"
 if [ "$fails" -eq 0 ]; then
   printf 'GREEN — all doc-truth bindings hold\n'
