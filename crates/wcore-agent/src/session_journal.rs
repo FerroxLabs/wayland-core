@@ -3585,8 +3585,14 @@ mod fault_tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("valid.journal");
-        let alias = dir.path().join("alias.journal");
+        // Every journal entry point reports the RESOLVED spelling of the path it
+        // was handed, and `$TMPDIR` reaches us through the `/var` ->
+        // `/private/var` symlink on macOS. Derive the fixture root the same way
+        // so the equality below compares one file against itself instead of two
+        // names for it - see `canonical_journal_root`.
+        let root = canonical_journal_root(dir.path()).unwrap();
+        let target = root.join("valid.journal");
+        let alias = root.join("alias.journal");
         write_valid_journal(&target, "target-turn");
         symlink(&target, &alias).unwrap();
 
@@ -3606,8 +3612,12 @@ mod fault_tests {
         use std::os::windows::fs::symlink_file;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("valid.journal");
-        let alias = dir.path().join("alias.journal");
+        // Resolved-spelling fixture root, as in the Unix case above: Windows can
+        // hand back an 8.3 short name for `$TMPDIR` while the journal reports the
+        // long one.
+        let root = canonical_journal_root(dir.path()).unwrap();
+        let target = root.join("valid.journal");
+        let alias = root.join("alias.journal");
         write_valid_journal(&target, "target-turn");
         symlink_file(&target, &alias)
             .unwrap_or_else(|error| panic!("Windows symlink fixture is required: {error}"));
@@ -3625,8 +3635,10 @@ mod fault_tests {
     #[test]
     fn readonly_recovery_rejects_hard_link_to_valid_journal() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("valid.journal");
-        let alias = dir.path().join("alias.journal");
+        // Resolved-spelling fixture root - see the symlink case above.
+        let root = canonical_journal_root(dir.path()).unwrap();
+        let target = root.join("valid.journal");
+        let alias = root.join("alias.journal");
         write_valid_journal(&target, "target-turn");
         std::fs::hard_link(&target, &alias).unwrap();
 
@@ -3665,10 +3677,12 @@ mod fault_tests {
     #[test]
     fn readonly_recovery_rejects_valid_journal_path_swap_after_read() {
         let dir = tempfile::tempdir().unwrap();
-        assert_readonly_recovery_rejects_path_swap(dir.path(), "replay", |path| {
+        // Resolved-spelling fixture root - see the symlink case above.
+        let root = canonical_journal_root(dir.path()).unwrap();
+        assert_readonly_recovery_rejects_path_swap(&root, "replay", |path| {
             SessionJournal::replay(path).map(|_| ())
         });
-        assert_readonly_recovery_rejects_path_swap(dir.path(), "state", |path| {
+        assert_readonly_recovery_rejects_path_swap(&root, "state", |path| {
             SessionJournal::recovered_state(path).map(|_| ())
         });
     }
