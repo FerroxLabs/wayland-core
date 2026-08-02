@@ -39,10 +39,14 @@ pub const CONSENT_FILE_NAME: &str = "auto-memorize.consent";
 // Consent gate
 // ---------------------------------------------------------------------------
 
-/// Returns the path of the opt-in consent file.
+/// Returns the path of the auto-memorize decision file.
 ///
-/// Auto-memorize is OFF unless this file exists on disk (and the
-/// `WAYLAND_AUTO_MEMORIZE` env var is not set to `"off"`).
+/// This comment used to read "Auto-memorize is OFF unless this file exists on
+/// disk", which has been false since the 2026-06-04 smart default directly
+/// below: [`consent_granted_at`] returns `true` for an ABSENT file. The file is
+/// an OPT-OUT marker, not an opt-in one, and an absent file means auto-memorize
+/// is ON. Callers that read the old sentence concluded there was nothing to
+/// gate — see the matching note on `AgentEngine::fire_auto_memorize`.
 ///
 /// Resolution: `wcore_config::config::wayland_config_dir()` so
 /// `WAYLAND_HOME` hermetically sandboxes the consent flag alongside the

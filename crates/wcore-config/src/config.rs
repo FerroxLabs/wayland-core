@@ -4870,10 +4870,26 @@ fn merge_config_files_with_trust(
     let memory = match (global.memory, project.memory) {
         (global_memory, None) => global_memory,
         (None, Some(project_memory)) => Some(project_memory),
-        (Some(global_memory), Some(project_memory)) => Some(MemoryConfig {
-            enabled: global_memory.enabled && project_memory.enabled,
-            ..project_memory
-        }),
+        (Some(global_memory), Some(project_memory)) => {
+            // Warn rather than ratchet silently, matching the `max_tokens` /
+            // `max_turns` clamps above: the whole defect here was that the
+            // operator was never told their preference had been overridden, so
+            // the fix should not invert into "the repository is never told its
+            // request was refused". Only fires when the ratchet actually bit —
+            // a bare `[memory]` block asks for nothing and warns about nothing.
+            if project_memory.enabled && !global_memory.enabled {
+                tracing::warn!(
+                    "ignored the project config's [memory] enabled = true; long-term memory \
+                     stays off because the global config opts out. A project config travels \
+                     with a cloned repository and may narrow the memory posture but never \
+                     grant it"
+                );
+            }
+            Some(MemoryConfig {
+                enabled: global_memory.enabled && project_memory.enabled,
+                ..project_memory
+            })
+        }
     };
 
     // B2 — security. GHSA-8r7g, same family as `auto_approve` above: the egress
