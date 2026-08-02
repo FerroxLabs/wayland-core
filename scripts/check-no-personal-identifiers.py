@@ -282,14 +282,23 @@ def run(root: Path) -> int:
 
 # ── self-test ─────────────────────────────────────────────────────────────────
 
-# The real values as they stood at c0906590, before redaction. This gate must
-# fire on each of them, or it is not the gate it claims to be.
+# The pre-redaction leak, reproduced SHAPE-FOR-SHAPE from the real evidence —
+# the whoami JSON, the URL-encoded room in a `/send` path, the credential table
+# row, the git author line — but with STAND-IN values.
+#
+# The first version of this file pasted the maintainer's actual MXID, room ID
+# and email in here, which would have made this gate the last remaining copy of
+# exactly what it was written to remove; it was invisible because the scanner
+# skips its own file. A checker must never be the place an identifier survives.
+# The stand-ins fire for the same reason the real ones did — an unallowlisted
+# localpart on a real homeserver — which is the property under test. A6 below
+# makes that explicit: no value here is denylisted anywhere.
 REAL_LEAK = """\
-| `matrix.env` | working. `@seandonahoe:matrix.org`, room `!kntRqkQCkPjhPvMMvf:matrix.org`, joined. |
-{"user_id":"@seandonahoe:matrix.org","is_guest":false,"device_id":"oRqn0FqTG2"}
-MLR_ROOM=!kntRqkQCkPjhPvMMvf:matrix.org
-/_matrix/client/v3/rooms/%21kntRqkQCkPjhPvMMvf%3Amatrix.org/send
-the repo default is `ci <sean@seandonahoe.com>`, which the third commit uses.
+| `matrix.env` | working. `@j.hazelwood:matrix.org`, room `!vQmXbTnLrPkDgHsWfZ:matrix.org`, joined. |
+{"user_id":"@j.hazelwood:matrix.org","is_guest":false,"device_id":"oRqn0FqTG2"}
+MLR_ROOM=!vQmXbTnLrPkDgHsWfZ:matrix.org
+/_matrix/client/v3/rooms/%21vQmXbTnLrPkDgHsWfZ%3Amatrix.org/send
+the repo default is `ci <j.hazelwood@hazelwoodmail.com>`, which the third commit uses.
 TWILIO_FROM_NUMBER=+14155309876 TWILIO_TEST_TO_NUMBER=+447700900123
 """
 
@@ -320,17 +329,18 @@ def self_test() -> int:
     v = scan_text(REAL_LEAK, ".planning/evidence/seeded/NOTES.md")
     rules = sorted({r for _, r, _ in v})
     check("A1", rules, ["email", "matrix-id", "phone"],
-          f"every class fires on the real pre-redaction values ({len(v)} hits)")
+          f"every class fires on the pre-redaction evidence shapes ({len(v)} hits)")
 
     mx = [h for _, r, h in v if r == "matrix-id"]
-    check("A2", sum(1 for h in mx if "seandonahoe" in h), 2,
-          "both MXID occurrences caught")
-    check("A3", sum(1 for h in mx if "kntRqk" in h), 2,
+    check("A2", sum(1 for h in mx if h.startswith("@")), 2,
+          "both MXID occurrences caught (table row + whoami JSON)")
+    check("A3", sum(1 for h in mx if h.startswith("!")), 2,
           "both plainly-encoded room-ID occurrences caught")
     check("A4", sorted(h for _, r, h in v if r == "phone"),
           ["+14155309876", "+447700900123"],
           "US non-555 and international numbers both caught")
-    check("A5", [h for _, r, h in v if r == "email"], ["sean@seandonahoe.com"],
+    check("A5", [h for _, r, h in v if r == "email"],
+          ["j.hazelwood@hazelwoodmail.com"],
           "personal email on a real domain caught")
 
     # A6 — a NEW personal handle nobody has denylisted must also fire. This is
@@ -340,6 +350,19 @@ def self_test() -> int:
     check("A6", sorted({h for _, _, h in v6}),
           ["!aBcDeFgHiJkLmNoPqR:matrix.org", "@some.new.person:matrix.org"],
           "an unseen real-homeserver identifier fires with no denylist entry")
+
+    # A7 — the self-scan exclusion is EXACTLY this file. It exists because the
+    # fixtures above must contain firing shapes; widening it would create a
+    # blind spot, which is how the real values first ended up living in here.
+    root = Path(__file__).resolve().parent.parent
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root,
+                             capture_output=True, check=True).stdout
+    all_names = [n.decode() for n in tracked.split(b"\0") if n]
+    scanned = {p.relative_to(root).as_posix() for p in targets(root)}
+    skipped = [n for n in all_names if n not in scanned
+               and (root / n).is_file() and not (root / n).is_symlink()]
+    check("A7", skipped, [f"scripts/{SELF_NAME}"],
+          "exactly one file is exempt from the scan, and it is this one")
 
     # ── DIRECTION 2: it is SILENT on clean evidence ──────────────────────────
     v = scan_text(CLEAN, ".planning/evidence/clean/NOTES.md")
@@ -375,7 +398,7 @@ def self_test() -> int:
         for f in failures:
             print("SELF-TEST FAIL:", f)
         return 1
-    print("\nSELF-TEST: PASSED (12 assertions, both directions)")
+    print("\nSELF-TEST: PASSED (14 assertions, both directions)")
     return 0
 
 
