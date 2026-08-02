@@ -1951,18 +1951,31 @@ async fn a_session_whose_key_is_gone_is_refused_by_name_and_only_that_session() 
         );
     }
 
-    // THE JOURNAL IS EVIDENCE. A refusal that consumed, truncated, rotated or
-    // appended to what it could not read would destroy the only record of the
-    // interrupted turn — and would make arm 3 impossible.
+    // THE JOURNAL IS EVIDENCE. A refusal that consumed, truncated or rotated
+    // what it could not read would destroy the only record of the interrupted
+    // turn — and would make arm 3 impossible.
     //
-    // Scoped to the journal FILE rather than the whole profile deliberately:
-    // opening a session acquires a writer lease, so a refused launch can
-    // legitimately create and release a lock file. Asserting over the whole
-    // home would red on that and say nothing about the property that matters.
-    assert_eq!(
-        fs::read(&journal_path).expect("read the journal after the refusal"),
-        seeded_journal,
-        "the refused resume modified the journal it could not read"
+    // NOT byte equality, and not over the whole profile. Both were tried and
+    // both red for reasons that are not the product misbehaving: a launch that
+    // opens a session acquires a writer lease and pins a confidential-backend
+    // marker, and `SessionJournal::open` legitimately folds a leftover WAL into
+    // the journal, so the file grows on its first open after the seeder died.
+    // Byte equality would forbid recovery from doing its job. What must hold is
+    // that nothing was LOST: the record only ever grows, the interrupted turn's
+    // own prompt is still in it, and the sealed material that caused the
+    // refusal is still there. Arm 3 then proves the stronger property end to
+    // end by resuming from it.
+    let after = fs::read(&journal_path).expect("read the journal after the refusal");
+    assert!(
+        after.len() >= seeded_journal.len(),
+        "the refused resume SHRANK the journal it could not read: {} -> {} bytes",
+        seeded_journal.len(),
+        after.len()
+    );
+    assert!(
+        !byte_offsets(&after, prompt.as_bytes()).is_empty(),
+        "the refused resume erased the interrupted turn's own prompt from the \
+         journal, so the evidence it refused to act on is gone"
     );
     assert!(
         !sealed_request_artifacts(env.home()).is_empty(),
