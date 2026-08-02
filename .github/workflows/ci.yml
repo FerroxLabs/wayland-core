@@ -759,6 +759,29 @@ jobs:
           python3 scripts/check-no-vacuous-cargo-test.py --self-test
           python3 scripts/check-no-vacuous-cargo-test.py
 
+      # ── pre-publish personal-identifier gate ──────────────────────────
+      # Placed here for the same reasons as the step above, which paid for
+      # them twice: AFTER checkout (it needs the working tree) and EARLY (a
+      # ~3s pure text scan needing no toolchain, so it cannot be shadowed by
+      # a build failure and never delays a real signal).
+      #
+      # This is NOT the credential gate. Credentials were swept three times
+      # with the grep proven alive on a known positive each time and are
+      # clean. This stops the maintainer's PERSONAL identifiers — Matrix
+      # MXIDs, joinable room IDs, real phone numbers, personal email —
+      # accumulating in committed evidence ahead of a public release. Live
+      # channel proofs transcribe whatever the real service printed, so they
+      # reintroduce these by default unless something says no.
+      #
+      # `--self-test` runs first and asserts BOTH directions: the gate fires
+      # on the real pre-redaction values and stays silent on redacted
+      # evidence plus the fixture corpora. A checker that has quietly stopped
+      # matching therefore fails loudly instead of passing everything.
+      - name: No personal identifiers in committed content
+        run: |
+          python3 scripts/check-no-personal-identifiers.py --self-test
+          python3 scripts/check-no-personal-identifiers.py
+
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
           set -e

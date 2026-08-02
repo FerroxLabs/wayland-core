@@ -80,7 +80,7 @@ worktree meta-digest (python os.walk, excludes .git): 75c3e71ff4c08d70ce2977fda5
 $ git -C $R rev-parse a7d0968^
 c68e39f60462f28d9be5e683d9cbe2c57b1a5027
 $ git -C $R show --name-status --format='%an <%ae>' a7d0968
-ci <sean@seandonahoe.com>
+ci <REDACTED-MAINTAINER@redacted.invalid>
 
 A	WAYLAND-INTEGRATION-AUDIT.md
 

@@ -2,7 +2,17 @@
 
 Lane `lane/matrix-live`. Merge-base `43c69ca71bc788dcd925fc070204d6918c2d7e0f`.
 All live runs on `hetzner-dsm`, `/root/wayland-matrix-live`, room
-`!kntRqkQCkPjhPvMMvf:matrix.org`, binary `wayland-core 0.12.25`.
+`!REDACTED-MATRIX-ROOM:matrix.org`, binary `wayland-core 0.12.25`.
+
+> **Redaction note.** This evidence was captured against the maintainer's real
+> matrix.org account, so the account MXID and the room ID appeared verbatim
+> throughout it and throughout the sibling logs. Both were replaced in place by
+> lane `identifier-scrub` (2026-08-02) with `@REDACTED-MATRIX-USER:matrix.org`
+> and `!REDACTED-MATRIX-ROOM:matrix.org` — one placeholder per distinct real
+> value, in the identifier's own syntax, so every claim below still reads and
+> still correlates across files. Nothing else in the evidence changed.
+> `scripts/check-no-personal-identifiers.py` is what keeps them out from now on.
+> **Git history at and before `c0906590` still contains the real values.**
 
 **Verdict: all five capabilities are PASS, none NOT-RUN — and the run found one HIGH
 and two MEDIUMs, one of which made the very row it was proving unreachable.**
@@ -62,7 +72,7 @@ census run). The shipped binary, first live attempt:
 
 ```text
 PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:bd8831fa-…:1785384138000
-403 M_FORBIDDEN "User @seandonahoe:matrix.org not in room mxlive"
+403 M_FORBIDDEN "User @REDACTED-MATRIX-USER:matrix.org not in room mxlive"
 ```
 
 `mxlive` is the channel's name.
@@ -90,7 +100,7 @@ Tests: legacy on-disk records without the field still load and are not rewritten
 addressed target round-trips; `--conversation` reaches the persisted job and is asserted **not
 equal** to the channel name. `conversation_id` is also fed to `scan_target`, being operator text
 that reaches a URL path segment. Proven live: the post-fix wire shows
-`PUT /rooms/%21kntRqkQCkPjhPvMMvf%3Amatrix.org/send/…` and `delivered:true`.
+`PUT /rooms/%21REDACTED-MATRIX-ROOM%3Amatrix.org/send/…` and `delivered:true`.
 
 ### F-ML-3 — MEDIUM — a Matrix redaction of a nonexistent event returns 200
 

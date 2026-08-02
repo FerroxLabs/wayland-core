@@ -203,7 +203,7 @@ with `Checking wcore-agent` present in the log so the crate genuinely recompiled
 was needed for a doc-comment change; the causation run above is the lane's substantive measurement.
 
 **Deviations.** My first two commits carry author `ci <ci@ferroxlabs.dev>` because I passed `-c`
-explicitly; the repo default is `ci <sean@seandonahoe.com>`, which the third commit uses. Not
+explicitly; the repo default is `ci <REDACTED-MAINTAINER@redacted.invalid>`, which the third commit uses. Not
 corrected — `rebase`/`reset` are forbidden by §0 and the cost of the inconsistency is zero.
 
 **Verdict: criteria met.** The causation claim is measured on both sides rather than taken on

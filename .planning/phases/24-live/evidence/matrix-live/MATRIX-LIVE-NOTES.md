@@ -29,7 +29,7 @@ send / edit / delete / receive / **outbound idempotency across a real process re
 ### F-ML-1 — the self-echo filter blocks the single-account inbound leg
 
 `sync.rs:414-416` — `parse_sync_events` **skips every event whose `sender ==
-bot_user_id`**. We hold exactly one account (`@seandonahoe:matrix.org`), so a probe
+bot_user_id`**. We hold exactly one account (`@REDACTED-MATRIX-USER:matrix.org`), so a probe
 message posted by that account is discarded by design and can never reach the product.
 
 Consequence for the inbound leg: the channel's configured `user_id` must name a
@@ -38,7 +38,7 @@ Consequence for the inbound leg: the channel's configured `user_id` must name a
 It also yields a control that runs in **both directions** in the same session:
 
 - `user_id = @wayland-probe-not-sean:matrix.org` → the event MUST arrive;
-- `user_id = @seandonahoe:matrix.org` (the true sender) → the same event MUST NOT
+- `user_id = @REDACTED-MATRIX-USER:matrix.org` (the true sender) → the same event MUST NOT
   arrive, and that is the self-echo filter working, not an instrument failure.
 
 ### F-ML-2 — `edit_message` / `delete_message` have NO production caller
@@ -81,7 +81,7 @@ not exist; a nonce never sent) so a dead observer cannot produce a green.
 ## 5. Live results (running)
 
 - **T+45** LEG 2 (edit) and LEG 3 (delete) **PASS** live against matrix.org, room
-  `!kntRqkQCkPjhPvMMvf`. Edit graded by the homeserver's own bundled
+  `!REDACTED-MATRIX-ROOM`. Edit graded by the homeserver's own bundled
   `unsigned.m.relations.m.replace` on the ORIGINAL event; delete graded by read-back
   body (`state=REDACTED body_present=false`). Both have a working known-negative.
 - **T+50** LEG 4 (inbound) **PASS**. `text_len=47`, sender preserved, through the
@@ -119,7 +119,7 @@ Measured live, the shipped binary:
 
 ```
 PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:bd8831fa-…:1785384138000
-403 M_FORBIDDEN "User @seandonahoe:matrix.org not in room mxlive"
+403 M_FORBIDDEN "User @REDACTED-MATRIX-USER:matrix.org not in room mxlive"
 ```
 
 `mxlive` is the channel's NAME. Ledger: `accepted → attempted → settled delivered:false`.

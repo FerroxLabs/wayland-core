@@ -415,10 +415,10 @@ mod tests {
         let addressed = Target::Channel {
             channel_name: "mxlive".into(),
             text: "status check".into(),
-            conversation_id: Some("!kntRqkQCkPjhPvMMvf:matrix.org".into()),
+            conversation_id: Some("!REDACTED-MATRIX-ROOM:matrix.org".into()),
         };
         let s = serde_json::to_string(&addressed).unwrap();
-        assert!(s.contains("!kntRqkQCkPjhPvMMvf:matrix.org"), "got {s}");
+        assert!(s.contains("!REDACTED-MATRIX-ROOM:matrix.org"), "got {s}");
         assert_eq!(serde_json::from_str::<Target>(&s).unwrap(), addressed);
     }
 

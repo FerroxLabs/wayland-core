@@ -51,7 +51,7 @@ warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supp
 [2m2026-07-30T04:01:53.302428Z[0m [32m INFO[0m no persisted /sync cursor (first start for this account); seeding from an initial sync — existing room backlog will NOT be replayed
 [2m2026-07-30T04:01:53.302519Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
 [gateway] started pid=2853869 role=Owner profile=mxlive carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
-[2m2026-07-30T04:02:18.396146Z[0m [33m WARN[0m handler dispatch failed; will retry on next tick [3mid[0m[2m=[0mbd8831fa-547b-4a8f-a9b4-ad7399887d70 [3merror[0m[2m=[0mdispatch error: channel send: transport: HTTP error 403: {"errcode":"M_FORBIDDEN","error":"User @seandonahoe:matrix.org not in room mxlive"}
+[2m2026-07-30T04:02:18.396146Z[0m [33m WARN[0m handler dispatch failed; will retry on next tick [3mid[0m[2m=[0mbd8831fa-547b-4a8f-a9b4-ad7399887d70 [3merror[0m[2m=[0mdispatch error: channel send: transport: HTTP error 403: {"errcode":"M_FORBIDDEN","error":"User @REDACTED-MATRIX-USER:matrix.org not in room mxlive"}
 --- wire journal (send routes only) ---
 {"ts":"2026-07-30T04:02:18.306Z","ev":"request","n":7,"method":"PUT","path":"/_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","txn":"cron:bd8831fa-547b-4a8f-a9b4-ad7399887d70:1785384138000","route":"send","body_bytes":81,"will_stall":false,"headers":["accept","content-length","content-type","host","user-agent"]}
 --- ledger ---

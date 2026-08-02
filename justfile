@@ -221,7 +221,9 @@ _auto-commit-fixes:
 # `verify-suppressions` added 2026-07-30 (lane f29-h1-advisories): audit and deny
 # check whether an advisory is muted; this checks whether the stated reason for
 # muting it is TRUE against the real graph. See the recipe above.
-check-all: fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+# `check-no-personal-identifiers` added 2026-08-02 (lane identifier-scrub): a
+# ~3s pure text scan, no toolchain, so it runs first and costs nothing.
+check-all: check-no-personal-identifiers fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -327,6 +329,22 @@ check-no-assertion-todos:
 check-no-vacuous-cargo-test:
     python3 scripts/check-no-vacuous-cargo-test.py --self-test
     python3 scripts/check-no-vacuous-cargo-test.py
+
+# ── Pre-publish personal-identifier gate ──────────────────────────────────
+# NOT a credential gate — credentials were swept three times and are clean.
+# This one stops the maintainer's PERSONAL identifiers accumulating in
+# committed evidence ahead of a public release: Matrix MXIDs and (joinable)
+# room IDs transcribed out of live-channel proof runs, real phone numbers, and
+# personal email. Shape-matched with a placeholder allowlist, so a NEW personal
+# handle nobody denylisted still fires. Absolute home paths are a ratchet
+# against a recorded baseline rather than a block — 2998 of them predate the
+# gate, and a permanently-red gate is worth as much as one that cannot fail.
+# `--self-test` proves both directions before it scans: it FIRES on the real
+# pre-redaction values and stays SILENT on redacted evidence + fixture corpora.
+# Run: `just check-no-personal-identifiers`
+check-no-personal-identifiers:
+    python3 scripts/check-no-personal-identifiers.py --self-test
+    python3 scripts/check-no-personal-identifiers.py
 
 # ── P0 smoke gate (pre-release) ───────────────────────────────────────────
 # Runs the live P0 smoke suite (crates/wcore-cli/tests/smoke_p0.rs) via

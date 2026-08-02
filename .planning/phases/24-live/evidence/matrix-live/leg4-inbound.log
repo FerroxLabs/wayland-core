@@ -4,11 +4,11 @@ note: to see what the problems were, use the option `--future-incompat-report`, 
      Running tests/matrix_live_room.rs (target/debug/deps/matrix_live_room-a0df2add8deff3eb)
 
 running 1 test
-test matrix_inbound_reaches_the_product_from_a_real_room ... MLR_INBOUND_SAW id=$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA sender=@seandonahoe:matrix.org text_len=52
-MLR_INBOUND_SAW id=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0 sender=@seandonahoe:matrix.org text_len=0
-MLR_INBOUND_SAW id=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 sender=@seandonahoe:matrix.org text_len=61
-MLR_INBOUND_SAW id=$P0bacHeMO1F-326a7BnvUb-2JSL7H24PHa9rnbsKpfI sender=@seandonahoe:matrix.org text_len=47
-MLR_INBOUND_ARRIVED=true text_len=47 sender=@seandonahoe:matrix.org text="wayland-core live probe mlin-1785384009 inbound"
+test matrix_inbound_reaches_the_product_from_a_real_room ... MLR_INBOUND_SAW id=$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA sender=@REDACTED-MATRIX-USER:matrix.org text_len=52
+MLR_INBOUND_SAW id=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0 sender=@REDACTED-MATRIX-USER:matrix.org text_len=0
+MLR_INBOUND_SAW id=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 sender=@REDACTED-MATRIX-USER:matrix.org text_len=61
+MLR_INBOUND_SAW id=$P0bacHeMO1F-326a7BnvUb-2JSL7H24PHa9rnbsKpfI sender=@REDACTED-MATRIX-USER:matrix.org text_len=47
+MLR_INBOUND_ARRIVED=true text_len=47 sender=@REDACTED-MATRIX-USER:matrix.org text="wayland-core live probe mlin-1785384009 inbound"
 MLR_INBOUND_SELF_ECHO_ADMITTED=false
 MLR_INBOUND_DONE
 ok

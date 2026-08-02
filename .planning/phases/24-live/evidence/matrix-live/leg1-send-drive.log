@@ -8,7 +8,7 @@ PROXY_LIVENESS_versions_http=200
 scheduled_for=2026-07-30T04:18:56Z nonce=mlsend-1785385106
 next[0]: 2026-07-30T04:18:56+00:00
 added 4ccc4e94-5e57-4b99-b39b-053989ad2fd6
-on  4ccc4e94-5e57-4b99-b39b-053989ad2fd6  [once      ] @once 2026-07-30T04:18:56+00:00  channel  mxlive -> !kntRqkQCkPjhPvMMvf:matrix.org :: wayland-core live probe mlsend-17853851...  last_fired=never
+on  4ccc4e94-5e57-4b99-b39b-053989ad2fd6  [once      ] @once 2026-07-30T04:18:56+00:00  channel  mxlive -> !REDACTED-MATRIX-ROOM:matrix.org :: wayland-core live probe mlsend-17853851...  last_fired=never
 gateway_pid=3101509
   t=3s wire_send_lines=0 alive=yes
   t=6s wire_send_lines=0 alive=yes
@@ -52,7 +52,7 @@ warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supp
 [2m2026-07-30T04:18:31.816554Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
 [gateway] started pid=3101509 role=Owner profile=mxlive carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
 --- wire journal (send routes only) ---
-{"ts":"2026-07-30T04:18:56.820Z","ev":"request","n":4,"method":"PUT","path":"/_matrix/client/v3/rooms/%21kntRqkQCkPjhPvMMvf%3Amatrix.org/send/m.room.message/cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","txn":"cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","route":"send","body_bytes":81,"will_stall":false,"headers":["accept","content-length","content-type","host","user-agent"]}
+{"ts":"2026-07-30T04:18:56.820Z","ev":"request","n":4,"method":"PUT","path":"/_matrix/client/v3/rooms/%21REDACTED-MATRIX-ROOM%3Amatrix.org/send/m.room.message/cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","txn":"cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","route":"send","body_bytes":81,"will_stall":false,"headers":["accept","content-length","content-type","host","user-agent"]}
 --- ledger ---
 {"id":"cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","state":"accepted","at":"2026-07-30T04:18:56.818238210+00:00","destination":"mxlive"}
 {"id":"cron:4ccc4e94-5e57-4b99-b39b-053989ad2fd6:1785385136000","state":"attempted","at":"2026-07-30T04:18:56.818270649+00:00","destination":"mxlive"}

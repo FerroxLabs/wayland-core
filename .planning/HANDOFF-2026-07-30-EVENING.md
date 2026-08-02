@@ -179,7 +179,7 @@ instrument that cannot fail?** Suggested spine:
 - **Never print, echo, or commit a credential value.** `~/.wayland-secrets/*.env` mode 600, to
   hetzner on **ssh stdin ONLY** — never argv, never disk, never a log.
 - **Slack is a LIVE COMPANY WORKSPACE** — private channel `C0BLR1UKKU6` only. **Matrix is
-  Sean's PERSONAL account** — room `!kntRqkQCkPjhPvMMvf:matrix.org` only, never
+  Sean's PERSONAL account** — room `!REDACTED-MATRIX-ROOM:matrix.org` only, never
   join/leave/invite, redact test events. Discord test channel `1532226655102173318`.
 - Peer trees under `~/dev/resources/` are **READ-ONLY**. Wayland Desktop `~/dev/wayland` is
   Sean's working tree — worktree only.

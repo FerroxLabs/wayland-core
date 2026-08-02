@@ -33,7 +33,7 @@ Matches the shape used for Hermes and OpenClaw (ledger lines 36-39 and 54-59).
 1. **The local checkout is NOT on upstream main.** Working tree HEAD is
    `a7d0968fe027b0e1f8e54c54d14e2ecba719a882`, branch `research/wayland-integration-audit`,
    tree **clean** (`git status --porcelain` → 0 lines). `a7d0968` is a **local** commit by
-   `ci <sean@seandonahoe.com>` adding exactly one file — `WAYLAND-INTEGRATION-AUDIT.md`,
+   `ci <REDACTED-MAINTAINER@redacted.invalid>` adding exactly one file — `WAYLAND-INTEGRATION-AUDIT.md`,
    +662 lines, **0 `.rs` touched** (`git show --name-status`; control: 1 `.md` matched).
 2. Its parent `c68e39f` **is** an ancestor of `origin/main` (`merge-base --is-ancestor` → YES),
    so the baseline is legitimate — but `origin/main` is **2 commits ahead**, and the delta is
@@ -44,7 +44,7 @@ Matches the shape used for Hermes and OpenClaw (ledger lines 36-39 and 54-59).
    review trail, no per-feature commits. `SOURCE_REV` records the internal monorepo SHA
    `124d85bc5dc6e7805560215fcc6d5413944920e1`, which we cannot resolve.
 4. `WAYLAND-INTEGRATION-AUDIT.md` in that tree is **ours, not xAI's** — 662 lines authored by
-   `sean@seandonahoe.com`. Prior recon on this peer exists and never reached the ledger. Treat
+   `REDACTED-MAINTAINER@redacted.invalid`. Prior recon on this peer exists and never reached the ledger. Treat
    as prior-work reference, never as peer evidence.
 
 ---

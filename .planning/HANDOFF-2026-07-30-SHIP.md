@@ -67,7 +67,7 @@ comparative claim about peers** — our own checker refuses all ten that were at
 | file | state |
 |---|---|
 | `discord.env` | **working.** Bot `WaylandCoreBot`, guild `Wayland Test Server`, channel `#general` `1532226655102173318`. Throwaway app + server |
-| `matrix.env` | **working.** `@seandonahoe:matrix.org`, room `!kntRqkQCkPjhPvMMvf:matrix.org`, joined. **Sean's PERSONAL account — only that room, never join/leave/invite, redact test events** |
+| `matrix.env` | **working.** `@REDACTED-MATRIX-USER:matrix.org`, room `!REDACTED-MATRIX-ROOM:matrix.org`, joined. **Sean's PERSONAL account — only that room, never join/leave/invite, redact test events** |
 | `slack.env` | token + scopes correct (`chat:write, channels:history, channels:read`), workspace **Trade Canyon, Inc.**. **BLOCKED: bot is a member of 0 channels.** Needs `/invite @wayland_core_test` in a public channel |
 | `flux.env` | pre-existing FluxRouter burn key |
 
