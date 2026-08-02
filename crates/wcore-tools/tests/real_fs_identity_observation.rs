@@ -33,7 +33,7 @@ use wcore_tools::effects::{
     FilesystemEffectPrecondition, FilesystemEffectReceiptV1, FilesystemReconciliation,
 };
 use wcore_tools::vfs::{
-    FileContentIdentity, FileObservation, IdentifiedFileObservation, RealFs, VirtualFs,
+    FileContentIdentity, FileObservation, IdentifiedFileObservation, RealFs, VfsError, VirtualFs,
 };
 
 async fn observe(path: &Path) -> IdentifiedFileObservation {
@@ -276,10 +276,36 @@ async fn directory_is_refused_rather_than_observed() {
     let directory = root.join("a-directory");
     std::fs::create_dir(&directory).unwrap();
 
-    RealFs
+    let error = RealFs
         .observe_file(&directory)
         .await
         .expect_err("a directory must never be observed as a CAS target");
+
+    assert_refused_not_unimplemented(&error);
+}
+
+/// "It was refused" and "the primitive does not exist here" are both `Err`, and
+/// the difference between them is the whole subject of this file.
+///
+/// Measured, not assumed: the first version of the two refusal cases asserted
+/// only `is_err()`, and when the Windows observation implementation was
+/// reverted to its `ErrorKind::Unsupported` stub they still PASSED — 12 of the
+/// 14 cases here reddened and these two did not. An assertion that a
+/// not-implemented platform satisfies is not a refusal test.
+fn assert_refused_not_unimplemented(error: &VfsError) {
+    let rendered = format!("{error}");
+    assert!(
+        !rendered.contains("unavailable on this platform"),
+        "this must be an actual refusal by the observation path, not the \
+         'identity-aware file observation is unavailable' stub; got: {rendered}"
+    );
+    if let VfsError::Io(io_error) = error {
+        assert_ne!(
+            io_error.kind(),
+            std::io::ErrorKind::Unsupported,
+            "a refusal must not be reported as Unsupported; got: {rendered}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -303,11 +329,7 @@ async fn file_reparse_point_is_refused_and_its_target_is_not_read() {
             observed.observation
         ),
     };
-    assert_ne!(
-        format!("{error}"),
-        String::new(),
-        "the refusal must carry a reason"
-    );
+    assert_refused_not_unimplemented(&error);
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"secret-target-bytes",
