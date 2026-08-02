@@ -2,7 +2,7 @@
 
 ## Overview
 
-MCP allows the agent to connect to external tool servers, extending beyond the 7 built-in tools to the entire MCP server ecosystem.
+MCP allows the agent to connect to external tool servers, extending beyond the built-in tool set to the entire MCP server ecosystem.
 
 ## Configuring MCP Servers
 
@@ -115,10 +115,14 @@ deferred = true    # Don't load tool schemas at startup
 
 | `deferred` | Behavior |
 |------------|----------|
-| `false` (default for config servers) | Tool schemas included in system prompt at startup |
-| `true` | Tools registered but schemas loaded on-demand via ToolSearch |
+| `true` (**the default** when the key is omitted) | Tools registered but schemas loaded on-demand via ToolSearch |
+| `false` | Tool schemas included in system prompt at startup |
 
-Use `deferred = true` for MCP servers with many tools to keep the initial system prompt small.
+**Deferral is on by default**, so you do not need to opt in to keep the initial
+system prompt small — omitting the key gives you the cheap behaviour
+(`config.rs:186-188`; resolved as `deferred.unwrap_or(true)`). Set
+`deferred = false` only for a small server whose tools the model should be able to
+call without a ToolSearch round-trip first.
 
 ## Local (loopback) MCP servers — `allow_local`
 

@@ -1,6 +1,11 @@
 # Built-in Tools
 
-The agent has 7 built-in tools. The LLM automatically selects and invokes them based on the task.
+The agent registers roughly seventy built-in tools. The eight below are the core
+file, shell and delegation set — the ones you will see in almost every run, and the
+ones the rest of this page documents. The remainder (memory, media, browser, voice,
+status and channel tools, plus anything contributed by a plugin or an MCP server)
+are registered by the same mechanism, and which of them a given session actually
+holds depends on its posture, its config and its plugins.
 
 | Tool | Function | Concurrent |
 |------|----------|------------|
@@ -81,9 +86,17 @@ See [Sub-Agent Spawning](advanced.md#sub-agent-spawning) in the Advanced Feature
 
 Load full schemas for deferred tools so the LLM can invoke them. Deferred tools (from MCP servers with `deferred = true`) are registered by name only — their parameter schemas are not loaded until the LLM calls ToolSearch.
 
-- Query by exact name: `"select:Read,Edit,Grep"`
-- Keyword search: `"slack send"` returns best matches
-- Returns up to 5 results by default
+The tool takes exactly one parameter, `query` (a string). There is no `select:`
+prefix, no multi-name list form, and no result limit — an earlier version of this
+page documented all three and none of them exist.
+
+- `query` is lowercased and matched as a **plain substring** against each deferred
+  tool's name *and* its description. `"slack"` matches a tool named `slack_send`
+  and also any tool whose description mentions Slack.
+- **Every** match is returned, with its full parameter schema. There is no cap and
+  no `max_results` parameter, so a broad query against a large MCP registry returns
+  a correspondingly large result — prefer a specific substring.
+- A query that matches nothing returns no tools; an empty query is an error.
 
 ---
 

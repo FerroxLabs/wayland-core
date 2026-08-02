@@ -469,7 +469,14 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 | `a` / `always` | Auto-approve this tool for the rest of the session |
 | `q` / `quit` | Abort the entire agent run |
 
-- Read-only tools (Read, Grep, Glob) are auto-approved by default
+- **Eleven** tools are auto-approved by default, not three
+  (`config.rs:1186-1206`): `Read`, `Grep`, `Glob`, `web`, `WebFetch`,
+  `vision_analyze`, `transcribe_audio`, `ToolSearch`, `Skill`, `wayland_status`,
+  `wayland_telemetry_query`. Nothing that writes, executes or sends a message is in
+  that list. Two entries are worth knowing about before you rely on the default:
+  `web` and `WebFetch` reach the network, and `Skill` can write declared artifacts
+  and run a skill's embedded `!` shell directives. If that is more than you want
+  approved silently, narrow `tools.allow_list`.
 - `--auto-approve` skips all confirmations
 - `tools.allow_list` in config customizes the whitelist
 

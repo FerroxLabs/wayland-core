@@ -122,7 +122,7 @@ include_usage_in_stream = false   # self-hosted server rejects stream_options
 
 ## Orchestration & swarms
 
-A single agent is the floor, not the ceiling. Wayland Core fans one task out across many workers and brings the results back, with real isolation between them. Three distinct mechanisms ship in the code, and a four-tier topology model governs all of them: **Spawn** (5 agents), **Swarm** (20), **Mesh** (50), **Fleet** (100). Each tier fixes the agent cap, how much the parent sees, and the blackboard scope — and the caps are enforced, not advisory. Ask for 51 agents on a 50-cap tier and you get `TopologyError::ExceedsCap`, not a quietly-truncated run.
+A single agent is the floor, not the ceiling. Wayland Core fans one task out across many workers and brings the results back, with real isolation between them. Three distinct mechanisms ship in the code, and a four-tier topology model governs all of them: **Spawn** (5 agents), **Swarm** (100), **Mesh** (50), **Fleet** (100). Each tier fixes the agent cap, how much the parent sees, and the blackboard scope — and the caps are enforced, not advisory. Ask for 51 agents on a 50-cap tier and you get `TopologyError::ExceedsCap`, not a quietly-truncated run.
 
 - **Sub-agents (`Spawn`)** fan parallel work out from one tool call. Each sub-agent gets its own conversation context and its own tool access; the count is capped by the active topology (default Spawn, 5).
 - **Worktree swarm** runs N workers as OS subprocesses, each in a fresh `git worktree` on its own branch. A dirty-checkout guard runs `git status --porcelain` first and **refuses to dispatch on an uncommitted tree** — that guard exists because a contamination incident in v0.2.2 taught us why it has to. Per-worker timeouts, `kill_on_drop` SIGKILL on expiry, and idempotent `git worktree remove --force` cleanup. Process isolation, not threads, so one bad worker can't corrupt another.
@@ -146,7 +146,7 @@ wayland-core swarm --workers 5 --worker-command "pytest" --reduce consensus
 - `consensus` — strict majority: a bucket wins only if its votes are more than half of the *successful* workers, otherwise the top three are returned as disputed.
 - `debate` — first round whose workers agree wins; at the CLI the batch is a single round (multi-round replay lives in the orchestrator, not the CLI path).
 
-Topology is pure data with cap enforcement, the guards have tests behind them (58 across the swarm crate), and the live TUI labels the running tier by sub-agent count — 0-5 Spawn, 6-20 Swarm, 21-50 Mesh, 51+ Fleet. One note on reach: the standard monitored relay clamps Spawn fan-out to the Mesh cap of 50, so the 100-agent Fleet ceiling is the unmonitored library path, not the everyday `Spawn` call.
+Topology is pure data with cap enforcement, the guards have tests behind them (58 across the swarm crate), and the live TUI labels the running tier by sub-agent count — 0-5 Spawn, 6-20 Swarm, 21-50 Mesh, 51+ Fleet. Those bands are a **display** heuristic (`tui/agents/strip.rs:431`) and are deliberately not the tier caps above: Swarm's own cap is `MAX_DISPATCH_WORKERS` = 100, so a 30-worker Swarm is within its cap while the TUI is labelling that count "Mesh". One note on reach: the standard monitored relay clamps Spawn fan-out to the Mesh cap of 50, so the 100-agent Fleet ceiling is the unmonitored library path, not the everyday `Spawn` call.
 
 <div align="center">
 
