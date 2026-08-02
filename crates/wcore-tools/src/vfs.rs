@@ -808,6 +808,172 @@ fn windows_identity_token(identity: &WindowsObjectIdentity) -> String {
     )
 }
 
+/// Direct proof for [`windows_identity_token`], which no filesystem-level test
+/// can force.
+///
+/// Two of the five inputs to the token are attribute bits that flip on a file
+/// nobody touched, and the token is not allowed to notice them; every other
+/// input IS an identity and the token must notice all of them. A test that
+/// only writes real files cannot force `ARCHIVE` off, cannot choose a volume
+/// serial, and cannot make a volume decline `FILE_ID_INFO` — so a token that
+/// masked the wrong bits, or that collapsed the "this volume has no file id"
+/// case onto a real all-zero id, would pass everything else in this crate.
+#[cfg(all(windows, test))]
+mod windows_identity_token_tests {
+    use super::{WindowsObjectIdentity, windows_authority, windows_identity_token};
+
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+    const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x0000_0020;
+    const FILE_ATTRIBUTE_NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+
+    fn identity() -> WindowsObjectIdentity {
+        WindowsObjectIdentity {
+            volume_serial: 0xDEAD_BEEF,
+            file_index: 0x0000_1234_5678_9ABC,
+            file_id: Some([7_u8; 16]),
+            attributes: FILE_ATTRIBUTE_ARCHIVE,
+            links: 1,
+        }
+    }
+
+    #[test]
+    fn token_ignores_only_the_two_incidental_attribute_bits() {
+        let base = identity();
+        let mut quiesced = identity();
+        quiesced.attributes = 0;
+        let mut indexed = identity();
+        indexed.attributes = FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+
+        assert_eq!(
+            windows_identity_token(&base),
+            windows_identity_token(&quiesced),
+            "a backup agent clearing FILE_ATTRIBUTE_ARCHIVE must not read as a \
+             different object"
+        );
+        assert_eq!(
+            windows_identity_token(&base),
+            windows_identity_token(&indexed),
+            "the search indexer toggling FILE_ATTRIBUTE_NOT_CONTENT_INDEXED \
+             must not read as a different object"
+        );
+    }
+
+    #[test]
+    fn token_notices_every_attribute_bit_that_is_not_masked() {
+        let base = identity();
+        let mut readonly = identity();
+        readonly.attributes |= FILE_ATTRIBUTE_READONLY;
+
+        assert_ne!(
+            windows_identity_token(&base),
+            windows_identity_token(&readonly),
+            "READONLY is a real, security-relevant property of the object and \
+             must not be masked away with the incidental bits"
+        );
+    }
+
+    #[test]
+    fn token_notices_each_identity_input_independently() {
+        let base = identity();
+        let base_token = windows_identity_token(&base);
+
+        let mut other_volume = identity();
+        other_volume.volume_serial = 0x1234_5678;
+        let mut other_index = identity();
+        other_index.file_index = 0x0000_1234_5678_9ABD;
+        let mut other_file_id = identity();
+        other_file_id.file_id = Some([8_u8; 16]);
+        let mut other_links = identity();
+        other_links.links = 2;
+
+        for (name, changed) in [
+            ("volume serial", other_volume),
+            ("file index", other_index),
+            ("file id", other_file_id),
+            ("link count", other_links),
+        ] {
+            assert_ne!(
+                base_token,
+                windows_identity_token(&changed),
+                "the token must distinguish objects differing only in {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_file_id_never_collides_with_a_real_one() {
+        let mut unavailable = identity();
+        unavailable.file_id = None;
+        let mut zeroed = identity();
+        zeroed.file_id = Some([0_u8; 16]);
+
+        assert_ne!(
+            windows_identity_token(&unavailable),
+            windows_identity_token(&zeroed),
+            "\"this volume cannot serve FILE_ID_INFO\" must be recorded \
+             explicitly; folding it onto an all-zero id would let a receipt \
+             written without a file id be compared against one written with"
+        );
+    }
+
+    /// The counted name handed to `NtCreateFile` with a `RootDirectory` must
+    /// be exactly one ordinary component. Anything else would reintroduce the
+    /// ambient pathname walk the retained handle exists to avoid, so it has to
+    /// be refused BEFORE the kernel sees it.
+    #[test]
+    fn relative_open_refuses_anything_that_is_not_one_plain_component() {
+        use super::{open_windows_child_no_follow, open_windows_directory};
+        use std::ffi::OsStr;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("leaf.txt"), b"reachable").unwrap();
+        std::fs::write(root.join("plain.txt"), b"plain").unwrap();
+        let directory = open_windows_directory(&root).unwrap();
+
+        for escaping in [
+            r"sub\leaf.txt",
+            "sub/leaf.txt",
+            "..",
+            r"..\plain.txt",
+            ".",
+            r"C:\Windows\System32\drivers\etc\hosts",
+            "",
+        ] {
+            let error = open_windows_child_no_follow(&directory, OsStr::new(escaping))
+                .err()
+                .unwrap_or_else(|| panic!("{escaping:?} must be refused, not opened"));
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{escaping:?} must be refused as malformed input, not passed to the kernel"
+            );
+        }
+
+        // Positive control: the same call opens an ordinary single component,
+        // so the refusals above are the guard talking and not a broken open.
+        open_windows_child_no_follow(&directory, OsStr::new("plain.txt"))
+            .expect("a plain single-component name must still open");
+    }
+
+    #[test]
+    fn authority_is_volume_scoped() {
+        let base = identity();
+        let mut other_volume = identity();
+        other_volume.volume_serial = 0x1234_5678;
+
+        assert_ne!(
+            windows_authority(&base),
+            windows_authority(&other_volume),
+            "Windows has no single filesystem root, so the volume plays the \
+             role unix gives the root device: a receipt prepared on one volume \
+             must never reconcile against a same-named path on another"
+        );
+        assert_eq!(windows_authority(&base), windows_authority(&identity()));
+    }
+}
+
 /// Open one direct child of a RETAINED directory handle without following a
 /// reparse point and without re-walking any pathname.
 ///
