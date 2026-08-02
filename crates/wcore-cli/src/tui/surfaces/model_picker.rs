@@ -537,8 +537,13 @@ impl Surface for ProviderPickerSurface {
                         // OAuth providers show their sign-in state; un-configured
                         // providers explain why they're listed but dimmed.
                         let detail = if *connected {
-                            match super::oauth_provider_signed_in(name) {
-                                Some(true) => "signed in".to_string(),
+                            match super::oauth_provider_login_probe(name) {
+                                Some(super::OAuthLoginProbe::SignedIn) => "signed in".to_string(),
+                                // A login that exists but cannot be read is not
+                                // a blank row: blank reads as "not signed in".
+                                Some(super::OAuthLoginProbe::StoreLocked(_)) => {
+                                    "signed in — token store locked".to_string()
+                                }
                                 _ => String::new(),
                             }
                         } else {
