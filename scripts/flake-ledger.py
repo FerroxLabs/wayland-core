@@ -142,11 +142,10 @@ def list_count(root: str, profile: str, expr: str) -> int:
     )
     if proc.returncode != 0:
         return -1
-    return sum(
-        1
-        for line in proc.stdout.splitlines()
-        if line.startswith("    ") and line.strip() and not line.strip().endswith(":")
-    )
+    # `nextest list` writes ONE flat `binary-id test-name` line per test to
+    # stdout (verified on 0.9.x: `wcore-swarm::dispatch_smoke <name>`); every
+    # compile message goes to stderr. So a non-empty stdout line is a test.
+    return sum(1 for line in proc.stdout.splitlines() if line.strip())
 
 
 def run_nextest(
