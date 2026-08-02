@@ -1215,7 +1215,7 @@ async fn launch_keyless(
     fixture: &RunningOpenAiFixture,
     session_id: &str,
 ) -> (CoreProcess, Value) {
-    let (mut process, ready) = spawn_keyless(keyless_command(env, fixture, Some(session_id))).await;
+    let (process, ready) = spawn_keyless(keyless_command(env, fixture, Some(session_id))).await;
     // THE HOST-FACING CONTRACT, read the way a host reads it: off the wire,
     // from the real packaged binary, on a real keyring-less profile.
     //
