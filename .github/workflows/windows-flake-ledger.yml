@@ -180,3 +180,72 @@ jobs:
           retention-days: 14
           # A measurement job that uploaded nothing measured nothing.
           if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Hosted-Windows companion.
+  #
+  # NOT a substitute for the self-hosted leg, and it must not be read as one.
+  # The hosted `windows-latest` image is a SERVER SKU on which
+  # `AppContainerBackend::is_available()` is false, so the four delegated-swarm
+  # targets cannot execute there — they will record a delegated-backend skip.
+  # That is the point: the harness grades those SKIPPED, never GREEN, so this
+  # leg answers honestly for the targets it CAN run and says so for the rest.
+  #
+  # It exists because the self-hosted Windows pool is two boxes deep behind a
+  # queue that has run hours long, and a measurement that cannot be taken for
+  # hours is a measurement that does not happen. This leg starts immediately.
+  # --------------------------------------------------------------------------
+  ledger-hosted:
+    name: Windows flake ledger (hosted server SKU, retries=0)
+    runs-on: windows-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Warm the test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo nextest list --profile ci \
+            -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
+            > /dev/null
+          cargo nextest list --profile ci \
+            -E 'package(wcore-cli) and binary(deterministic_openai_loop)' \
+            > /dev/null
+
+      - name: Measure with retries disabled
+        shell: bash
+        env:
+          LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
+          LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
+        run: |
+          set -euo pipefail
+          python scripts/flake-ledger.py \
+            --runs "$LEDGER_RUNS" \
+            --conditions "$LEDGER_CONDITIONS" \
+            --profile ci \
+            --out windows-hosted-flake-ledger.json \
+            --logdir flake-ledger-logs-hosted \
+            | tee flake-ledger-hosted.txt
+
+      - name: Upload the hosted ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-hosted-flake-ledger-${{ github.run_id }}
+          path: |
+            windows-hosted-flake-ledger.json
+            flake-ledger-hosted.txt
+            flake-ledger-logs-hosted/
+            target/swarm-delegated-skips.txt
+          retention-days: 14
+          if-no-files-found: error
