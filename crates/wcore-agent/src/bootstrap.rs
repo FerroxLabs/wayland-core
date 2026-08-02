@@ -4108,17 +4108,29 @@ pub fn build_native_or_chatgpt_provider(config: &Config) -> anyhow::Result<Arc<d
 }
 
 /// True when xAI OAuth credentials are available to refresh from — either the
-/// engine's own store (`~/.wayland/oauth/xai.json`) or the Grok CLI's
-/// `~/.grok/auth.json`. Gates the OAuth path so a plain `xai` API key still
-/// flows through the static-key provider unchanged.
+/// engine's own store (the credential ladder, or the pre-migration
+/// `~/.wayland/oauth/xai.json`) or the Grok CLI's `~/.grok/auth.json`. Gates the
+/// OAuth path so a plain `xai` API key still flows through the static-key
+/// provider unchanged.
+///
+/// A load that REFUSES — a login is recorded and the credential store cannot
+/// produce it — counts as available, deliberately. Treating it as unavailable
+/// would route a signed-in user down the static-key path and hand them
+/// `MissingApiKey`, which is the silent sign-out this release closes. Taking the
+/// OAuth path instead lets the manager's own load surface the store's message,
+/// which names the remedy.
 fn xai_oauth_available() -> bool {
     if crate::oauth::xai::read_grok_cli_tokens().is_some() {
         return true;
     }
-    crate::oauth::OAuthStorage::from_home()
-        .ok()
-        .and_then(|s| s.load(crate::oauth::xai::PROVIDER).ok().flatten())
-        .is_some()
+    let Ok(storage) = crate::oauth::OAuthStorage::from_home() else {
+        return false;
+    };
+    match storage.load(crate::oauth::xai::PROVIDER) {
+        Ok(tokens) => tokens.is_some(),
+        Err(crate::oauth::OAuthStorageError::SecureStoreUnavailable { .. }) => true,
+        Err(_) => false,
+    }
 }
 
 /// OAuth-aware analogue of [`wcore_providers::create_provider`].

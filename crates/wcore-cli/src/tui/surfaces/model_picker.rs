@@ -1054,6 +1054,17 @@ mod tests {
     /// against the other env-mutating tests; restores everything before return.
     /// `seed_chatgpt_token` writes `$HOME/.wayland/oauth/chatgpt.json` so the
     /// OAuth provider reads as signed in.
+    ///
+    /// `WAYLAND_HOME` is cleared for the duration, and that is load-bearing
+    /// rather than tidiness: everything under test resolves its profile through
+    /// `profile_home()`, which prefers `WAYLAND_HOME` over `$HOME/.wayland`. A
+    /// value left behind by any earlier test in this binary therefore silently
+    /// redirects the lookup away from the tempdir this helper just seeded, and
+    /// the seeded login becomes invisible — `provider_rows_partition_...` then
+    /// fails with "a stored ChatGPT login is connected" while the file it
+    /// wrote is sitting right there. Measured: `HOME=/tmp/.tmpkhGJEk`,
+    /// `WAYLAND_HOME=/tmp/.tmpsFehgi`, `token_exists=false`. `#[serial]` does
+    /// not help, because the leak outlives the leaking test.
     #[cfg(unix)]
     fn with_clean_provider_env<T>(seed_chatgpt_token: bool, body: impl FnOnce() -> T) -> T {
         const KEYS: &[&str] = &[
@@ -1088,20 +1099,41 @@ mod tests {
             .expect("write token");
         }
         let saved_home = std::env::var_os("HOME");
+        let saved_wayland_home = std::env::var_os("WAYLAND_HOME");
         let saved_keys: Vec<(&str, Option<std::ffi::OsString>)> =
             KEYS.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        // SAFETY: serial test; HOME + keys reverted before return.
+        // SAFETY: serial test; HOME, WAYLAND_HOME + keys reverted before return.
         unsafe {
             std::env::set_var("HOME", tmp.path());
+            std::env::remove_var("WAYLAND_HOME");
             for k in KEYS {
                 std::env::remove_var(k);
             }
+        }
+        // The premise this helper claims must actually hold before `body` runs:
+        // the seeded login has to be where `profile_home()` will look. Asserting
+        // it here turns a silent misdirection into a named failure at the line
+        // that caused it, rather than an assertion about providers 60 lines away.
+        if seed_chatgpt_token {
+            assert!(
+                wcore_config::config::profile_home()
+                    .join("oauth")
+                    .join("chatgpt.json")
+                    .exists(),
+                "the seeded login is not where profile_home() resolves ({:?}); the sandbox \
+                 did not take effect",
+                wcore_config::config::profile_home()
+            );
         }
         let out = body();
         unsafe {
             match saved_home {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+            match saved_wayland_home {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
             }
             for (k, v) in saved_keys {
                 match v {
