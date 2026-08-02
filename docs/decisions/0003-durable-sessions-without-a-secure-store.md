@@ -1,7 +1,7 @@
 # 0003 — Durable sessions on a host with no secure credential store
 
 Date: 2026-07-30
-Status: **Accepted (degrade), with open items — supersedes the refusal posture of 2026-07-16**
+Status: **Superseded on the question by §10 (journal without the seal, 2026-08-02); retained in full as the record of a decision taken three times.** The 2026-07-30 degrade it accepted was an interim posture and said so.
 
 > **Read this whole file before revisiting the question.** This decision has already been
 > taken twice, in opposite directions, five days apart, because the second decision-maker was
@@ -354,3 +354,74 @@ A pointer to this ADR is attached to `RecoveryConfidentialError` in
 specifically so that these causes do not collapse into one string. That enum is what a reader
 reaches when they hit "secure recovery storage is unavailable" and start asking why, and it is
 not owned by any single decision, so it survives both.
+
+---
+
+## 10. RESOLVED — journal without the seal (2026-08-02, `lane/durable-option-d`)
+
+**Status of this ADR changes to: superseded on the question, retained in full as its record.**
+Open item 1 is closed. The dichotomy §6 called false was false, and the middle it predicted turned
+out to be one `if`.
+
+### The measurement that settles it
+
+The journal is **not encrypted**. It is a framed JSONL event log at `0600` inside a `0700`
+directory, and the reader refuses to open it if `mode & 0o077 != 0` or the owner uid differs
+(`session_journal.rs:712/744/819`). The confidential store holds exactly **one** 32-byte key
+(`recovery_confidential.rs:18`) protecting exactly **one** field:
+`RecoveryCheckpoint.sealed_prepared_request` (`recovery.rs:157`), the field that makes AUTOMATIC
+replay of an interrupted provider dispatch possible.
+
+Meanwhile the audit trail is already keyless and already exists. `LEGACY_EVENT_TYPES`
+(`session_journal.rs:2376`) carries write-ahead pairs for every effect boundary this product has —
+provider, tool, approval, delivery, turn — and `JournaledLlmProvider::with_dispatch_id` is
+optional, so the v1 no-dispatch-id variants are already legal events.
+
+**A missing key therefore costs REPLAY and nothing else.** What turned that into total amnesia was
+one validation branch (`recovery.rs:331`, a `ProviderDispatch` checkpoint is rejected without its
+seal) plus `Config::resolve` setting `session.enabled = false` upstream so that branch was never
+reached. §3's release blocker was real; the price it paid was not necessary.
+
+### What changed
+
+| Site | Before | After |
+|---|---|---|
+| `Config::resolve_inner`, `Degrade` arm | `session.enabled = false` | records `replay_protection_unavailable()`; the journal is untouched |
+| `run_with_content` | `recovery_request_protection.preflight()` gates every journaled turn | skipped when replay protection is unavailable; a per-turn notice replaces it |
+| the provider loop | `commit_provider_recovery_checkpoint` mints the dispatch id | in that mode the dispatch id is minted directly, so physical attempts stay bound to one logical send with no seal written |
+| restart | n/a — nothing was journaled | a `turn_started` with no terminal is not `Ready`, so the refusal that already existed asks the operator to resume, reconcile or cancel. Nothing auto-continues. |
+
+`[session] require_durability = true` is deliberately **unchanged**. An operator who declared that
+this deployment requires durability including recoverability still gets a refusal. Re-reading their
+setting as "a journal is enough" because a weaker mode now exists would be answering a question
+they did not ask.
+
+### Open items, closed
+
+| # | disposition |
+|---|---|
+| 1 | **CLOSED.** This section. |
+| 3 | **CLOSED.** Renamed `replay_protection_unavailable()` and consumed by `--doctor`, which no longer has an `OffByHost` state to print because the product can no longer reach one. |
+| 4 | **CLOSED for the host-forced case.** A keyless host now HAS a session, so `ready` names it. `session_id` is omitted only when the operator turned sessions off — which is what `docs/json-stream-protocol.md` always said. See the note below for the sibling lane's typed field. |
+| 5 | **CLOSED.** `switch_active_session` now runs the same session-resume admission as every launch path. |
+| 6 | **CLOSED.** The July-16 test is re-pointed, not deleted. Its two properties are both preserved and both now provable: the provider is not reached under `require_durability`, and the journal exists under the default. |
+| 2 | **STILL OPEN** — `lane/effect-accounting`. What §6 predicted would be lost is now recorded, so the measurement is finally possible. |
+
+### HIGH-1, also closed here
+
+A profile seeded with a real recoverable turn, reopened with `--resume` after its key was gone,
+started `rc=0` and emitted `ready` carrying that session id while reading nothing. Such a session
+is now refused **by name**, at every resume surface, before `ready`.
+
+The refusal is scoped to the SESSION. A launch that did not name it starts and journals normally
+on the same host in the same second, so suppressing a keyring is not an availability kill — which
+is the mirror of the downgrade abuse this posture exists to prevent, and is what a global
+refuse-to-start would have created.
+
+### Note for whoever lands the typed `ready` field
+
+`lane/ready-session-id` proposes `session_persistence: durable | disabled_by_operator |
+disabled_by_host`. After this change `disabled_by_host` is **unreachable**: a keyless host no
+longer disables anything. The state it should describe instead is a session that is journaled and
+resumable but not automatically replayable, which `durable` over-claims. A fourth variant is
+needed and it requires a contract regeneration — see that lane's coordination note.

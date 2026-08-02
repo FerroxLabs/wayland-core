@@ -104,8 +104,8 @@ particular. The keyring-less frame is pinned byte-exact at
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Protocol version (semver) |
-| `session_id` | string \| null | Session ID. **Always present**, `null` when this run has no durable session. Never omitted — see below |
-| `session_persistence` | string | Why `session_id` holds what it holds: `durable`, `disabled_by_operator`, or `disabled_by_host`. Required |
+| `session_id` | string \| null | Session ID. **Always present**, `null` when this run has no durable session. Never omitted — see below. `null` means, and now only means, that the operator set `[session] enabled = false`: since 2026-08-02 a host that cannot protect a durable session journals anyway, without the sealed replay copy of the provider request, so it has a real session and names it |
+| `session_persistence` | string | Why `session_id` holds what it holds: `durable`, `journaled_without_replay`, `disabled_by_operator`, or (decode-only, from an older producer) `disabled_by_host`. Required. See §1.1b |
 | `contract` | object | Pinned producer-contract descriptor. Required. Host compares `name`, `major`, `minor`, `generator` and all three digests against its own pin and fails closed on any mismatch |
 | `execution_policy` | object | Launch policy snapshot at `revision` 0 with `reason` `launch` or `resume`. Required. Same envelope as the `execution_policy` event (§1.1a) |
 | `capabilities.tool_approval` | bool | Whether agent supports pause-and-wait tool approval |
