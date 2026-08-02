@@ -5513,3 +5513,121 @@ mod crash_injection_verification {
         );
     }
 }
+
+// ===========================================================================
+// ADVERSARIAL VERIFICATION HARNESS 2 — concurrent writers (verify-cred lane).
+//
+// `chunked_put` chooses its target generation by READING the live manifest and
+// picking the other letter. That is a read-modify-write with no lock and no
+// compare-and-swap, so two writers that read the same live manifest choose the
+// SAME target generation and then interleave their parts into it. No crash is
+// required.
+//
+// This is not hypothetical for the key the rewrite exists to serve: every
+// session refreshes the same `oauth.<provider>.tokens` entry, and the CLI and
+// the desktop host can both be live against one profile.
+// ===========================================================================
+#[cfg(test)]
+mod concurrency_verification {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    /// Serialises each individual entry op, exactly as a keyring daemon does,
+    /// while leaving the multi-op SEQUENCE unserialised — which is the whole
+    /// question.
+    #[derive(Default)]
+    struct AtomicPerEntryStore {
+        entries: Mutex<HashMap<String, String>>,
+    }
+
+    impl CredentialsStore for Arc<AtomicPerEntryStore> {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            Ok(self.entries.lock().unwrap().get(key).cloned())
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            // Widen the window the way a real keyring's IPC round-trip does.
+            std::thread::yield_now();
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.entries.lock().unwrap().remove(key);
+            std::thread::yield_now();
+            Ok(())
+        }
+    }
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    /// Two concurrent token refreshes of the same provider. Whichever wins,
+    /// the stored credential must be ONE of the two token sets in full.
+    #[test]
+    fn concurrent_writers_must_not_splice_two_secrets_together() {
+        let mut corrupt = 0usize;
+        let mut observed: Vec<String> = Vec::new();
+
+        for attempt in 0..200 {
+            let raw = Arc::new(AtomicPerEntryStore::default());
+            // Seed a live spanned value so both writers see a real manifest.
+            chunked_put(&raw, KEY, &"S".repeat(6000), UNITS).unwrap();
+
+            // Different lengths on purpose: a shared target generation with
+            // different part counts is what leaves a tail behind.
+            let candidates = [("A".repeat(9000)), ("B".repeat(3000))];
+            let barrier = Arc::new(Barrier::new(candidates.len()));
+            let mut handles = Vec::new();
+            for value in candidates.clone() {
+                let raw = Arc::clone(&raw);
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = chunked_put(&raw, KEY, &value, UNITS);
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            match chunked_get(&raw, KEY) {
+                Ok(Some(v)) if candidates.contains(&v) => {}
+                Ok(Some(v)) => {
+                    corrupt += 1;
+                    let mut tags: Vec<char> = v.chars().collect();
+                    tags.dedup();
+                    let tags: String = tags.into_iter().collect();
+                    observed.push(format!(
+                        "attempt {attempt}: len={} tags=[{tags}] (candidates were 9000 'A' \
+                         and 3000 'B')",
+                        v.len()
+                    ));
+                }
+                Ok(None) => {
+                    corrupt += 1;
+                    observed.push(format!("attempt {attempt}: the credential VANISHED"));
+                }
+                Err(e) => {
+                    corrupt += 1;
+                    observed.push(format!("attempt {attempt}: torn read — {e}"));
+                }
+            }
+        }
+
+        assert_eq!(
+            corrupt,
+            0,
+            "{corrupt}/200 concurrent rewrites of one credential did not yield either \
+             whole secret. First few:\n{}",
+            observed
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
