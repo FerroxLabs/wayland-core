@@ -1016,7 +1016,15 @@ impl BudgetTracker {
             (Some(daily), Some(cap)) => match daily.reserve(usd, cap, Utc::now()) {
                 Ok(grant) => Some(grant),
                 Err(crate::daily::DailySpendError::Exceeded { limit, observed }) => {
-                    self.blocked_sessions.insert(session_id.to_string());
+                    // Deliberately NOT latched into `blocked_sessions`. That
+                    // latch means "this session is exhausted until an operator
+                    // grants it more", and an operator grant cannot widen a
+                    // daily ceiling by design. The ledger is re-read under its
+                    // lock on every admission, so refusing without latching is
+                    // exactly as safe — and it lets the session recover on its
+                    // own when the day rolls over or a concurrent claim is
+                    // released, instead of staying dead behind a Continue that
+                    // could never help it.
                     return Err(self.cap_block(
                         session_id,
                         "per_user_daily_usd",
@@ -2146,6 +2154,110 @@ mod tests {
         );
         assert_eq!(tracker.reserved_totals("s1"), (0, 0.0));
         assert_eq!(tracker.session_totals("s1"), (0, 0.0));
+    }
+
+    /// Build a tracker the way a NEW PROCESS would: fresh caps, fresh
+    /// in-memory state, nothing carried over except the ledger on disk.
+    fn tracker_over_ledger(path: &std::path::Path, cap_usd: f64) -> BudgetTracker {
+        let mut tracker = BudgetTracker::new(
+            BudgetCap::builder()
+                .per_user_daily_usd(cap_usd)
+                .per_session_usd(1_000.0)
+                .build(),
+        );
+        tracker.set_daily_authority(crate::daily::DailyAuthority::new(
+            Arc::new(crate::daily::DailySpendStore::at(path)),
+            "default",
+        ));
+        tracker
+    }
+
+    #[test]
+    fn a_durable_ledger_binds_a_caller_that_starts_a_fresh_session_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("daily-spend.json");
+
+        // Four independent "processes", each with its own session id and its
+        // own untouched per-session budget. $0.25 settles each time.
+        for round in 0..4 {
+            let mut tracker = tracker_over_ledger(&ledger, 1.00);
+            let reservation = tracker
+                .reserve(&format!("session-{round}"), 10, 0.25)
+                .expect("each fresh session is admitted until the DAILY cap is reached");
+            tracker.settle(reservation, 10, 0.25).unwrap();
+        }
+
+        let mut tracker = tracker_over_ledger(&ledger, 1.00);
+        let err = tracker
+            .reserve("session-4", 10, 0.25)
+            .expect_err("the fifth fresh session must be refused by the daily ceiling");
+        assert!(
+            matches!(err, BudgetError::CapExceeded { ref kind, .. } if kind == "per_user_daily_usd"),
+            "expected a daily-cap receipt, got {err:?}"
+        );
+        // The refusal must not latch the session behind an operator grant that
+        // could never widen a daily ceiling anyway: once the day frees, the
+        // same session admits again with no intervention.
+        let tomorrow_ledger = dir.path().join("tomorrow.json");
+        let mut tracker = tracker_over_ledger(&tomorrow_ledger, 1.00);
+        tracker
+            .reserve("session-4", 10, 0.25)
+            .expect("a daily refusal must be recoverable, not a permanent session brick");
+    }
+
+    #[test]
+    fn a_ceiling_with_headroom_admits_the_next_fresh_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("daily-spend.json");
+
+        let mut first = tracker_over_ledger(&ledger, 10.00);
+        let reservation = first.reserve("session-a", 10, 0.25).unwrap();
+        first.settle(reservation, 10, 0.25).unwrap();
+
+        // A ceiling that cannot PASS is as broken as one that cannot fail.
+        let mut second = tracker_over_ledger(&ledger, 10.00);
+        second
+            .reserve("session-b", 10, 0.25)
+            .expect("a legitimate launch under the ceiling must not be bricked");
+    }
+
+    #[test]
+    fn a_released_admission_hands_its_daily_authority_straight_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("daily-spend.json");
+
+        let mut tracker = tracker_over_ledger(&ledger, 1.00);
+        let reservation = tracker.reserve("session-a", 10, 1.00).unwrap();
+        assert!(
+            tracker.reserve("session-b", 10, 0.10).is_err(),
+            "an in-flight claim must bind while it is outstanding"
+        );
+        assert!(tracker.release(reservation));
+
+        tracker
+            .reserve("session-b", 10, 1.00)
+            .expect("a call that never reached the provider must not consume the day");
+    }
+
+    #[test]
+    fn a_daily_only_ceiling_still_counts_as_a_monetary_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = BudgetTracker::new(BudgetCap::builder().per_user_daily_usd(5.0).build());
+        tracker.set_daily_authority(crate::daily::DailyAuthority::new(
+            Arc::new(crate::daily::DailySpendStore::at(
+                dir.path().join("daily-spend.json"),
+            )),
+            "default",
+        ));
+
+        assert!(
+            !tracker.has_session_usd_cap("s1"),
+            "there is no PER-SESSION dollar cap here"
+        );
+        assert!(
+            tracker.has_monetary_cap("s1"),
+            "an unpriced $0 call would otherwise walk straight through the daily ceiling"
+        );
     }
 
     #[test]
