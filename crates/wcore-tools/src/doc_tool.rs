@@ -234,6 +234,18 @@ impl Tool for DocExtractTool {
         // told to `read` the named path could expose a partial file. If either
         // property is ever broken, this MUST become `false`.
         // Proven by `concurrent_identical_artifact_writes_are_never_torn`.
+        //
+        // WHERE THE RACE ACTUALLY COMES FROM — stated precisely, because
+        // overstating it would be its own kind of wrong. A concurrent batch in
+        // `orchestration::partition` is `futures::future::join_all` on ONE task,
+        // not a task-per-call: it interleaves siblings at their `.await` points.
+        // `execute` below has no `.await` between admission and the artifact
+        // write, so two `doc_extract` calls in a SINGLE assistant turn do not
+        // in fact interleave with each other. The genuine parallel window is
+        // one level up — `AgentSpawner::spawn_parallel` puts each sub-agent on
+        // its own `tokio::spawn`ed task, and a host may drive several sessions
+        // at once, so two agents extracting the SAME document run on different
+        // runtime threads and do contend on this one path.
         true
     }
 
@@ -420,11 +432,14 @@ fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::P
     let path = dir.join(format!("{hash:016x}.md"));
 
     // ATOMIC publish. The old code did `fs::write(&path, ..)` straight onto the
-    // shared, content-addressed name. `DocExtractTool::is_concurrency_safe`
-    // returns `true`, so the orchestrator batches this tool for PARALLEL
-    // execution (`orchestration::partition`); two identical extractions racing
-    // here would interleave writes on one path while the model is being told to
-    // `read` that path — a torn read.
+    // shared, content-addressed name. Two identical extractions racing here
+    // would interleave writes on one path while the model is being told to
+    // `read` that path — a torn read. The racers are agents on separate runtime
+    // threads (`AgentSpawner::spawn_parallel` spawns a task per sub-agent, and a
+    // host may drive several sessions concurrently), NOT two calls inside one
+    // turn: `orchestration::partition`'s concurrent batch is `join_all` on a
+    // single task and this tool never yields mid-extract. See
+    // `DocExtractTool::is_concurrency_safe` for the full argument.
     //
     // Write to a per-call unique temp name in the SAME directory (so `rename`
     // stays within one filesystem and is therefore atomic), then rename into

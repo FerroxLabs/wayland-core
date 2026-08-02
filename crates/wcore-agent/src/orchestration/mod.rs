@@ -3667,6 +3667,14 @@ mod partition_tests {
     ///
     /// If anyone flips `doc_extract` to not-safe, this test fails and points at
     /// the doc_tool comment explaining the two properties involved.
+    ///
+    /// Scope note, so this test is not read as claiming more than it shows:
+    /// landing in a concurrent batch means `join_all` on ONE task, which
+    /// interleaves siblings only at their `.await` points. It is the sub-agent
+    /// fan-out (`AgentSpawner::spawn_parallel`, a `tokio::spawn` per child) and
+    /// multi-session hosts that put two extractions on different runtime
+    /// threads. This test pins the declaration and the batching; it does not
+    /// by itself prove two `doc_extract` bodies overlap in wall-clock time.
     #[test]
     fn doc_extract_really_is_placed_in_a_parallel_batch() {
         let r = real_registry();
@@ -3683,6 +3691,78 @@ mod partition_tests {
              atomic (see wcore_tools::doc_tool::write_doc_artifact)"
         );
         assert_eq!(batches[0].calls.len(), 2);
+    }
+
+    /// The two load-bearing assumptions the concurrent branch of
+    /// [`execute_tool_calls`] encodes as COMMENTS rather than as code:
+    ///
+    /// * "Concurrent tools are never SkillTool" — so skill hooks are not merged
+    ///   for a concurrent batch.
+    /// * "Concurrent batches never include Bash" — so the streaming context is
+    ///   deliberately not threaded through the concurrent path.
+    ///
+    /// Both are consequences of a `is_concurrency_safe` declaration living in
+    /// another crate/module. Flip either declaration to `true` and the
+    /// orchestrator silently drops hook merging or streaming for that tool, with
+    /// nothing failing. This test is the missing enforcement.
+    #[test]
+    fn bash_and_skill_never_land_in_a_concurrent_batch() {
+        use std::sync::Arc;
+        use wcore_skills::permissions::SkillPermissionChecker;
+        use wcore_skills::refs::SkillCatalog;
+        use wcore_tools::bash::BashTool;
+
+        let mut r = real_registry();
+        r.register(Box::new(BashTool));
+        r.register(Box::new(crate::skill_tool::SkillTool::new(
+            Arc::new(SkillCatalog::from_metadata_vec(Vec::new())),
+            ".".to_string(),
+            SkillPermissionChecker::new(vec![], vec![], false),
+        )));
+
+        // `ToolRegistry::register` SILENTLY SKIPS a tool whose backend is not
+        // configured, and `partition` treats an unregistered name as not-safe.
+        // Without this guard the assertions below would pass on a registry that
+        // never held either tool -- a permanently-green test.
+        let bash_name = "Bash".to_string();
+        let skill_name = "Skill".to_string();
+        for name in [&bash_name, &skill_name] {
+            assert!(
+                r.get(name).is_some(),
+                "{name} did not register, so the batching assertion below would \
+                 be vacuous"
+            );
+        }
+
+        // Sandwich each between two genuinely safe tools: if the tool were
+        // wrongly declared safe it would MERGE into the surrounding batch, so
+        // this is the shape that actually detects the regression.
+        for name in [bash_name, skill_name] {
+            let calls = vec![
+                call("Glob", json!({"pattern": "*"})),
+                call(&name, json!({"command": "echo hi", "skill": "x"})),
+                call("Grep", json!({"pattern": "z", "path": "."})),
+            ];
+            let batches = partition(&r, &calls);
+            let offending: Vec<_> = batches
+                .iter()
+                .filter(|b| b.is_concurrent)
+                .flat_map(|b| b.calls.iter())
+                .filter_map(|c| match c {
+                    ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .filter(|n| n == &name)
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "{name} landed in a CONCURRENT batch. execute_tool_calls skips \
+                 skill-hook merging and streaming for concurrent batches on the \
+                 stated assumption that this never happens -- either restore \
+                 is_concurrency_safe=false for {name}, or wire up the branch it \
+                 is now silently skipping."
+            );
+        }
     }
 
     /// `durable_tool_call_ordinal` relies on `partition` retaining references
