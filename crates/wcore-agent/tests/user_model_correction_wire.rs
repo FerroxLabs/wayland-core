@@ -164,6 +164,32 @@ async fn start_mock_anthropic() -> MockServer {
     server
 }
 
+/// A temporary workspace spelled the way `bootstrap.rs` will spell it.
+///
+/// `AgentBootstrap::new` fixes a session's workspace SPELLING at ingress
+/// (`canonical_workspace`), and every path bootstrap derives from it — the
+/// user-model and correction stores this file seeds above all — is keyed by
+/// that resolved string. On macOS `/var`, `/tmp` and `/etc` are symlinks into
+/// `/private`, so the spelling `TempDir` hands back is NOT the spelling
+/// bootstrap reads under. Seeding the raw one puts the correction in a store
+/// the session never opens, and the value then never reaches the wire — which
+/// reads exactly like the defect this file exists to pin, from a harness fault.
+///
+/// Linux has no such alias, which is why leaving this out was green there and
+/// red on macOS. The returned `TempDir` must be kept alive by the caller.
+///
+/// `dunce::simplified` is not decoration: `canonical_workspace` applies it too,
+/// so on Windows it is the difference between `C:\…` and the verbatim
+/// `\\?\C:\…` form `canonicalize` returns. Canonicalizing WITHOUT it leaves the
+/// harness on a third spelling that bootstrap never emits, and this file stays
+/// red on Windows for the same reason it was red on macOS.
+fn resolved_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().expect("workdir");
+    let canonical =
+        std::fs::canonicalize(dir.path()).expect("resolve the workdir bootstrap will resolve");
+    (dir, dunce::simplified(&canonical).to_path_buf())
+}
+
 /// The user-model persistence paths, computed exactly as `bootstrap.rs` does.
 /// Duplicating the expression rather than hardcoding a path is deliberate: if
 /// bootstrap's path ever moves, this helper moves with it and the test starts
@@ -251,7 +277,7 @@ async fn captured_bodies(server: &MockServer) -> Vec<String> {
 
 /// §3b-i: prove the artifact is a live instrument BEFORE claiming anything is
 /// absent from it.
-fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str) {
+fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str, cwd: &Path) {
     assert!(
         bodies.len() > index,
         "{label}: expected at least {} captured request(s), got {}. An absent artifact \
@@ -268,6 +294,29 @@ fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str
         "{label}: captured body {index} does not contain the user's own message \
          ({PROBE_QUESTION:?}), so this is not a real outbound prompt and a search over it \
          proves nothing. Body was: {}",
+        bodies[index]
+    );
+    // The seeding invariant, read off the wire rather than assumed. `bootstrap`
+    // prints its OWN workspace spelling here, and keys the user-model and
+    // correction stores by that same spelling. If it disagrees with the one this
+    // file seeded under, every seed landed in a store the session never opened —
+    // and the symptom is a value absent from the prompt, which is exactly the
+    // shape of the defect this file pins. Name it here instead.
+    // The body is a JSON document, so the needle must carry JSON's escaping or
+    // this check is a Windows-only false positive: every `\` in `D:\lanes\...`
+    // appears in the body as `\\`. Encoding the expected string and stripping
+    // its quotes escapes exactly what the serializer escaped, on every platform.
+    let working_directory = format!("Working directory: {}", cwd.display());
+    let working_directory = serde_json::to_string(&working_directory)
+        .expect("a String always serializes")
+        .trim_matches('"')
+        .to_string();
+    assert!(
+        bodies[index].contains(&working_directory),
+        "{label}: the session reported a workspace spelling other than the one this \
+         harness seeded under ({working_directory:?}). Every user-model path bootstrap \
+         derives is keyed by ITS spelling, so the seeds above are in a store this \
+         session never opened and no assertion below means anything. Body was: {}",
         bodies[index]
     );
 }
@@ -317,8 +366,8 @@ async fn run_everything_that_would_clobber_a_correction(cwd: &Path) {
 #[tokio::test]
 async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
     let server = start_mock_anthropic().await;
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     seed_inferred_style(cwd).await;
 
@@ -326,7 +375,7 @@ async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
     // absence asserted after the correction would prove nothing at all.
     drive_cold_session(&server, cwd, "msg-um-1").await;
     let bodies = captured_bodies(&server).await;
-    assert_body_is_a_live_instrument(&bodies, 0, "session 1");
+    assert_body_is_a_live_instrument(&bodies, 0, "session 1", cwd);
     assert!(
         bodies[0].contains(INFERRED_STYLE_MARKER),
         "session 1: the inferred style never reached the outbound body, so this test cannot \
@@ -359,7 +408,7 @@ async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
         "expected exactly two outbound requests, one per cold session; got {}",
         bodies.len()
     );
-    assert_body_is_a_live_instrument(&bodies, 1, "session 2");
+    assert_body_is_a_live_instrument(&bodies, 1, "session 2", cwd);
 
     // The correction SURVIVED and is on the wire.
     assert!(
@@ -396,8 +445,8 @@ async fn a_user_correction_survives_session_end_and_reaches_the_provider() {
 #[tokio::test]
 async fn the_control_proves_the_probe_can_fail() {
     let server = start_mock_anthropic().await;
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     seed_inferred_style(cwd).await;
     drive_cold_session(&server, cwd, "msg-ctl-1").await;
@@ -408,7 +457,7 @@ async fn the_control_proves_the_probe_can_fail() {
     drive_cold_session(&server, cwd, "msg-ctl-2").await;
     let bodies = captured_bodies(&server).await;
     assert_eq!(bodies.len(), 2, "expected two outbound requests");
-    assert_body_is_a_live_instrument(&bodies, 1, "control session 2");
+    assert_body_is_a_live_instrument(&bodies, 1, "control session 2", cwd);
     assert!(
         bodies[1].contains("User context (from rolling profile)"),
         "control: the user-context block is not being rendered at all, so the headline \
@@ -438,8 +487,8 @@ async fn the_control_proves_the_probe_can_fail() {
 #[tokio::test]
 async fn forgetting_a_correction_returns_the_subject_to_inference_on_the_wire() {
     let server = start_mock_anthropic().await;
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd = workdir.path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     seed_inferred_style(cwd).await;
     let (_, corrections_path) = user_model_paths(cwd);
@@ -452,7 +501,7 @@ async fn forgetting_a_correction_returns_the_subject_to_inference_on_the_wire() 
     // Session 1: correction present, inference suppressed.
     drive_cold_session(&server, cwd, "msg-fg-1").await;
     let bodies = captured_bodies(&server).await;
-    assert_body_is_a_live_instrument(&bodies, 0, "forget session 1");
+    assert_body_is_a_live_instrument(&bodies, 0, "forget session 1", cwd);
     assert!(
         bodies[0].contains(CORRECTION_VALUE),
         "correction on the wire"
@@ -473,7 +522,7 @@ async fn forgetting_a_correction_returns_the_subject_to_inference_on_the_wire() 
     // Session 2: correction gone, inference returns.
     drive_cold_session(&server, cwd, "msg-fg-2").await;
     let bodies = captured_bodies(&server).await;
-    assert_body_is_a_live_instrument(&bodies, 1, "forget session 2");
+    assert_body_is_a_live_instrument(&bodies, 1, "forget session 2", cwd);
     assert!(
         !bodies[1].contains(CORRECTION_VALUE),
         "session 2: a forgotten correction is STILL on the wire. Body was: {}",

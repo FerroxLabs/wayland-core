@@ -21,13 +21,13 @@
 //!     server is probed for reachability before the flow claims a
 //!     connection, and the provider selection is persisted so the next
 //!     launch does not re-onboard.
-//!  3. Skip for now — defer provider setup. The config layer carries a
-//!     `[default] read_only` posture for this path (see
-//!     `wcore_config::DefaultConfig::read_only`), but the writer wiring that
-//!     persists it from onboarding and the engine gate that refuses outbound
-//!     calls when it is set are wired separately. Until both land, onboarding
-//!     deliberately does NOT promise "no API calls" as an enforced guarantee
-//!     here — it is framed as deferred setup only.
+//!  3. Skip for now — defer provider setup. This path writes nothing and
+//!     promises nothing: it is deferred setup only. In particular it is NOT
+//!     the `[default] read_only` posture. `read_only` is now enforced (it
+//!     refuses every tool that is not read-only-safe, ahead of PreToolUse
+//!     hooks — see `wcore_config::DefaultConfig::read_only`), but what it
+//!     bounds is TOOL EFFECTS, not outbound provider calls, and onboarding
+//!     never persists it. Do not describe this option as "no API calls".
 //!
 //! On entry the surface scans `std::env` for the common provider API-key
 //! variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, …). If any are
@@ -81,15 +81,15 @@ enum Path {
     ApiKey,
     /// Use a local Ollama install (reachability-probed, then persisted).
     Ollama,
-    /// Skip provider setup for now (deferred setup; the `read_only` posture
-    /// it maps to lives in config — enforcement wired separately).
+    /// Skip provider setup for now. Deferred setup only — this path does not
+    /// map to, and does not persist, the `[default] read_only` posture.
     Skip,
 }
 
 impl Path {
     /// The three connect options, in display order. "Enter an API key"
     /// is first (and the default selection); "Skip" is deliberately last
-    /// so the read-only escape hatch never reads as the primary action.
+    /// so the deferred-setup escape hatch never reads as the primary action.
     const ALL: [Path; 3] = [Path::ApiKey, Path::Ollama, Path::Skip];
 
     /// The option label — framed by what the user *gets*.
@@ -619,8 +619,8 @@ impl OnboardingSurface {
     ///   The probe outcome (drained in `render`) decides whether Ready
     ///   claims "Connected" and persists the provider selection.
     /// - **Skip**: records the choice and shows Ready immediately. No config
-    ///   write here — the `read_only` posture persistence is wired through
-    ///   the onboarding config writer separately (see the module doc).
+    ///   write here, and none intended: this option is deferred provider setup
+    ///   and does not persist `[default] read_only` (see the module doc).
     fn finish_non_key(&mut self, via: Path) -> SurfaceAction {
         self.completed_via = Some(via);
         match via {

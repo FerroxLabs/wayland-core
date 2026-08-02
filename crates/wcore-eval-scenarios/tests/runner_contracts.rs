@@ -207,9 +207,39 @@ async fn assert_owned_orphan_cleaned(
     control_path: &std::path::Path,
     result: &wcore_eval_scenarios::runner::ScenarioResult,
 ) {
-    let state = wait_for_orphan_state(control_path, Duration::from_secs(1))
-        .await
-        .expect("owned descendant must publish pid, port, and heartbeat");
+    // Report WHY when the descendant never published. This used to be a bare
+    // `.expect(...)`, which is the least useful thing it could say: the two
+    // causes it hides — the fixture aborted before spawning, or the descendant
+    // was reaped before it could write — need opposite repairs, and the run
+    // already captured the evidence that separates them.
+    let state = match wait_for_orphan_state(control_path, Duration::from_secs(1)).await {
+        Some(state) => state,
+        None => panic!(
+            "owned descendant never published pid/port/heartbeat at {}\n\
+             control file present: {}\n\
+             control file read: {:?}\n\
+             sibling entries: {:?}\n\
+             scenario failures: {:?}\n\
+             candidate stderr tail: {}",
+            control_path.display(),
+            control_path.exists(),
+            std::fs::read_to_string(control_path),
+            control_path.parent().map(|dir| {
+                std::fs::read_dir(dir).map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                })
+            }),
+            result.failures,
+            if result.stderr_tail.is_empty() {
+                "<empty>"
+            } else {
+                result.stderr_tail.as_str()
+            }
+        ),
+    };
     let cleaned = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
     if !cleaned {
         emergency_kill_owned_orphan(state).await;
@@ -707,7 +737,7 @@ async fn dropping_runner_future_reaps_owned_descendant_listener() {
         );
         let scenario = Scenario::new("owned_orphan_future_drop", Category::Hardening)
             .max_total_time(Duration::from_secs(30))
-            .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(30)));
+            .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(5)));
         run_with_binary(&scenario, &provider(&model), fixture()).await
     });
 

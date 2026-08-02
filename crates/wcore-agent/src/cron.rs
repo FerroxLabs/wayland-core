@@ -359,6 +359,30 @@ pub async fn build_headless_cron_handler_with_channels(
 
     let cwd_path = std::path::Path::new(cwd);
 
+    // `[default] read_only` for this daemon.
+    //
+    // `Config::default()` above is a stand-in, not a resolution: it always
+    // carries `read_only = false`, so reading the posture off it would mean the
+    // daemon never honoured the operator's setting and quietly ran skill shell
+    // in a session they had made read-only. Read the merged config file
+    // directly instead.
+    //
+    // A load failure is NOT `false`. We could not take the measurement, and a
+    // posture we cannot read must not render as "off" — that is a fail-open on
+    // a safety flag. Refuse skills until the config can be read, and say so.
+    let read_only = match wcore_config::config::load_merged_config_file(Some(cwd_path)) {
+        Ok(file) => file.default.read_only,
+        Err(error) => {
+            warn!(
+                target: "wcore_agent::cron",
+                %error,
+                "cron daemon cannot read the config, so it cannot tell whether this \
+                 session is read-only — refusing skill fires until it can"
+            );
+            true
+        }
+    };
+
     // --- Skill sink (engine-less) ---------------------------------------
     // Build the catalog exactly as bootstrap does: load from disk, then widen
     // to sibling projects when cwd has a parent.
@@ -431,7 +455,10 @@ pub async fn build_headless_cron_handler_with_channels(
                         }
                     }
                 }
-                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                // No dispatcher in this path — the sink calls `execute()`
+                // directly — so the read-only posture travels on the tool.
+                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker)
+                    .with_read_only(read_only);
                 let input = serde_json::json!({ "skill": skill_name, "args": args });
                 let result = wcore_tools::Tool::execute(&tool, input).await;
                 if result.is_error {

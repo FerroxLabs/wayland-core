@@ -40,19 +40,47 @@ fn workspace_forms(workspace: &Path) -> Result<Vec<Vec<u8>>, WorkspaceEvidenceEr
     if native.is_empty() {
         return Err(WorkspaceEvidenceError::UnsafeWorkspace);
     }
-    let native_form = native.as_bytes().to_vec();
+    let mut forms = Vec::new();
+    push_spellings(&mut forms, native);
+    // The SAME directory reaches evidence under more than one spelling, and the
+    // caller only holds one of them. `AgentBootstrap` fixes a session's
+    // workspace at ingress with `std::fs::canonicalize`, so every path the
+    // binary under test emits — the `Working directory:` line of its system
+    // prompt above all — carries the RESOLVED form, while the harness that owns
+    // the temporary directory still holds the form `TempDir` handed it. On macOS
+    // `/var`, `/tmp` and `/etc` are symlinks into `/private`, and on Windows an
+    // 8.3 short name aliases its long form, so those two disagree on exactly the
+    // platforms CI runs; Linux has no such alias, which is why matching only the
+    // caller's form was green there.
+    //
+    // Left unmatched, the random per-run directory name stays inside the digest
+    // and two identical runs never agree — a repeatability gate that cannot pass
+    // rather than one that cannot fail, but just as worthless.
+    //
+    // Fail-soft on a workspace that cannot be resolved (the identity-only roots
+    // in `openai_fixture_contract.rs` are never created): an unresolvable path
+    // has no second spelling to miss, so the caller's form is already complete.
+    if let Ok(canonical) = std::fs::canonicalize(workspace)
+        && let Some(canonical) = dunce::simplified(&canonical).to_str()
+    {
+        push_spellings(&mut forms, canonical);
+    }
+    Ok(forms)
+}
+
+/// Append every spelling of one pathname the platform can produce, skipping
+/// duplicates so `next_workspace` never scans the same bytes twice.
+fn push_spellings(forms: &mut Vec<Vec<u8>>, path: &str) {
+    let native = path.as_bytes().to_vec();
+    if !forms.contains(&native) {
+        forms.push(native);
+    }
     #[cfg(windows)]
     {
-        let mut forms = vec![native_form];
-        let slash = native.replace('\\', "/").into_bytes();
-        if slash != forms[0] {
+        let slash = path.replace('\\', "/").into_bytes();
+        if !forms.contains(&slash) {
             forms.push(slash);
         }
-        Ok(forms)
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(vec![native_form])
     }
 }
 
@@ -169,6 +197,55 @@ mod tests {
         assert_eq!(
             semantic_sha256(b"test", first_evidence.as_bytes(), first.path()).unwrap(),
             semantic_sha256(b"test", second_evidence.as_bytes(), second.path()).unwrap()
+        );
+    }
+
+    /// The caller holds the workspace by its SYMLINKED spelling; the binary
+    /// under test prints the RESOLVED one, because `AgentBootstrap` canonicalizes
+    /// at ingress. Both must normalize to the same marker, or the random
+    /// per-run directory name survives into the digest and no two runs of the
+    /// F04 repeatability gate can ever agree.
+    ///
+    /// This is the macOS condition exactly (`/var` -> `/private/var`),
+    /// reproduced here with an explicit symlink so it is checked on every unix
+    /// runner rather than only where the platform happens to supply the alias.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workspace_matches_the_resolved_spelling_the_binary_prints() {
+        let root = tempfile::tempdir().unwrap();
+        let mut resolved = Vec::new();
+        let mut links = Vec::new();
+        for name in ["a", "b"] {
+            let real = root.path().join(format!("real-{name}"));
+            std::fs::create_dir(&real).unwrap();
+            let link = root.path().join(format!("link-{name}"));
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            resolved.push(std::fs::canonicalize(&real).unwrap());
+            links.push(link);
+        }
+
+        // Positive control on the setup: the two spellings really do differ, so
+        // a match below is the canonical form doing work rather than the two
+        // sides being the same string all along.
+        assert_ne!(
+            links[0].to_str().unwrap(),
+            resolved[0].to_str().unwrap(),
+            "the symlink and its target have the same spelling; this test would \
+             pass without the canonical form and proves nothing"
+        );
+
+        let evidence = |index: usize| format!("Working directory: {}\n", resolved[index].display());
+        assert_eq!(
+            semantic_sha256(b"test", evidence(0).as_bytes(), &links[0]).unwrap(),
+            semantic_sha256(b"test", evidence(1).as_bytes(), &links[1]).unwrap()
+        );
+
+        // Known-negative: recognising more spellings must not make unrelated
+        // evidence agree. Same workspace, different tail.
+        let deeper = format!("Working directory: {}/sub\n", resolved[0].display());
+        assert_ne!(
+            semantic_sha256(b"test", evidence(0).as_bytes(), &links[0]).unwrap(),
+            semantic_sha256(b"test", deeper.as_bytes(), &links[0]).unwrap()
         );
     }
 
