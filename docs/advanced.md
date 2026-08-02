@@ -2,7 +2,22 @@
 
 ## Sub-Agent Spawning
 
-The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context and full tool set, but shares the parent agent's LLM provider (connection pool reuse).
+The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context and shares the parent agent's LLM provider (connection pool reuse).
+
+**A sub-agent does not get your tool set.** Spawn children are read-only. Every
+Spawn dispatch builds the child registry with an empty request, which falls to the
+read-only floor — **`Read`, `Grep` and `Glob`, and nothing else**
+(`SHARED_READ_ONLY_CHILD_TOOLS`, `crates/wcore-types/src/spawner.rs:159`). `Write`,
+`Edit` and `Bash` are never registered on a Spawn child, whatever the parent holds.
+
+That floor is then **intersected with the parent's own authority**, so a child can
+only ever be a subset of the session that spawned it — a parent that has had `Grep`
+and `Glob` dropped by its posture cannot recover them by spawning
+(`crates/wcore-agent/src/spawner.rs:2818`). The intersection is unconditional: there
+is no "no authority supplied" arm to fall through.
+
+The child's filesystem access is also jailed to a contained workspace, with the
+parent's read/write deny list applied on top.
 
 ### Use Cases
 
@@ -15,14 +30,20 @@ The LLM can use the Spawn tool to create independent sub-agents that run tasks i
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Max parallel sub-agents | 5 | Prevents resource exhaustion |
-| Sub-agent max turns | 10 | Per sub-agent conversation turn limit |
+| Sub-agent max turns | 200 | Per sub-agent conversation turn limit |
 | Sub-agent max tokens | 4096 | Per sub-agent response token limit |
 
 ### Behavior
 
-- Sub-agents auto-approve all tool calls (no confirmation prompts)
+- Sub-agents **inherit the parent's approval posture** — they do not auto-approve.
+  A session that prompts you before Bash/Write/Edit keeps prompting inside any
+  sub-agent it spawns (`crates/wcore-agent/src/spawner.rs:2434`). A parent already
+  running with `auto_approve` on is the only case in which a child auto-approves.
 - Sub-agents do not save sessions
-- Sub-agents run silently (no stdout output)
+- By default a sub-agent's streaming output is discarded and only the parent writes
+  to stdout. When the host wires the relay (the JSON-stream protocol path), the
+  child's events are forwarded to the parent sink as `sub_agent_event` frames
+  instead of being dropped.
 - All results are merged and returned to the parent agent
 
 ---

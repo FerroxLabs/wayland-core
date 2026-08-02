@@ -22,9 +22,10 @@ session and reading them back the next time the agent boots.
 
 Three rules govern the layer:
 
-1. **Opt-in.** Memory is off by default. Until you set
-   `memory.enabled = true`, every write is a no-op against
-   `NullMemory` and every read returns empty.
+1. **Opt-out.** Memory is **on by default** (`config.rs:596`, F-091). It records
+   across sessions unless you turn it off — set `memory.enabled = false` in your
+   config, or pass `--no-memory`. Only then does every write become a no-op
+   against `NullMemory` and every read return empty.
 2. **Append-only at the row level.** Decay and the dream cycle can flip
    a row's status to `archived`, but rows are never deleted by the
    normal pipeline. Audit and reproducibility need the tail.
@@ -87,22 +88,29 @@ Episodic→Project, Semantic→Project, Procedural→Project, Core→Global.
 
 ### Configuration
 
-Memory is off by default. To enable it, set the following in your config
-(`.wayland-core.toml` for project scope, or the global config — see
+Memory is **on by default**, so the agent records across sessions unless you stop
+it. To turn it off, set the following in your config (`.wayland-core.toml` for
+project scope, or the global config — see
 [getting-started.md](getting-started.md) for cascading precedence):
 
 ```toml
 [memory]
-enabled = true
+enabled = false                    # off; the default is true
 dream_cycle_throttle_secs = 1800   # minimum gap between dream cycles (30 min)
 decay_interval_secs       = 3600   # decay sweep cadence (1 hour)
 ```
 
+`--no-memory` does the same thing for a single run.
+
 The fields map one-to-one to `wcore_config::config::MemoryConfig`. With
-`enabled = false` (the default), the agent binds `NullMemory` —
-every mutator is a silent no-op and every reader returns empty. The CLI
-inspection flag still works against the null store; it just reports
-zero rows.
+`enabled = false`, the agent binds `NullMemory` — every mutator is a silent no-op
+and every reader returns empty. The CLI inspection flag still works against the
+null store; it just reports zero rows.
+
+Note that a present `[memory]` table that omits `enabled` also leaves memory
+**on**: the serde default is `default_true`, deliberately matched to the `Default`
+impl so the two cannot disagree (`config.rs:518-523`). Writing `[memory]` on its
+own does not disable anything.
 
 ### Where files live
 
@@ -285,15 +293,28 @@ The struct backing this section is `wcore_config::config::MemoryConfig`.
 Defaults live in `default_dream_throttle_secs()` and
 `default_decay_interval_secs()` in
 `crates/wcore-config/src/config.rs`. The Default impl is
-`enabled: false` plus those two defaults — every change to the default
-posture has to pass the regression tests in
-`crates/wcore-config/tests/memory_config_test.rs`.
+`enabled: true` (`config.rs:596`) plus those two defaults — every change to the
+default posture has to pass the regression tests in
+`crates/wcore-config/tests/memory_config_test.rs`, whose
+`memory_config_default_enabled` asserts exactly this: *"F-091: memory must be
+enabled by default (opt-out via memory.enabled=false)"*.
 
-To opt in for a single project, add the `[memory]` block to that
-project's `.wayland-core.toml`. To opt in globally, add it to the
-global config (`<config_dir>/wayland-core/config.toml`). Project values
-override global values per the cascading rule documented in
+To opt **out** for a single project, add `[memory]` with `enabled = false` to that
+project's `.wayland-core.toml`. To opt out globally, add it to the global config
+(`<config_dir>/wayland-core/config.toml`). Project values override global values
+per the cascading rule documented in
 [getting-started.md](getting-started.md).
+
+> **A global opt-out is not final, and this is worth knowing before you rely on
+> it.** The merge is *presence*-gated, not value-gated: `project.memory.or(global.memory)`
+> (`config.rs:4755`). A project `[memory]` table wins **outright**, and because the
+> serde default for `enabled` is `true`, a project config carrying a bare `[memory]`
+> block — or one that sets only `decay_interval_secs` — silently restores memory that
+> your global config had switched off. Since `.wayland-core.toml` travels with a
+> cloned repository, that is a repo you did not write deciding your memory posture.
+> Unlike the egress master switch, which is read from the trusted global layer alone
+> precisely so a cloned repo cannot weaken it (`config.rs:4757-4760`), `[memory]`
+> carries no such protection. If memory must stay off, check the project config.
 
 ## 7. Privacy notes
 
