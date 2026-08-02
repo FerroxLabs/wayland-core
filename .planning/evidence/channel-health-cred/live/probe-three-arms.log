@@ -1,0 +1,82 @@
+=== PROBE ARM real (mode=real) ===
+binary sha256: 645ac61317b7ffbcc44beff8edaa1b8572cce01bc76a325109cd2178707d512c
+handles stored: 3
+[
+  {
+    "channel": "discord",
+    "platform": "discord",
+    "outcome": "ok",
+    "config_complete": true,
+    "authenticated": true,
+    "identity": "1532224324075913297",
+    "findings": []
+  },
+  {
+    "channel": "slack",
+    "platform": "slack",
+    "outcome": "ok",
+    "config_complete": true,
+    "authenticated": true,
+    "identity": "<redacted-user-id>/Trade Canyon, Inc.",
+    "findings": []
+  }
+]
+PROBE_RC=0
+
+=== PROBE ARM bogus (mode=bogus) ===
+binary sha256: 645ac61317b7ffbcc44beff8edaa1b8572cce01bc76a325109cd2178707d512c
+handles stored: 3
+[
+  {
+    "channel": "discord",
+    "platform": "discord",
+    "outcome": "unauthenticated",
+    "config_complete": true,
+    "authenticated": false,
+    "findings": [
+      "GET /users/@me returned HTTP 401"
+    ]
+  },
+  {
+    "channel": "slack",
+    "platform": "slack",
+    "outcome": "unauthenticated",
+    "config_complete": true,
+    "authenticated": false,
+    "findings": [
+      "invalid_auth"
+    ]
+  }
+]
+wayland-core channel: 2 of 2 channels are not ready: discord, slack
+PROBE_RC=1
+
+=== PROBE ARM absent (mode=absent) ===
+binary sha256: 645ac61317b7ffbcc44beff8edaa1b8572cce01bc76a325109cd2178707d512c
+handles stored: 0
+[
+  {
+    "channel": "discord",
+    "platform": "discord",
+    "outcome": "incomplete",
+    "config_complete": false,
+    "authenticated": false,
+    "findings": [
+      "credential \"discord.chc.bot_token\" is not present in the credentials store"
+    ]
+  },
+  {
+    "channel": "slack",
+    "platform": "slack",
+    "outcome": "incomplete",
+    "config_complete": false,
+    "authenticated": false,
+    "findings": [
+      "credential \"slack.chc.bot_token\" is not present in the credentials store",
+      "credential \"slack.chc.signing_secret\" is not present in the credentials store"
+    ]
+  }
+]
+wayland-core channel: 2 of 2 channels are not ready: discord, slack
+PROBE_RC=1
+

@@ -1,0 +1,62 @@
+=== ARM chc-discord-real ===
+binary: /root/lanes/channel-health-cred/wt/target/debug/wayland-core
+wayland-core 0.12.25
+sha256: 83ff14dbe04fc547143af9bde5b8488661682b45f39fc22f1a18cb6ab265fe6d
+platform: discord   token mode: real
+WAYLAND_HOME: /root/wl-authprod-chc-discord-real
+-- PRECONDITIONS, asserted before any measurement --
+handle_in_config=1   (must be 1)
+handle_in_store=1   (bogus/real: 1, absent: 0)
+owners_of_this_home_BEFORE_start=0   (must be 0)
+
+-- start gateway --
+gateway_pid=581083
+waiting for health file: iteration 1
+waiting for health file: iteration 2
+waiting for health file: iteration 3
+health file after 8s: /root/wl-authprod-chc-discord-real/channel-health.json
+-- PARTICIPANT ASSERTION --
+gateway_alive=yes   (must be yes)
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+
+-- gateway log: platform-facing evidence --
+count_4004=0
+count_invalid_auth=0
+count_auth_test_rejected=0
+count_mgr_terminal=0
+count_gateway_stop=0
+[gateway] channels registered=1
+[gateway] started pid=581083 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+
+-- channel health --json (DEFAULT exit status) --
+{
+  "configured": 1,
+  "registered": 1,
+  "channels": [
+    {
+      "channel": "discord",
+      "platform": "discord",
+      "state": "healthy",
+      "consecutive_errors": 0,
+      "reconnects": 0
+    }
+  ]
+}
+HEALTH_RC=0
+
+-- STICKINESS: same query again after 20s (state must not drift) --
+      "state": "healthy",
+HEALTH2_RC=0
+
+-- channel health --require-healthy (the gate), FULL output --
+configured: 1   registered: 1
+discord (discord)
+  state:      Healthy
+  reason:     -
+  errors:     0
+  reconnects: 0
+REQUIRE_RC=0
+
+-- teardown BY PID, verified --
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)
