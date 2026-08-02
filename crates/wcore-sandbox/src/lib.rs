@@ -404,7 +404,12 @@ impl SandboxRegistry {
         let normalized = choice.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
         let backend: Box<dyn backends::SandboxBackend> = match normalized {
-            None => real_platform_backend().unwrap_or_else(|| Box::new(FailClosedBackend::new())),
+            // The readiness path: bootstrap resolves this BEFORE the
+            // `--json-stream` `ready` frame, so selection must not spend a
+            // startup-unsafe availability probe here. See
+            // [`select_without_startup_probe`].
+            None => real_platform_backend_with(select_without_startup_probe)
+                .unwrap_or_else(|| Box::new(FailClosedBackend::new())),
             Some("docker") => {
                 use backends::SandboxBackend as _;
                 let docker = backends::docker::DockerBackend::new();
@@ -646,34 +651,202 @@ impl HardContainmentAuthority {
     }
 }
 
-/// Return the real native backend when one is available. This helper never
-/// consults process-global configuration and never falls back to NoSandbox.
-fn real_platform_backend() -> Option<Box<dyn backends::SandboxBackend>> {
+/// How a backend candidate is admitted during selection. Both policies below
+/// have the same signature so exactly one platform cascade
+/// ([`real_platform_backend_with`]) serves both callers — a second cascade is
+/// how the two would drift apart.
+type SelectionPolicy =
+    fn(Box<dyn backends::SandboxBackend>) -> Option<Box<dyn backends::SandboxBackend>>;
+
+/// Selection policy: probe the candidate now, and drop it when unavailable.
+///
+/// This is the policy `default_for_platform` needs and MUST keep: its fallback
+/// branches on the verdict (`WAYLAND_ALLOW_NO_SANDBOX` can turn an unavailable
+/// real backend into an unsandboxed run), so deferring the probe there could
+/// convert a refusal into an *uncontained execution*.
+fn select_probing_now(
+    candidate: Box<dyn backends::SandboxBackend>,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    if candidate.is_available() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Selection policy for an agent SESSION: never put a startup-unsafe
+/// availability probe on the readiness path.
+///
+/// Session selection runs inside bootstrap, before the `--json-stream` `ready`
+/// frame. A backend that declares its probe startup-unsafe
+/// ([`backends::SandboxBackend::availability_probe_is_startup_safe`]) is taken
+/// structurally here and enforces its own verdict at the first `execute`.
+///
+/// This is safe ONLY because both outcomes on the session path refuse:
+/// `required_for_session` has no `WAYLAND_ALLOW_NO_SANDBOX` branch, so an
+/// unavailable backend yields a refused command either way. Deferring changes
+/// *when* the operator learns, never *what* runs.
+fn select_without_startup_probe(
+    candidate: Box<dyn backends::SandboxBackend>,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    if !candidate.availability_probe_is_startup_safe() {
+        return Some(candidate);
+    }
+    select_probing_now(candidate)
+}
+
+/// The real backend this target ships, CONSTRUCTED ONLY — never probed.
+///
+/// Split from selection so the platform `cfg` cascade exists exactly once and
+/// every selection policy sees the same candidate. A second cascade is how the
+/// session path and the compatibility path would drift apart.
+fn platform_candidate() -> Option<Box<dyn backends::SandboxBackend>> {
     #[cfg(target_os = "linux")]
     {
-        use backends::SandboxBackend as _;
-        let bwrap = backends::bwrap::BubblewrapBackend::new();
-        if bwrap.is_available() {
-            return Some(Box::new(bwrap));
-        }
+        let backend = backends::bwrap::BubblewrapBackend::new();
+        Some(Box::new(backend))
     }
     #[cfg(target_os = "macos")]
     {
-        use backends::SandboxBackend as _;
-        let sbx = backends::sandbox_exec::SandboxExecBackend::new();
-        if sbx.is_available() {
-            return Some(Box::new(sbx));
-        }
+        let backend = backends::sandbox_exec::SandboxExecBackend::new();
+        Some(Box::new(backend))
     }
     #[cfg(target_os = "windows")]
     {
-        use backends::SandboxBackend as _;
-        let appc = backends::appcontainer::AppContainerBackend::new();
-        if appc.is_available() {
-            return Some(Box::new(appc));
+        let backend = backends::appcontainer::AppContainerBackend::new();
+        Some(Box::new(backend))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+/// The single platform cascade. Returns the real native backend for this
+/// target when `select` admits it. Never consults process-global configuration
+/// and never falls back to NoSandbox.
+fn real_platform_backend_with(
+    select: SelectionPolicy,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    platform_candidate().and_then(select)
+}
+
+/// Return the real native backend when one is available *right now*, probing to
+/// find out. See [`select_probing_now`] for why this caller keeps the probe.
+fn real_platform_backend() -> Option<Box<dyn backends::SandboxBackend>> {
+    real_platform_backend_with(select_probing_now)
+}
+
+#[cfg(test)]
+mod selection_policy_tests {
+    //! The two selection policies, driven through the SAME functions
+    //! `real_platform_backend_with` calls. These run on every target because
+    //! the readiness contract is not Windows-specific: any backend that
+    //! declares its probe startup-unsafe must be admitted without one, and the
+    //! eager policy that `default_for_platform` depends on must keep probing.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingBackend {
+        startup_safe: bool,
+        available: bool,
+        probes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl backends::SandboxBackend for CountingBackend {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn is_available(&self) -> bool {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            self.available
+        }
+        fn availability_probe_is_startup_safe(&self) -> bool {
+            self.startup_safe
+        }
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> Result<SandboxOutput> {
+            Err(SandboxError::ExecFailed("counting backend".into()))
         }
     }
-    None
+
+    fn candidate(
+        startup_safe: bool,
+        available: bool,
+    ) -> (Box<dyn backends::SandboxBackend>, Arc<AtomicUsize>) {
+        let probes = Arc::new(AtomicUsize::new(0));
+        (
+            Box::new(CountingBackend {
+                startup_safe,
+                available,
+                probes: Arc::clone(&probes),
+            }),
+            probes,
+        )
+    }
+
+    /// The readiness fix, stated as a property: session selection admits a
+    /// startup-unsafe backend WITHOUT asking whether it is available.
+    ///
+    /// The candidate here reports `available == false`, so a policy that probed
+    /// would drop it. Selecting it anyway is only correct because the backend
+    /// enforces its own verdict at `execute` — which is what moves the cost off
+    /// the `ready` path without moving the containment decision.
+    #[test]
+    fn session_selection_admits_a_startup_unsafe_backend_without_probing() {
+        let (backend, probes) = candidate(false, false);
+        let selected = select_without_startup_probe(backend);
+        assert!(
+            selected.is_some(),
+            "a startup-unsafe backend must be admitted structurally"
+        );
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            0,
+            "session selection must not run a startup-unsafe availability probe"
+        );
+    }
+
+    /// …and it does NOT become a blanket "skip the probe": a startup-safe
+    /// backend is still probed and still dropped when unavailable, which is how
+    /// a bwrap-less Linux host still falls closed.
+    #[test]
+    fn session_selection_still_probes_a_startup_safe_backend() {
+        let (unavailable, probes) = candidate(true, false);
+        assert!(
+            select_without_startup_probe(unavailable).is_none(),
+            "an unavailable startup-safe backend must be dropped"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+        let (usable, probes) = candidate(true, true);
+        assert!(select_without_startup_probe(usable).is_some());
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+    }
+
+    /// `default_for_platform` must KEEP the eager probe even for a
+    /// startup-unsafe backend. Its fallback branches on the verdict and
+    /// `WAYLAND_ALLOW_NO_SANDBOX=1` can turn "unavailable" into an unsandboxed
+    /// run, so admitting structurally there would risk trading a refusal for an
+    /// uncontained execution. Collapsing both callers onto one policy is the
+    /// tempting simplification this pins shut.
+    #[test]
+    fn eager_selection_probes_even_a_startup_unsafe_backend() {
+        let (backend, probes) = candidate(false, false);
+        assert!(
+            select_probing_now(backend).is_none(),
+            "the eager policy must drop an unavailable backend regardless of probe cost"
+        );
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            1,
+            "the eager policy must actually probe"
+        );
+    }
 }
 
 /// Choose the default backend for the current platform.

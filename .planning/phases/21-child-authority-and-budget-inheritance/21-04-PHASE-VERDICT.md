@@ -338,3 +338,61 @@ verdict was stated. No fifth Phase 21 plan was created or proposed. No productio
 file under `crates/*/src` was touched. No existing test was modified, renamed,
 re-gated, `#[ignore]`d or deleted. No production observability hook was added to
 make a test possible. Nothing was repaired. No seal is claimed.
+
+---
+
+# RE-CONFIRMATION — 2026-08-01, lane `verdict-truth-text`, base `02575b6f`
+
+**This block supersedes nothing. Criterion 3 stays NOT MET, and the grade is re-derived rather
+than inherited.**
+
+A sweep ran across the phase verdicts on 2026-08-01 looking specifically for reds that **cannot
+pass** — checks whose verdict is decoupled from the property they name, so the scoreboard reads
+worse than the product is. Four phase verdicts were found publishing worse-than-true grades
+(`22-C1`, `23A-C1`, `24-C4`, `27-C4`) and were given dated superseding blocks. **Phase 21's
+Criterion 3 was checked by the same method and came back SOUND.** Recording that is the point:
+a sweep that only ever moved rows upward would be a sweep with a known bias.
+
+Re-measured in this worktree at `02575b6f`, two-directionally:
+
+```
+grep -rlc "SubAgentConfig" crates/wcore-protocol/src   ->  0 in ALL 20 files
+grep -rl  "SubAgentConfig" crates                      ->  hits in wcore-skills/src/executor.rs,
+                                                           wcore-agent/tests/*  [NEEDLE IS ALIVE]
+```
+
+`ProtocolCommand` (`crates/wcore-protocol/src/commands.rs:290-400`) carries `SetMode`,
+`SetConfig`, `ContinueWithBudget`, `SessionResync`, `ResumeTurn`,
+`ResolveInterruptedApproval`, `ResolveUnknownToolEffect`, `GetRuntimeDiagnostics`, five `Goal*`
+variants, `AddMcpServer`, `RemoveMcpServer`, `GrantWorkspaceCapability`, `ApprovalResume`,
+`HostSendMessageResult` — **and no child-spawn variant.**
+
+`crates/wcore-protocol/src/child.rs` is **16 lines**, and re-exports the *durable child record*
+from `wcore_types::spawner` (`ChildPolicySnapshot`, `DurableChildRecord`, …). It is an
+**observation** model. There is no request type on it through which a host could ask for the tool
+or fan-out dimensions.
+
+So §"Why that clause is still not the criterion" holds verbatim: **three of eleven dimensions have
+no host-protocol expression at all**, and equivalence cannot be established over what cannot be
+requested. The phase's own standard — *a criterion that says ANY is not satisfied by MOST* —
+still yields NOT MET.
+
+## One distinction worth keeping separate from staleness
+
+`21-C3`'s pass state **is** reachable — it needs a `ProtocolCommand` child-spawn variant plus a
+`wcore-contract generate` — but the regeneration is reserved to the orchestrator, so **no lane can
+reach it alone**. A row that never moves for that reason looks identical to a permanently-red one
+and is **not** the same thing. It should be scheduled, not re-graded.
+
+## What the successor lane already established, and this block does not touch
+
+`21-C3-SUMMARY.md` records that widening the proof made the evidence *better and the criterion no
+less unmet*: fan-out went NOT-EXPRESSIBLE → **REFUSED** on 3 of 4 platform×surface cells behind an
+at-cap control admitting exactly 5 children; the Windows standalone-live surface was **measured**
+to admit 0 children rather than merely declared actorless; and the tool dimension resolved to
+**NOT-EXPRESSIBLE on all four cells**, replacing four decisive-looking REFUSED verdicts with the
+truth that there was never a measurement there. That is a loss of apparent coverage and a gain of
+honesty, and it is the correct direction.
+
+_Re-confirmed 2026-08-01 · base `02575b6f` · lane `verdict-truth-text` · source measurement only,
+two-directional controls, no cargo, no `crates/` edit. Sweep: `.planning/VERDICT-TRUTH-2026-08-01.md`._

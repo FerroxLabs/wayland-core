@@ -281,6 +281,30 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// backend is unavailable.
     fn is_available(&self) -> bool;
 
+    /// Whether [`Self::is_available`] is cheap enough to run on the
+    /// session-startup path.
+    ///
+    /// Agent-session backend selection happens inside bootstrap, BEFORE the
+    /// `--json-stream` `ready` frame is written, so anything selection calls is
+    /// on the host's readiness clock. `false` here means "selection must not
+    /// call `is_available()`" — the backend is taken structurally and the
+    /// verdict is enforced at the first `execute` instead.
+    ///
+    /// Default `true`: a backend opts OUT only when its probe is a real
+    /// process spawn with a wall-clock guard measured in seconds. Today that is
+    /// the Windows AppContainer backend, whose probe is a guarded
+    /// `cmd.exe /c exit 0` through the entire pipeline (15s guard, because
+    /// `CreateAppContainerProfile` / `CreateProcessAsUserW` can stall on an AV
+    /// image scan or a slow profile-service RPC) — longer than the host's ready
+    /// deadline, so the Desktop app saw no `ready` frame at all on first launch.
+    ///
+    /// Opting out is a LATENCY change only where both outcomes of the probe
+    /// refuse execution. It must never be used on a path that would answer an
+    /// unavailable probe by running something *less* contained.
+    fn availability_probe_is_startup_safe(&self) -> bool {
+        true
+    }
+
     /// True if this backend enforces `manifest.fs_read_deny` at the OS layer.
     /// The agent uses this to decide whether `Bash` may run in the untrusted
     /// `Workspace` posture. Default `false` — a backend opts in by overriding

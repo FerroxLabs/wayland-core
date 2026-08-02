@@ -77,9 +77,9 @@ impl Default for AppContainerBackend {
 }
 
 /// Probe cache: stores `Some(true)` once a real spawn has succeeded, and
-/// stays sticky for the process lifetime. Negative results are cached
-/// only for [`NEGATIVE_PROBE_TTL`], after which `is_available()`
-/// re-probes. This avoids both the "transient flake at startup
+/// stays sticky for the process lifetime. A negative verdict also stays
+/// readable, but throttles re-probing for [`NEGATIVE_PROBE_TTL`], after which
+/// `is_available()` re-probes. This avoids both the "transient flake at startup
 /// permanently disables sandboxing" silent-failure pattern and the
 /// re-probe-every-command hang of #125.
 pub(super) fn probe_cache() -> &'static Mutex<ProbeCache> {
@@ -95,9 +95,9 @@ pub(super) fn probe_cache() -> &'static Mutex<ProbeCache> {
 /// at the same instant. On Windows those parallel spawns contend on the
 /// shared per-PID AppContainer profile / profile-service RPC and most of
 /// them FAIL — and every failure is written into the cache as
-/// `UnavailableUntil(now + NEGATIVE_PROBE_TTL)`, so for the next 30s
-/// `default_for_platform()` returns `FailClosedBackend` and EVERY tool
-/// command is refused ("sandbox UNAVAILABLE … refusing to run"). The agent
+/// `Unavailable { retry_after: now + NEGATIVE_PROBE_TTL }`, so every tool
+/// command is refused ("sandbox UNAVAILABLE … refusing to run") until a
+/// re-probe succeeds. The agent
 /// reads that as a failed command and retries, which the user sees as every
 /// shell command timing out / returning empty / looping.
 ///
@@ -111,6 +111,68 @@ pub(super) fn probe_cache() -> &'static Mutex<ProbeCache> {
 pub(super) fn probe_gate() -> &'static Mutex<()> {
     static GATE: OnceLock<Mutex<()>> = OnceLock::new();
     GATE.get_or_init(|| Mutex::new(()))
+}
+
+/// The settled probe verdict, read WITHOUT probing.
+///
+/// `None` means the probe has not run yet. This is the read used by session
+/// selection and by the containment predicates, both of which run on the
+/// readiness path and must never pay the 15s guarded spawn.
+pub(super) fn settled_verdict() -> Option<bool> {
+    probe_cache()
+        .lock()
+        .expect("probe cache poisoned")
+        .settled()
+}
+
+/// Single-flighted availability, BLOCKING for up to the probe's wall-clock
+/// guard on a cold cache.
+///
+/// A free function rather than only a trait method so the async `execute` gate
+/// can hand it to `spawn_blocking` — a 15s guarded spawn must never run on a
+/// tokio worker thread.
+fn availability() -> bool {
+    super::super::probe_single_flight(
+        probe_cache(),
+        probe_gate(),
+        NEGATIVE_PROBE_TTL,
+        probe_appcontainer_available,
+    )
+}
+
+/// Whether a backend admitted WITHOUT a startup probe may still claim its
+/// containment properties, given only what the probe has settled.
+///
+/// Pure in the verdict so both arms are reachable from a test on any host.
+/// An "unknown" verdict is NOT a negative — the claim is withdrawn only on
+/// evidence, because a session that has not yet run a command has not yet
+/// learned anything about this host.
+pub(super) fn containment_claim(settled: Option<bool>) -> bool {
+    settled != Some(false)
+}
+
+/// True once a probe has actually settled UNAVAILABLE.
+///
+/// Monotone by construction: [`ProbeCache::settled`] keeps a negative verdict
+/// until a probe succeeds, so a predicate built on this answers the same way
+/// for as long as the host stays broken.
+fn containment_withdrawn() -> bool {
+    !containment_claim(settled_verdict())
+}
+
+/// The refusal a deferred-selection backend returns when its probe has settled
+/// unavailable. Deliberately the same sentence `FailClosedBackend` uses, so
+/// deferring selection does not change what the operator is told or what they
+/// are told to do about it.
+fn unavailable_refusal() -> SandboxError {
+    SandboxError::ExecFailed(
+        "sandbox UNAVAILABLE and unsandboxed execution is not permitted — \
+         refusing to run with host permissions. The AppContainer real-spawn \
+         probe failed on this host; the cause was logged by \
+         `probe_appcontainer_available` at the first execution. Set \
+         WAYLAND_ALLOW_NO_SANDBOX=1 only to accept running with NO isolation."
+            .to_owned(),
+    )
 }
 
 #[async_trait]
@@ -127,7 +189,17 @@ impl SandboxBackend for AppContainerBackend {
     }
 
     fn owns_descendants_hard(&self) -> bool {
-        true
+        !containment_withdrawn()
+    }
+
+    /// The AppContainer probe is a real guarded `cmd.exe /c exit 0` through the
+    /// whole pipeline (15s wall-clock guard), so it is NOT safe to run on the
+    /// session-startup path — bootstrap resolves the session backend before the
+    /// `--json-stream` `ready` frame, and the host's ready deadline is shorter
+    /// than the guard. Session selection therefore takes this backend
+    /// structurally and [`Self::execute`] enforces the verdict instead.
+    fn availability_probe_is_startup_safe(&self) -> bool {
+        false
     }
 
     /// Real-spawn availability probe.
@@ -147,16 +219,11 @@ impl SandboxBackend for AppContainerBackend {
         // ONE real AppContainer spawn instead of stampeding it (#754). The
         // logic lives in a platform-independent helper so it is unit-tested
         // on every target; here it is driven by the real Win32 probe.
-        super::super::probe_single_flight(
-            probe_cache(),
-            probe_gate(),
-            NEGATIVE_PROBE_TTL,
-            probe_appcontainer_available,
-        )
+        availability()
     }
 
     fn enforces_read_deny(&self) -> bool {
-        true
+        !containment_withdrawn()
     }
 
     /// True because [`Self::execute_with_cwd_authority`] establishes an
@@ -168,8 +235,12 @@ impl SandboxBackend for AppContainerBackend {
     /// `binds_workspace_authority` is deliberately NOT overridden: the trait
     /// derives it from this predicate, and a second independent answer is how
     /// the two drift apart.
+    ///
+    /// Withdrawn once the probe settles unavailable — a backend that cannot
+    /// spawn binds nothing, and delegated mutation must refuse rather than
+    /// believe a claim this host has disproved.
     fn binds_cwd_authority(&self) -> bool {
-        true
+        !containment_withdrawn()
     }
 
     async fn execute_with_cwd_authority(
@@ -203,10 +274,36 @@ impl SandboxBackend for AppContainerBackend {
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
+        // Static policy refusals first: they are decided from the manifest
+        // alone, need no host, and must keep their exact error so a caller can
+        // tell "this policy is unsupported" from "this host cannot sandbox".
         if matches!(manifest.network, NetworkPolicy::AllowHosts(_)) {
             return Err(SandboxError::PolicyNotSupported(
                 "AppContainer has no DNS-name allowlist; use NetworkPolicy::Deny + WFP filter (v0.7.0)".into(),
             ));
+        }
+        // THE availability gate for this backend. Session selection takes
+        // AppContainer without probing (the probe does not fit inside the
+        // host's ready deadline), so the verdict is enforced HERE, at the first
+        // command that would actually reach Win32, instead of at selection.
+        //
+        // This is the single funnel and it must stay one: `execute_streaming`
+        // (trait default) and `execute_with_cwd_authority` (above) both route
+        // through this method, and `execute_with_workspace_authority` is
+        // additionally gated by `binds_workspace_authority`, which withdraws on
+        // the same verdict. `is_available` is single-flighted and its positive
+        // result is sticky, so the guarded probe is paid at most once per
+        // retry window — never per command, and never before `ready`.
+        //
+        // On `spawn_blocking` because a cold probe blocks for up to its 15s
+        // wall-clock guard, and a guarded Win32 spawn must never occupy a
+        // tokio worker thread. A join failure is treated as unavailable —
+        // fail closed, never "assume it worked".
+        if !tokio::task::spawn_blocking(availability)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(unavailable_refusal());
         }
         let manifest = manifest.clone();
         // Defense-in-depth wall-clock ceiling (#125). `execute_blocking`'s

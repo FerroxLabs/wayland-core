@@ -327,3 +327,78 @@ by measurement and one by construction. Full evidence in
    the shipped binary reports `cooldown_tracker` **`ready`** (receipt says "no production
    constructor") and `pricing_refresher` `unavailable / **disabled_by_config**` (receipt
    says "no production constructor"). Reported, not edited.
+
+---
+
+# SUPERSEDING BLOCK — 2026-08-01, lane `verdict-truth-text`, base `02575b6f`
+
+**This block supersedes the 2026-07-29 grade of Criterion 1 above.** It supersedes nothing else
+in this file: Criteria 2, 3, 4 and 5 stand exactly as the 2026-07-29 section left them.
+
+**Text only.** Zero files under `crates/`, `.github/`, `docs/` or `scripts/` were changed by the
+lane that wrote this. No cargo was run. Full sweep, method and controls:
+`.planning/VERDICT-TRUTH-2026-08-01.md`.
+
+## Criterion 1 — **NOT MET → PARTIAL**
+
+The 2026-07-29 row reads:
+
+> **NOT MET — 3 of 3 observe, 0 of 3 control.** *"no host→core Goal command exists (`GoalResync`
+> count **0** in `commands.rs`; known-positive `Stop` = 1) … the producer fixtures are declared in
+> `EVENT_SPECS` (8 references) but **0 of 49** fixture files on disk are Goal fixtures."*
+
+**Both of its needles are dead needles at `02575b6f`.** Re-run in this worktree, with the
+known-negative control the original grading did not carry:
+
+```
+grep -c "GoalResync"        crates/wcore-protocol/src/commands.rs  ->  2   [was 0]
+grep -c "GoalCancelCommand" crates/wcore-protocol/src/commands.rs  ->  2   [was absent]
+grep -c "GoalZzzzz"         crates/wcore-protocol/src/commands.rs  ->  0   [KNOWN-NEGATIVE]
+find crates/wcore-protocol/contracts/desktop/v1 -type f -iname "*goal*" | wc -l  ->  8   [was 0]
+find crates/wcore-protocol/contracts/desktop/v1 -type f            | wc -l  -> 164   [DENOMINATOR]
+```
+
+**Control ships on all three surfaces.** `ProtocolCommand::{GoalOpen, GoalDeclareTask,
+GoalAdvance, GoalCancel, GoalResync}` are declared at `crates/wcore-protocol/src/commands.rs:328`
+–`:340`; `GoalCancelCommand` is the struct at `:237`, documented as terminating a Goal through
+the one canonical transition with a cursor that prevents a stale host card cancelling a Goal that
+has already finished.
+
+**And a human can reach it**, which is the specific clause the row said failed:
+`tui/commands/mod.rs:42` (a slash command a user types) → `TuiEngine::request_goal_control` →
+`GoalControlBridge::issue_goal_control` (`tui/engine_bridge.rs:1230`, invoked at `:1273`), with a
+PTY drive at `crates/wcore-cli/tests/goal_control_tui_pty.rs`. `issue_goal_control` has **10**
+references across `crates/`, not the definition-plus-two-comments this row once measured.
+
+The eight Goal artifacts are real producer output, not schemas —
+`contracts/desktop/v1/commands/goal_cancel.json` is one serialized frame, byte-checked against
+the live serializers by `desktop_contract_corpus.rs:202`.
+
+## Why this is recorded as CANNOT-PASS and not merely "stale"
+
+`GoalResync == 0` was chosen as a proxy for *"the host cannot control a Goal."* Once the command
+landed, the proxy inverted — and nothing re-ran it, so this file kept publishing the zero. **A
+proxy that is never re-measured is a constant, and a constant is not a gate.** That is the same
+shape as the 23A-C1 defect, and the exact inverse of this phase's own 22-C3 falsifier, which
+greps `orchestration/` for `GoalTerminalState` and therefore can never go green (**0** here,
+against a known-positive `ClimbOutcome` = **21** in that same directory; corrected needle across
+`wcore-agent/src/` = **88**). **Both directions cost the same.**
+
+## What stays red, and is NOT swept
+
+* **The Windows terminal leg is still NOT MEASURED**, and it needs a *different instrument*, not
+  a different host — the PTY harness is `#![cfg(unix)]`. Linux and macOS are closed
+  (`CRITERIA-STATUS.md`: 13 passed / 0 failed / 0 ignored / 0 filtered out on each); Windows is
+  not, and this block does not claim it.
+* **The *"consumed later at D2"* clause** of the criterion is untouched by this correction.
+* PARTIAL, not MET, for those two reasons.
+
+## §"Deliberately left open" item 2 is now discharged
+
+That item reads *"Criterion 1's control half and its fixtures. Both are fenced."* Both have since
+landed: the command exists in the protocol and the fixtures are on disk from a contract
+regeneration. **Retired, not deleted** — the record of it having been correctly fenced at the
+time is the point.
+
+_Corrected 2026-08-01 · base `02575b6f` · lane `verdict-truth-text` · source measurement only,
+two-directional controls, no cargo, no `crates/` edit._

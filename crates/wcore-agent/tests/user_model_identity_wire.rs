@@ -212,6 +212,32 @@ async fn start_mock_anthropic() -> MockServer {
     server
 }
 
+/// A temporary workspace spelled the way `bootstrap.rs` will spell it.
+///
+/// `AgentBootstrap::new` fixes a session's workspace SPELLING at ingress
+/// (`canonical_workspace`), and every path bootstrap derives from it — the
+/// user-model store this file seeds above all — is keyed by that resolved
+/// string. On macOS `/var`, `/tmp` and `/etc` are symlinks into `/private`, so
+/// the spelling `TempDir` hands back is NOT the spelling bootstrap reads under.
+/// Seeding the raw one puts the observation in a bucket the session never
+/// opens, and the user-context block then silently never renders — which reads
+/// exactly like the defect this file exists to pin, from a harness fault.
+///
+/// Linux has no such alias, which is why leaving this out was green there and
+/// red on macOS. The returned `TempDir` must be kept alive by the caller.
+///
+/// `dunce::simplified` is not decoration: `canonical_workspace` applies it too,
+/// so on Windows it is the difference between `C:\…` and the verbatim
+/// `\\?\C:\…` form `canonicalize` returns. Canonicalizing WITHOUT it leaves the
+/// harness on a third spelling that bootstrap never emits, and this file stays
+/// red on Windows for the same reason it was red on macOS.
+fn resolved_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().expect("workdir");
+    let canonical =
+        std::fs::canonicalize(dir.path()).expect("resolve the workdir bootstrap will resolve");
+    (dir, dunce::simplified(&canonical).to_path_buf())
+}
+
 /// The user-model store path, computed exactly as `bootstrap.rs` computes it.
 /// Duplicating the expression rather than hardcoding a path is deliberate: if
 /// bootstrap's path moves, this helper moves with it and the test fails
@@ -289,7 +315,7 @@ async fn captured_bodies(server: &MockServer) -> Vec<String> {
 
 /// §3b-i: prove the artifact is a live instrument BEFORE claiming anything is
 /// absent from it.
-fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str) {
+fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str, cwd: &Path) {
     assert!(
         bodies.len() > index,
         "{label}: expected at least {} captured request(s), got {}. An absent artifact \
@@ -308,6 +334,29 @@ fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str
          proves nothing. Body was: {}",
         bodies[index]
     );
+    // The seeding invariant, read off the wire rather than assumed. `bootstrap`
+    // prints its OWN workspace spelling here, and keys every user-model path by
+    // that same spelling. If it disagrees with the one this file seeded under,
+    // every seed landed in a bucket the session never opened — and the symptom
+    // is an absent user-context block, which is indistinguishable from the
+    // defect this file pins. Name it here instead.
+    // The body is a JSON document, so the needle must carry JSON's escaping or
+    // this check is a Windows-only false positive: every `\` in `D:\lanes\...`
+    // appears in the body as `\\`. Encoding the expected string and stripping
+    // its quotes escapes exactly what the serializer escaped, on every platform.
+    let working_directory = format!("Working directory: {}", cwd.display());
+    let working_directory = serde_json::to_string(&working_directory)
+        .expect("a String always serializes")
+        .trim_matches('"')
+        .to_string();
+    assert!(
+        bodies[index].contains(&working_directory),
+        "{label}: the session reported a workspace spelling other than the one this \
+         harness seeded under ({working_directory:?}). Every user-model path bootstrap \
+         derives is keyed by ITS spelling, so the seeds above are in a bucket this \
+         session never opened and no assertion below means anything. Body was: {}",
+        bodies[index]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -324,9 +373,8 @@ fn assert_body_is_a_live_instrument(bodies: &[String], index: usize, label: &str
 async fn the_resolved_user_ids_model_reaches_the_wire() {
     install_named_user_id();
     let server = start_mock_anthropic().await;
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd_owned = common::bootstrap_workspace(workdir.path());
-    let cwd = cwd_owned.as_path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     // Seed ONLY the named bucket — the one the write path uses.
     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;
@@ -344,7 +392,7 @@ async fn the_resolved_user_ids_model_reaches_the_wire() {
 
     drive_cold_session(&server, cwd, "msg-uid-1").await;
     let bodies = captured_bodies(&server).await;
-    assert_body_is_a_live_instrument(&bodies, 0, "named-user session");
+    assert_body_is_a_live_instrument(&bodies, 0, "named-user session", cwd);
 
     assert!(
         bodies[0].contains(USER_CONTEXT_HEADING),
@@ -383,9 +431,8 @@ async fn the_resolved_user_ids_model_reaches_the_wire() {
 async fn a_named_user_does_not_render_the_default_buckets_model() {
     install_named_user_id();
     let server = start_mock_anthropic().await;
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd_owned = common::bootstrap_workspace(workdir.path());
-    let cwd = cwd_owned.as_path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     // Seed ONLY `"default"` — another user's bucket, from this session's view.
     seed_bucket(cwd, DEFAULT_BUCKET, DEFAULT_FINGERPRINT).await;
@@ -418,7 +465,7 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
 
     drive_cold_session(&server, cwd, "msg-uid-2").await;
     let bodies = captured_bodies(&server).await;
-    assert_body_is_a_live_instrument(&bodies, 0, "named-user session, default bucket seeded");
+    assert_body_is_a_live_instrument(&bodies, 0, "named-user session, default bucket seeded", cwd);
 
     // THE CLAIM: another bucket's learned model is not in this user's prompt.
     assert!(
@@ -464,9 +511,8 @@ async fn a_named_user_does_not_render_the_default_buckets_model() {
 #[serial]
 async fn the_prefix_render_expression_reads_an_empty_bucket() {
     install_named_user_id();
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let cwd_owned = common::bootstrap_workspace(workdir.path());
-    let cwd = cwd_owned.as_path();
+    let (_workdir, workspace) = resolved_workspace();
+    let cwd = workspace.as_path();
 
     // Production seeding: the WRITE path keys by the resolved id.
     seed_bucket(cwd, NAMED_USER_ID, NAMED_FINGERPRINT).await;
