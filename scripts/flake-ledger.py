@@ -93,6 +93,17 @@ SUMMARY_RE = re.compile(
     r"(?:.*?(\d+)\s+failed)?"
 )
 
+# nextest colours its output whenever it believes the sink can take it, and on
+# the hosted Windows runner it did so even through a pipe. The escape sequences
+# land INSIDE the summary line — `Summary\x1b[0m [ 6.7s] \x1b[1m1\x1b[0m test
+# run` — so an un-stripped regex matches nothing and every run is graded ERROR.
+# Measured on run 30727452188: all 180 repetitions came back ERROR with the
+# tests themselves plainly reporting `1 test run: 1 passed` or `1 failed`.
+# `--color never` is passed as well; this is the belt to that's braces, because
+# the failure mode of getting this wrong is a ledger that grades real results
+# unreadable.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
 
 # `crates/wcore-swarm/tests/common/mod.rs` lets these tests SKIP when no sandbox
 # backend can host delegated dispatch, and a skip returns early — so the test
@@ -198,6 +209,8 @@ def run_nextest(
         "--no-fail-fast",
         "--no-tests",
         "fail",
+        "--color",
+        "never",
         "-E",
         expr,
     ]
@@ -217,7 +230,7 @@ def run_nextest(
             "",
         )
     elapsed = time.monotonic() - started
-    blob = proc.stdout + proc.stderr
+    blob = ANSI_RE.sub("", proc.stdout + proc.stderr)
     summary = parse_summary(blob)
     if summary is None:
         # No summary line at all: nextest never got to running tests (compile
@@ -251,10 +264,15 @@ def run_nextest(
                 blob + "\n=== delegated skip ledger ===\n" + skips,
             )
         return Outcome("PASS", elapsed, proc.returncode), blob
+    # The per-test result line carries a `(n/m)` progress counter between the
+    # duration and the binary id — `FAIL [ 0.583s] (1/1) wcore-swarm::x name` —
+    # so anything matching on it must tolerate that field. The whole line is
+    # kept, which is what lets the batch pass attribute a failure to a row by
+    # searching for the test's name inside it.
     fails = [
         line.strip()
         for line in blob.splitlines()
-        if line.strip().startswith(("FAIL [", "TRY", "SIGSEGV", "TIMEOUT ["))
+        if line.strip().startswith(("FAIL [", "TRY", "SIGSEGV", "TIMEOUT [", "ABORT ["))
     ]
     return Outcome("FAIL", elapsed, proc.returncode, "; ".join(fails[:6])), blob
 

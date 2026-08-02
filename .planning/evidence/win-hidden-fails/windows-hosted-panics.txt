@@ -1,0 +1,355 @@
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-1.log
+thread 'dispatches_4_noop_workers_in_parallel' (6884) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30758768640 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-1.log
+thread 'public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state' (8032) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:106:5:
+assertion `left == right` failed: WorkerHandle { worker_id: "d1f58733839f4eb69d84bb96efe2d0b6-0", branch: "swarm/authority/d1f58733839f4eb69d84bb96efe2d0b6-0", status: Failed("worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry"), stdout: "", stderr: "worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry", duration: 1.0927667s }
+left: Failed("worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry")
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-1.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (3076) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758162432 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-10.log
+thread 'dispatches_4_noop_workers_in_parallel' (2120) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30758182912 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-10.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (7196) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758113280 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-2.log
+thread 'dispatches_4_noop_workers_in_parallel' (6376) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30757896192 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-2.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (7432) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30756249600 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-3.log
+thread 'dispatches_4_noop_workers_in_parallel' (5624) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30756245504 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-3.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (1468) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-3.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (3824) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30755590144 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-4.log
+thread 'dispatches_4_noop_workers_in_parallel' (6100) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30763450368 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-4.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (6044) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30762315776 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-5.log
+thread 'dispatches_4_noop_workers_in_parallel' (5908) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762311680 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-5.log
+thread 'public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state' (7664) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:106:5:
+assertion `left == right` failed: WorkerHandle { worker_id: "308880e435794042a77ebbcd790de96c-0", branch: "swarm/authority/308880e435794042a77ebbcd790de96c-0", status: Failed("worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry"), stdout: "", stderr: "worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry", duration: 1.024029s }
+left: Failed("worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry")
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-5.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (5428) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30762553344 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-6.log
+thread 'dispatches_4_noop_workers_in_parallel' (1280) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762545152 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-6.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1680) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30760968192 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-7.log
+thread 'dispatches_4_noop_workers_in_parallel' (3424) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30760898560 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-7.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (7528) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30760353792 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-8.log
+thread 'dispatches_4_noop_workers_in_parallel' (8992) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30760349696 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-8.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1524) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758772736 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-9.log
+thread 'dispatches_4_noop_workers_in_parallel' (8304) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30758768640 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. batch-dispatches_4_noop_workers_in_parallel-9.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (8908) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758187008 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-1.log
+thread 'dispatches_4_noop_workers_in_parallel' (2372) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762373120 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-10.log
+thread 'dispatches_4_noop_workers_in_parallel' (8628) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30760050688 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-2.log
+thread 'dispatches_4_noop_workers_in_parallel' (2404) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762373120 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-3.log
+thread 'dispatches_4_noop_workers_in_parallel' (6344) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762373120 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-4.log
+thread 'dispatches_4_noop_workers_in_parallel' (6860) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762307584 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-5.log
+thread 'dispatches_4_noop_workers_in_parallel' (3324) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762307584 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-6.log
+thread 'dispatches_4_noop_workers_in_parallel' (2400) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30762307584 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-7.log
+thread 'dispatches_4_noop_workers_in_parallel' (8392) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30761783296 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-8.log
+thread 'dispatches_4_noop_workers_in_parallel' (6980) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30761529344 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-dispatches_4_noop_workers_in_parallel-9.log
+thread 'dispatches_4_noop_workers_in_parallel' (1240) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30760402944 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-malformed_heartbeat_fails_closed_and_preserves_bounded_diagn-1.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (3620) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker process: sandbox child execution failed: workspace accounting: dispatch admission refused: workspace accounting refused ".git": io: The process cannot access the file because it is being used by another process. (os error 32)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-malformed_heartbeat_fails_closed_and_preserves_bounded_diagn-4.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (6884) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-malformed_heartbeat_fails_closed_and_preserves_bounded_diagn-8.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (4456) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-1.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (2968) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30762147840 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-10.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (8940) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758772736 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-2.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (2856) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30762147840 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-3.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (3436) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30762147840 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-4.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (5616) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30760050688 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-5.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (8) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30760017920 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-6.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1960) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758969344 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-7.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (8720) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758965248 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-8.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1420) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758772736 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 2 occurrence(s), e.g. isolated-multi_worker_output_exhaustion_fails_without_retaining_buffe-9.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (5392) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30758772736 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-1.log
+thread 'dispatches_4_noop_workers_in_parallel' (5968) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30757584896 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-1.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (5564) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30757515264 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-10.log
+thread 'dispatches_4_noop_workers_in_parallel' (3496) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30780354560 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-10.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (4748) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30779760640 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-2.log
+thread 'dispatches_4_noop_workers_in_parallel' (7604) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30757437440 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-2.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (1524) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker process: sandbox child execution failed: workspace accounting: dispatch admission refused: workspace accounting refused ".git": io: The process cannot access the file because it is being used by another process. (os error 32)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-2.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1344) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30756773888 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-3.log
+thread 'dispatches_4_noop_workers_in_parallel' (4424) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30757687296 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-3.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (1384) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30753546240 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-4.log
+thread 'dispatches_4_noop_workers_in_parallel' (4324) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30753345536 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-4.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (6372) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-4.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (7832) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30752710656 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-5.log
+thread 'dispatches_4_noop_workers_in_parallel' (5432) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30752694272 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-5.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (9056) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30751981568 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-6.log
+thread 'dispatches_4_noop_workers_in_parallel' (8088) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30751977472 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-6.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (4956) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30751969280 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-7.log
+thread 'dispatches_4_noop_workers_in_parallel' (4036) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30788620288 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-7.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (5956) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-7.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (3844) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30787964928 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-8.log
+thread 'dispatches_4_noop_workers_in_parallel' (8612) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30787960832 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-8.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (2956) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-8.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (5136) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30785245184 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-9.log
+thread 'dispatches_4_noop_workers_in_parallel' (7640) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:32:50:
+called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch requires 34896609280 bytes for 4 active workers, 0 bytes already reserved, and its safety margin, but only 30785191936 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-9.log
+thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (1192) panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- 12 occurrence(s), e.g. loaded-dispatches_4_noop_workers_in_parallel-9.log
+thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (4692) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:47:14:
+dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes for 5 active workers, 0 bytes already reserved, and its safety margin, but only 30780489728 bytes are available")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
