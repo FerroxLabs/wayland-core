@@ -718,6 +718,23 @@ async fn native_windows_command_shell_resolves_cmd_and_bat_from_effective_cwd() 
         )
         .await
         .unwrap();
-        assert_eq!(resolved.as_path(), temp.path().join(program));
+        // Case-INSENSITIVE, because that is what Windows path equality is and
+        // it is all the resolver can promise. The candidate is built by
+        // appending a PATHEXT entry to the stem, so a `.COM;.EXE;.BAT;.CMD`
+        // PATHEXT — the spelling Windows itself ships — resolves the on-disk
+        // `native-cmd.cmd` as `native-cmd.CMD`. `assert_eq!` on the raw strings
+        // was asserting an extension case the resolver never claimed to
+        // preserve (it would have to read the directory entry to know it, and
+        // this probe path is deliberately bounded to stat-only I/O), so this
+        // case could not pass on any Windows host. Found red on hosted
+        // `windows-latest`.
+        let (got, want) = (
+            resolved.as_path().to_string_lossy().into_owned(),
+            temp.path().join(program).to_string_lossy().into_owned(),
+        );
+        assert!(
+            got.eq_ignore_ascii_case(&want),
+            "resolved {got} but expected {want} (modulo extension case)"
+        );
     }
 }

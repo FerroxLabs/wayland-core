@@ -109,10 +109,11 @@ pub async fn check_ffmpeg_available() -> bool {
 ///     ffmpeg flag (`-vf`, `-y`, `-i`) when concatenated into the
 ///     argv.
 ///   * Canonicalizes the path and verifies the realpath lives under
-///     one of the permitted prefixes (`/tmp/`, `~/Downloads/`, or
-///     `~/.wayland/videos/`). The verify-after-canonicalize order is
-///     the TOCTOU defense: a symlink that swaps target between check
-///     and use cannot smuggle the realpath out of the whitelist.
+///     one of the permitted prefixes ([`permitted_temp_root`],
+///     `~/Downloads/`, or `~/.wayland/videos/`). The verify-after-
+///     canonicalize order is the TOCTOU defense: a symlink that swaps
+///     target between check and use cannot smuggle the realpath out
+///     of the whitelist.
 pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
     let raw_str = raw
         .to_str()
@@ -149,7 +150,8 @@ pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
     // prefix too so symlinked tempdirs (macOS `/tmp` → `/private/tmp`) and
     // `~/` expansion both match cleanly.
     let mut allowed: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::fs::canonicalize("/tmp") {
+    let temp_root = permitted_temp_root();
+    if let Ok(p) = std::fs::canonicalize(&temp_root) {
         allowed.push(p);
     }
     if let Some(home) = dirs::home_dir() {
@@ -165,12 +167,39 @@ pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
 
     if !allowed.iter().any(|p| canonical.starts_with(p)) {
         return Err(format!(
-            "video path is outside permitted prefixes (/tmp/, ~/Downloads/, ~/.wayland/videos/): {}",
+            "video path is outside permitted prefixes ({}, ~/Downloads/, ~/.wayland/videos/): {}",
+            temp_root.display(),
             canonical.display()
         ));
     }
 
     Ok(canonical)
+}
+
+/// The temp root that participates in the [`validate_local_path`] whitelist.
+///
+/// Unix: `/tmp`, the shared temp directory every caller that hands this
+/// function a temporary file writes into.
+///
+/// Windows: the process temp directory (`%TEMP%`). `/tmp` is not an absolute
+/// path there — it is drive-relative, so `canonicalize("/tmp")` resolves
+/// against whatever drive the current directory happens to be on. A checkout
+/// on `D:` asks about `D:\tmp` and one on `C:` asks about `C:\tmp`; whether
+/// either exists, and who may write into it, is not a property a security
+/// boundary can rest on. Hosted `windows-latest` has no `D:\tmp` at all,
+/// which is how the accident surfaced (run 30727017681) — and a machine that
+/// does have one had been silently admitting it.
+///
+/// Deliberately NOT `std::env::temp_dir()` on Unix: on macOS that is the
+/// per-user `$TMPDIR` under `/var/folders/…`, so using it there would widen
+/// the whitelist rather than repair it. See [`download_remote_video`], which
+/// exists partly because of that difference.
+fn permitted_temp_root() -> PathBuf {
+    if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        PathBuf::from("/tmp")
+    }
 }
 
 /// Download a remote video URL into a tempfile, SSRF-safe, and return the
@@ -612,7 +641,10 @@ mod tests {
 
     #[test]
     fn video_accepts_file_under_tmp() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        // The literal `/tmp` this used to pass is drive-relative on Windows —
+        // it asked for `D:\tmp` on the CI checkout drive and blew up with
+        // NotFound (os 3) rather than testing anything about the whitelist.
+        let dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let p = dir.path().join("ok.mp4");
         std::fs::write(&p, b"fake").unwrap();
         let canonical = validate_local_path(&p).expect("tmp file should be accepted");
@@ -708,7 +740,7 @@ mod tests {
             eprintln!("ffmpeg missing — skipping frame extraction shape test");
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         // Build a 2s test clip via lavfi (no input needed).
         let make = tokio::process::Command::new("ffmpeg")
@@ -774,7 +806,7 @@ mod tests {
             eprintln!("ffmpeg missing — skipping aggregator wire-up test");
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         let make = tokio::process::Command::new("ffmpeg")
             .args([
@@ -859,7 +891,7 @@ mod tests {
         if !check_ffmpeg_available().await {
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         let make = tokio::process::Command::new("ffmpeg")
             .args([

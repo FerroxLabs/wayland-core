@@ -25683,11 +25683,22 @@ mod audit_2026_05_22_tests {
                 .await;
             (engine, outcome)
         });
-        tokio::time::timeout(std::time::Duration::from_secs(2), approval_seen.notified())
+        // These two are DEADLOCK guards, not latency assertions. Nothing in
+        // this test claims the approval becomes pending inside any particular
+        // wall-clock budget — `Notify` is the ordering signal and it stores a
+        // permit, so there is no lost-wakeup race to bound. The old 2s budget
+        // was therefore a pass condition the test never meant to state, and on
+        // a hosted `windows-latest` runner executing the whole 2253-case
+        // binary four-ways it went red (run 30727017681) purely on contention:
+        // the same case passes in 0.5-0.6s five times out of five in isolation
+        // there, and the full binary passes it on this tree. 30s still fails a
+        // genuine hang fast while no longer encoding runner throughput.
+        const DEADLOCK_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+        tokio::time::timeout(DEADLOCK_GUARD, approval_seen.notified())
             .await
             .expect("the durable tool approval must become pending");
         cancel.cancel();
-        let (engine, outcome) = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+        let (engine, outcome) = tokio::time::timeout(DEADLOCK_GUARD, run)
             .await
             .expect("approval cancellation must stop the durable turn")
             .expect("engine task must join");

@@ -1,0 +1,256 @@
+name: win-readonly-vacuity (hosted Windows)
+
+# ============================================================================
+# TEMPORARY, LANE-SCOPED. DELETE THIS FILE AT MERGE.
+# ============================================================================
+#
+# Why it exists
+# -------------
+# `ci.yml`'s Windows leg runs on the two SELF-HOSTED runners, which this wave
+# keeps saturated, and as of b8d51309 a `lane/**` push no longer starts the
+# heavy `ci` job at all unless the commit message carries `[ci-windows]`.
+# GitHub-hosted `windows-latest` is a different, idle pool, and it is the pool
+# that produced the defect this lane exists to repair (run 30727017681).
+#
+# What it proves
+# --------------
+# The `read_only` gate merged in e81509a0 was VACUOUS on Windows: all three of
+# its CONTROL arms — the arms that assert "with read_only OFF the write really
+# does happen" — failed on hosted Windows, so the refusals the gate observed
+# could not be distinguished from the write never working there at all.
+#
+# Three legs, each asserting something different:
+#
+#   wcore-config-shell  the root cause in isolation. `Command::arg` applies
+#                       std's CommandLineToArgvW quoting on top of a `cmd /C`
+#                       command line, so any hook/skill shell string that
+#                       quotes a path is mangled before cmd sees it.
+#   wcore-agent-targeted the read_only gate itself, plus the two unrelated
+#                       failures from the same run, each run in isolation.
+#   wcore-agent-full    the whole `-p wcore-agent --lib` binary, i.e. the exact
+#                       conditions of run 30727017681 — the only way to observe
+#                       a failure that only appears under full-suite load.
+#
+# `mutate` (workflow_dispatch) applies a named, printed, verified source
+# mutation before building, so "this test can fail" is measured on the same
+# tree as "this test passes" instead of asserted.
+
+on:
+  push:
+    branches:
+      - 'lane/win-readonly-vacuity'
+  workflow_dispatch:
+    inputs:
+      mutate:
+        description: 'Source mutation to apply before building (mutant evidence)'
+        type: choice
+        default: none
+        options:
+          - none
+          # Reinstates the ORIGINAL defect: the read_only posture is accepted
+          # at the boundary and silently dropped. Every refusal assertion in
+          # read_only_gate_tests must go red; every CONTROL must stay green.
+          - drop-read-only-posture
+          # Reinstates `Command::arg` for the Windows cmd command line. The two
+          # wcore-config quoting tests and the three read_only CONTROLS must go
+          # red — that is the failure hosted Windows reported.
+          - revert-cmd-raw-arg
+          # Reinstates the literal `/tmp` permitted-prefix root, which on
+          # Windows resolves against whatever drive the cwd is on.
+          - revert-video-temp-root
+      leg:
+        description: 'Which leg(s) to run. A mutant usually only needs one.'
+        type: choice
+        default: all
+        options:
+          - all
+          - wcore-config-shell
+          - wcore-agent-targeted
+          - wcore-agent-full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: win-readonly-vacuity-${{ github.ref }}-${{ github.event.inputs.mutate }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: "${{ matrix.leg }}${{ (github.event.inputs.mutate != '' && github.event.inputs.mutate != 'none') && format(' [mutant {0}]', github.event.inputs.mutate) || '' }}"
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # A push runs all three legs. A dispatch may narrow to one, because a
+        # mutant usually only needs the leg it mutates and hosted Windows is
+        # serialising jobs one at a time across this account.
+        leg: ${{ fromJSON((github.event.inputs.leg == '' || github.event.inputs.leg == 'all') && '["wcore-config-shell","wcore-agent-targeted","wcore-agent-full"]' || format('["{0}"]', github.event.inputs.leg)) }}
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUST_BACKTRACE: '1'
+      MUTATE: ${{ github.event.inputs.mutate || 'none' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vx (installs the Rust pinned in vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # Keyed per leg (and per mutant, so a mutated tree cannot poison the
+      # clean cache). Hosted Windows is running these jobs one at a time, and
+      # a cold `wcore-agent --lib` compile is the bulk of each one.
+      - name: Cargo build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.leg }}-${{ github.event.inputs.mutate || 'none' }}
+          cache-on-failure: 'true'
+
+      - name: Show what is actually being tested
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "commit:  $(git rev-parse HEAD)"
+          echo "branch:  $BRANCH"
+          echo "leg:     ${{ matrix.leg }}"
+          echo "mutate:  $MUTATE"
+          vx cargo --version
+
+      # A mutation that silently fails to apply would produce a green "mutant"
+      # run and prove the opposite of what it claims, so every arm greps for
+      # its own marker and hard-fails when the count is wrong.
+      - name: Apply mutation
+        if: ${{ env.MUTATE != 'none' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expect_marker() {
+            local file="$1" want="$2"
+            local got
+            got=$(grep -c 'LANE-MUTANT' "$file" || true)
+            if [ "$got" != "$want" ]; then
+              echo "::error::mutation did not apply to $file (found $got markers, wanted $want)"
+              exit 1
+            fi
+          }
+
+          case "$MUTATE" in
+            drop-read-only-posture)
+              # The posture is accepted and thrown away — the exact shape of the
+              # defect e81509a0 repaired.
+              perl -pi -e 's/self\.read_only = read_only;/self.read_only = false; \/\/ LANE-MUTANT/' \
+                crates/wcore-tools/src/registry.rs crates/wcore-agent/src/skill_tool.rs
+              expect_marker crates/wcore-tools/src/registry.rs 1
+              expect_marker crates/wcore-agent/src/skill_tool.rs 1
+              ;;
+            revert-cmd-raw-arg)
+              perl -pi -e 's/^        cmd\.raw_arg\(command_line\);$/        cmd.arg(command_line); \/\/ LANE-MUTANT/' \
+                crates/wcore-config/src/shell.rs
+              expect_marker crates/wcore-config/src/shell.rs 1
+              ;;
+            revert-video-temp-root)
+              perl -pi -e 's/^        std::env::temp_dir\(\)$/        PathBuf::from("\/tmp") \/\/ LANE-MUTANT/' \
+                crates/wcore-agent/src/tool_backends/video_analyze.rs
+              expect_marker crates/wcore-agent/src/tool_backends/video_analyze.rs 1
+              ;;
+            *)
+              echo "::error::unknown mutation '$MUTATE'"
+              exit 1
+              ;;
+          esac
+          echo '--- applied mutation ---'
+          git --no-pager diff
+
+      # ---------------------------------------------------------------- leg 1
+      # The root cause, isolated from the agent. Fast: wcore-config is near the
+      # bottom of the graph.
+      - name: wcore-config shell-string quoting
+        if: ${{ matrix.leg == 'wcore-config-shell' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          vx cargo test -p wcore-config --lib shell:: -- --test-threads=4 --nocapture 2>&1 | tee result.txt
+          # A filter that matches nothing prints `0 passed` and exits 0.
+          passed=$(grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' result.txt | grep -oE '[0-9]+' | head -1)
+          echo "shell:: tests passed: ${passed:-0}"
+          if [ "${passed:-0}" -lt 8 ]; then
+            echo "::error::only ${passed:-0} shell:: tests ran — that is a filtered/empty run, not a proof"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------- leg 2
+      # Each failure from run 30727017681, run on its own so a result cannot be
+      # blamed on a neighbour. `set +e` so one red arm does not hide the others.
+      - name: wcore-agent targeted suites
+        if: ${{ matrix.leg == 'wcore-agent-targeted' }}
+        shell: bash
+        run: |
+          set +e
+          rc=0
+
+          echo '::group::read_only gate (all 8 cases, single-threaded)'
+          vx cargo test -p wcore-agent --lib orchestration::read_only_gate_tests \
+            -- --test-threads=1 --nocapture 2>&1 | tee ro.txt
+          [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+          echo '::endgroup::'
+
+          echo '::group::video_analyze temp-root acceptance'
+          vx cargo test -p wcore-agent --lib \
+            tool_backends::video_analyze::tests::video_accepts_file_under_tmp \
+            -- --nocapture 2>&1 | tee video.txt
+          [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+          echo '::endgroup::'
+
+          # Isolated AND repeated: a test that passes alone five times but fails
+          # inside the full binary is starved, not broken. The full-suite leg is
+          # the other half of that comparison.
+          echo '::group::durable approval cancellation x5, isolated'
+          for i in 1 2 3 4 5; do
+            echo "--- iteration $i ---"
+            vx cargo test -p wcore-agent --lib \
+              engine::audit_2026_05_22_tests::cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled \
+              -- --nocapture 2>&1 | tee "approval-$i.txt"
+            [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+          done
+          echo '::endgroup::'
+
+          # The gate binary must have collected all 9 cases. Refusals with no
+          # controls, or a filter typo, would otherwise read as a pass.
+          ran=$(grep -oE 'running [0-9]+ tests?' ro.txt | grep -oE '[0-9]+' | head -1)
+          echo "read_only_gate_tests collected: ${ran:-0}"
+          if [ "${ran:-0}" -ne 9 ]; then
+            echo "::error::read_only_gate_tests collected ${ran:-0} cases, expected 9"
+            rc=1
+          fi
+          exit $rc
+
+      # ---------------------------------------------------------------- leg 3
+      # The conditions of run 30727017681, reproduced verbatim.
+      - name: wcore-agent full lib suite
+        if: ${{ matrix.leg == 'wcore-agent-full' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          vx cargo test -p wcore-agent --lib -- --test-threads=4 2>&1 | tee full.txt
+          status=$?
+          total=$(grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' full.txt \
+            | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
+          echo "total passed: $total"
+          if [ "$total" -lt 2000 ]; then
+            echo "::error::only $total tests passed — that is not the full binary"
+            exit 1
+          fi
+          exit $status
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.leg }}-${{ github.event.inputs.mutate || 'none' }}-logs
+          path: |
+            *.txt
+          if-no-files-found: warn
