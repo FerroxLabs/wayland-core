@@ -63,4 +63,12 @@ jobs:
         continue-on-error: true
         run: >
           cargo test -p wcore-agent --test win_bash_path_diag
+          windows_bash_path_differential
+          -- --ignored --nocapture --test-threads=1
+
+      - name: BISECT - the engine path in the failing runtime flavour
+        continue-on-error: true
+        run: >
+          cargo test -p wcore-agent --test win_bash_path_diag
+          windows_engine_path_bisect
           -- --ignored --nocapture --test-threads=1
