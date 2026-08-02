@@ -1,0 +1,99 @@
+name: win-engine-prove (hosted Windows)
+
+# TEMPORARY, lane-scoped. Delete with the lane.
+#
+# `ci.yml`'s Windows test leg runs on the two SELF-HOSTED runners, which this
+# wave keeps saturated: at the time this was added, `CI (Array)` for two other
+# lanes had been executing on SEANDESKTOP and ferrox-win-msvc for over 90
+# minutes with three more Windows lanes queued behind them, and direct ssh to
+# the box did not return a single byte in fifty minutes. That is a supply
+# problem, not a proof problem — GitHub-hosted `windows-latest` is a different
+# and idle pool, and the ONE thing this lane must not do is report a Windows
+# result it did not observe.
+#
+# So: run exactly the code the seven lane/win-engine changes live in, on real
+# Windows, and print the per-binary counts. Narrow on purpose — `wcore-tools`
+# and `wcore-agent` contain every changed file, and a targeted run returns in
+# a fraction of the full-workspace compile.
+#
+# This does NOT replace the self-hosted leg. `ci.yml` still runs the whole
+# workspace on Windows and is still the gate.
+
+on:
+  push:
+    branches:
+      - 'lane/win-engine-prove'
+      - 'lane/win-engine-prove-mutant'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: win-engine-prove-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-targeted:
+    name: Targeted Windows suites (${{ matrix.crate }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Every file the seven changes touch:
+          #   wcore-tools  -> vfs.rs, grep.rs, media_intake.rs,
+          #                   transcription_tools.rs (4 of 7, plus the new
+          #                   real_fs_identity_observation integration suite)
+          #   wcore-agent  -> child_transaction/gate_executor.rs (2 changes),
+          #                   journal_effects.rs
+          - crate: wcore-tools
+            args: '--lib --tests'
+          - crate: wcore-agent
+            args: '--lib'
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vx (installs the Rust pinned in vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Show what is actually being tested
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "branch: $BRANCH"
+          vx cargo --version
+          rustc --version || true
+
+      # `cargo test`, not nextest, and deliberately: the per-binary
+      # `test result: ok. N passed` lines are the evidence this lane owes, and
+      # the zero-test guard below is asserted here rather than inferred.
+      - name: Run ${{ matrix.crate }} ${{ matrix.args }}
+        shell: bash
+        run: |
+          set -o pipefail
+          vx cargo test -p ${{ matrix.crate }} ${{ matrix.args }} -- --test-threads=4 2>&1 | tee result.txt
+
+      # A suite that collected nothing certifies nothing. Assert a non-trivial
+      # test count survived, so a compile-empty or filtered-out run can never
+      # be reported as a Windows pass.
+      - name: Assert this leg produced real test signal
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          total=$(grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' result.txt \
+            | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' \
+            | awk '{s+=$1} END {print s+0}')
+          echo "total passed across all binaries: $total"
+          if [ "$total" -lt 20 ]; then
+            echo "::error::Only $total tests passed on this leg — that is not a Windows proof, it is an empty run."
+            exit 1
+          fi
