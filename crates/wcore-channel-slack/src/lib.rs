@@ -533,6 +533,99 @@ impl Channel for SlackChannel {
         }
     }
 
+    /// Setup and authentication probe — the pre-flight surface Slack never had.
+    ///
+    /// `channel probe` answers "is this channel ready" WITHOUT starting the
+    /// gateway and without sending a message. Slack implemented no probe, so it
+    /// took the trait default and reported `Unsupported`. That default is
+    /// honest — it is not `Ok`, and it does not read as ready — but it means the
+    /// one platform whose inbound is webhooks, and therefore the one platform
+    /// with no connection to reject a bad token, was also the one an operator
+    /// could not pre-check. The only way to find out a Slack token was refused
+    /// was to start a gateway and read `channel health`.
+    ///
+    /// [`api::auth_test`] already answers the credential question with no
+    /// traffic, and already separates the three verdicts the three outcomes
+    /// need: a missing handle is `Incomplete` (fill the credentials store), a
+    /// refusal is `Unauthenticated` (rotate the token), and an unreachable
+    /// slack.com is `Unreachable` (no verdict — retry). Collapsing those is how
+    /// an operator ends up rotating a working token because the network blipped.
+    ///
+    /// The identity is `auth.test`'s own `<user_id>/<team>`. The token never
+    /// enters the report — only the HANDLE is ever named in a finding.
+    async fn probe(&self) -> Result<wcore_channels::ProbeReport, ChannelError> {
+        use wcore_channels::ProbeReport;
+
+        let mut missing = Vec::new();
+        if self.config.credential_handle_bot_token.trim().is_empty() {
+            missing.push("options.credential_handle_bot_token".to_string());
+        }
+        if self
+            .config
+            .credential_handle_signing_secret
+            .trim()
+            .is_empty()
+        {
+            missing.push("options.credential_handle_signing_secret".to_string());
+        }
+        if !missing.is_empty() {
+            return Ok(ProbeReport::incomplete(&self.name, "slack", missing));
+        }
+
+        // The signing secret is checked for PRESENCE only. It is verified
+        // against inbound webhook signatures, and there is no Slack API that
+        // will tell us whether it is the right one — claiming otherwise would
+        // be the probe attesting to something it did not measure.
+        for handle in [
+            &self.config.credential_handle_bot_token,
+            &self.config.credential_handle_signing_secret,
+        ] {
+            match self.credentials.get(handle) {
+                Ok(Some(_)) => {}
+                Ok(None) => missing.push(format!(
+                    "credential {handle:?} is not present in the credentials store"
+                )),
+                Err(e) => missing.push(format!("credential {handle:?} unreadable: {e}")),
+            }
+        }
+        if !missing.is_empty() {
+            return Ok(ProbeReport::incomplete(&self.name, "slack", missing));
+        }
+
+        let bot_token = match self
+            .credentials
+            .get(&self.config.credential_handle_bot_token)
+        {
+            Ok(Some(t)) => t,
+            // Re-read raced with a delete, or the store broke between the two
+            // calls. Either way nothing was measured, so say nothing was.
+            Ok(None) | Err(_) => {
+                return Ok(ProbeReport::incomplete(
+                    &self.name,
+                    "slack",
+                    vec![format!(
+                        "credential {:?} is not present in the credentials store",
+                        self.config.credential_handle_bot_token
+                    )],
+                ));
+            }
+        };
+
+        match api::auth_test(&self.http, &self.config.api_base_url, &bot_token).await {
+            Ok(identity) => Ok(ProbeReport::ok(&self.name, "slack", identity)),
+            // `SlackError::Auth` is exactly "slack.com looked at this token and
+            // said no"; everything else is "we never got an answer".
+            Err(SlackError::Auth(reason)) => {
+                Ok(ProbeReport::unauthenticated(&self.name, "slack", reason))
+            }
+            Err(other) => Ok(ProbeReport::unreachable(
+                &self.name,
+                "slack",
+                other.to_string(),
+            )),
+        }
+    }
+
     /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], which is
     /// the same constant [`api::download_file`] caps the streamed body at.
     fn media_bounds(&self) -> wcore_channels::MediaBounds {
@@ -941,6 +1034,122 @@ mod tests {
             expired.len(),
             1,
             "a deactivated bot user must reach the health surface: {evs:?}"
+        );
+    }
+
+    /// `channel probe` must answer the credential question for Slack too.
+    ///
+    /// Slack took the trait default (`Unsupported`) — honest, but it left the
+    /// one webhook-inbound platform, the one with no connection to reject a bad
+    /// token, as the one an operator could not pre-check.
+    #[tokio::test]
+    async fn probe_reports_ok_with_the_authenticated_identity() {
+        use wcore_channels::ProbeOutcome;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+
+        // NOT started — a probe must need no gateway and no start().
+        let ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        let r = ch.probe().await.unwrap();
+        mock.assert_async().await;
+
+        assert_eq!(r.outcome, ProbeOutcome::Ok);
+        assert!(r.outcome.is_ready());
+        assert!(r.config_complete && r.authenticated);
+        assert_eq!(r.identity.as_deref(), Some("U123/acme"));
+    }
+
+    /// The three verdicts are three different operator actions and must not
+    /// collapse: rotate the token, fill the store, or retry later.
+    #[tokio::test]
+    async fn probe_separates_a_rejected_token_from_an_unreachable_slack() {
+        use wcore_channels::ProbeOutcome;
+
+        let mut rejecting = mockito::Server::new_async().await;
+        let _m = rejecting
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"invalid_auth"}"#)
+            .create_async()
+            .await;
+        let ch = SlackChannel::new("test", cfg_for(&rejecting.url()), store_for_test());
+        let r = ch.probe().await.unwrap();
+        assert_eq!(r.outcome, ProbeOutcome::Unauthenticated);
+        assert!(
+            r.findings.iter().any(|f| f.contains("invalid_auth")),
+            "the platform's own rejection label is what makes this actionable: {:?}",
+            r.findings
+        );
+
+        let mut down = mockito::Server::new_async().await;
+        let _m2 = down
+            .mock("POST", "/api/auth.test")
+            .with_status(503)
+            .create_async()
+            .await;
+        let ch = SlackChannel::new("test", cfg_for(&down.url()), store_for_test());
+        let r = ch.probe().await.unwrap();
+        assert_eq!(
+            r.outcome,
+            ProbeOutcome::Unreachable,
+            "a 5xx says nothing about the credential; calling it Unauthenticated \
+             makes an operator rotate a working token because slack.com blipped"
+        );
+    }
+
+    /// An absent credential is `Incomplete` (fill the store), never
+    /// `Unauthenticated` (rotate the token) — and no network call is made,
+    /// because there is nothing to authenticate with.
+    #[tokio::test]
+    async fn probe_reports_incomplete_when_the_bot_token_is_absent() {
+        use wcore_channels::ProbeOutcome;
+        let mut server = mockito::Server::new_async().await;
+        let never = server
+            .mock("POST", "/api/auth.test")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let store = MapStore::new(&[("slack.test.signing_secret", "shhh")]);
+        let ch = SlackChannel::new("test", cfg_for(&server.url()), store);
+        let r = ch.probe().await.unwrap();
+        never.assert_async().await;
+
+        assert_eq!(r.outcome, ProbeOutcome::Incomplete);
+        assert!(!r.outcome.is_ready());
+        assert!(
+            r.findings
+                .iter()
+                .any(|f| f.contains("slack.test.bot_token")),
+            "the report must name the handle the operator has to fill: {:?}",
+            r.findings
+        );
+    }
+
+    /// The report names handles, never values.
+    #[tokio::test]
+    async fn probe_output_never_carries_the_bot_token() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"invalid_auth"}"#)
+            .create_async()
+            .await;
+        let ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        let r = ch.probe().await.unwrap();
+        let rendered = format!("{r:?}");
+        assert!(
+            !rendered.contains("xoxb-test-token"),
+            "the probe report leaked the bot token: {rendered}"
         );
     }
 
