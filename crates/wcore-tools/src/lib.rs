@@ -529,6 +529,29 @@ pub trait Tool: Send + Sync {
         ToolExecutionClass::InProcess
     }
 
+    /// Whether this concrete invocation may run in a session whose config
+    /// carries `[default] read_only = true`.
+    ///
+    /// **Default-deny, and deliberately not derived from anything else.**
+    /// The first attempt at this gate keyed off [`ToolCategory`], and
+    /// `SkillTool::category_for` returns `Info` for an inline skill — so the
+    /// `Skill` tool passed the gate and then ran the skill body's embedded
+    /// `!` shell directives, which wrote a real file to disk in what the
+    /// operator had been told was a read-only session. Category answers "how
+    /// long may this run", not "may this change the world"; effect contracts
+    /// answer "is a retry safe". Neither is a mutation predicate, so this is
+    /// its own method and every tool that does not explicitly claim otherwise
+    /// is refused.
+    ///
+    /// A tool may only return `true` when the invocation cannot mutate the
+    /// filesystem, spawn a process, send a message, or change any durable
+    /// state — for ANY input it will accept. Overriding this on a tool whose
+    /// safety depends on an input the caller could vary is a bug: inspect
+    /// `_input` and return `false` for the cases you cannot vouch for.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        false
+    }
+
     /// Crash-recovery semantics for this concrete invocation.
     ///
     /// Tools must explicitly opt into any stronger guarantee. The conservative
@@ -649,6 +672,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn execution_class_for(&self, input: &Value) -> ToolExecutionClass {
         (**self).execution_class_for(input)
+    }
+    fn read_only_safe(&self, input: &Value) -> bool {
+        (**self).read_only_safe(input)
     }
     fn effect_contract(&self, input: &Value) -> ToolEffectContract {
         (**self).effect_contract(input)

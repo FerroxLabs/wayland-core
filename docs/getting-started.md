@@ -168,6 +168,7 @@ provider = "anthropic"
 # model = "claude-sonnet-4-20250514"
 max_tokens = 8192
 max_turns = 30
+# read_only = true            # refuse every tool that can change anything
 
 [providers.anthropic]
 # api_key = "sk-ant-xxx"       # or env var ANTHROPIC_API_KEY
@@ -255,6 +256,32 @@ release, but it is deprecated in `--help`; prefer the explicit spelling.
 Managed installs a global approval floor and an allow/deny decision for local
 Dangerous launches. Lower-trust project, protocol, TUI, ACP, resume, and child
 inputs can tighten the floor but cannot relax it.
+
+### Read-only sessions
+
+`[default] read_only = true` makes the session non-mutating. It is off by
+default.
+
+What it does, exactly:
+
+- Only tools that declare read-only safety may run. Today that is **Read,
+  Grep and Glob**, and nothing else. The check is a positive claim each tool
+  makes about a specific invocation, not a category or a name list, so a tool
+  that says nothing is refused.
+- The refusal happens **before PreToolUse hooks**. A refused call fires no
+  operator-configured hook command, so a read-only session does not execute a
+  shell for work it is not going to do.
+- **`Skill` is refused.** A skill body can write its declared artifacts and can
+  execute embedded `` !`…` `` shell directives, so skills are refused wholesale
+  rather than inspected — at the dispatcher and again inside the skill tool, so
+  the cron skill path, which has no dispatcher, is covered too.
+- Nothing can talk the session back out of it: the posture is installed once at
+  boot. `auto_approve`, `approval_mode = "force"`,
+  `--dangerously-skip-permissions` and an explicit allow rule all leave it in
+  force — they govern approval, and this is not an approval.
+
+What it does **not** do: it does not block outbound provider API calls. A
+read-only session still talks to its model. It bounds tool effects only.
 
 ### Workspace trust
 

@@ -13,8 +13,17 @@ use std::time::Duration;
 use wcore_config::shell;
 use wcore_swarm::{Swarm, SwarmBrief, SwarmResult, WorkerStatus};
 
+mod common;
+
 #[tokio::test]
 async fn swarm_reports_failed_worker_status_and_succeeding_workers_complete() {
+    if common::skip_without_delegated_backend(
+        "swarm_reports_failed_worker_status_and_succeeding_workers_complete",
+    )
+    .await
+    {
+        return;
+    }
     // Swarm refuses dispatch on a dirty checkout. Use two separate repos:
     // one for the 2 succeeding workers, one for the 1 failing worker.
     // This matches the dispatch_smoke pattern of one brief per repo.

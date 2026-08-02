@@ -1,8 +1,14 @@
-//! `PluginsConfig` — `~/.wayland-core/plugins.toml` schema.
+//! `PluginsConfig` — the `plugins.toml` schema and its on-disk loader.
 //!
-//! Pure data + parser. The actual file-load wiring lands in W4 alongside the
-//! interactive permission-grant UX; W2.5 ships this module so the host
-//! loader (T9) can already consume it via `PluginsConfig::default()`.
+//! The file lives beside `config.toml` in the app config root
+//! ([`crate::config::app_config_dir`]), so `WAYLAND_HOME` /
+//! `XDG_DATA_HOME` redirect it like every other engine-owned file.
+//! [`PluginsConfig::load`] is what binds `enabled = false`,
+//! `plugin_signature_verification` and `trusted_plugin_keys` to something —
+//! before it existed the engine booted from `PluginsConfig::default()` and
+//! every setting in the file was inert.
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,9 +57,65 @@ fn default_enabled() -> bool {
     true
 }
 
+/// Absolute path of the engine-wide `plugins.toml`.
+///
+/// Resolved from the same root as `config.toml` so `WAYLAND_HOME` sandboxes
+/// it too. The fallback mirrors [`crate::config::global_config_path`].
+pub fn plugins_config_path() -> PathBuf {
+    crate::config::app_config_dir()
+        .unwrap_or_else(|| PathBuf::from("wayland-core"))
+        .join("plugins.toml")
+}
+
+/// Why a `plugins.toml` could not be honoured.
+///
+/// Deliberately NOT collapsed into "use the defaults": a `plugins.toml` the
+/// engine cannot parse is an operator policy it cannot enforce, and silently
+/// booting with default policy is how `enabled = false` came to mean nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum PluginsConfigError {
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
 impl PluginsConfig {
     pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
+    }
+
+    /// Load the engine-wide `plugins.toml`, or the built-in defaults when no
+    /// such file exists. A malformed or unreadable file is an error, never a
+    /// silent fallback.
+    pub fn load() -> Result<Self, PluginsConfigError> {
+        Self::load_from_path(&plugins_config_path())
+    }
+
+    /// [`Self::load`] against an explicit path. Absent file → defaults.
+    pub fn load_from_path(path: &Path) -> Result<Self, PluginsConfigError> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => {
+                return Err(PluginsConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        Self::from_toml_str(&raw).map_err(|source| PluginsConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     pub fn entry(&self, name: &str) -> Option<&PluginEntry> {
@@ -120,5 +182,68 @@ enabled = false
         let cfg: PluginsConfig = toml::from_str("plugin_signature_verification = false\n")
             .expect("explicit false parses");
         assert!(!cfg.plugin_signature_verification);
+    }
+
+    #[test]
+    fn load_from_path_reads_the_file_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(
+            &path,
+            "plugin_signature_verification = false\n\
+             trusted_plugin_keys = [\"deadbeef\"]\n\
+             \n\
+             [[plugin]]\n\
+             name = \"wayland-ollama\"\n\
+             enabled = false\n",
+        )
+        .expect("write");
+
+        let cfg = PluginsConfig::load_from_path(&path).expect("load");
+        assert!(
+            !cfg.is_enabled("wayland-ollama"),
+            "enabled = false on disk must reach the loaded config"
+        );
+        assert!(
+            !cfg.plugin_signature_verification,
+            "plugin_signature_verification on disk must reach the loaded config"
+        );
+        assert_eq!(cfg.trusted_plugin_keys, vec!["deadbeef".to_string()]);
+    }
+
+    #[test]
+    fn load_from_path_absent_file_is_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = PluginsConfig::load_from_path(&dir.path().join("plugins.toml"))
+            .expect("absent file is not an error");
+        assert!(cfg.plugin.is_empty());
+        assert!(cfg.plugin_signature_verification);
+    }
+
+    #[test]
+    fn load_from_path_malformed_file_is_an_error_not_a_silent_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(&path, "this is not = = toml\n").expect("write");
+        let err = PluginsConfig::load_from_path(&path)
+            .expect_err("a malformed policy file must not degrade to default policy");
+        assert!(
+            matches!(err, PluginsConfigError::Parse { .. }),
+            "expected a Parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn plugins_config_path_sits_beside_the_global_config() {
+        let path = plugins_config_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("plugins.toml")
+        );
+        assert_eq!(
+            path.parent(),
+            crate::config::global_config_path().parent(),
+            "plugins.toml must resolve into the same root as config.toml"
+        );
     }
 }

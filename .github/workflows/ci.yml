@@ -657,7 +657,19 @@ jobs:
       # two variables MUST agree — a different value between the pre-build step
       # and the test step re-triggers `cargo:rerun-if-env-changed` and rebuilds
       # wcore-cli for no reason.
-      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      #
+      # WCORE_REQUIRE_DELEGATED_BACKEND=1 (crates/wcore-swarm/tests/common/mod.rs)
+      # is armed for the same reason WCORE_REQUIRE_ENFORCING_SANDBOX is, one
+      # layer up. Eight wcore-swarm tests now skip HONESTLY where no sandbox
+      # backend can own a descendant tree — which is the truth on a stock macOS
+      # runner, where `sandbox_exec` is not a hard-containment backend and the
+      # Docker fallback needs a default-OFF feature plus a live daemon. This leg
+      # is the one that PROVES the delegated-dispatch guarantee (bwrap qualifies
+      # here, given the four grants above), so a skip here would mean the
+      # guarantee went unproven everywhere while the run stayed green. With this
+      # set, the skip path PANICS instead: if bwrap ever stops qualifying in this
+      # container, these tests go RED rather than quietly qualifying out.
+      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WCORE_REQUIRE_DELEGATED_BACKEND=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
       # ── macOS runner budget report ────────────────────────────────────
       # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
@@ -846,6 +858,102 @@ jobs:
           timeout_minutes: 45
           max_attempts: 2
           command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+
+      # ── Swarm delegated-dispatch gate ────────────────────────────────────
+      # THE COUNTERWEIGHT TO THE HONEST SKIP.
+      #
+      # Eight wcore-swarm tests gained a skip path (see
+      # crates/wcore-swarm/tests/common/mod.rs) because on a stock macOS runner
+      # they had NO reachable pass state: `Swarm::dispatch` refuses to run a
+      # worker unless a backend satisfies `owns_descendants_hard`, macOS's
+      # `sandbox_exec` does not, and the qualified Docker fallback needs the
+      # default-OFF `wcore-sandbox/live-docker` feature plus a live daemon. A
+      # gate that cannot pass is exactly as worthless as one that cannot fail,
+      # so those eight now skip with a stated, recorded reason there.
+      #
+      # A skip path is a liability everywhere ELSE, though: the same mechanism
+      # that stops macOS lying green would let the guarantee evaporate silently
+      # on the ONE leg that can actually prove it. This step is what stops that.
+      # THIS is the leg that certifies delegated dispatch, and it fails if any
+      # of the eight skips here, or stops being collected at all.
+      #
+      # THREE INDEPENDENT FAILURE MODES, each closed by a different mechanism —
+      # none of them is exit status, which is the one thing a vacuous filter
+      # preserves:
+      #
+      #   1. SKIPPED HERE. `WCORE_REQUIRE_DELEGATED_BACKEND=1` turns the skip
+      #      path into a panic, so a backend regression reds the test itself.
+      #      Belt-and-braces: the skip LEDGER is read back below, because a
+      #      passing test's stdout is captured by nextest and a print-only skip
+      #      would be invisible in exactly the run that matters.
+      #   2. NO LONGER COLLECTED. A rename, a new `#[ignore]`, or a `cfg` that
+      #      compiles one of them out would leave a filter matching 7, or 0, and
+      #      `cargo nextest run` would exit 0 having proved less. So the EXECUTED
+      #      COUNT is parsed out and compared against an exact floor of 8.
+      #      `--no-tests=fail` covers only the all-eight-vanish case; the count
+      #      is what covers losing one.
+      #   3. RAN BUT DID NOT PASS. `passed` is compared to the same 8, so a
+      #      failure cannot be absorbed by the run count alone.
+      #
+      # Deliberately a SEPARATE invocation from the workspace run above rather
+      # than trusting that run's aggregate: the aggregate cannot tell 13,775
+      # passed-with-eight-skipped from 13,775 passed-with-eight-run. target/ is
+      # warm from that step, so these eight cost seconds, not a compile.
+      #
+      # No `--profile ci`: that profile's junit.path is target/nextest/ci/junit.xml,
+      # which the `Upload nextest JUnit report` step and the aggregate `report`
+      # job both consume. Re-running under it here would OVERWRITE the workspace
+      # result with an 8-test file and shrink the evidence the report publishes.
+      # The default profile writes target/nextest/default/junit.xml instead.
+      #
+      # `!cancelled()` and not a plain trailing step: a plain step is skipped
+      # whenever anything earlier in the job goes red, which would let this gate
+      # sit un-run for long stretches while looking correctly configured — the
+      # exact "green-looking absence of signal" this file has been bitten by
+      # twice (see the anti-vacuity block above). It is not `always()`: a
+      # cancelled job should not start fresh work.
+      - name: Swarm delegated dispatch must RUN here, never skip (8 tests)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # A ledger left by an earlier step would be read as this step's
+          # result. Clear it so what we read back is only what we produced.
+          rm -f target/swarm-delegated-skips.txt
+          EXPECTED=8
+          EXPR='(binary_id(=wcore-swarm::dispatch_smoke) and (test(=dispatches_4_noop_workers_in_parallel) or test(=public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state) or test(=malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic) or test(=heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang))) or (binary_id(=wcore-swarm::heartbeat_test) and test(=worker_writes_heartbeat_during_long_running_task)) or (binary_id(=wcore-swarm::swarm_worker_failure_reporting_e2e) and test(=swarm_reports_failed_worker_status_and_succeeding_workers_complete)) or (binary_id(=wcore-swarm::worker_runtime_limits) and (test(=multi_worker_output_exhaustion_fails_without_retaining_buffers) or test(=timeout_releases_workspace_and_capacity_before_return)))'
+          # Captured rather than streamed because the SUMMARY LINE is the
+          # evidence and it has to be parsed. Printed in full either way, so a
+          # failure is still fully legible in the log.
+          if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --no-tests=fail -E "$EXPR" 2>&1)"; then
+            printf '%s\n' "$out"
+            echo "::error title=Swarm delegated dispatch::The eight delegated-dispatch tests did not pass on the leg that certifies them. With WCORE_REQUIRE_DELEGATED_BACKEND=1 a missing backend PANICS rather than skipping, so this is either a real regression or bwrap has stopped qualifying in this container."
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          summary="$(printf '%s\n' "$out" | grep -E 'Summary \[' | tail -1)"
+          ran="$(printf '%s\n' "$summary" | sed -n 's/.*\] *\([0-9][0-9]*\) tests run.*/\1/p')"
+          passed="$(printf '%s\n' "$summary" | sed -n 's/.*tests run: *\([0-9][0-9]*\) passed.*/\1/p')"
+          ran="${ran:-0}"; passed="${passed:-0}"
+          echo "delegated-dispatch gate: ran=${ran} passed=${passed} expected=${EXPECTED}"
+          if [ "$ran" -ne "$EXPECTED" ]; then
+            echo "::error title=Swarm delegated dispatch::Expected exactly ${EXPECTED} delegated-dispatch tests to be COLLECTED here, nextest ran ${ran}. A test was renamed, #[ignore]d, or cfg'd out — the filter still exits 0 while proving less, which is why the count is checked and not the exit status. Update the filterset in this step together with whatever moved."
+            exit 1
+          fi
+          if [ "$passed" -ne "$EXPECTED" ]; then
+            echo "::error title=Swarm delegated dispatch::${ran} collected but only ${passed} passed."
+            exit 1
+          fi
+          # The load-bearing channel. nextest CAPTURES a passing test's output,
+          # so a skip that only printed would be invisible above; the file is
+          # what makes it observable. With the env armed this should be
+          # unreachable, which is the point — if it ever fires, the panic path
+          # itself has regressed.
+          if [ -f target/swarm-delegated-skips.txt ]; then
+            echo "::error title=Swarm delegated dispatch::A skip was RECORDED on the leg that must never skip:"
+            cat target/swarm-delegated-skips.txt
+            exit 1
+          fi
+          echo "OK: ${EXPECTED}/${EXPECTED} delegated-dispatch tests ran and passed here, zero skips recorded"
 
       # ── Voice suite (2026-07-29, lane/voice-bargein) ──────────────────
       # `voice` is off by default (it hard-links libasound.so.2 on Linux —

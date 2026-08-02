@@ -1,5 +1,14 @@
 # CRITERIA STATUS — one line per criterion, measured 2026-07-31
 
+> **2026-08-01 — the PHASE VERDICT files did not carry these grades, and now they do.** This file
+> was current; the per-phase verdicts it corrects were not, and those are what a planner opens
+> first. `lane/verdict-truth-text` swept them at `02575b6f` for reds that **cannot pass** and wrote
+> dated superseding blocks into `21-04`, `22`, `23A`, `24` and `27`. Four were publishing
+> worse-than-true grades (`22-C1`, `23A-C1`, `24-C4`, `27-C4`); `21-C3` was re-derived and came
+> back **SOUND**; `24-C1`'s correction runs **against** the product. Table, controls and method:
+> **`.planning/VERDICT-TRUTH-2026-08-01.md`**. That sweep is source-measurement only — it
+> re-executed none of the live figures below.
+
 **All grades re-measured at `659fa4922a62ca9657c600938c6313d017fb859f`** (`docs: handoff rev 3 —
 RC status, and the two Grok gaps that are not code`, 2026-07-31 13:33:06 +0700) **by
 `lane/criteria-regrade`, with a control in both directions per `LANE-BRIEF.md` §3b-iii** (can it

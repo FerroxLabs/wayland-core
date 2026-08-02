@@ -271,9 +271,14 @@ the standard `OLLAMA_HOST` environment variable.
 ### Requirements
 
 - The `wayland-ollama` plugin must be enabled in `plugins.toml`
-  (default: enabled). Disable via:
+  (default: enabled). That file sits beside `config.toml` in the app
+  config root — `~/.config/wayland-core/plugins.toml` on Linux,
+  `~/Library/Application Support/wayland-core/plugins.toml` on macOS,
+  `%APPDATA%\wayland-core\plugins.toml` on Windows; `WAYLAND_HOME`
+  overrides the root. Plugins are an array of tables keyed by `name`:
   ```toml
-  [plugins.wayland-ollama]
+  [[plugin]]
+  name = "wayland-ollama"
   enabled = false
   ```
 - A running Ollama daemon and a pulled model. See
