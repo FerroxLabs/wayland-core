@@ -53,7 +53,12 @@ permissions:
 
 concurrency:
   group: windows-flake-ledger-${{ github.ref }}
-  cancel-in-progress: true
+  # NOT `true`. The Windows runner pool is two boxes deep and the queue in front
+  # of this job has been hours long; cancelling the pending run on every push
+  # sends the measurement back to the end of that queue, so it never runs at
+  # all. Serialize instead — the box only ever executes one of these at a time,
+  # which is also what makes the `isolated` condition mean anything.
+  cancel-in-progress: false
 
 jobs:
   ledger:
