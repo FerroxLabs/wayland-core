@@ -483,7 +483,12 @@ mod tests {
             std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
             Some(OsStr::new("1"))
         );
-        const HOLD: Duration = Duration::from_secs(22);
+        // Above the old 15s cliff with margin on BOTH sides: high enough that a
+        // descheduled parent still measures >= 15s, low enough that this plus
+        // the marker deadline stays under nextest's 60s hard kill
+        // (`slow-timeout = { period = "30s", terminate-after = 2 }`).
+        const HOLD: Duration = Duration::from_secs(20);
+        const MARKER_DEADLINE: Duration = Duration::from_secs(20);
         assert!(
             HOLD > Duration::from_secs(15),
             "the hold must exceed the old flat timeout or this test cannot fail"
@@ -498,7 +503,7 @@ mod tests {
             .env(HELPER_HOLD_SECS_ENV, HOLD.as_secs().to_string())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + MARKER_DEADLINE;
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
