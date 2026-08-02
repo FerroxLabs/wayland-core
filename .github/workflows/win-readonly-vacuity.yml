@@ -58,6 +58,15 @@ on:
           # Reinstates the literal `/tmp` permitted-prefix root, which on
           # Windows resolves against whatever drive the cwd is on.
           - revert-video-temp-root
+      leg:
+        description: 'Which leg(s) to run. A mutant usually only needs one.'
+        type: choice
+        default: all
+        options:
+          - all
+          - wcore-config-shell
+          - wcore-agent-targeted
+          - wcore-agent-full
 
 permissions:
   contents: read
@@ -73,10 +82,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg:
-          - wcore-config-shell
-          - wcore-agent-targeted
-          - wcore-agent-full
+        # A push runs all three legs. A dispatch may narrow to one, because a
+        # mutant usually only needs the leg it mutates and hosted Windows is
+        # serialising jobs one at a time across this account.
+        leg: ${{ fromJSON((github.event.inputs.leg == '' || github.event.inputs.leg == 'all') && '["wcore-config-shell","wcore-agent-targeted","wcore-agent-full"]' || format('["{0}"]', github.event.inputs.leg)) }}
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -90,6 +99,15 @@ jobs:
         with:
           setup: 'true'
           cache: 'true'
+
+      # Keyed per leg (and per mutant, so a mutated tree cannot poison the
+      # clean cache). Hosted Windows is running these jobs one at a time, and
+      # a cold `wcore-agent --lib` compile is the bulk of each one.
+      - name: Cargo build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.leg }}-${{ github.event.inputs.mutate || 'none' }}
+          cache-on-failure: 'true'
 
       - name: Show what is actually being tested
         shell: bash
@@ -200,12 +218,12 @@ jobs:
           done
           echo '::endgroup::'
 
-          # The gate binary must have collected all 8 cases. 8 refusals with 0
+          # The gate binary must have collected all 9 cases. Refusals with no
           # controls, or a filter typo, would otherwise read as a pass.
           ran=$(grep -oE 'running [0-9]+ tests?' ro.txt | grep -oE '[0-9]+' | head -1)
           echo "read_only_gate_tests collected: ${ran:-0}"
-          if [ "${ran:-0}" -ne 8 ]; then
-            echo "::error::read_only_gate_tests collected ${ran:-0} cases, expected 8"
+          if [ "${ran:-0}" -ne 9 ]; then
+            echo "::error::read_only_gate_tests collected ${ran:-0} cases, expected 9"
             rc=1
           fi
           exit $rc
