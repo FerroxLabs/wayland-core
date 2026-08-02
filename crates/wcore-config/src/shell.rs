@@ -439,9 +439,10 @@ mod tests {
     #[tokio::test]
     async fn shell_string_mode_preserves_a_quoted_path() {
         let dir = tempfile::tempdir().unwrap();
-        // A space in the directory name is the everyday Windows case
-        // (`C:\Users\First Last\…`) and is exactly what forces a caller to
-        // quote in the first place.
+        // A space in the directory name is the everyday Windows case -- a
+        // user profile directory named for a person with a given name and a
+        // surname -- and is exactly what forces a caller to quote in the
+        // first place.
         let sub = dir.path().join("a dir");
         std::fs::create_dir(&sub).unwrap();
         let target = sub.join("written.txt");
