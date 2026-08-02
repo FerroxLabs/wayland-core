@@ -392,6 +392,82 @@ mod tests {
         assert!(stdout.contains("test_value"));
     }
 
+    /// Shell-string mode must hand the interpreter the command line the
+    /// caller wrote, **quotes intact**.
+    ///
+    /// On Windows `Command::arg` applies std's `CommandLineToArgvW` quoting,
+    /// which is the wrong escaping for `cmd /C`: cmd has no backslash escape,
+    /// so `type nul > "C:\dir\f"` reaches it as `type nul > \"C:\dir\f\"` and
+    /// the redirect target becomes an invalid filename — cmd answers "The
+    /// filename, directory name, or volume label syntax is incorrect." That
+    /// broke every hook command and every skill `` !`…` `` directive that
+    /// quotes a path, and because a failing PreToolUse hook BLOCKS the call,
+    /// the blast radius was every tool call in the session. Same defect class
+    /// as #262/#263, which [`mcp_stdio_command_builder`] closed with
+    /// `raw_arg`.
+    ///
+    /// On Unix `sh -c` receives the line as one argv entry either way, so
+    /// this case is a standing guard there and the real assertion on Windows.
+    #[tokio::test]
+    async fn shell_string_mode_preserves_a_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // A space in the directory name is the everyday Windows case
+        // (`C:\Users\First Last\…`) and is exactly what forces a caller to
+        // quote in the first place.
+        let sub = dir.path().join("a dir");
+        std::fs::create_dir(&sub).unwrap();
+        let target = sub.join("written.txt");
+        let command = if cfg!(windows) {
+            format!("type nul > \"{}\"", target.display())
+        } else {
+            format!("touch '{}'", target.display())
+        };
+
+        let output = shell_command(&command).await.expect("spawn failed");
+
+        assert!(
+            target.exists(),
+            "shell-string mode did not create {} — the command line was mangled \
+             before the interpreter saw it. status={:?} stdout={:?} stderr={:?}",
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// The same guarantee for the hook builder (`cmd /V:ON /C` on Windows),
+    /// which is a separate construction site and the one the PreToolUse /
+    /// PostToolUse runner actually uses.
+    #[tokio::test]
+    async fn hook_shell_mode_preserves_a_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a dir");
+        std::fs::create_dir(&sub).unwrap();
+        let target = sub.join("hook-fired");
+        let command = if cfg!(windows) {
+            format!("type nul > \"{}\"", target.display())
+        } else {
+            format!("touch '{}'", target.display())
+        };
+
+        let output = hook_shell_command_builder(&command)
+            .output()
+            .await
+            .expect("spawn failed");
+
+        assert!(
+            target.exists(),
+            "the hook shell did not create {} — a hook that quotes a path is \
+             mangled, and a failed hook blocks the tool call. status={:?} \
+             stdout={:?} stderr={:?}",
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
     /// Argv mode: shell metacharacters in args are passed literally to the
     /// program, NOT interpreted by any shell. This is the load-bearing
     /// invariant for shell injection eradication (Wave SA).
