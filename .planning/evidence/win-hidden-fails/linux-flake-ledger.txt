@@ -1,0 +1,183 @@
+host=Ubuntu-2404-noble-amd64-base os=Linux 6.8.0-101-generic
+cpus=96 profile=ci runs=10 retries=0
+conditions=['isolated', 'batch', 'loaded'] load_workers=96
+
+  ABSENT  required_live_windows_public_dispatch_refuses_bash_worker_and_preserve filter selected 0 tests on this platform
+present targets: 5/6
+
+== condition: isolated ==
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  1/10  PASS      5.8s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  2/10  PASS      5.7s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  3/10  PASS      5.7s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  4/10  PASS      5.7s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  5/10  PASS      5.7s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  6/10  PASS      5.8s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  7/10  PASS      5.6s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  8/10  PASS      6.0s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  9/10  PASS      5.7s
+  [isolated] packaged_core_recovers_after_two_503_responses                   run 10/10  PASS      5.8s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  PASS      2.1s
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  PASS      2.0s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  PASS      2.0s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  PASS      2.0s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  PASS      2.0s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  PASS      2.1s
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  PASS      2.1s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  1/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  2/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  3/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  4/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  5/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  6/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  7/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  8/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  9/10  PASS      2.3s
+  [isolated] dispatches_4_noop_workers_in_parallel                            run 10/10  PASS      2.3s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  PASS      3.5s
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  PASS      3.5s
+== condition: batch ==
+  [batch] packaged_core_recovers_after_two_503_responses                   run  1/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  1/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  2/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  2/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  3/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  3/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  4/10  PASS      5.8s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  PASS      5.8s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  PASS      5.8s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  4/10  PASS      5.8s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  PASS      5.8s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  5/10  PASS      5.6s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  PASS      5.6s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  PASS      5.6s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  5/10  PASS      5.6s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  PASS      5.6s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  6/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  6/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  7/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  7/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  8/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  8/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  PASS      5.7s
+  [batch] packaged_core_recovers_after_two_503_responses                   run  9/10  PASS      5.6s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  PASS      5.6s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  PASS      5.6s
+  [batch] dispatches_4_noop_workers_in_parallel                            run  9/10  PASS      5.6s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  PASS      5.6s
+  [batch] packaged_core_recovers_after_two_503_responses                   run 10/10  PASS      5.7s
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  PASS      5.7s
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  PASS      5.7s
+  [batch] dispatches_4_noop_workers_in_parallel                            run 10/10  PASS      5.7s
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  PASS      5.7s
+== condition: loaded ==
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  1/10  PASS      9.6s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  PASS      9.6s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  PASS      9.6s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  1/10  PASS      9.6s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  PASS      9.6s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  2/10  PASS     10.7s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  PASS     10.7s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  PASS     10.7s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  2/10  PASS     10.7s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  PASS     10.7s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  3/10  PASS      9.7s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  PASS      9.7s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  PASS      9.7s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  3/10  PASS      9.7s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  PASS      9.7s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  4/10  PASS     10.3s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  PASS     10.3s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  PASS     10.3s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  4/10  PASS     10.3s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  PASS     10.3s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  5/10  PASS      9.6s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  PASS      9.6s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  PASS      9.6s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  5/10  PASS      9.6s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  PASS      9.6s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  6/10  PASS     10.3s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  PASS     10.3s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  PASS     10.3s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  6/10  PASS     10.3s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  PASS     10.3s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  7/10  PASS     10.2s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  PASS     10.2s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  PASS     10.2s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  7/10  PASS     10.2s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  PASS     10.2s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  8/10  PASS     10.3s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  PASS     10.3s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  PASS     10.3s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  8/10  PASS     10.3s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  PASS     10.3s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  9/10  PASS     10.4s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  PASS     10.4s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  PASS     10.4s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  9/10  PASS     10.4s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  PASS     10.4s
+  [loaded] packaged_core_recovers_after_two_503_responses                   run 10/10  PASS      9.6s
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  PASS      9.6s
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  PASS      9.6s
+  [loaded] dispatches_4_noop_workers_in_parallel                            run 10/10  PASS      9.6s
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  PASS      9.6s
+
+| test | condition | runs | passes | failures | verdict |
+|---|---|---:|---:|---:|---|
+| packaged_core_recovers_after_two_503_responses | isolated | 10 | 10 | 0 | GREEN |
+| packaged_core_recovers_after_two_503_responses | batch | 10 | 10 | 0 | GREEN |
+| packaged_core_recovers_after_two_503_responses | loaded | 10 | 10 | 0 | GREEN |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | isolated | 10 | 0 | 0 | NOTRUN |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | batch | 10 | 0 | 0 | NOTRUN |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | loaded | 10 | 0 | 0 | NOTRUN |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | isolated | 10 | 10 | 0 | GREEN |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | batch | 10 | 10 | 0 | GREEN |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | loaded | 10 | 10 | 0 | GREEN |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | isolated | 10 | 10 | 0 | GREEN |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | batch | 10 | 10 | 0 | GREEN |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | loaded | 10 | 10 | 0 | GREEN |
+| dispatches_4_noop_workers_in_parallel | isolated | 10 | 10 | 0 | GREEN |
+| dispatches_4_noop_workers_in_parallel | batch | 10 | 10 | 0 | GREEN |
+| dispatches_4_noop_workers_in_parallel | loaded | 10 | 10 | 0 | GREEN |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | isolated | 10 | 10 | 0 | GREEN |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | batch | 10 | 10 | 0 | GREEN |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | loaded | 10 | 10 | 0 | GREEN |
+
+wrote /root/lanes/linux-flake-ledger.json

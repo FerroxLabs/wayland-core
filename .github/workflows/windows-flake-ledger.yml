@@ -47,6 +47,13 @@ on:
   push:
     branches:
       - lane/win-hidden-fails
+    # Committing the evidence this job produces must not re-queue the job that
+    # produced it. The Windows pool is two boxes and the queue is hours deep, so
+    # a self-retriggering measurement is not merely wasteful — it displaces the
+    # run that would answer the question.
+    paths-ignore:
+      - '.planning/**'
+      - '**/*.md'
 
 permissions:
   contents: read
