@@ -704,3 +704,106 @@ async fn windows_retained_cwd_bind_survives_a_pathname_substitution() {
         "the refused execution still ran a child against the unpinned pathname"
     );
 }
+
+// ---------- the readiness seam ----------
+
+/// THE regression for the `--json-stream` `ready` frame.
+///
+/// `SandboxRegistry::required_for_session` is resolved inside agent bootstrap,
+/// BEFORE the `ready` frame is written. It used to decide the Windows backend
+/// by running `AppContainerBackend::is_available()` — a real guarded
+/// `cmd.exe /c exit 0` through the whole pipeline, bounded by a 15s wall-clock
+/// guard because `CreateAppContainerProfile` / `CreateProcessAsUserW` can stall
+/// on an AV image scan or a slow profile-service RPC. That guard is longer than
+/// the host's ready deadline, so on a first launch that hit the stall the
+/// Desktop app got no `ready` frame at all.
+///
+/// This asserts the wiring, not a helper: it calls the production selector and
+/// then reads the production process-global probe cache. If selection probes
+/// again, the cache is populated and this goes red.
+///
+/// The cache is process-global and `nextest` runs each test in its own process,
+/// so the cold precondition is real. The final block is the anti-vacuity
+/// control: it drives the SAME cache through the production `is_available()` to
+/// prove the observation would have caught a probe if one had happened.
+#[test]
+fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
+    // `WAYLAND_SANDBOX` would route selection down the docker / refusal arms
+    // instead of the platform cascade under test.
+    assert!(
+        std::env::var("WAYLAND_SANDBOX").is_err(),
+        "this test drives the default platform cascade; WAYLAND_SANDBOX must be unset"
+    );
+    assert_eq!(
+        settled_verdict(),
+        None,
+        "precondition: the probe cache must be cold at the start of this process — \
+         run this test with `cargo nextest run` (process per test)"
+    );
+
+    let registry =
+        crate::SandboxRegistry::required_for_session(None).expect("session selection must resolve");
+
+    assert_eq!(
+        registry.backend_name(),
+        "appcontainer",
+        "the session must take the real Windows backend, not a fail-closed placeholder"
+    );
+    assert_eq!(
+        settled_verdict(),
+        None,
+        "session selection ran the AppContainer real-spawn probe — that is the 15s guard \
+         sitting on the `ready` path this fix removed"
+    );
+
+    // Anti-vacuity: the verdict IS reachable through the production path, so
+    // "still None above" is an observation, not an inability to observe.
+    let available = registry.is_available();
+    assert_eq!(
+        settled_verdict(),
+        Some(available),
+        "the production availability path must settle the same cache this test read"
+    );
+
+    // …and the containment predicates are driven by that same settled verdict,
+    // not by a constant. Whichever way this host probed, the claims must agree
+    // with it — a hardcoded `true` disagrees on a host whose probe fails.
+    let backend = AppContainerBackend::new();
+    println!("OBSERVED: AppContainer probed available={available} on this host");
+    assert_eq!(
+        backend.enforces_read_deny(),
+        available,
+        "the read-deny claim must track the settled verdict"
+    );
+    assert_eq!(
+        backend.binds_cwd_authority(),
+        available,
+        "the cwd-authority claim must track the settled verdict"
+    );
+    assert_eq!(
+        backend.owns_descendants_hard(),
+        available,
+        "the descendant-ownership claim must track the settled verdict"
+    );
+}
+
+/// Both arms of the containment claim, reachable on ANY host because the
+/// mapping is pure in the verdict.
+///
+/// "Unknown" must still claim: a session that has not run a command yet has
+/// learned nothing about this host, and withdrawing on no evidence would make
+/// every fresh process report itself uncontained. Only a settled negative
+/// withdraws — and because `ProbeCache::settled` keeps a negative until a probe
+/// succeeds, that answer cannot flip back on an unchanged machine.
+#[test]
+fn the_containment_claim_is_withdrawn_only_by_a_settled_negative_verdict() {
+    assert!(
+        containment_claim(None),
+        "an unprobed backend must not withdraw its claim on no evidence"
+    );
+    assert!(containment_claim(Some(true)));
+    assert!(
+        !containment_claim(Some(false)),
+        "a settled-unavailable backend must withdraw the containment claim"
+    );
+}

@@ -64,12 +64,15 @@
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 
-/// How long a *negative* AppContainer probe verdict is trusted before a fresh
-/// probe is warranted. A positive verdict is sticky for the process lifetime;
-/// a negative one is cached only briefly so a transient stall (AV image scan,
-/// disk contention, slow profile-service RPC) self-heals after the window
-/// instead of re-running the (now wall-clock-guarded) probe on every command.
-/// (FerroxLabs/wayland-core#125)
+/// How long to wait before a *negative* AppContainer probe verdict may be
+/// re-attempted. A positive verdict is sticky for the process lifetime; after a
+/// negative one this window throttles re-probing so a transient stall (AV image
+/// scan, disk contention, slow profile-service RPC) self-heals without
+/// re-running the (wall-clock-guarded) probe on every command
+/// (FerroxLabs/wayland-core#125).
+///
+/// This is a *schedule*, never an answer: the negative verdict itself stays
+/// readable until a probe succeeds. See [`ProbeCache::settled`].
 ///
 /// Only the Windows backend consumes this; the cache tests supply their own
 /// TTL, so it is `cfg(windows)` (not `test`) to stay dead-code-free elsewhere.
@@ -80,23 +83,29 @@ const NEGATIVE_PROBE_TTL: Duration = Duration::from_secs(30);
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeVerdict {
-    /// Never probed (or the last negative verdict has expired).
+    /// Never probed. The ONLY state with no answer.
     Unknown,
     /// Probe succeeded — sticky for the process lifetime.
     Available,
-    /// Probe failed; do not re-probe until this instant.
-    UnavailableUntil(Instant),
+    /// Probe failed. The ANSWER is `false` from here until a probe succeeds;
+    /// `retry_after` bounds only when the next probe may be attempted.
+    Unavailable { retry_after: Instant },
 }
 
 /// Availability cache for the AppContainer probe.
 ///
-/// Positive results stick (the sandbox stays available once proven); negative
-/// results are cached with a short TTL so a transient failure neither
-/// permanently disables isolation (a silent security regression) nor forces a
-/// full probe on every command (the ~120s-per-Bash hang of
+/// Positive results stick (the sandbox stays available once proven); a negative
+/// result throttles re-probing for a short window so a transient failure
+/// neither permanently disables isolation (a silent security regression) nor
+/// forces a full probe on every command (the ~120s-per-Bash hang of
 /// FerroxLabs/wayland-core#125). This temporal logic is platform-independent
 /// and unit-tested on all targets; the Windows backend drives it with the real
 /// Win32 probe.
+///
+/// Two questions, deliberately kept apart, because conflating them made the
+/// containment predicates oscillate on an unchanged host:
+/// - [`Self::settled`] — what do we currently know? Monotone.
+/// - [`Self::needs_probe`] — may we spend a probe right now? Temporal.
 #[cfg(any(windows, test))]
 struct ProbeCache {
     verdict: ProbeVerdict,
@@ -110,18 +119,42 @@ impl ProbeCache {
         }
     }
 
-    /// A cached verdict usable *without* re-probing, or `None` when a fresh
-    /// probe is warranted (never probed, or a negative verdict has expired).
-    fn cached(&self, now: Instant) -> Option<bool> {
+    /// The settled answer, readable WITHOUT probing. `None` only while the
+    /// probe has never run.
+    ///
+    /// **A negative answer never expires.** `NEGATIVE_PROBE_TTL` bounds when
+    /// the next probe may be *attempted* ([`Self::needs_probe`]); it must not
+    /// also erase the answer, because every containment predicate downstream
+    /// reads this. When expiry erased the answer, a permanently-broken host
+    /// made `sandbox status`, the `enforces_read_deny` / `owns_descendants_hard`
+    /// / `binds_cwd_authority` claims and swarm admission alternate between two
+    /// answers on a machine that never changed: unavailable inside the TTL,
+    /// "no verdict" (read as available) once it lapsed, unavailable again after
+    /// the next probe. A status surface that flip-flops on an unchanged host is
+    /// a defect, so the answer here is monotone — it only ever moves from
+    /// unknown to a verdict, and from unavailable to available when a probe
+    /// actually succeeds.
+    fn settled(&self) -> Option<bool> {
         match self.verdict {
+            ProbeVerdict::Unknown => None,
             ProbeVerdict::Available => Some(true),
-            ProbeVerdict::UnavailableUntil(until) if now < until => Some(false),
-            ProbeVerdict::Unknown | ProbeVerdict::UnavailableUntil(_) => None,
+            ProbeVerdict::Unavailable { .. } => Some(false),
         }
     }
 
-    /// Record a fresh probe result. A success is sticky; a failure is trusted
-    /// for `neg_ttl` before the next `cached()` call will re-probe.
+    /// Whether a fresh probe is warranted now: never probed, or the negative
+    /// verdict's retry window has elapsed. A positive verdict is sticky, so it
+    /// never re-probes.
+    fn needs_probe(&self, now: Instant) -> bool {
+        match self.verdict {
+            ProbeVerdict::Unknown => true,
+            ProbeVerdict::Available => false,
+            ProbeVerdict::Unavailable { retry_after } => now >= retry_after,
+        }
+    }
+
+    /// Record a fresh probe result. A success is sticky; a failure keeps
+    /// answering `false` and schedules the next permitted probe `neg_ttl` out.
     ///
     /// A negative NEVER downgrades a sticky `Available`: the probe runs
     /// outside the cache lock, so a concurrent stalled probe can finish
@@ -134,7 +167,9 @@ impl ProbeCache {
         self.verdict = if available {
             ProbeVerdict::Available
         } else {
-            ProbeVerdict::UnavailableUntil(now + neg_ttl)
+            ProbeVerdict::Unavailable {
+                retry_after: now + neg_ttl,
+            }
         };
     }
 }
@@ -162,11 +197,14 @@ fn probe_single_flight(
     neg_ttl: Duration,
     probe: impl FnOnce() -> bool,
 ) -> bool {
-    // Fast path: a cached verdict needs neither a probe nor the gate.
+    // Fast path: a settled verdict that is not due for a re-probe needs
+    // neither a probe nor the gate.
     {
         let g = cache.lock().expect("probe cache poisoned");
-        if let Some(cached) = g.cached(Instant::now()) {
-            return cached;
+        if !g.needs_probe(Instant::now())
+            && let Some(settled) = g.settled()
+        {
+            return settled;
         }
     }
     // Slow path: serialize, then re-check the cache under the gate so only the
@@ -178,8 +216,10 @@ fn probe_single_flight(
     let _gate = gate.lock().expect("probe gate poisoned");
     {
         let g = cache.lock().expect("probe cache poisoned");
-        if let Some(cached) = g.cached(Instant::now()) {
-            return cached;
+        if !g.needs_probe(Instant::now())
+            && let Some(settled) = g.settled()
+        {
+            return settled;
         }
     }
     let result = probe();
@@ -195,7 +235,8 @@ mod probe_cache_tests {
     #[test]
     fn unknown_forces_a_probe() {
         let c = ProbeCache::new();
-        assert_eq!(c.cached(Instant::now()), None);
+        assert_eq!(c.settled(), None);
+        assert!(c.needs_probe(Instant::now()));
     }
 
     #[test]
@@ -203,22 +244,77 @@ mod probe_cache_tests {
         let mut c = ProbeCache::new();
         let t0 = Instant::now();
         c.record(true, t0, Duration::from_secs(30));
-        assert_eq!(c.cached(t0), Some(true));
+        assert_eq!(c.settled(), Some(true));
         // Still available far in the future — never re-probes.
-        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+        assert!(!c.needs_probe(t0 + Duration::from_secs(3600)));
+        assert_eq!(c.settled(), Some(true));
     }
 
+    /// Regression: a negative verdict must NOT oscillate across the TTL.
+    ///
+    /// `NEGATIVE_PROBE_TTL` schedules the next *probe attempt*. It used to also
+    /// erase the *answer* — `cached()` returned `Some(false)` inside the window
+    /// and `None` after it — so on a permanently-broken host every containment
+    /// predicate that reads this cache alternated between two answers while the
+    /// machine never changed. Two answers on an unchanged host is a defect
+    /// regardless of which one is "safe": it makes `sandbox status` and swarm
+    /// admission unusable as evidence.
+    ///
+    /// The two questions are now separate and only `needs_probe` is temporal.
     #[test]
-    fn negative_is_cached_then_self_heals() {
+    fn a_negative_verdict_never_oscillates_across_the_retry_window() {
         let mut c = ProbeCache::new();
         let t0 = Instant::now();
         let ttl = Duration::from_secs(30);
         c.record(false, t0, ttl);
-        // Within the TTL: cheap negative, no re-probe.
-        assert_eq!(c.cached(t0 + Duration::from_secs(10)), Some(false));
-        // At/after the TTL: verdict expires → re-probe (self-heal).
-        assert_eq!(c.cached(t0 + ttl), None);
-        assert_eq!(c.cached(t0 + Duration::from_secs(31)), None);
+
+        // The ANSWER is stable at every point on both sides of the window.
+        for at in [
+            Duration::ZERO,
+            Duration::from_secs(10),
+            ttl,
+            Duration::from_secs(31),
+            Duration::from_secs(3600),
+        ] {
+            assert!(
+                !c.needs_probe(t0 + at) || c.settled() == Some(false),
+                "an unavailable verdict must stay unavailable at +{at:?}"
+            );
+            assert_eq!(
+                c.settled(),
+                Some(false),
+                "the settled answer must not change at +{at:?} on an unchanged host"
+            );
+        }
+
+        // Only the re-probe schedule is temporal.
+        assert!(!c.needs_probe(t0 + Duration::from_secs(10)));
+        assert!(c.needs_probe(t0 + ttl));
+        assert!(c.needs_probe(t0 + Duration::from_secs(31)));
+    }
+
+    /// The same property against the REAL clock, so it cannot be satisfied by
+    /// a synthetic-time convention.
+    ///
+    /// A one-millisecond retry window is guaranteed to have lapsed after the
+    /// sleep. Under the old semantics — where the window erased the answer —
+    /// the verdict here reads "no verdict", which is what a containment
+    /// predicate reads as "still fine". It must read `false`.
+    #[test]
+    fn a_negative_verdict_survives_a_lapsed_retry_window_on_the_real_clock() {
+        let mut c = ProbeCache::new();
+        c.record(false, Instant::now(), Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(
+            c.settled(),
+            Some(false),
+            "the answer must outlive its retry window — a lapsed window means \
+             `probe again`, never `never mind`"
+        );
+        assert!(
+            c.needs_probe(Instant::now()),
+            "the lapsed window must still permit a fresh probe"
+        );
     }
 
     #[test]
@@ -230,8 +326,8 @@ mod probe_cache_tests {
         let t0 = Instant::now();
         c.record(true, t0, Duration::from_secs(30));
         c.record(false, t0 + Duration::from_secs(1), Duration::from_secs(30));
-        assert_eq!(c.cached(t0 + Duration::from_secs(2)), Some(true));
-        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+        assert_eq!(c.settled(), Some(true));
+        assert!(!c.needs_probe(t0 + Duration::from_secs(3600)));
     }
 
     #[test]
@@ -239,9 +335,11 @@ mod probe_cache_tests {
         let mut c = ProbeCache::new();
         let t0 = Instant::now();
         c.record(false, t0, Duration::from_secs(30));
-        // A later successful probe upgrades to sticky-available.
+        // A later successful probe upgrades to sticky-available — recovery is
+        // the ONLY thing that may move the answer off `false`.
         c.record(true, t0 + Duration::from_secs(31), Duration::from_secs(30));
-        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+        assert_eq!(c.settled(), Some(true));
+        assert!(!c.needs_probe(t0 + Duration::from_secs(3600)));
     }
 
     /// Regression for FerroxLabs/wayland#754: concurrent cold callers must NOT
@@ -340,12 +438,12 @@ mod probe_cache_tests {
             1,
             "the failing probe must run exactly once despite {n} concurrent cold callers (#754)"
         );
-        // (c) the cache holds the negative verdict (UnavailableUntil), reused
-        // within the TTL — an Unknown/uncached verdict would surface as `None`.
+        // (c) the cache holds the negative verdict, reused within the retry
+        // window — an Unknown/uncached verdict would surface as `None`.
         assert_eq!(
-            cache.lock().unwrap().cached(Instant::now()),
+            cache.lock().unwrap().settled(),
             Some(false),
-            "a concurrent fail-closed probe must cache UnavailableUntil, not leave the cache cold"
+            "a concurrent fail-closed probe must settle Unavailable, not leave the cache cold"
         );
         // …and a follow-up caller reuses that verdict WITHOUT re-probing: this
         // closure would flip the result to Available if it ran, so it must not.
