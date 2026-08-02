@@ -511,39 +511,52 @@ async fn print_mcp_section(probe: bool) {
 
 /// The three distinguishable states of durable session persistence.
 ///
-/// `session.enabled == false` alone cannot tell them apart, and the middle two
-/// want OPPOSITE reporting: one is a healthy configuration the operator chose,
-/// the other is a capability they did not choose to lose.
+/// `session.enabled` alone cannot tell them apart, and the last two want
+/// OPPOSITE reporting: one is a healthy configuration the operator chose, the
+/// other is a capability they did not choose to lose.
+///
+/// `OffByHost` is GONE, and its absence is the report. A host that cannot seal
+/// a provider request no longer turns durable sessions off — it journals
+/// without the seal — so a doctor that could still print "OFF, forced by this
+/// host" would be describing a state the product cannot reach. A status surface
+/// carrying a value nothing can produce is the same defect as a status surface
+/// missing one that something can.
 #[derive(Debug, PartialEq, Eq)]
 enum DurableSessions {
-    /// Durable sessions are on.
+    /// Durable sessions are on, seal and all: an interrupted dispatch resumes
+    /// itself.
     On,
     /// The operator set `[session] enabled = false`. Normal and healthy.
     OffByOperator,
-    /// This host cannot protect a durable session, so startup turned it off.
-    OffByHost,
+    /// Durable sessions are ON and the journal is complete, but this host
+    /// cannot seal a provider request, so an interrupted dispatch will ask for
+    /// a decision instead of resuming itself.
+    OnWithoutReplay,
 }
 
 /// Classify the state. Pure, so every combination can be exercised — including
 /// the one that matters most.
 ///
-/// **`host_forced` is tested FIRST, and that ordering is the whole point.** By
-/// the time `Config::resolve` returns, a host-forced degrade has ALREADY set
-/// `session.enabled = false`, so testing the config value first would report
-/// every host-forced degrade as an operator choice and the distinction this
-/// function exists to make would be silently lost.
-fn classify_durable_sessions(session_enabled: bool, host_forced: bool) -> DurableSessions {
-    if host_forced {
-        DurableSessions::OffByHost
-    } else if !session_enabled {
+/// **The operator's own choice is now tested FIRST, and the reversal is
+/// deliberate.** It used to be the other way round, and had to be: a host-forced
+/// degrade set `session.enabled = false` as part of forcing itself, so reading
+/// the config value first reported every host degrade as an operator choice.
+/// That coupling is gone — the host no longer touches `session.enabled` — so
+/// `!session_enabled` now means one thing only, and reading it first is what
+/// keeps an operator who genuinely turned sessions off from being told about a
+/// replay seal for a journal they do not have.
+fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) -> DurableSessions {
+    if !session_enabled {
         DurableSessions::OffByOperator
+    } else if replay_unavailable {
+        DurableSessions::OnWithoutReplay
     } else {
         DurableSessions::On
     }
 }
 
 /// Print the durable-session state. This is the consumer
-/// `durable_sessions_disabled_by_host()` was added for: the headless-keyring
+/// `replay_protection_unavailable()` was added for: the headless-keyring
 /// fix degrades gracefully and announces it once on stderr at startup, and the
 /// cross-audit panel's dissenting REFUSE vote rested on that not being enough —
 /// a degraded capability must be *reportable on demand*, not only printed into
@@ -576,29 +589,36 @@ async fn print_durable_sessions_section() {
         }
         Ok(cfg) => match classify_durable_sessions(
             cfg.session.enabled,
-            wcore_config::config::durable_sessions_disabled_by_host(),
+            wcore_config::config::replay_protection_unavailable(),
         ) {
             DurableSessions::On => println!("  ON       conversation history is saved to disk"),
             DurableSessions::OffByOperator => {
                 println!("  OFF      by your configuration ([session] enabled = false)");
             }
-            DurableSessions::OffByHost => {
-                println!("  OFF      forced by this host, NOT by your configuration");
+            DurableSessions::OnWithoutReplay => {
+                println!("  ON       but crash replay is unavailable on this host");
                 println!(
                     "           no usable OS keyring and no unlocked credentials vault were found"
                 );
                 println!(
-                    "           prompts, channels, tools and replies work normally; conversation"
+                    "           conversation history IS saved and every provider call, tool call,"
                 );
                 println!(
-                    "           history is not saved and an interrupted turn cannot be recovered"
+                    "           approval and delivery is still recorded; what is missing is the"
                 );
+                println!(
+                    "           sealed copy of the exact provider request, so a turn interrupted"
+                );
+                println!(
+                    "           mid-dispatch asks you to resume, reconcile or cancel it instead"
+                );
+                println!("           of resuming itself");
                 println!(
                     "           to restore: set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file"
                 );
                 println!("           descriptor, preferred) or WAYLAND_VAULT_PASSPHRASE");
-                println!("           to accept it and silence the startup notice: set [session]");
-                println!("           enabled = false in config.toml");
+                println!("           to refuse to run this way at all: set [session]");
+                println!("           require_durability = true in config.toml");
             }
         },
     }
@@ -685,19 +705,32 @@ mod tests {
         assert!(matches!(r.outcome, Outcome::Fail { .. }));
     }
 
-    /// The whole point of `durable_sessions_disabled_by_host()`: a host-forced
-    /// degrade must NOT be reported as an operator choice.
-    ///
-    /// This is the case that breaks if the two conditions are ever reordered.
-    /// `Config::resolve` sets `session.enabled = false` as part of forcing the
-    /// degrade, so the host-forced state ALWAYS arrives here with
-    /// `session_enabled == false` — testing that first would collapse the two
-    /// causes and this assertion is what stops it.
+    /// The whole point of `replay_protection_unavailable()`: a host-forced loss
+    /// of crash replay must NOT be reported as an operator choice, and must NOT
+    /// be reported as a healthy fully-durable session either.
     #[test]
-    fn host_forced_degrade_is_not_reported_as_an_operator_choice() {
+    fn host_forced_replay_loss_is_not_reported_as_an_operator_choice() {
+        assert_eq!(
+            classify_durable_sessions(true, true),
+            DurableSessions::OnWithoutReplay
+        );
+    }
+
+    /// The state the host CANNOT produce any more, asserted as such.
+    ///
+    /// `session_enabled == false` with the host flag set is now only reachable
+    /// if an operator turned sessions off on a keyless host: two independent
+    /// facts, and the operator's is the one that decided the outcome. Reporting
+    /// it as a host fault would tell them to go find a keyring for a journal
+    /// they asked not to have.
+    ///
+    /// This is the assertion that would red if the old ordering were restored,
+    /// so it is the one that pins the reversal rather than merely surviving it.
+    #[test]
+    fn a_keyless_host_does_not_override_an_operator_who_turned_sessions_off() {
         assert_eq!(
             classify_durable_sessions(false, true),
-            DurableSessions::OffByHost
+            DurableSessions::OffByOperator
         );
     }
 
@@ -714,14 +747,37 @@ mod tests {
         assert_eq!(classify_durable_sessions(true, false), DurableSessions::On);
     }
 
-    /// Defensive: `session_enabled == true` alongside a host-forced flag is a
-    /// state `Config::resolve` should never produce, but if it ever did, the
-    /// host fact is the one worth reporting — the capability is gone either way.
+    /// All four inputs are graded, and they must produce three distinct
+    /// outputs. Without this a classifier that collapsed two states — which is
+    /// exactly what the previous ordering did to the pair below — still passes
+    /// every individual assertion above.
     #[test]
-    fn host_forced_wins_even_if_the_config_still_says_enabled() {
-        assert_eq!(
+    fn every_input_combination_is_graded_and_the_states_stay_distinct() {
+        use std::collections::BTreeSet;
+
+        let graded = [
+            classify_durable_sessions(true, false),
             classify_durable_sessions(true, true),
-            DurableSessions::OffByHost
+            classify_durable_sessions(false, false),
+            classify_durable_sessions(false, true),
+        ];
+        assert_eq!(
+            graded,
+            [
+                DurableSessions::On,
+                DurableSessions::OnWithoutReplay,
+                DurableSessions::OffByOperator,
+                DurableSessions::OffByOperator,
+            ]
+        );
+        assert_eq!(
+            graded
+                .iter()
+                .map(|state| format!("{state:?}"))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3,
+            "the classifier collapsed states that need different remedies"
         );
     }
 

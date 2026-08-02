@@ -3808,6 +3808,14 @@ impl AgentEngine {
                 session.id
             );
         }
+        // HIGH-1, the second resume surface. `AgentBootstrap::resume` covers
+        // every LAUNCH; this covers the live TUI `/resume`, which moves an
+        // already-running engine onto another persisted session without going
+        // through bootstrap at all. Same question, same answer, and it is asked
+        // here — inside the validated block, before any live state changes — so
+        // a refusal leaves the engine on the session it was already on rather
+        // than half-moved onto one it cannot read.
+        crate::recovery::admit_session_resume(&self.config, &journal)?;
         let canonical_messages = journal_state
             .conversation
             .into_iter()
@@ -6345,7 +6353,6 @@ impl AgentEngine {
         }
 
         if self.session_journal.is_none() {
-            self.announce_host_forced_degrade_for_this_turn();
             let result = self
                 .run_inner(
                     UserTurnInput::new(user_input, Some(additional_content)),
@@ -6376,9 +6383,23 @@ impl AgentEngine {
         // request can be protected for crash recovery. Failing here keeps an
         // unconfigured headless/profile launch at a clean Ready boundary
         // instead of stranding a TurnStarted that can never dispatch.
-        self.recovery_request_protection
-            .preflight(&self.config)
-            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        //
+        // UNLESS the host cannot seal a request at all, in which case this gate
+        // is the whole amnesia. It is the reason a keyless host used to have to
+        // choose between "no journal" and "every turn fails at dispatch": the
+        // preflight refuses the turn, so `Config::resolve` disabled sessions
+        // upstream to stop it being reached. Neither is necessary. The seal
+        // buys AUTOMATIC replay of an interrupted dispatch and nothing else;
+        // the write-ahead pairs that prove what executed are keyless. So on a
+        // host that cannot seal, journal the turn, decline the promise, and say
+        // so on the turn's own surface.
+        if wcore_config::config::replay_protection_unavailable() {
+            self.announce_replay_protection_unavailable_for_this_turn();
+        } else {
+            self.recovery_request_protection
+                .preflight(&self.config)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        }
         let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
         self.active_journal_turn_id = Some(turn_id.clone());
         if let Err(error) = self
@@ -8898,17 +8919,16 @@ impl AgentEngine {
         self.sync_journal_conversation(turn_id).await
     }
 
-    /// Tell whoever is watching THIS turn that it is not being recorded.
+    /// Tell whoever is watching THIS turn that it is being recorded but cannot
+    /// resume itself.
     ///
     /// The host-forced degrade already announces itself once, on stderr, during
     /// config resolution. That is the right place to explain the situation and
     /// the wrong place to be the only mention of it: a channel gateway resolves
     /// its config when the daemon starts and then serves turns for weeks, so
     /// the notice reaches whoever ran `systemctl start` and nobody after. Every
-    /// person whose message went unrecorded arrived long after that line
-    /// scrolled away, and the `--json-stream` `ready` frame does not carry the
-    /// state either — it simply omits `session_id`, which is also what a legacy
-    /// producer looks like.
+    /// person whose turn could not have been replayed arrived long after that
+    /// line scrolled away.
     ///
     /// So say it per turn, on the surface the turn is observable on:
     /// [`OutputSink::emit_durability_degraded`] reaches the terminal for a
@@ -8916,17 +8936,22 @@ impl AgentEngine {
     /// is already in the pinned contract, so no host has to learn a new frame
     /// to receive it.
     ///
-    /// Deliberately conditioned on `durable_sessions_disabled_by_host()`, not
-    /// on `session_journal.is_none()`. The two causes need opposite treatment:
-    /// an operator who wrote `[session] enabled = false` asked for this and
-    /// must not be nagged once per message; an operator whose HOST took the
-    /// capability away never agreed to anything.
+    /// Deliberately conditioned on `replay_protection_unavailable()`, not on
+    /// the journal. The two causes need opposite treatment: an operator who
+    /// wrote `[session] enabled = false` asked for that and must not be nagged
+    /// once per message; an operator whose HOST took replay away never agreed
+    /// to anything.
+    ///
+    /// The text says what is STILL true as well as what is lost. Its
+    /// predecessor said "this turn is not being recorded", which is now false
+    /// and was the more alarming half — a notice that overstates the loss gets
+    /// filtered as noise, and then the real loss goes unread with it.
     ///
     /// # The record and the notice are separate, and only one of them repeats
     ///
-    /// The `tracing::warn!` below is the RECORD: one line per undurable turn,
-    /// on every surface, wherever the process routed its diagnostics. With
-    /// `RUST_LOG` unset that is the size-bounded log at
+    /// The `tracing::warn!` below is the RECORD: one line per unreplayable
+    /// turn, on every surface, wherever the process routed its diagnostics.
+    /// With `RUST_LOG` unset that is the size-bounded log at
     /// `$WAYLAND_HOME/logs/wayland-core.log` (`~/.wayland/logs/` when
     /// `WAYLAND_HOME` is not set); with `RUST_LOG` set it is stderr, because
     /// `RUST_LOG` is authoritative and routes everything there. Either way the
@@ -8936,16 +8961,16 @@ impl AgentEngine {
     /// named rather than intra-doc linked, since that crate sits ABOVE this one
     /// and the path would not resolve from here. It is the durable artifact the
     /// gateway case actually needs: an operator debugging "which of last week's
-    /// messages went unrecorded" reads a file, not a terminal that scrolled
-    /// away three weeks ago.
+    /// messages could not have been recovered" reads a file, not a terminal
+    /// that scrolled away three weeks ago.
     ///
     /// The sink call is the NOTICE, and whether it repeats is the sink's
     /// decision — see [`OutputSink::emit_durability_degraded`]. A protocol
     /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
-    fn announce_host_forced_degrade_for_this_turn(&self) {
-        if !wcore_config::config::durable_sessions_disabled_by_host() {
+    fn announce_replay_protection_unavailable_for_this_turn(&self) {
+        if !wcore_config::config::replay_protection_unavailable() {
             return;
         }
         tracing::warn!(
@@ -8955,15 +8980,18 @@ impl AgentEngine {
                 .as_ref()
                 .map(|s| s.id.as_str())
                 .unwrap_or("<none>"),
-            "this turn is NOT being recorded: durable session persistence is off because the \
-             host has no usable OS keyring and no unlocked credentials vault"
+            "this turn cannot be replayed if it is interrupted: the host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request is not \
+             sealed. The turn IS journaled"
         );
         self.output.emit_durability_degraded(
-            "durable session persistence is OFF for this run: this host has no usable OS \
-             keyring and no unlocked credentials vault. This turn is not being recorded, so \
-             if it is interrupted there will be no way to tell whether its effects already \
-             happened. Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE to restore \
-             durability, [session] enabled = false to accept it silently, or \
+            "crash replay protection is OFF for this run: this host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request \
+             cannot be sealed. This turn IS being recorded — the journal keeps its \
+             provider, tool, approval and delivery boundaries — but if it is interrupted \
+             mid-dispatch it will not resume itself; you will be asked to resume, \
+             reconcile or cancel it. Set WAYLAND_VAULT_PASSPHRASE_FD or \
+             WAYLAND_VAULT_PASSPHRASE to restore replay, or \
              [session] require_durability = true to refuse to run this way at all.",
         );
     }
@@ -10103,19 +10131,46 @@ impl AgentEngine {
                     })?)
                 } else if let Some(turn_id) = journal_turn_id {
                     self.sync_journal_conversation(turn_id).await?;
-                    let checkpoint = self
-                        .commit_provider_recovery_checkpoint(
-                            turn_id,
-                            &request,
-                            turn,
-                            stream_attempt,
-                            overflow_retried,
-                            length_wedge_retried,
-                            &loop_guard,
-                            &failure_guard,
-                        )
-                        .await?;
-                    checkpoint.dispatch_id
+                    if wcore_config::config::replay_protection_unavailable() {
+                        // A `ProviderDispatch` checkpoint is REQUIRED to carry a
+                        // sealed prepared request (`recovery.rs:331`), so on a
+                        // host that cannot seal one there is no honest
+                        // checkpoint to write — and writing one without the
+                        // seal would be a durable claim that this dispatch can
+                        // be replayed, which is exactly the lie this posture
+                        // exists to avoid.
+                        //
+                        // Mint the dispatch identity directly instead. It is
+                        // not decoration: with a journal and an active turn the
+                        // provider adapter REQUIRES one (see the `ok_or_else`
+                        // below), and it is what binds every physical
+                        // retry/fallback attempt to one logical send, so the
+                        // keyless write-ahead pairs still say "these four
+                        // attempts were one dispatch" rather than "four
+                        // dispatches happened". That distinction is the whole
+                        // value of the record to whoever has to reconcile it.
+                        //
+                        // On restart `recovery_plan()` finds a `turn_started`
+                        // with no terminal and no checkpoint, which is not
+                        // `Ready`, so the honest refusal already at
+                        // `run_with_content` names the interrupted turn and
+                        // asks for a decision. Nothing auto-continues.
+                        Some(format!("provider-dispatch-{}", uuid::Uuid::new_v4()))
+                    } else {
+                        let checkpoint = self
+                            .commit_provider_recovery_checkpoint(
+                                turn_id,
+                                &request,
+                                turn,
+                                stream_attempt,
+                                overflow_retried,
+                                length_wedge_retried,
+                                &loop_guard,
+                                &failure_guard,
+                            )
+                            .await?;
+                        checkpoint.dispatch_id
+                    }
                 } else {
                     None
                 };

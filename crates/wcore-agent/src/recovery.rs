@@ -389,6 +389,88 @@ impl RecoveryCheckpoint {
     }
 }
 
+/// HIGH-1. May this specific session be resumed on this host?
+///
+/// # The measured defect
+///
+/// Seed a profile with a real recoverable turn under a vault, delete the vault,
+/// relaunch with `--resume <that id>`. Measured at 0.12.25: the process starts
+/// `rc=0` and emits `ready` **carrying that session id**, while the six journal
+/// artifacts sit on disk unread. The host is told it resumed a session the
+/// engine cannot open a single sealed byte of. That is strictly worse than an
+/// anonymous refusal — a host that is told nothing retries or asks; a host that
+/// is told `ready(session_id=X)` builds its whole session view on a continuity
+/// claim that is false.
+///
+/// # Why the SESSION and not the PROCESS
+///
+/// The obvious repair — refuse to start when a key is missing — hands anyone who
+/// can suppress the keyring (a stopped D-Bus, an unmounted keyring, a hostile
+/// local process) a complete availability kill. That converts an attack on
+/// confidentiality into an attack on availability, which is the exact mirror of
+/// the downgrade abuse this whole posture exists to prevent, and a previous
+/// version of this remedy did precisely that.
+///
+/// So the refusal is scoped to the thing that is genuinely unreadable. On the
+/// same host, in the same second:
+///
+/// * `--resume <locked id>` is refused, by name, before `ready`;
+/// * a launch with no `--resume`, or with a different session, starts normally
+///   and journals normally;
+/// * the locked session's journal is left untouched — it is evidence, and a
+///   later launch WITH the vault resumes it exactly as before.
+///
+/// An attacker who suppresses the keyring therefore gains nothing they did not
+/// already have: they cannot start turns they could not otherwise start, and
+/// they cannot stop the product from running.
+///
+/// # Why not "fork it into a new session"
+///
+/// The panel's form was "permit a new session under a new id, never reuse the
+/// old id or call the fork a resume". Silently forking here would do the naming
+/// half of that and hide the decision: the operator asked to continue a
+/// specific conversation, and starting a different one under a different id
+/// while reporting success is the same class of false claim as the `ready`
+/// frame this fixes. Refusing by name, and saying that a new session is
+/// available, leaves the fork as the operator's choice — one command away, and
+/// theirs.
+pub(crate) fn admit_session_resume(
+    config: &wcore_config::config::Config,
+    journal: &SessionJournal,
+) -> anyhow::Result<()> {
+    let plan = RecoveryPlan::from_journal(journal)?;
+    if !plan.requires_sealed_replay() {
+        return Ok(());
+    }
+    match crate::recovery_confidential::sealed_request_key_available(config) {
+        Ok(()) => Ok(()),
+        Err(cause) => anyhow::bail!("{}", locked_session_refusal(&plan.session_id, &cause)),
+    }
+}
+
+/// The operator-facing text for a session whose sealed state cannot be opened.
+///
+/// A `const`-shaped single source, like `DURABILITY_REQUIRED_REFUSAL`, so the
+/// three things it must say cannot drift apart under editing: WHICH session,
+/// WHY, and — the part a refusal usually forgets — what still works. A refusal
+/// that reads like an outage gets escalated as one.
+fn locked_session_refusal(
+    session_id: &str,
+    cause: &crate::recovery_confidential::RecoveryConfidentialError,
+) -> String {
+    format!(
+        "session '{session_id}' cannot be resumed on this host: it was interrupted while a \
+         provider request was in flight, and continuing it means re-opening the sealed copy of \
+         that exact request, which this host cannot read ({cause}). Resuming without it would \
+         mean either re-sending a request that may already have been answered, or claiming to \
+         have resumed a session nothing was read from. Only THIS session is refused — starting \
+         a new session on this host works normally, and its journal is left untouched, so \
+         restoring the key and resuming again recovers it. To restore the key, set \
+         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
+         WAYLAND_VAULT_PASSPHRASE and resume again."
+    )
+}
+
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1174,6 +1256,33 @@ impl RecoveryPlan {
         RecoveryCursor {
             journal_sequence: self.journal_sequence,
             journal_digest: self.journal_digest.clone(),
+        }
+    }
+
+    /// Does continuing this session require OPENING a sealed prepared request?
+    ///
+    /// True for exactly one disposition: a `ProviderDispatch` checkpoint at the
+    /// head. Every other continuation — a bare `TurnStarted`, a tool round, an
+    /// approval gate, a terminal commit, a blocked reconciliation — is decided
+    /// from keyless journal events and needs no key at all.
+    ///
+    /// The predicate reads `sealed_prepared_request`, not `next_action`, even
+    /// though `RecoveryCheckpoint::validate` currently makes the two equivalent
+    /// for `ProviderDispatch`. The question here is literally "is there
+    /// ciphertext that must be opened", and answering it from the field that
+    /// holds the ciphertext keeps this correct if a future action ever carries
+    /// one or a `ProviderDispatch` ever legitimately does not.
+    #[must_use]
+    pub(crate) fn requires_sealed_replay(&self) -> bool {
+        match &self.disposition {
+            RecoveryDisposition::ContinueCheckpoint { checkpoint, .. } => {
+                checkpoint.sealed_prepared_request.is_some()
+            }
+            RecoveryDisposition::Ready
+            | RecoveryDisposition::ContinueTurnStart { .. }
+            | RecoveryDisposition::AwaitApproval { .. }
+            | RecoveryDisposition::ReconciliationRequired { .. }
+            | RecoveryDisposition::Blocked { .. } => false,
         }
     }
 

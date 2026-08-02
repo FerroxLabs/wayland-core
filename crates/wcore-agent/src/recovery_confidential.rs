@@ -147,6 +147,24 @@ pub(crate) fn reject_backend_without_confidential_storage(
     }
 }
 
+/// Can this host still OPEN a sealed prepared request it wrote earlier?
+///
+/// Read-only in the strong sense: `create = false`, so it never mints this
+/// profile's recovery key as a side effect of asking. That matters — the
+/// question is asked about a journal that ALREADY contains sealed material, and
+/// creating a fresh key at that moment would answer "yes" while guaranteeing
+/// every open still fails, which is worse than either honest answer.
+///
+/// Deliberately NOT `preflight`. `preflight` asks "may I start sealing?" and
+/// creates a key to say yes. This asks "can I read what is already there?", and
+/// the two have opposite side effects and opposite correct answers on a profile
+/// whose key was deleted while its journal survived.
+pub(crate) fn sealed_request_key_available(
+    config: &Config,
+) -> Result<(), RecoveryConfidentialError> {
+    RecoveryRequestProtector::default().with_key(config, false, |_| Ok(()))
+}
+
 /// Lazily caches a successfully loaded key for one engine. Backend failures
 /// are not cached, so unlocking the configured store can make a later retry
 /// succeed without restarting Core.
