@@ -150,10 +150,18 @@ async fn typed_bypass_executes_bash_inside_required_sandbox() {
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
         .provider(Arc::new(
+            // `printf` is a POSIX utility. BashTool runs `sh -c` on Unix but
+            // `cmd /C` on Windows (`wcore_config::shell::bash_shell_argv_prefix`),
+            // and nothing in the shipped Windows path supplies POSIX utilities —
+            // the AppContainer backend actively refuses the shells that would
+            // (git-bash, busybox), and downgrades PowerShell to cmd. So the
+            // sandboxed child exited "'printf' is not recognized" and this test
+            // reported a containment failure it had not observed. `echo` is the
+            // one spelling both shells share; no `cfg` needed.
             MockLlmProvider::with_tool_use(
                 "typed-bash",
                 "Bash",
-                json!({"command": "printf typed-bypass-bash-succeeded"}),
+                json!({"command": "echo typed-bypass-bash-succeeded"}),
             )
             .with_physical_url(physical.uri()),
         ))
@@ -180,7 +188,9 @@ async fn typed_bypass_executes_bash_inside_required_sandbox() {
 
     assert!(
         capture.has_success_containing("Bash", "typed-bypass-bash-succeeded"),
-        "Bash must execute through the required sandbox runtime"
+        "Bash must execute through the required sandbox runtime; \
+         recorded tool results: {:?}",
+        capture.tool_results.lock().unwrap()
     );
 }
 

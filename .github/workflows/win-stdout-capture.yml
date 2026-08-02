@@ -1,0 +1,89 @@
+---
+# TEMPORARY lane proof. DELETE THIS FILE AT MERGE — it is scoped to one lane
+# branch and must not survive into main.
+#
+# The self-hosted Windows pool this repo normally uses is saturated, so this
+# runs on a GitHub-hosted `windows-latest`. It proves the fix in BOTH
+# directions on a real Windows host:
+#
+#   GREEN — with the fix, the product E2E
+#           (`typed_bypass_executes_bash_inside_required_sandbox`) passes and
+#           the new gates pass.
+#   RED   — with `collapse_cr_lines` reverted to its shipped form and NOTHING
+#           else changed, the same three commands fail.
+#
+# A gate that cannot fail is worthless, so the RED leg asserts the failure
+# instead of merely reporting it: each command must exit non-zero.
+name: win-stdout-capture
+
+on:
+  push:
+    branches:
+      - lane/win-stdout-capture
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain and host identity
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          whoami
+          [System.Environment]::OSVersion.Version.ToString()
+
+      - name: GREEN 1 - the sanitizer unit gates
+        run: cargo test -p wcore-compact --lib sanitize -- --nocapture
+
+      - name: GREEN 2 - the engine tool-result pipeline gate
+        run: >
+          cargo test -p wcore-agent --test tool_result_fidelity_test
+          -- --nocapture --test-threads=1
+
+      - name: GREEN 3 - the product E2E that was red on this host
+        run: >
+          cargo test -p wcore-agent --test typed_execution_policy_e2e_test
+          typed_bypass_executes_bash_inside_required_sandbox
+          -- --nocapture --test-threads=1
+
+      - name: MUTATE - restore the shipped collapse_cr_lines, change nothing else
+        run: |
+          python .github/workflows/win-stdout-capture-mutate.py mutate
+          git --no-pager diff --stat
+
+      - name: RED - all three must now fail
+        run: |
+          $failures = 0
+          $commands = @(
+            'cargo test -p wcore-compact --lib sanitize',
+            'cargo test -p wcore-agent --test tool_result_fidelity_test -- --test-threads=1',
+            'cargo test -p wcore-agent --test typed_execution_policy_e2e_test typed_bypass_executes_bash_inside_required_sandbox -- --nocapture --test-threads=1'
+          )
+          foreach ($c in $commands) {
+            Write-Output "########## MUTANT: $c"
+            Invoke-Expression $c
+            Write-Output "########## exit=$LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          if ($failures -ne $commands.Count) {
+            throw "the mutant did not turn every gate red ($failures of $($commands.Count)); a gate that cannot fail is worthless"
+          }
+          Write-Output "MUTANT PROOF OK: $failures of $($commands.Count) gates went red"
+          # Every command in this step is EXPECTED to exit non-zero. pwsh
+          # propagates the last one, which would mark a successful proof as a
+          # failed step, so the verdict above is the step's exit status.
+          exit 0
+
+      - name: RESTORE - leave the checkout on the fixed code
+        if: always()
+        run: python .github/workflows/win-stdout-capture-mutate.py restore

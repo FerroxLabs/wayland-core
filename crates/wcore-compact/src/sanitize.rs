@@ -11,12 +11,29 @@ pub fn strip_ansi(text: &str) -> String {
     ANSI_RE.replace_all(text, "").into_owned()
 }
 
+/// Collapse carriage-return overwrites (progress bars) to the final state of
+/// each line.
+///
+/// A `\r` that is IMMEDIATELY followed by the `\n` this function splits on is
+/// not an overwrite — it is the second half of a CRLF line terminator, which is
+/// what every Windows child process emits. Keeping only the text after the last
+/// `\r` therefore erased the whole line on Windows: `"ok\r\n"` collapsed to
+/// `""`. Because this runs on every tool result the engine returns
+/// (`wcore_compact::compact_output`, default level `Safe`), that silently
+/// deleted the entire visible output of every tool on the platform — a Bash
+/// command reported `Exit code: 0` with an empty `STDOUT:` while its side
+/// effects had really happened, and the model then reasoned from "the command
+/// produced no output". Strip the terminator first, then collapse.
 pub fn collapse_cr_lines(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
-    for line in text.split('\n') {
-        if !result.is_empty() {
+    for (index, line) in text.split('\n').enumerate() {
+        // Keyed on the split index, not on `result.is_empty()`: an empty first
+        // line left `result` empty, so the separator for the SECOND line was
+        // skipped too and a leading blank line vanished from the output.
+        if index > 0 {
             result.push('\n');
         }
+        let line = line.strip_suffix('\r').unwrap_or(line);
         if let Some(last) = line.rsplit('\r').next() {
             result.push_str(last);
         }
@@ -125,6 +142,31 @@ mod tests {
         assert_eq!(collapse_cr_lines(input), input);
     }
 
+    /// The regression this function shipped: every Windows child writes CRLF,
+    /// and treating the terminator's `\r` as an overwrite deleted the whole
+    /// line. `"ok\r\n"` came back as `""`.
+    #[test]
+    fn collapse_cr_keeps_crlf_line_content() {
+        let input = "first\r\nsecond\r\n";
+        assert_eq!(collapse_cr_lines(input), "first\nsecond\n");
+    }
+
+    /// The overwrite semantics this function exists for must survive the fix,
+    /// including when the progress line is itself CRLF-terminated.
+    #[test]
+    fn collapse_cr_overwrites_before_a_crlf_terminator() {
+        let input = "10%\r50%\r100%\r\ndone\r\n";
+        assert_eq!(collapse_cr_lines(input), "100%\ndone\n");
+    }
+
+    /// A leading blank line was dropped: the empty first line left `result`
+    /// empty, so the separator for the second line was skipped as well.
+    #[test]
+    fn collapse_cr_keeps_a_leading_blank_line() {
+        assert_eq!(collapse_cr_lines("\nfoo"), "\nfoo");
+        assert_eq!(collapse_cr_lines("\r\nfoo\r\n"), "\nfoo\n");
+    }
+
     // --- merge_blank_lines ---
 
     #[test]
@@ -160,6 +202,22 @@ mod tests {
     }
 
     // --- sanitize (combined safe layer) ---
+
+    /// The product-shaped case: a `BashTool` result captured from a Windows
+    /// child. Sanitizing it must be indistinguishable from sanitizing the same
+    /// output captured on Unix — anything else means the engine hands the model
+    /// a different reality depending on the host OS.
+    #[test]
+    fn sanitize_keeps_a_crlf_tool_result_intact() {
+        let crlf = "Exit code: 0\nSTDOUT:\nproof-string\r\n\nSTDERR:\n";
+        let lf = "Exit code: 0\nSTDOUT:\nproof-string\n\nSTDERR:\n";
+        let sanitized = sanitize(crlf);
+        assert!(
+            sanitized.contains("proof-string"),
+            "CRLF output was erased: {sanitized:?}"
+        );
+        assert_eq!(sanitized, sanitize(lf));
+    }
 
     #[test]
     fn sanitize_applies_all() {
