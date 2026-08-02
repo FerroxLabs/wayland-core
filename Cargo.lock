@@ -9330,9 +9330,11 @@ name = "wcore-budget"
 version = "0.12.25"
 dependencies = [
  "chrono",
+ "fd-lock",
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "toml",
  "workspace-hack",
