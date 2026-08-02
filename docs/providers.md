@@ -308,11 +308,12 @@ wayland-core auth login chatgpt
 
 This opens your browser to OpenAI's sign-in page (a loopback PKCE flow on
 `http://localhost:1455/auth/callback`). Approve the request and the tokens are
-written **encrypted** to:
-
-```
-~/.wayland/oauth/chatgpt.json     # dir mode 0700, file mode 0600 on Unix
-```
+stored through the credential ladder — OS keyring, then the encrypted vault,
+then a refusal. There is no cleartext rung; see
+[Advanced → OAuth token storage](advanced.md#chatgpt-subscription-login-oauth)
+for the migration and refusal contract. `~/.wayland/oauth/chatgpt.json` is a
+pre-v0.12.26 artifact: it is read, promoted into the ladder, and deleted the
+first time the engine loads it.
 
 The stored access token is a JWT; your `chatgpt_account_id` is read from it (no
 separate API call) and sent as the `chatgpt-account-id` request header. Login
@@ -365,7 +366,7 @@ wayland-core auth login chatgpt --import-codex
 
 This reads `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), validates the
 file's ownership/permissions, decodes the account id, and stores the tokens
-under `~/.wayland/oauth/chatgpt.json`. `wayland-core auth status` also attempts a
+through the credential ladder. `wayland-core auth status` also attempts a
 one-shot import when no wayland token exists yet.
 
 ### Fallback
@@ -408,7 +409,9 @@ is **fresher**:
 
 ```
 ~/.grok/auth.json            # the Grok CLI's credential file ($GROK_HOME/auth.json when set)
-~/.wayland/oauth/xai.json    # the engine's own store (written by an app or a prior refresh)
+the credential ladder        # the engine's own store (written by an app or a prior refresh);
+                             # `~/.wayland/oauth/xai.json` is the pre-v0.12.26 form, read and
+                             # promoted into the ladder on first load
 ```
 
 Preferring the fresher file avoids racing the Grok CLI for the **single-use,

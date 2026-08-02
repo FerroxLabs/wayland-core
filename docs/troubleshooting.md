@@ -76,9 +76,28 @@ The session was started as `--provider openai`, so requests went to
 ```
 
 Grok must run as `--provider xai`. Spawned as `--provider openai` it ignores the
-OAuth token files (`~/.grok/auth.json`, `~/.wayland/oauth/xai.json`) and sends an
-unsupported `stop` parameter. Under `--provider xai` the stop suppression is
-automatic.
+stored OAuth login (`~/.grok/auth.json`, and the engine's own token in the
+credential ladder) and sends an unsupported `stop` parameter. Under
+`--provider xai` the stop suppression is automatic.
+
+## "signed in ... but its OAuth token could not be read out of the secure credential store"
+
+The login is still there; the credential store is what cannot be opened. This
+happens when a profile signed in with `WAYLAND_VAULT_PASSPHRASE` set (or with a
+keyring running) and is then re-run without it — the migration that moved the
+token into the vault deleted the cleartext copy once the write verified, so
+there is nothing left to fall back to. The engine refuses rather than telling
+you that you are signed out.
+
+The error names the three ways forward, and the third one is exact:
+
+- set `WAYLAND_VAULT_PASSPHRASE` (or `WAYLAND_VAULT_PASSPHRASE_FD`) to the
+  passphrase this profile's vault was created under, then re-run; or
+- start the OS keyring / Secret Service this profile signed in under; or
+- if you removed the credential deliberately, delete the login record the error
+  names (`~/.wayland/oauth/{provider}.stored`, or its `$WAYLAND_HOME`
+  equivalent) and sign in again. `wayland-core auth logout chatgpt` does the
+  same and works even when the store cannot be opened.
 
 ## OpenRouter model "vanishes" after one turn
 
