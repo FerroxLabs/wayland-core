@@ -111,6 +111,36 @@ pub trait OutputSink: Send + Sync {
     fn emit_error(&self, msg: &str, retryable: bool);
     /// Display informational message
     fn emit_info(&self, msg: &str);
+
+    /// Tell whoever is watching THIS turn that it is not being recorded,
+    /// because the host took durable session persistence away.
+    ///
+    /// Split out of [`Self::emit_info`] because the two surfaces need opposite
+    /// treatment for the SAME fact, and only the sink knows which it is:
+    ///
+    /// * A **protocol host** must receive it every turn, correlated to that
+    ///   turn's `msg_id`. `f14_sigkill_recovery::…degraded…` runs two turns
+    ///   specifically to assert this ("a startup notice is indistinguishable
+    ///   from a per-turn notice if you only ever run one turn"). The default
+    ///   body below is that behaviour, unchanged.
+    ///
+    /// * A **human at a terminal** must NOT. It is one person, in one process,
+    ///   who was already told at config resolution by
+    ///   `wcore_config::config`'s `warn_durable_sessions_disabled_once` —
+    ///   whose own doc comment says the operator should hear it "ONCE, at a
+    ///   moment that is about configuration — not repeatedly, attached to a
+    ///   message they were trying to answer". Repeating it per turn is exactly
+    ///   what that `Once` guard was installed to prevent, re-introduced one
+    ///   layer up. Measured: 520 bytes of identical prose per turn, 91% of all
+    ///   per-turn stderr on a host with no keyring.
+    ///
+    /// The per-turn RECORD does not depend on this at all — the engine writes
+    /// one `tracing::warn!` per undurable turn into the bounded diagnostics
+    /// log regardless of sink, so collapsing the terminal repeat loses nothing.
+    fn emit_durability_degraded(&self, msg: &str) {
+        self.emit_info(msg);
+    }
+
     /// W1: F9 trace emission. Implementations that don't structure-trace
     /// (e.g. `TerminalSink`, `NullSink`) leave the default no-op body. The
     /// `ProtocolSink` impl emits `ProtocolEvent::TraceEvent` ONLY when the

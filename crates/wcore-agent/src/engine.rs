@@ -8911,20 +8911,46 @@ impl AgentEngine {
     /// producer looks like.
     ///
     /// So say it per turn, on the surface the turn is observable on:
-    /// [`OutputSink::emit_info`] reaches the terminal for a TUI/CLI run and a
-    /// `ProtocolEvent::Info` for a protocol host, and `Info` is already in the
-    /// pinned contract, so no host has to learn a new frame to receive it.
+    /// [`OutputSink::emit_durability_degraded`] reaches the terminal for a
+    /// TUI/CLI run and a `ProtocolEvent::Info` for a protocol host, and `Info`
+    /// is already in the pinned contract, so no host has to learn a new frame
+    /// to receive it.
     ///
     /// Deliberately conditioned on `durable_sessions_disabled_by_host()`, not
     /// on `session_journal.is_none()`. The two causes need opposite treatment:
     /// an operator who wrote `[session] enabled = false` asked for this and
     /// must not be nagged once per message; an operator whose HOST took the
     /// capability away never agreed to anything.
+    ///
+    /// # The record and the notice are separate, and only one of them repeats
+    ///
+    /// The `tracing::warn!` below is the RECORD: one line per undurable turn,
+    /// on every surface, into the size-bounded diagnostics log
+    /// (`crate::…`/`wcore_cli::log_rotate`). That is the durable artifact the
+    /// gateway case actually needs — an operator debugging "which of last
+    /// week's messages went unrecorded" reads a file, not a terminal that
+    /// scrolled away three weeks ago.
+    ///
+    /// The sink call is the NOTICE, and whether it repeats is the sink's
+    /// decision — see [`OutputSink::emit_durability_degraded`]. A protocol
+    /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
+    /// human gets it once, because they were already told at config
+    /// resolution and the condition cannot change mid-process.
     fn announce_host_forced_degrade_for_this_turn(&self) {
         if !wcore_config::config::durable_sessions_disabled_by_host() {
             return;
         }
-        self.output.emit_info(
+        tracing::warn!(
+            target: "wcore_agent::session",
+            session = %self
+                .current_session
+                .as_ref()
+                .map(|s| s.id.as_str())
+                .unwrap_or("<none>"),
+            "this turn is NOT being recorded: durable session persistence is off because the \
+             host has no usable OS keyring and no unlocked credentials vault"
+        );
+        self.output.emit_durability_degraded(
             "durable session persistence is OFF for this run: this host has no usable OS \
              keyring and no unlocked credentials vault. This turn is not being recorded, so \
              if it is interrupted there will be no way to tell whether its effects already \
@@ -14659,6 +14685,9 @@ impl AgentEngine {
             .map(|s| s.id.clone())
             .unwrap_or_default();
         let turn_count = self.recent_turn_traces.len() as u32;
+        // Kept for the skip-report level decision below; `digest` consumes the
+        // vector.
+        let considered = fact_candidates.len();
         let digest = SessionDigest {
             session_id,
             turn_count,
@@ -14677,12 +14706,36 @@ impl AgentEngine {
             // #664: the SkipReason was computed then discarded, so facts were
             // silently not saved. Surface WHY so an operator can see that
             // auto-memorize skipped (e.g. consent not granted / below threshold).
-            tracing::info!(
-                target: "wcore_agent::memory",
-                skip_reason = ?report.skipped_reason,
-                candidates = report.facts_persisted,
-                "auto-memorize skipped this session; no facts saved"
-            );
+            //
+            // #147: this runs at the end of EVERY turn, not once per session,
+            // so at INFO it emitted one line per turn — measured 9 identical
+            // `candidates=0` lines in a 9-turn run, the only per-turn record in
+            // the diagnostics log. Nothing was extracted, nothing was dropped,
+            // and nothing was decided: there is no event there to report.
+            //
+            // The #664 question is "why were MY facts not saved", which only
+            // has content when there were facts. So the level follows the
+            // evidence: INFO when candidates existed and were rejected (an
+            // operator-visible decision), DEBUG when the turn produced none
+            // (`RUST_LOG=debug` still shows it). `candidates` is also corrected
+            // here — it reported `facts_persisted`, which is 0 by construction
+            // on every skip path and so could never distinguish the two cases
+            // this branch now separates.
+            if considered > 0 {
+                tracing::info!(
+                    target: "wcore_agent::memory",
+                    skip_reason = ?report.skipped_reason,
+                    candidates = considered,
+                    "auto-memorize skipped this session; no facts saved"
+                );
+            } else {
+                tracing::debug!(
+                    target: "wcore_agent::memory",
+                    skip_reason = ?report.skipped_reason,
+                    candidates = 0,
+                    "auto-memorize skipped this session; no facts saved"
+                );
+            }
             return;
         }
 
