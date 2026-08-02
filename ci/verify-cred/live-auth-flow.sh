@@ -15,6 +15,9 @@
 #   E. no secure rung — a NEW login must be refused, not written in cleartext
 set -uo pipefail
 
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
+
 BIN=""
 FAILURES=0
 say() { printf '\n=== %s ===\n' "$*"; }
@@ -41,7 +44,7 @@ make_auth_json() {
   local dir="$1" nonce="$2"
   mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
-  python3 - "$dir/auth.json" "$nonce" <<'PY'
+  "$PY" - "$dir/auth.json" "$nonce" <<'PY'
 import base64, json, sys, time
 path, nonce = sys.argv[1], sys.argv[2]
 def seg(obj):

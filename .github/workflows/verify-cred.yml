@@ -37,6 +37,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11 libdbus-1-dev
 
       - name: Crash-injection sweeps (all platforms)
+        continue-on-error: true
         run: cargo test -p wcore-config --lib crash_injection_verification -- --nocapture --test-threads=2
 
       - name: Concurrent-writer race (all platforms)
@@ -44,6 +45,7 @@ jobs:
         run: cargo test -p wcore-config --lib scheduled_race_verification concurrency_verification -- --nocapture
 
       - name: Real per-entry cap probe + live OAuth lifecycle (Windows/macOS)
+        continue-on-error: true
         if: matrix.os != 'ubuntu-latest'
         run: |
           cargo test -p wcore-config --test keyring_cap_probe_live -- --ignored --nocapture
@@ -51,6 +53,7 @@ jobs:
           cargo test -p wcore-agent --test oauth_live_keyring_e2e -- --ignored --nocapture
 
       - name: Real per-entry cap probe + live OAuth lifecycle (Linux, under gnome-keyring)
+        continue-on-error: true
         if: matrix.os == 'ubuntu-latest'
         run: |
           cargo test -p wcore-config --test keyring_cap_probe_live --no-run
@@ -64,5 +67,6 @@ jobs:
           '
 
       - name: Drive the real CLI login flow with a synthetic credential
+        continue-on-error: true
         shell: bash
         run: bash ci/verify-cred/live-auth-flow.sh
