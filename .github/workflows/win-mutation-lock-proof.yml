@@ -130,29 +130,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "regression tests are red on the fixed tree" }
 
       # --------------------------------------------------------------- MUTATE
-      - name: PHASE 3 MUTATE — knock each load-bearing constant back one token
-        shell: pwsh
-        run: |
-          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
-          $proc = "$env:SANDBOX_SRC/windows_impl/process.rs"
-          (Get-Content $lock -Raw) -replace 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 16;', 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' | Set-Content -NoNewline $lock
-          (Get-Content $proc -Raw) -replace 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(240\);', 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs(0);' | Set-Content -NoNewline $proc
-          git --no-pager diff --stat
-          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' -Quiet)) { throw "lock mutation did not apply" }
-          if (-not (Select-String -Path $proc -Pattern 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(0\);' -Quiet)) { throw "probe mutation did not apply" }
-
-      - name: PHASE 3 MUTATE — both regression tests MUST go red
+      #
+      # THREE mutations, applied and graded ONE AT A TIME. Applying them
+      # together would only prove that *something* went red — it could not tell
+      # which assertion each part of the fix is actually held up by, and a fix
+      # whose parts are not individually covered is a fix with an untested part
+      # in it. Each mutation is one token.
+      - name: PHASE 3 MUTATE M1 — restore the flat 15s ceiling (queue depth = 1)
         shell: pwsh
         env:
           WAYLAND_SANDBOX_LIVE_WINDOWS: "1"
         run: |
+          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
+          (Get-Content $lock -Raw) -replace 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 16;', 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' | Set-Content -NoNewline $lock
+          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' -Quiet)) { throw "M1 did not apply" }
           cargo nextest run -p wcore-sandbox --run-ignored all --no-fail-fast `
-            -E 'test(acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget) + test(the_probe_guard_forgives_lock_queueing_and_still_catches_a_real_stall)'
+            -E 'test(acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget)'
           $rc = $LASTEXITCODE
-          Write-Host "MUTANT rc=$rc"
-          if ($rc -eq 0) {
-            throw "MUTATION SURVIVED — the regression tests pass with the fix removed, so they do not test the fix"
-          }
+          Write-Host "M1 rc=$rc (must be non-zero)"
+          git checkout HEAD -- crates/wcore-sandbox
+          if ($rc -eq 0) { throw "M1 SURVIVED — the queue regression passes against the old flat 15s ceiling" }
+
+      - name: PHASE 3 MUTATE M2 — charge the wait only on completion
+        shell: pwsh
+        env:
+          WAYLAND_SANDBOX_LIVE_WINDOWS: "1"
+        run: |
+          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
+          (Get-Content $lock -Raw) -replace 'MUTATION_LOCK_CHARGE_SLICE: Duration = Duration::from_secs\(1\);', 'MUTATION_LOCK_CHARGE_SLICE: Duration = Duration::from_secs(600);' | Set-Content -NoNewline $lock
+          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_CHARGE_SLICE: Duration = Duration::from_secs\(600\);' -Quiet)) { throw "M2 did not apply" }
+          cargo nextest run -p wcore-sandbox --run-ignored all --no-fail-fast `
+            -E 'test(acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget)'
+          $rc = $LASTEXITCODE
+          Write-Host "M2 rc=$rc (must be non-zero)"
+          git checkout HEAD -- crates/wcore-sandbox
+          if ($rc -eq 0) { throw "M2 SURVIVED — an in-flight queue can be invisible to the probe and no test notices" }
+
+      - name: PHASE 3 MUTATE M3 — remove the probe's queue credit
+        shell: pwsh
+        env:
+          WAYLAND_SANDBOX_LIVE_WINDOWS: "1"
+        run: |
+          $proc = "$env:SANDBOX_SRC/windows_impl/process.rs"
+          (Get-Content $proc -Raw) -replace 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(240\);', 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs(0);' | Set-Content -NoNewline $proc
+          if (-not (Select-String -Path $proc -Pattern 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(0\);' -Quiet)) { throw "M3 did not apply" }
+          cargo nextest run -p wcore-sandbox --no-fail-fast `
+            -E 'test(the_probe_guard_forgives_lock_queueing_and_still_catches_a_real_stall)'
+          $rc = $LASTEXITCODE
+          Write-Host "M3 rc=$rc (must be non-zero)"
+          git checkout HEAD -- crates/wcore-sandbox
+          if ($rc -eq 0) { throw "M3 SURVIVED — the probe guard can stop discounting queue time and no test notices" }
 
       - name: Restore the tree
         if: always()

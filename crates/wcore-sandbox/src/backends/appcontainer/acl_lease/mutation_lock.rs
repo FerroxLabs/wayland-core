@@ -134,51 +134,74 @@ impl MutationLock {
     }
 }
 
+/// Granularity at which an in-flight wait is published to
+/// [`MUTATION_LOCK_WAIT_NANOS`].
+///
+/// The wait CANNOT be charged in one lump when it finishes. The AppContainer
+/// probe's stall guard reads this counter while its worker is *still blocked*;
+/// a counter that only moves on completion is always zero at exactly the moment
+/// the guard needs it, and the guard fires on a queue it cannot see. So the
+/// wait is sliced and each slice is charged as it elapses. One second bounds
+/// the un-published residue, which is what sets how tightly the guard can track
+/// reality; the syscall cost (one `WaitForSingleObject` per second) is nothing
+/// next to the critical section it is waiting on.
+const MUTATION_LOCK_CHARGE_SLICE: Duration = Duration::from_secs(1);
+
 /// Block until this process owns `handle`, tolerating a queue but not a stall.
 ///
-/// Waits in [`MUTATION_LOCK_HOLDER_BUDGET`] slices up to
-/// [`MUTATION_LOCK_MAX_QUEUED_HOLDERS`] of them, adding every nanosecond spent
-/// blocked to [`MUTATION_LOCK_WAIT_NANOS`]. The accounting is what lets the
-/// AppContainer probe's wall-clock guard keep meaning "a Win32 setup call
-/// stalled" rather than "this host is running more than one sandboxed command".
+/// Waits up to [`MUTATION_LOCK_HOLDER_BUDGET`] ×
+/// [`MUTATION_LOCK_MAX_QUEUED_HOLDERS`], warning once per elapsed holder budget
+/// and charging every elapsed second to [`MUTATION_LOCK_WAIT_NANOS`] as it
+/// happens. The accounting is what lets the AppContainer probe's wall-clock
+/// guard keep meaning "a Win32 setup call stalled" rather than "this host is
+/// running more than one sandboxed command".
 fn wait_for_mutation_mutex(handle: HANDLE) -> Result<()> {
+    let total_budget = MUTATION_LOCK_HOLDER_BUDGET * MUTATION_LOCK_MAX_QUEUED_HOLDERS;
+    let slice = MUTATION_LOCK_CHARGE_SLICE.as_millis() as u32;
     let started = Instant::now();
-    let slice = MUTATION_LOCK_HOLDER_BUDGET.as_millis() as u32;
-    let mut outcome = None;
-    for elapsed_budgets in 0..MUTATION_LOCK_MAX_QUEUED_HOLDERS {
+    let mut charged = Duration::ZERO;
+    let mut next_warning = MUTATION_LOCK_HOLDER_BUDGET;
+    loop {
         let wait = unsafe { WaitForSingleObject(handle, slice) };
-        if wait != WAIT_TIMEOUT {
-            outcome = Some(wait);
-            break;
-        }
-        tracing::warn!(
-            target: "wcore_sandbox",
-            waited_secs = started.elapsed().as_secs(),
-            budgets_remaining = MUTATION_LOCK_MAX_QUEUED_HOLDERS - elapsed_budgets - 1,
-            "still queued for the AppContainer ACL mutation lock — another sandboxed \
-             execution on this machine holds it. This is serialization, not a failure; \
-             it becomes one only if no holder ever releases."
+        let elapsed = started.elapsed();
+        // Publish before acting on the result, so the failure path charges too:
+        // a caller that discounts queue time must be able to see the queue that
+        // killed it.
+        MUTATION_LOCK_WAIT_NANOS.fetch_add(
+            u64::try_from(elapsed.saturating_sub(charged).as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
         );
-    }
-    // Charge the wait BEFORE returning, on the failure path too: a caller that
-    // discounts queue time must be able to see the queue that killed it.
-    MUTATION_LOCK_WAIT_NANOS.fetch_add(
-        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
-    match outcome {
-        Some(wait) if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED => Ok(()),
-        Some(_) => Err(last_error(
-            "WaitForSingleObject(AppContainer ACL mutation lock)",
-        )),
-        None => Err(exec_error(format!(
-            "timed out acquiring AppContainer ACL mutation lock after {}s. The lock is \
-             machine-wide (one per user) and every sandboxed execution takes it, so this \
-             is either far more concurrent sandboxed commands than {} at once, or one \
-             holder wedged inside a Win32 call.",
-            started.elapsed().as_secs(),
-            MUTATION_LOCK_MAX_QUEUED_HOLDERS
-        ))),
+        charged = elapsed;
+
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            return Ok(());
+        }
+        if wait != WAIT_TIMEOUT {
+            return Err(last_error(
+                "WaitForSingleObject(AppContainer ACL mutation lock)",
+            ));
+        }
+        if elapsed >= total_budget {
+            return Err(exec_error(format!(
+                "timed out acquiring AppContainer ACL mutation lock after {}s. The lock is \
+                 machine-wide (one per user) and every sandboxed execution takes it, so this \
+                 is either far more than {} concurrent sandboxed commands, or one holder \
+                 wedged inside a Win32 call.",
+                elapsed.as_secs(),
+                MUTATION_LOCK_MAX_QUEUED_HOLDERS
+            )));
+        }
+        if elapsed >= next_warning {
+            tracing::warn!(
+                target: "wcore_sandbox",
+                waited_secs = elapsed.as_secs(),
+                budget_secs = total_budget.as_secs(),
+                "still queued for the AppContainer ACL mutation lock — another sandboxed \
+                 execution on this machine holds it. This is serialization, not a failure; \
+                 it becomes one only if no holder ever releases."
+            );
+            next_warning += MUTATION_LOCK_HOLDER_BUDGET;
+        }
     }
 }
 
@@ -510,6 +533,18 @@ mod tests {
         assert!(marker.exists(), "child never acquired global mutex");
 
         let charged_before = MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed);
+
+        // Sample the counter WHILE the main thread is still blocked. This is
+        // the assertion that matters most and the one a "charge it when the
+        // wait finishes" implementation fails: the probe's stall guard reads
+        // this counter at the moment its worker is still queued, so a counter
+        // that only moves on completion is always zero exactly when it is
+        // needed, and the guard fires on a queue it cannot see.
+        let midflight = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(8));
+            MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed)
+        });
+
         let started = Instant::now();
         let lock = MutationLock::acquire()
             .expect("a waiter must QUEUE behind a busy host, not fail it: this is the 15s cliff");
@@ -520,6 +555,13 @@ mod tests {
             waited >= Duration::from_secs(15),
             "parent acquired in {waited:?}, before the old cliff — the holder was not \
              actually still holding, so this run proves nothing"
+        );
+        let midflight = midflight.join().unwrap() - charged_before;
+        assert!(
+            Duration::from_nanos(midflight) >= Duration::from_secs(5),
+            "after 8s of a {waited:?} wait the counter had moved only {midflight}ns — an \
+             in-flight queue is invisible, so the probe's stall guard has nothing to \
+             discount while it still matters"
         );
         let charged = MUTATION_LOCK_WAIT_NANOS.load(Ordering::Relaxed) - charged_before;
         assert!(
