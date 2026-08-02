@@ -17,21 +17,31 @@
 //! → `wcore_agent::goal::handle_goal_control` → `ProtocolEvent` → `apply_event`
 //! → the rendered frame.
 //!
-//! ## Two hosts in one binary
+//! ## Three hosts in one binary
 //!
-//! Whether Core is ever asked depends on whether this host can protect a
-//! durable session — `Config::resolve` degrades `[session] enabled` to false on
-//! a box with no keyring and no unlocked vault. Both dispositions are real and
-//! both are driven here, because inferring one from the other is the habit that
-//! left this row open:
+//! Whether Core is ever asked depends on whether this host holds a durable
+//! journal to name a Goal in. Every disposition that reaches `/goal` is driven
+//! here, because inferring one from the other is the habit that left this row
+//! open:
 //!
 //! * [`goal_open_is_accepted_by_core_on_a_durable_host`] supplies vault unlock
-//!   material, so the degrade does not fire and Core answers with a
+//!   material, so the session is fully durable and Core answers with a
 //!   `goal_snapshot` the status line renders. **This is the leg that proves
 //!   `issue_goal_control` actually runs.**
-//! * [`goal_open_names_the_cause_on_a_degraded_host`] supplies none, the stock
-//!   headless-Linux posture, and proves the surface names the real cause
-//!   instead of going silent.
+//! * [`goal_open_is_accepted_on_a_keyless_host`] supplies none — the stock
+//!   headless-Linux posture. It used to be the leg that proved the refusal:
+//!   `Config::resolve` degraded `[session] enabled` to false on a box with no
+//!   keyring and no unlocked vault, so there was no journal and no Goal. ADR
+//!   0003's third decision ended that — a keyless host now journals without
+//!   crash replay (`SessionPersistence::JournaledWithoutReplay`), so it holds
+//!   Goals like any other. The leg stays, driving the same host, asserting the
+//!   outcome that replaced the refusal; without it nothing here would notice a
+//!   regression that took the keyless journal away again.
+//! * [`goal_open_names_the_cause_when_the_session_has_no_journal`] is where the
+//!   refusal moved. `[session] enabled = false` is the operator's own opt-out
+//!   and the only remaining way to reach `/goal` with no session id, and it
+//!   proves the surface names the real cause instead of reporting a missing
+//!   Goal or going silent.
 //!
 //! ## Why `#![cfg(unix)]`
 //!
@@ -51,21 +61,34 @@ use tempfile::TempDir;
 mod support;
 use support::pty::{Pty, write_config};
 
-/// A hermetic TUI on a host that CANNOT protect a durable session — no keyring
-/// on a headless box and no vault unlock material.
-fn boot_degraded() -> (TempDir, Pty) {
-    boot_with(&[])
+/// A hermetic TUI on a host that cannot SEAL a durable session — no keyring on
+/// a headless box and no vault unlock material. It still journals: the host
+/// degrade costs `sealed_prepared_request` and nothing else.
+fn boot_keyless() -> (TempDir, Pty) {
+    boot_with(&[], false)
 }
 
-/// A hermetic TUI on a host that CAN. `WAYLAND_VAULT_PASSPHRASE` is the unlock
-/// material `vault_unlock_material_present` reads, so the encrypted-file vault
-/// is available, the degrade does not fire, and `init_session` opens a real
-/// durable journal.
+/// A hermetic TUI on a host that can seal. `WAYLAND_VAULT_PASSPHRASE` is the
+/// unlock material `vault_unlock_material_present` reads, so the encrypted-file
+/// vault is available, the degrade does not fire, and `init_session` opens a
+/// durable journal with crash replay.
 fn boot_durable() -> (TempDir, Pty) {
-    boot_with(&[("WAYLAND_VAULT_PASSPHRASE", "goal-control-pty-passphrase")])
+    boot_with(
+        &[("WAYLAND_VAULT_PASSPHRASE", "goal-control-pty-passphrase")],
+        false,
+    )
 }
 
-fn boot_with(extra_env: &[(&str, &str)]) -> (TempDir, Pty) {
+/// A hermetic TUI with NO journal at all, which since ADR 0003's third decision
+/// only the operator can ask for. `[session] enabled = false` is written into
+/// the config rather than forced by the environment for exactly that reason:
+/// starving the host of credentials no longer produces this state, and a test
+/// that constructed it that way would be asserting a posture the product left.
+fn boot_without_a_journal() -> (TempDir, Pty) {
+    boot_with(&[], true)
+}
+
+fn boot_with(extra_env: &[(&str, &str)], sessions_disabled: bool) -> (TempDir, Pty) {
     let home = TempDir::new().expect("tempdir");
     // No network is ever reached: `/goal` never sends an agent turn, and the
     // key below is not a credential.
@@ -75,6 +98,12 @@ fn boot_with(extra_env: &[(&str, &str)]) -> (TempDir, Pty) {
         Some("claude-sonnet-4-20250514"),
         None,
     );
+    if sessions_disabled {
+        let path = home.path().join("config.toml");
+        let mut toml = std::fs::read_to_string(&path).expect("read seeded config.toml");
+        toml.push_str("\n[session]\nenabled = false\n");
+        std::fs::write(&path, toml).expect("disable durable sessions");
+    }
     // 200 columns, not the harness default 120: the Goal segment is the LAST
     // thing on the status line, and at 120 the first run of this file rendered
     // `goals 1 live` with the `/ 1` clipped off the right edge. A width that
@@ -152,17 +181,50 @@ fn advance_without_a_projection_produces_no_goal_on_the_status_line() {
     pty.quit();
 }
 
-/// The stock headless-Linux posture: no keyring, no vault material. Core is
-/// never asked, and the surface names durable sessions as the cause rather than
-/// reporting a missing Goal or saying nothing at all.
+/// The stock headless-Linux posture: no keyring, no vault material. This leg
+/// asserted the refusal until ADR 0003's third decision, which is the whole
+/// reason it still drives this host — a keyless box journals now, so the Goal
+/// is ACCEPTED here exactly as it is on a sealed host, and the only way to see
+/// a regression that takes the keyless journal away again is to keep asking.
+///
+/// The negative half is not decoration. `no durable journal` is the answer this
+/// host used to give; if it ever comes back, the run is silently back to
+/// refusing Goals on every headless server, and `goals 1 live / 1` alone would
+/// not say which of the two answers arrived first.
 #[test]
-fn goal_open_names_the_cause_on_a_degraded_host() {
-    let (_home, mut pty) = boot_degraded();
+fn goal_open_is_accepted_on_a_keyless_host() {
+    let (_home, mut pty) = boot_keyless();
+    run_slash(&mut pty, "/goal open tui-probe direct 2 prove the surface");
+    pty.wait_for(
+        |s| s.contains("goals 1 live / 1"),
+        Duration::from_secs(30),
+        "a keyless host to hold the Goal its journal can record",
+    );
+    let screen = pty.screen_text();
+    assert!(
+        !screen.contains("no durable journal"),
+        "a keyless host journals; it must not be told it has no journal.\n--- screen ---\n{screen}"
+    );
+    pty.quit();
+}
+
+/// The operator's own `[session] enabled = false`, the one remaining way to
+/// reach `/goal` with no session id. Core is never asked, and the surface names
+/// the missing journal as the cause rather than reporting a missing Goal or
+/// saying nothing at all.
+#[test]
+fn goal_open_names_the_cause_when_the_session_has_no_journal() {
+    let (_home, mut pty) = boot_without_a_journal();
     run_slash(&mut pty, "/goal open tui-probe direct 2 prove the surface");
     pty.wait_for(
         |s| s.contains("no durable journal"),
         Duration::from_secs(30),
-        "the degraded host's cause to be named at the terminal",
+        "the journal-less session's cause to be named at the terminal",
+    );
+    let screen = pty.screen_text();
+    assert!(
+        !screen.contains("live / "),
+        "a session with no journal must not put a Goal on the status line.\n--- screen ---\n{screen}"
     );
     pty.quit();
 }
@@ -173,7 +235,7 @@ fn goal_open_names_the_cause_on_a_degraded_host() {
 /// already delivered.
 #[test]
 fn a_bare_goal_is_reachable_from_the_palette() {
-    let (_home, mut pty) = boot_degraded();
+    let (_home, mut pty) = boot_keyless();
     run_slash(&mut pty, "/goal");
     pty.wait_for(
         |s| s.contains("No durable Goal has been reported"),
@@ -188,7 +250,7 @@ fn a_bare_goal_is_reachable_from_the_palette() {
 /// text, every assertion above is measuring the screen and not the wiring.
 #[test]
 fn a_near_miss_command_does_not_reach_the_goal_surface() {
-    let (_home, mut pty) = boot_degraded();
+    let (_home, mut pty) = boot_keyless();
     run_slash(&mut pty, "/goalzzzzzz");
     std::thread::sleep(Duration::from_secs(3));
     let screen = pty.screen_text();
