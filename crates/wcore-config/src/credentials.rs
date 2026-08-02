@@ -537,16 +537,21 @@ fn chunk_key(key: &str, generation: char, index: usize) -> String {
 
 /// Where the cross-process lock for one keyring service's spanned writes lives.
 ///
-/// Lock identity is derived from what identifies the entry **in the OS keyring**
-/// — the service name and the key — and NOT from whichever credentials path the
-/// caller happened to pass. The keyring is a host-global singleton: two openers
-/// can reach one `(service, key)` pair through different `plaintext_path`s
-/// (`build_ladder` and `open_store(Keyring)` both resolve the same default
-/// service), and a path-derived lock would let exactly those two writers race.
+/// The lock NAME is derived from what identifies the entry **in the OS
+/// keyring** — the service and the key — and NOT from whichever credentials
+/// path the caller happened to pass. The keyring is a host-global singleton:
+/// two openers can reach one `(service, key)` pair through different
+/// `plaintext_path`s (`build_ladder` and `open_store(Keyring)` both resolve the
+/// same default service), and a name derived from the caller's path would let
+/// exactly those two writers race.
 ///
-/// The lockfile itself sits in the profile home, which is per-user and, under
-/// `WAYLAND_HOME`, per-profile — the same directory the migration lock and the
-/// confidential key-creation lock already use.
+/// The DIRECTORY is [`crate::config::wayland_config_dir`] — the canonical
+/// `WAYLAND_HOME`-honouring credentials root, and already the home of the
+/// migration lock and the confidential key-creation lock. It tracks the service
+/// by construction: the keyring rung is only mounted with the bare service name
+/// when `WAYLAND_HOME` is unset (one directory for every process on the host),
+/// and a profile-scoped service is derived from a path under `WAYLAND_HOME`
+/// (one directory per profile, matching the service's own profile digest).
 #[derive(Clone, Debug)]
 struct ChunkWriteLockSite {
     dir: PathBuf,
@@ -558,14 +563,14 @@ struct ChunkWriteLockSite {
 
 impl ChunkWriteLockSite {
     fn for_service(service: &str) -> Self {
-        Self::anchored(service, crate::config::profile_home())
+        Self::anchored(service, crate::config::wayland_config_dir())
     }
 
-    /// The same site with the profile home named explicitly rather than read
-    /// from the environment. Only [`purge_profile_confidential_keys`] needs it:
-    /// it runs against ANOTHER profile's keyring service while `WAYLAND_HOME`
-    /// still points at the caller's, so the ambient home would place its lock
-    /// where no writer in the target profile looks for one.
+    /// The same site with the credentials directory named explicitly rather than
+    /// resolved from the environment. Only [`purge_profile_confidential_keys`]
+    /// needs it: it runs against ANOTHER profile's keyring service while
+    /// `WAYLAND_HOME` still points at the caller's, so the ambient directory
+    /// would place its lock where no writer in the target profile looks.
     fn anchored(service: &str, dir: PathBuf) -> Self {
         Self {
             dir,
@@ -575,7 +580,7 @@ impl ChunkWriteLockSite {
     }
 
     /// A site rooted at an explicit directory, so a test can exercise the real
-    /// lock without writing lockfiles into the developer's profile home.
+    /// lock without writing lockfiles into the developer's credentials dir.
     #[cfg(test)]
     fn in_dir(dir: &Path, policy: LockPolicy) -> Self {
         Self {
@@ -606,8 +611,10 @@ impl ChunkWriteLockSite {
     /// a fall-through to an unlocked write: proceeding without the lock is
     /// precisely the interleave this guards against.
     fn acquire(&self, key: &str) -> Result<ExclusiveFileLock, CredentialsError> {
-        // The profile home is created lazily elsewhere, and a credential write
-        // can be the first thing that touches it.
+        // The credentials directory is created lazily, and on a keyring-only
+        // profile a credential write can be the first thing that needs it. This
+        // is the same directory (and the same hardening) the migration lock and
+        // the confidential key-creation lock already use.
         secure_credential_dir(&self.dir)?;
         ExclusiveFileLock::acquire(self.lock_path(key), self.policy, "credential write")
     }
@@ -831,12 +838,12 @@ impl KeyringCredentialsStore {
         }
     }
 
-    /// [`Self::new`] with the write lock anchored at an explicit profile home.
-    /// See [`ChunkWriteLockSite::anchored`] for why one caller needs that.
-    fn anchored_at(service: impl Into<String>, profile_home: PathBuf) -> Self {
+    /// [`Self::new`] with the write lock anchored at an explicit credentials
+    /// directory. See [`ChunkWriteLockSite::anchored`] for the one caller.
+    fn anchored_at(service: impl Into<String>, credentials_dir: PathBuf) -> Self {
         let service = service.into();
         Self {
-            locks: ChunkWriteLockSite::anchored(&service, profile_home),
+            locks: ChunkWriteLockSite::anchored(&service, credentials_dir),
             raw: RawKeyringEntries { service },
         }
     }
@@ -2802,13 +2809,13 @@ pub fn purge_profile_confidential_keys(credentials_path: &Path) -> Result<(), Cr
         return Ok(());
     };
 
-    // The TARGET profile's home, not the caller's: `WAYLAND_HOME` still points
-    // at whoever is running `profile delete`.
-    let target_home = credentials_path
+    // The TARGET profile's credentials directory, not the caller's:
+    // `WAYLAND_HOME` still points at whoever is running `profile delete`.
+    let target_dir = credentials_path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let store = ConfidentialCredentialsStore::new(
-        Box::new(KeyringCredentialsStore::anchored_at(service, target_home)),
+        Box::new(KeyringCredentialsStore::anchored_at(service, target_dir)),
         credentials_path.with_file_name(".credentials.confidential-key.lock"),
         None,
     );
