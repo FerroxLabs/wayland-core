@@ -670,7 +670,15 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     let stderr_cap = StderrCapture::spawn_redacted(stderr, redactor.clone());
 
     let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
+    // EOF on this pipe is NOT a reliable "the candidate exited" signal on
+    // Windows — every descendant it spawned inherited a live write end. Pair
+    // the pipe with a liveness probe on the direct child so a candidate that
+    // exits while leaving a background process running is graded on what it
+    // actually did, not recorded as `Hung`. See `candidate_stdout`.
+    let stdout = crate::candidate_stdout::CandidateStdout::new(
+        child.stdout.take().expect("piped stdout"),
+        process_tree.root_pid(),
+    );
     let stdout_secret_detected = Arc::new(AtomicBool::new(false));
 
     // Outer wall-time guard. On Elapsed we MUST start_kill + wait —
@@ -1320,7 +1328,7 @@ fn capture_structured_tool_inputs(
 
 async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::candidate_stdout::CandidateStdout,
     scenario: &crate::scenario::Scenario,
     redactor: SecretRedactor,
     secret_detected: Arc<AtomicBool>,
