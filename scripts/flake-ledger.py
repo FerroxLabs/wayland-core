@@ -124,6 +124,30 @@ def parse_summary(text: str) -> tuple[int, int, int] | None:
     return run, passed, failed
 
 
+def list_count(root: str, profile: str, expr: str) -> int:
+    """How many tests this filter actually selects on THIS platform.
+
+    A target can be absent here and present elsewhere — the Windows-only
+    `required_live_windows_*` case is exactly that. Asking nextest instead of
+    assuming is what keeps an absent test graded NOTRUN rather than silently
+    shrinking the batch's expected count into an ERROR.
+    """
+    proc = subprocess.run(
+        ["cargo", "nextest", "list", "--profile", profile, "-E", expr],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if proc.returncode != 0:
+        return -1
+    return sum(
+        1
+        for line in proc.stdout.splitlines()
+        if line.startswith("    ") and line.strip() and not line.strip().endswith(":")
+    )
+
+
 def run_nextest(
     root: str, profile: str, expr: str, expected: int, timeout: int
 ) -> tuple[Outcome, str]:
@@ -252,9 +276,25 @@ def main() -> int:
             with open(os.path.join(args.logdir, name), "w", errors="replace") as fh:
                 fh.write(blob)
 
+    # Which targets exist on THIS platform. A target that does not exist is
+    # recorded as NOTRUN in every condition and excluded from the batch, so an
+    # absent test can never render as a pass and can never turn the batch's
+    # own count into a spurious ERROR.
+    present: list[Row] = []
+    for row in rows:
+        n = list_count(args.root, args.profile, filterset(row.package, row.binary, row.test))
+        if n == 1:
+            present.append(row)
+        else:
+            reason = "filter selected 0 tests on this platform" if n == 0 else f"nextest list failed (n={n})"
+            print(f"  ABSENT  {row.test[:70]:<70} {reason}")
+            for cond in conditions:
+                row.results[cond] = [Outcome("NOTRUN", 0.0, 0, reason)] * args.runs
+    print(f"present targets: {len(present)}/{len(rows)}\n", flush=True)
+
     if "isolated" in conditions:
         print("== condition: isolated ==")
-        for row in rows:
+        for row in present:
             for i in range(args.runs):
                 out, blob = run_nextest(
                     args.root,
@@ -266,17 +306,19 @@ def main() -> int:
                 record(row, "isolated", out, blob, i)
 
     batch_expr = " or ".join(
-        f"({filterset(r.package, r.binary, r.test)})" for r in rows
+        f"({filterset(r.package, r.binary, r.test)})" for r in present
     )
 
     def batch_pass(cond: str) -> None:
         print(f"== condition: {cond} ==")
+        if not present:
+            return
         for i in range(args.runs):
             out, blob = run_nextest(
-                args.root, args.profile, batch_expr, len(rows), args.timeout
+                args.root, args.profile, batch_expr, len(present), args.timeout
             )
             # A batch invocation grades the SET. Attribute per test from the log.
-            for row in rows:
+            for row in present:
                 if out.verdict in ("ERROR", "NOTRUN"):
                     per = Outcome(out.verdict, out.seconds, out.rc, out.detail)
                 elif row.test in out.detail:
