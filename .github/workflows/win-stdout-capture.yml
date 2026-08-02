@@ -79,6 +79,10 @@ jobs:
             throw "the mutant did not turn every gate red ($failures of $($commands.Count)); a gate that cannot fail is worthless"
           }
           Write-Output "MUTANT PROOF OK: $failures of $($commands.Count) gates went red"
+          # Every command in this step is EXPECTED to exit non-zero. pwsh
+          # propagates the last one, which would mark a successful proof as a
+          # failed step, so the verdict above is the step's exit status.
+          exit 0
 
       - name: RESTORE - leave the checkout on the fixed code
         if: always()

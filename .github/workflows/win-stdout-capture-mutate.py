@@ -35,9 +35,12 @@ if mode == "mutate":
     open(path, "w", encoding="utf-8").write(src.replace(FIXED, MUTANT))
     print("MUTANT APPLIED (collapse_cr_lines restored to the shipped, defective form)")
 elif mode == "restore":
+    # Idempotent: the proof job runs this with `if: always()`, so it must be a
+    # no-op when an earlier step failed before the mutation was applied.
     if MUTANT not in src:
-        sys.exit("anchor (mutant form) not found")
-    open(path, "w", encoding="utf-8").write(src.replace(MUTANT, FIXED))
-    print("FIX RESTORED")
+        print("already on the fixed form; nothing to restore")
+    else:
+        open(path, "w", encoding="utf-8").write(src.replace(MUTANT, FIXED))
+        print("FIX RESTORED")
 else:
     sys.exit("usage: mutate.py mutate|restore")
