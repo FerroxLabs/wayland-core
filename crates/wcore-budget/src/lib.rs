@@ -21,6 +21,7 @@
 //! models need to share defaults. `wcore-config::budget` is a re-export.
 
 pub mod config;
+pub mod daily;
 pub mod execution;
 pub mod tracker;
 
@@ -39,6 +40,10 @@ pub enum BudgetSnapshotError {
 }
 
 pub use config::{BudgetConfig, BudgetConfigError};
+pub use daily::{
+    DAILY_LEDGER_SCHEMA_VERSION, DailyAuthority, DailyGrant, DailyPosition, DailySpendError,
+    DailySpendStore,
+};
 pub use execution::{
     AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
     ProcessCleanupProof, ToolRunGuard,

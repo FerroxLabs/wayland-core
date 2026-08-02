@@ -181,6 +181,38 @@ struct SessionBudgetEnvelope {
     authority_seed: crate::budget_authority::BudgetAuthoritySeed,
 }
 
+/// Subject bucket used by the single-tenant CLI/daemon shape.
+///
+/// Each OS user already has their own profile home, so one bucket per profile
+/// is the correct partition today. The store is keyed by subject so a
+/// multi-tenant host can debit per end-user without a schema change.
+const DEFAULT_DAILY_SPEND_SUBJECT: &str = "default";
+
+/// Path of the durable cross-session daily ledger for this profile.
+///
+/// Deliberately NOT the diagnostics cost ledger: that one is prunable, so
+/// enforcing on it would either fail open the moment a prune lands or brick
+/// every launch after one. This file holds only the current UTC day's spend
+/// authority and is never a pruning target.
+pub fn daily_spend_ledger_path() -> std::path::PathBuf {
+    wcore_config::config::wayland_config_dir()
+        .join("budget")
+        .join("daily-spend.json")
+}
+
+/// Bind the durable daily ceiling when — and only when — the operator
+/// configured `max_daily_cost_usd`. Absent that field this returns `None` and
+/// nothing about the existing per-session behaviour changes.
+fn daily_spend_authority(
+    effective_budget: &wcore_budget::BudgetConfig,
+) -> Option<wcore_budget::DailyAuthority> {
+    effective_budget.max_daily_cost_usd?;
+    Some(wcore_budget::DailyAuthority::new(
+        std::sync::Arc::new(wcore_budget::DailySpendStore::at(daily_spend_ledger_path())),
+        DEFAULT_DAILY_SPEND_SUBJECT,
+    ))
+}
+
 impl SessionBudgetEnvelope {
     fn from_config(config: &Config) -> Self {
         Self::from_config_for_session(config, uuid::Uuid::new_v4().to_string())
@@ -208,6 +240,7 @@ impl SessionBudgetEnvelope {
             execution_policy: operational_budget.clone(),
             wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: daily_spend_authority(&effective_budget),
         };
         let authority = authority_seed
             .detached(session_id.clone())

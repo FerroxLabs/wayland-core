@@ -384,7 +384,20 @@ max_wall_time_secs    = 600        # execution-tree caps
 max_tool_runtime_secs = 120
 max_concurrent_process_tools = 8 # legacy `max_processes` is still accepted
 max_agent_depth       = 4
+
+[budget]
+max_daily_cost_usd = 20.0          # UTC-day ceiling, ACROSS sessions and processes
 ```
+
+Every cap above is per session, which means none of them bind a caller that
+starts a *fresh session per process* — a crash-looping daemon, a cron job, a
+channel gateway answering inbound messages. Each run is correctly inside its
+own budget while the machine bills without limit. `max_daily_cost_usd` is the
+one that binds that shape: it is backed by a small durable ledger holding only
+the current UTC day's spend, mutated under an exclusive cross-process file lock
+and published atomically, so concurrent processes serialize and a crash between
+reserve and settle over-counts for one lease rather than reopening the hole. It
+is opt-in and absent by default.
 
 ```bash
 wayland-core --list-sessions

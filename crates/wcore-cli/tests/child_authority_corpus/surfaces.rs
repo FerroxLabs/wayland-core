@@ -2710,6 +2710,7 @@ fn session_turn_child_view() -> Result<ExecutionBudgetView, String> {
         execution_policy: tight_parent_budget(),
         wall_clock: BudgetWallClockAuthority::ActiveRuntime,
         process_cleanup_proof: None,
+        daily_authority: None,
     };
     let mut coordinator = BudgetAuthorityCoordinator::bind(seed.config(None, "corpus-session"))
         .map_err(|error| error.to_string())?;

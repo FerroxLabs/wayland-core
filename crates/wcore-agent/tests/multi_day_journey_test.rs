@@ -219,6 +219,7 @@ fn restore_authority(
         execution_policy,
         wall_clock,
         process_cleanup_proof: None,
+        daily_authority: None,
     })
     .map_err(|error| error.to_string())?;
 

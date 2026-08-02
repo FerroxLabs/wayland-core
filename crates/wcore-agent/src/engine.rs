@@ -10217,23 +10217,27 @@ impl AgentEngine {
                     reserved_output,
                     &self.compat,
                 );
+                // `has_monetary_cap`, not `has_session_usd_cap`: a cross-session
+                // daily ceiling is also a monetary ceiling, and an unpriced call
+                // debits $0 against it — which would let a fresh-session-per-
+                // process caller walk straight through the very ceiling the
+                // daily ledger exists to hold.
                 let monetary_cap_active = if let Some(authority) = self.budget_authority.as_ref() {
                     authority
                         .lock()
-                        .inspect(|tracker, _| tracker.has_session_usd_cap(&reservation_session_id))
+                        .inspect(|tracker, _| tracker.has_monetary_cap(&reservation_session_id))
                         .map_err(|error| AgentError::SessionAuthority(error.to_string()))?
                 } else {
                     self.budget_tracker.as_ref().is_some_and(|tracker| {
-                        tracker.lock().has_session_usd_cap(&reservation_session_id)
+                        tracker.lock().has_monetary_cap(&reservation_session_id)
                     })
                 };
                 let strict_monetary_cap = self.config.execution_policy.is_managed()
                     || self.config.budget.max_cost_usd.is_some()
-                    || self
-                        .config
-                        .session_cap
-                        .as_ref()
-                        .is_some_and(|cap| cap.max_cost_usd.is_some());
+                    || self.config.budget.max_daily_cost_usd.is_some()
+                    || self.config.session_cap.as_ref().is_some_and(|cap| {
+                        cap.max_cost_usd.is_some() || cap.max_daily_cost_usd.is_some()
+                    });
                 if !reserved_cost.priced {
                     if monetary_cap_active && strict_monetary_cap {
                         self.output.emit_budget_exceeded(
@@ -23695,6 +23699,7 @@ mod audit_2026_05_22_tests {
             },
             wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
+            daily_authority: None,
         };
         let mut engine = super::AgentEngine::resume_active_with_provider(
             provider.clone(),
