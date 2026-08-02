@@ -1,0 +1,68 @@
+# VERIFY-CRED lane — TEMPORARY adversarial verification harness. Not for merge.
+#
+# The self-hosted pool is wedged, so this runs on hosted runners. It exists to
+# answer four questions that no committed job answers:
+#   1. does the spanned-write commit order survive a kill at every step, on
+#      Windows and macOS as well as Linux?
+#   2. what is each backend's REAL per-entry ceiling, versus the 1000-unit
+#      threshold derived from the Windows number alone?
+#   3. does the product's own OAuth token path — store, read back, rotate, read
+#      back, log out — work against a real Credential Manager / Keychain?
+#   4. does `auth login` behave at the migration cliff, with and without
+#      WAYLAND_VAULT_PASSPHRASE?
+name: verify-cred
+
+on:
+  push:
+    branches: [lane/verify-cred]
+  workflow_dispatch:
+
+jobs:
+  credential-store:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Linux hosted runners have no session Secret Service; start one so the
+      # keyring rung is actually mounted and the live legs MEASURE rather than
+      # skip.
+      - name: Install a Secret Service (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11 libdbus-1-dev
+
+      - name: Crash-injection sweeps (all platforms)
+        run: cargo test -p wcore-config --lib crash_injection_verification -- --nocapture --test-threads=2
+
+      - name: Concurrent-writer race (all platforms)
+        continue-on-error: true
+        run: cargo test -p wcore-config --lib scheduled_race_verification concurrency_verification -- --nocapture
+
+      - name: Real per-entry cap probe + live OAuth lifecycle (Windows/macOS)
+        if: matrix.os != 'ubuntu-latest'
+        run: |
+          cargo test -p wcore-config --test keyring_cap_probe_live -- --ignored --nocapture
+          cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture
+          cargo test -p wcore-agent --test oauth_live_keyring_e2e -- --ignored --nocapture
+
+      - name: Real per-entry cap probe + live OAuth lifecycle (Linux, under gnome-keyring)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p wcore-config --test keyring_cap_probe_live --no-run
+          cargo test -p wcore-config --test keyring_blob_size_live --no-run
+          cargo test -p wcore-agent --test oauth_live_keyring_e2e --no-run
+          dbus-run-session -- bash -c '
+            echo -n verifycred | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p wcore-config --test keyring_cap_probe_live -- --ignored --nocapture
+            cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture
+            cargo test -p wcore-agent --test oauth_live_keyring_e2e -- --ignored --nocapture
+          '
+
+      - name: Drive the real CLI login flow with a synthetic credential
+        shell: bash
+        run: bash ci/verify-cred/live-auth-flow.sh
