@@ -8,8 +8,13 @@ use wcore_config::shell;
 use wcore_swarm::worktree::WorktreeManager;
 use wcore_swarm::{Swarm, SwarmBrief, WorkerStatus};
 
+mod common;
+
 #[tokio::test]
 async fn dispatches_4_noop_workers_in_parallel() {
+    if common::skip_without_delegated_backend("dispatches_4_noop_workers_in_parallel").await {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
 
@@ -50,6 +55,13 @@ async fn dispatches_4_noop_workers_in_parallel() {
 
 #[tokio::test]
 async fn public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state() {
+    if common::skip_without_delegated_backend(
+        "public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state",
+    )
+    .await
+    {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
     let parent_git = tmp.path().join(".git");
@@ -382,6 +394,13 @@ async fn assert_public_dispatch_bash_confines_parent_and_descendants() {
 
 #[tokio::test]
 async fn malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic() {
+    if common::skip_without_delegated_backend(
+        "malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic",
+    )
+    .await
+    {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
     let swarm = Swarm::new(tmp.path()).unwrap();
@@ -411,6 +430,13 @@ async fn malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic() {
 #[cfg(unix)]
 #[tokio::test]
 async fn heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang() {
+    if common::skip_without_delegated_backend(
+        "heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang",
+    )
+    .await
+    {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
     let secret = tmp.path().join(".git/heartbeat-secret");

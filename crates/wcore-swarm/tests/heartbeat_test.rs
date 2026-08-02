@@ -19,9 +19,20 @@ use wcore_swarm::heartbeat::WorkerStatusFile;
 #[cfg(unix)]
 use wcore_swarm::{Swarm, SwarmBrief};
 
+// `cfg(unix)` to match its only consumer below — the rest of this file's
+// imports are gated the same way, and an unconditional `mod` would pull a
+// module nothing references into the Windows build.
+#[cfg(unix)]
+mod common;
+
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_writes_heartbeat_during_long_running_task() {
+    if common::skip_without_delegated_backend("worker_writes_heartbeat_during_long_running_task")
+        .await
+    {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
 
