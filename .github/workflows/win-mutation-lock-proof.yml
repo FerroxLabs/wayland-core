@@ -1,0 +1,160 @@
+name: win-mutation-lock proof
+
+# Lane proof harness for the AppContainer ACL mutation-lock 15-second cliff.
+#
+# It exists because the verdict it replaces was wrong on ONE lucky run. A
+# ~40%-flaky Windows failure cannot be graded by a single green pass, and the
+# only host that can grade it is a Windows CLIENT SKU with a working
+# AppContainer profile service — the self-hosted runner, not `windows-2022`
+# (Server SKUs have no AppContainer profile service, which is why every native
+# Windows leg in this repo is pinned to self-hosted).
+#
+# `on: push` scoped to this lane's branch, NOT `workflow_dispatch`: GitHub only
+# exposes a dispatch trigger for workflows already present on the DEFAULT
+# branch, so a lane-only workflow can never be dispatched. `ci.yml` records the
+# same finding at its own `on:` block. Delete this file when the lane merges.
+#
+# Three phases in ONE job so all of them see the same machine and the same load:
+#
+#   1. BEFORE — the sandbox sources reverted to BASE_SHA, formatter suite run
+#      RUNS times. Expect intermittent RED at ~15.0s.
+#   2. AFTER  — the fix restored, same suite, same count, plus the two new
+#      regression tests.
+#   3. MUTATE — the fix's two load-bearing constants knocked back one token
+#      each. The regression tests MUST go red; if they do not, the fix is not
+#      proven and this job fails.
+
+on:
+  push:
+    branches:
+      - lane/win-mutation-lock
+
+permissions:
+  contents: read
+
+concurrency:
+  group: win-mutation-lock-proof-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  # Repetitions of the formatter suite in each of the BEFORE and AFTER phases.
+  # Five is the floor the lane was given, and it is a floor for a reason: at the
+  # measured ~40% failure rate, one green run has a 60% chance of happening on
+  # broken code.
+  PROOF_RUNS: "5"
+  # The pre-fix tree. This is the merge of the integration branch into the lane,
+  # i.e. everything except this lane's own change.
+  PROOF_BASE_SHA: "489601f4c66a71388c9931332c646292a8b14d61"
+  SANDBOX_SRC: crates/wcore-sandbox/src/backends/appcontainer
+
+jobs:
+  proof:
+    name: mutation-lock proof (self-hosted Windows client)
+    runs-on: [self-hosted, Windows, X64, msvc]
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Environment
+        shell: pwsh
+        run: |
+          cargo --version
+          cargo nextest --version
+          [Environment]::OSVersion.Version.ToString()
+          git rev-parse HEAD
+
+      # --------------------------------------------------------------- BEFORE
+      - name: PHASE 1 BEFORE — revert the sandbox sources to the pre-fix tree
+        shell: pwsh
+        run: |
+          git checkout $env:PROOF_BASE_SHA -- $env:SANDBOX_SRC
+          git --no-pager diff --stat HEAD -- $env:SANDBOX_SRC
+          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
+          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs\(15\)' -Quiet)) {
+            throw "BEFORE state is not the flat 15s timeout — the revert did not take, so this phase would prove nothing"
+          }
+
+      - name: PHASE 1 BEFORE — formatter suite x N (expected intermittently RED)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $n = [int]$env:PROOF_RUNS
+          $red = 0
+          for ($i = 1; $i -le $n; $i++) {
+            $t0 = Get-Date
+            cargo nextest run -p wcore-cli --test tool_formatter_real_payloads --no-fail-fast
+            $rc = $LASTEXITCODE
+            $secs = ((Get-Date) - $t0).TotalSeconds
+            if ($rc -ne 0) { $red++ }
+            Write-Host ("BEFORE run={0} rc={1} wall={2:N1}s" -f $i, $rc, $secs)
+          }
+          Write-Host ("BEFORE SUMMARY red={0} of {1}" -f $red, $n)
+
+      # ---------------------------------------------------------------- AFTER
+      - name: PHASE 2 AFTER — restore the fix
+        shell: pwsh
+        run: |
+          git checkout HEAD -- $env:SANDBOX_SRC
+          git status --porcelain crates/wcore-sandbox
+          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
+          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_MAX_QUEUED_HOLDERS' -Quiet)) {
+            throw "AFTER state does not contain the fix"
+          }
+
+      - name: PHASE 2 AFTER — formatter suite x N (must be GREEN every time)
+        shell: pwsh
+        run: |
+          $n = [int]$env:PROOF_RUNS
+          $red = 0
+          for ($i = 1; $i -le $n; $i++) {
+            $t0 = Get-Date
+            cargo nextest run -p wcore-cli --test tool_formatter_real_payloads --no-fail-fast
+            $rc = $LASTEXITCODE
+            $secs = ((Get-Date) - $t0).TotalSeconds
+            if ($rc -ne 0) { $red++ }
+            Write-Host ("AFTER run={0} rc={1} wall={2:N1}s" -f $i, $rc, $secs)
+          }
+          Write-Host ("AFTER SUMMARY red={0} of {1}" -f $red, $n)
+          if ($red -ne 0) { throw "AFTER phase still red $red/$n" }
+
+      - name: PHASE 2 AFTER — the two regression tests
+        shell: pwsh
+        env:
+          WAYLAND_SANDBOX_LIVE_WINDOWS: "1"
+        run: |
+          cargo nextest run -p wcore-sandbox --run-ignored all `
+            -E 'test(acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget) + test(the_probe_guard_forgives_lock_queueing_and_still_catches_a_real_stall)'
+          if ($LASTEXITCODE -ne 0) { throw "regression tests are red on the fixed tree" }
+
+      # --------------------------------------------------------------- MUTATE
+      - name: PHASE 3 MUTATE — knock each load-bearing constant back one token
+        shell: pwsh
+        run: |
+          $lock = "$env:SANDBOX_SRC/acl_lease/mutation_lock.rs"
+          $proc = "$env:SANDBOX_SRC/windows_impl/process.rs"
+          (Get-Content $lock -Raw) -replace 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 16;', 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' | Set-Content -NoNewline $lock
+          (Get-Content $proc -Raw) -replace 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(240\);', 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs(0);' | Set-Content -NoNewline $proc
+          git --no-pager diff --stat
+          if (-not (Select-String -Path $lock -Pattern 'MUTATION_LOCK_MAX_QUEUED_HOLDERS: u32 = 1;' -Quiet)) { throw "lock mutation did not apply" }
+          if (-not (Select-String -Path $proc -Pattern 'MAX_QUEUE_CREDIT: Duration = Duration::from_secs\(0\);' -Quiet)) { throw "probe mutation did not apply" }
+
+      - name: PHASE 3 MUTATE — both regression tests MUST go red
+        shell: pwsh
+        env:
+          WAYLAND_SANDBOX_LIVE_WINDOWS: "1"
+        run: |
+          cargo nextest run -p wcore-sandbox --run-ignored all --no-fail-fast `
+            -E 'test(acquire_queues_behind_a_holder_that_outlives_the_old_fifteen_second_budget) + test(the_probe_guard_forgives_lock_queueing_and_still_catches_a_real_stall)'
+          $rc = $LASTEXITCODE
+          Write-Host "MUTANT rc=$rc"
+          if ($rc -eq 0) {
+            throw "MUTATION SURVIVED — the regression tests pass with the fix removed, so they do not test the fix"
+          }
+
+      - name: Restore the tree
+        if: always()
+        shell: pwsh
+        run: git checkout HEAD -- crates/wcore-sandbox
