@@ -400,9 +400,34 @@ fn run_orphan_listener(control_path: &std::path::Path) -> ! {
 
     loop {
         let state = format!("pid={pid}\nport={port}\nheartbeat={heartbeat}\n");
-        std::fs::write(control_path, state).expect("write orphan fixture control state");
+        publish_control_state(control_path, &state);
         heartbeat = heartbeat.saturating_add(1);
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Publish descendant state so a reader can never observe a half-written file.
+///
+/// `fs::write` truncates the target in place, so between the truncate and the
+/// write the file is zero bytes on disk. This descendant republishes every
+/// 20 ms and the evaluator's containment kills it at an arbitrary instant — so
+/// whatever was on disk at that instant is what the test reads, forever.
+///
+/// Observed on Windows (SeanDesktop, 2026-08-02) as `control file read:
+/// Ok("")`: the descendant HAD published, containment HAD worked, and the test
+/// still failed with "owned descendant never published", because the process
+/// was killed inside that window. A containment test that reports a
+/// successfully contained descendant as one that never existed is worse than a
+/// flake — it is a false negative on the exact property under test.
+///
+/// Staging + rename makes the swap atomic: a reader sees either the previous
+/// complete state or the new complete state. A failed swap is not fatal — the
+/// next 20 ms tick retries, and the previous complete state stays readable
+/// meanwhile, which is precisely the property being bought here.
+fn publish_control_state(control_path: &std::path::Path, state: &str) {
+    let staging = control_path.with_extension("staging");
+    if std::fs::write(&staging, state).is_ok() {
+        let _ = std::fs::rename(&staging, control_path);
     }
 }
 
@@ -467,7 +492,10 @@ fn run_cgroup_migration_listener(target: &std::path::Path, control: &std::path::
     loop {
         let state =
             format!("pid={pid}\nport={port}\nheartbeat={heartbeat}\nmigration={migration}\n");
-        std::fs::write(control, state).expect("write migration fixture control state");
+        // Same truncate-window hazard as `run_orphan_listener`, same repair:
+        // this descendant is also killed at an arbitrary instant by the
+        // evaluator's containment.
+        publish_control_state(control, &state);
         heartbeat = heartbeat.saturating_add(1);
         std::thread::sleep(Duration::from_millis(20));
     }

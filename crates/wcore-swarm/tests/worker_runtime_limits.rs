@@ -16,8 +16,17 @@ use wcore_swarm::{Swarm, SwarmBrief, WorkerStatus};
 const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const OUTPUT_EXHAUSTION_WORKERS: usize = 5;
 
+mod common;
+
 #[tokio::test]
 async fn multi_worker_output_exhaustion_fails_without_retaining_buffers() {
+    if common::skip_without_delegated_backend(
+        "multi_worker_output_exhaustion_fails_without_retaining_buffers",
+    )
+    .await
+    {
+        return;
+    }
     for stream in ["stdout", "stderr"] {
         let tmp = tempfile::tempdir().expect("temp repo");
         init_repo(tmp.path()).await;
@@ -60,6 +69,13 @@ async fn multi_worker_output_exhaustion_fails_without_retaining_buffers() {
 
 #[tokio::test]
 async fn timeout_releases_workspace_and_capacity_before_return() {
+    if common::skip_without_delegated_backend(
+        "timeout_releases_workspace_and_capacity_before_return",
+    )
+    .await
+    {
+        return;
+    }
     let tmp = tempfile::tempdir().expect("temp repo");
     init_repo(tmp.path()).await;
     let swarm = Swarm::new(tmp.path()).expect("create swarm");

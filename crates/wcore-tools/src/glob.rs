@@ -190,6 +190,12 @@ impl Tool for GlobTool {
         }
     }
 
+    /// Pattern matching walks the tree and returns paths. No input it accepts
+    /// can turn it into a mutation. Safe under `read_only`.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     fn describe(&self, input: &Value) -> String {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
         format!("Search for {}", pattern)
