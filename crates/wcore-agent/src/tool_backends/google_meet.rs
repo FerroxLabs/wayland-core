@@ -44,7 +44,11 @@ use wcore_tools::google_meet_tool::{
 };
 
 /// Provider name used by [`OAuthStorage`] when persisting tokens.
-const PROVIDER: &str = "google_meet";
+///
+/// Public so the `/config` status row names the same provider slug this
+/// backend stores under. A row that re-spells it is a row that reports a
+/// signed-in user as unconfigured.
+pub const PROVIDER: &str = "google_meet";
 
 /// Refresh tokens this many seconds before they expire to absorb clock skew.
 const REFRESH_LEAD_SECS: u64 = 60;

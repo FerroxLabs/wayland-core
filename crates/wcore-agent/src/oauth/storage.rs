@@ -22,6 +22,11 @@
 //!   and removes the cleartext copy — but only AFTER the secure write has been
 //!   verified by readback. A failed migration leaves the file in place and the
 //!   user signed in.
+//! * **Refuses rather than silently signing you out.** Every verified store
+//!   drops a non-secret marker beside the legacy path. If neither tier can
+//!   produce the token while that marker says one was stored, `load` returns
+//!   [`OAuthStorageError::SecureStoreUnavailable`] naming the remedy, instead
+//!   of `Ok(None)`.
 //!
 //! The `{provider}.json` path is retained as the legacy read/delete tier only.
 
@@ -50,6 +55,25 @@ pub enum OAuthStorageError {
          not read back from it; refusing to report the login as stored"
     )]
     ReadbackFailed { provider: String },
+    /// A login WAS stored securely on this host, and no tier can produce it
+    /// now. Never downgrade this to `Ok(None)`: the migration that moved the
+    /// token into the keyring or the vault deleted the cleartext copy once the
+    /// secure write verified, so "not signed in" is not merely unhelpful here —
+    /// it is false, and it invites the user to re-authenticate over a login
+    /// that is still there.
+    #[error(
+        "'{provider}' is signed in on this profile, but its OAuth token could not be read out \
+         of the secure credential store.\n\
+         The token was moved into the OS keyring or the encrypted vault and the cleartext copy \
+         was removed once that write verified, so there is nothing to fall back to.\n\
+         Do one of these:\n  \
+         * set WAYLAND_VAULT_PASSPHRASE (or WAYLAND_VAULT_PASSPHRASE_FD) to the passphrase this \
+         profile's vault was created under, then re-run; or\n  \
+         * start the OS keyring / Secret Service this profile signed in under, then re-run; or\n  \
+         * if you removed that credential deliberately, delete {record} to clear the record, \
+         then sign in again."
+    )]
+    SecureStoreUnavailable { provider: String, record: String },
 }
 
 /// Secure storage for OAuth tokens, one entry per provider.
@@ -126,6 +150,12 @@ impl OAuthStorage {
 
         // 3. remove-cleartext. Only now is the legacy copy redundant.
         self.remove_legacy(provider)?;
+
+        // 4. record that this provider HAS a secure login. Written last, so a
+        //    record can only exist for a write that fully landed. This is what
+        //    makes a later "the store cannot produce it" distinguishable from
+        //    "you were never signed in" — see `Self::load`.
+        self.write_login_record(provider);
         Ok(())
     }
 
@@ -137,12 +167,26 @@ impl OAuthStorage {
     /// its existing file rather than being logged out, because refusing the
     /// READ would turn a storage-hardening change into an authentication
     /// regression for every already-signed-in user.
+    ///
+    /// Migration is also **one-way**, and that is the case this refuses on.
+    /// Run once with the vault unlocked and the token moves into the vault and
+    /// the cleartext copy is deleted; run again without the passphrase and
+    /// there is nothing left for either tier to return. Reporting that as
+    /// `Ok(None)` presents a signed-in user as signed-out — so when the login
+    /// record says a token WAS stored here, this returns
+    /// [`OAuthStorageError::SecureStoreUnavailable`] and names the remedy.
     pub fn load(&self, provider: &str) -> Result<Option<OAuthTokens>, OAuthStorageError> {
         if let Ok(Some(json)) = self.secure.get(&oauth_tokens_key(provider)) {
             return Ok(Some(serde_json::from_str(&json)?));
         }
 
         let Some(bytes) = self.read_legacy(provider)? else {
+            if self.login_record_path(provider).exists() {
+                return Err(OAuthStorageError::SecureStoreUnavailable {
+                    provider: provider.to_string(),
+                    record: self.login_record_path(provider).display().to_string(),
+                });
+            }
             return Ok(None);
         };
         let tokens: OAuthTokens = serde_json::from_slice(&bytes)?;
@@ -177,15 +221,20 @@ impl OAuthStorage {
     /// removed only one of them would leave the user signed in through the
     /// other. Reports whether anything was actually removed, so a caller can
     /// distinguish "signed out" from "already signed out".
+    /// Removing the login record is what makes this the documented escape
+    /// hatch from [`OAuthStorageError::SecureStoreUnavailable`]: it must work
+    /// on a host whose secure tier cannot be opened at all, so the record is
+    /// cleared regardless of what the secure tier says.
     pub fn delete(&self, provider: &str) -> Result<bool, OAuthStorageError> {
         let key = oauth_tokens_key(provider);
         let had_secure = matches!(self.secure.get(&key), Ok(Some(_)));
         let secure_error = self.secure.delete(&key).err();
         let had_legacy = self.remove_legacy(provider)?;
+        let had_record = self.remove_login_record(provider)?;
         if let Some(error) = secure_error {
             return Err(OAuthStorageError::NoSecureBackend(error.to_string()));
         }
-        Ok(had_secure || had_legacy)
+        Ok(had_secure || had_legacy || had_record)
     }
 
     /// Path of the LEGACY cleartext token file for `provider`.
@@ -199,6 +248,50 @@ impl OAuthStorage {
         // practice, but defense-in-depth is cheap here.
         let safe = provider.replace(['/', '\\', '\0'], "_");
         self.root.join(format!("{safe}.json"))
+    }
+
+    /// Path of the non-secret marker recording that `provider` has a login in
+    /// the secure credential store.
+    ///
+    /// It holds NO token material — only the fact that one was stored, which
+    /// the legacy directory listing already revealed. Its whole job is to make
+    /// "the store cannot produce your token" distinguishable from "you never
+    /// signed in", because those two states need opposite messages and only one
+    /// of them should ever be shown to a signed-in user.
+    pub fn login_record_path(&self, provider: &str) -> PathBuf {
+        let safe = provider.replace(['/', '\\', '\0'], "_");
+        self.root.join(format!("{safe}.stored"))
+    }
+
+    /// Best-effort: a store that landed and verified is a successful store even
+    /// if the marker could not be written. Failing the write here would refuse
+    /// a login that is genuinely in the keyring — the marker exists to prevent
+    /// a false negative, never to create one.
+    fn write_login_record(&self, provider: &str) {
+        let path = self.login_record_path(provider);
+        let body = format!(
+            "wayland-core: '{provider}' has an OAuth login in this profile's secure credential \
+             store (OS keyring or encrypted vault). This file holds no token material. \
+             Deleting it tells wayland-core to stop expecting that login.\n"
+        );
+        if let Err(error) = std::fs::write(&path, body) {
+            tracing::warn!(
+                target: "wcore_oauth",
+                provider,
+                path = %path.display(),
+                error = %error,
+                "could not record that an OAuth login was stored securely; a later run on a \
+                 host that cannot open the store will report 'not signed in'"
+            );
+        }
+    }
+
+    fn remove_login_record(&self, provider: &str) -> Result<bool, OAuthStorageError> {
+        match std::fs::remove_file(self.login_record_path(provider)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(OAuthStorageError::Io(e)),
+        }
     }
 
     fn read_legacy(&self, provider: &str) -> Result<Option<Vec<u8>>, OAuthStorageError> {
@@ -476,6 +569,143 @@ mod tests {
         assert!(!store.path_for("chatgpt").exists());
         assert!(store.load("chatgpt").unwrap().is_none());
         assert!(!store.delete("chatgpt").unwrap(), "already signed out");
+    }
+
+    /// THE MIGRATION CLIFF. Run once with the vault unlocked: the token moves
+    /// into the vault and the cleartext copy is deleted. Run again without the
+    /// passphrase: the vault is not even mounted, so nothing can produce the
+    /// token — and the user must NOT be told they are signed out.
+    ///
+    /// MUTATION TARGET. Delete the `login_record_path(...).exists()` arm in
+    /// `load` and this fails: `load` starts returning `Ok(None)`, which is the
+    /// exact silent sign-out this closes.
+    #[test]
+    fn a_consumed_migration_refuses_instead_of_reporting_signed_out() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+
+        // Run 1: a secure tier is mounted (stands in for an unlocked vault).
+        // The pre-existing cleartext token migrates up and is removed.
+        let unlocked = InMemoryCredentialsStore::new();
+        let signed_in = OAuthStorage::at_root(root.clone(), Box::new(unlocked)).unwrap();
+        let legacy = signed_in.path_for("chatgpt");
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&make_tokens()).unwrap()).unwrap();
+        assert!(signed_in.load("chatgpt").unwrap().is_some());
+        assert!(
+            !legacy.exists(),
+            "the migration must consume the cleartext copy"
+        );
+
+        // Run 2: a NEW process with no unlock material. `InMemoryCredentialsStore`
+        // is per-instance, so a fresh one is exactly the "the vault is not
+        // mounted" state — nothing in it, and nothing on disk either.
+        let locked =
+            OAuthStorage::at_root(root, Box::new(InMemoryCredentialsStore::new())).unwrap();
+        let error = locked
+            .load("chatgpt")
+            .expect_err("a consumed migration must refuse, not report signed-out");
+        assert!(
+            matches!(error, OAuthStorageError::SecureStoreUnavailable { .. }),
+            "expected a refusal, got {error:?}"
+        );
+        let message = error.to_string();
+        for expected in [
+            "WAYLAND_VAULT_PASSPHRASE",
+            "keyring",
+            &locked.login_record_path("chatgpt").display().to_string(),
+        ] {
+            assert!(
+                message.contains(expected),
+                "the refusal must name the remedy '{expected}'; got:\n{message}"
+            );
+        }
+    }
+
+    /// The refusal must be escapable exactly the way it says: clearing the
+    /// record returns the profile to an honest "not signed in".
+    #[test]
+    fn clearing_the_login_record_restores_a_plain_signed_out_answer() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+        let (signed_in, _secure) = store_at(root.clone());
+        signed_in.store("chatgpt", &make_tokens()).unwrap();
+
+        let locked =
+            OAuthStorage::at_root(root, Box::new(InMemoryCredentialsStore::new())).unwrap();
+        assert!(
+            locked.load("chatgpt").is_err(),
+            "refuses while the record stands"
+        );
+
+        std::fs::remove_file(locked.login_record_path("chatgpt")).unwrap();
+        assert!(
+            locked.load("chatgpt").unwrap().is_none(),
+            "with the record cleared, 'not signed in' is the honest answer"
+        );
+    }
+
+    /// `auth logout` is the other documented escape hatch, and it has to work
+    /// on the very host that cannot open the store.
+    #[test]
+    fn logout_clears_the_record_even_when_the_store_cannot_be_opened() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+        let (signed_in, _secure) = store_at(root.clone());
+        signed_in.store("chatgpt", &make_tokens()).unwrap();
+
+        let locked = OAuthStorage::at_root(root, Box::new(RefusesWrites)).unwrap();
+        assert!(
+            locked.delete("chatgpt").unwrap(),
+            "logout must report that it removed something"
+        );
+        assert!(!locked.login_record_path("chatgpt").exists());
+        assert!(locked.load("chatgpt").unwrap().is_none());
+    }
+
+    /// A host that never had a secure tier keeps its cleartext file and stays
+    /// signed in — the refusal must not fire there, because the token is still
+    /// readable and nothing was consumed.
+    #[test]
+    fn a_host_with_no_secure_tier_is_not_refused_while_its_file_survives() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+        let store = OAuthStorage::at_root(root, Box::new(RefusesWrites)).unwrap();
+        std::fs::write(
+            store.path_for("chatgpt"),
+            serde_json::to_vec_pretty(&make_tokens()).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            store.load("chatgpt").unwrap().is_some(),
+            "a failed migration must leave the user signed in, not refused"
+        );
+        assert!(!store.login_record_path("chatgpt").exists());
+    }
+
+    /// A refused store must not leave a record behind — a record for a login
+    /// that was never stored would refuse every subsequent load forever.
+    #[test]
+    fn a_refused_store_writes_no_login_record() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+        let store = OAuthStorage::at_root(root, Box::new(RefusesWrites)).unwrap();
+        assert!(store.store("chatgpt", &make_tokens()).is_err());
+        assert!(!store.login_record_path("chatgpt").exists());
+        assert!(store.load("chatgpt").unwrap().is_none());
+    }
+
+    /// The record holds no token material. It exists to make a state
+    /// distinguishable, not to store anything.
+    #[test]
+    fn the_login_record_contains_no_token_material() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _secure) = store_at(tmp.path().join("oauth"));
+        store.store("chatgpt", &make_tokens()).unwrap();
+        let body = std::fs::read_to_string(store.login_record_path("chatgpt")).unwrap();
+        for secret in ["rt-456", "at-123"] {
+            assert!(!body.contains(secret), "the record leaked {secret}: {body}");
+        }
     }
 
     #[test]

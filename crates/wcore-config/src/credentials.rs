@@ -371,27 +371,17 @@ impl CredentialsStore for PlaintextCredentialsStore {
 // Keyring backend
 // ---------------------------------------------------------------------------
 
-/// OS-native keyring credentials store.
+/// One keyring entry, addressed as the `keyring` crate addresses it.
 ///
-/// Backed by the `keyring` crate (macOS Keychain on Apple, Windows
-/// Credential Manager on Windows, Secret Service on Linux). Each
-/// `key` is mapped to a `(service, user)` pair; we use the
-/// configured service name (default `"wayland-core"`) and the key
-/// itself as the user — this keeps lookup O(1) and matches the
-/// `keyring` crate's expected shape.
-pub struct KeyringCredentialsStore {
+/// Private because it is the *unbounded* view: a caller that writes through it
+/// is subject to whatever per-entry size ceiling the host imposes. Everything
+/// outside this module goes through [`KeyringCredentialsStore`], which spans
+/// that ceiling.
+struct RawKeyringEntries {
     service: String,
 }
 
-impl KeyringCredentialsStore {
-    pub fn new(service: impl Into<String>) -> Self {
-        Self {
-            service: service.into(),
-        }
-    }
-}
-
-impl CredentialsStore for KeyringCredentialsStore {
+impl CredentialsStore for RawKeyringEntries {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
         let entry = keyring::Entry::new(&self.service, key)
             .map_err(|e| CredentialsError::Keyring(e.to_string()))?;
@@ -417,6 +407,250 @@ impl CredentialsStore for KeyringCredentialsStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(CredentialsError::Keyring(e.to_string())),
         }
+    }
+}
+
+/// Maximum UTF-16 code units this crate will put in ONE keyring entry.
+///
+/// Windows Credential Manager caps a credential's `CredentialBlob` at
+/// `CRED_MAX_CREDENTIAL_BLOB_SIZE` = 2560 bytes, and the `keyring` crate
+/// encodes the value as UTF-16 — so the real per-entry ceiling on Windows is
+/// **1280 code units**, roughly 1280 ASCII characters, and `set_password`
+/// refuses anything larger.
+///
+/// That ceiling is far below one OAuth token set: a ChatGPT login is an access
+/// JWT plus an id JWT plus a refresh token, routinely 3–5 KB of JSON. Once
+/// OAuth tokens moved onto the credential ladder, `auth login` on Windows hit
+/// the cap, the keyring rung refused, and — on the overwhelmingly common
+/// Windows desktop that has no `WAYLAND_VAULT_PASSPHRASE` — the ladder had no
+/// rung left and refused the login outright. A user who could sign in before
+/// could not sign in after. Spanning entries is what makes the ceiling stop
+/// being a functional limit; it does NOT relax the ladder, because every piece
+/// still lands in the OS keyring and nothing is ever written in cleartext.
+///
+/// 1000 rather than 1280 leaves headroom for the non-ASCII case, where one
+/// `char` costs two UTF-16 units and a split must still land on a `char`
+/// boundary.
+const KEYRING_MAX_UTF16_UNITS_PER_ENTRY: usize = 1000;
+
+/// Sentinel that marks a primary entry as a manifest rather than a secret.
+///
+/// Leads with U+0001 (START OF HEADING), which no API key, token set or
+/// passphrase this crate stores can begin with, so a literal value can never be
+/// mistaken for a manifest.
+const KEYRING_CHUNK_MANIFEST_PREFIX: &str = "\u{1}wayland-core-chunked-v1 ";
+
+/// Where a spanned value's parts live: `<generation>` is `a` or `b` and
+/// `<count>` is how many parts make up the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyringChunkManifest {
+    generation: char,
+    count: usize,
+}
+
+/// UTF-16 code units in `value` — the unit Windows Credential Manager actually
+/// measures, which is neither `len()` (UTF-8 bytes) nor `chars().count()`.
+fn utf16_units(value: &str) -> usize {
+    value.chars().map(char::len_utf16).sum()
+}
+
+/// Split `value` into pieces of at most `max_units` UTF-16 code units each,
+/// never splitting a `char`. `max_units` of 0 is treated as 1 so the loop
+/// cannot spin.
+fn split_by_utf16_units(value: &str, max_units: usize) -> Vec<&str> {
+    let max_units = max_units.max(1);
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    for (offset, ch) in value.char_indices() {
+        let cost = ch.len_utf16();
+        if units + cost > max_units && offset > start {
+            parts.push(&value[start..offset]);
+            start = offset;
+            units = 0;
+        }
+        units += cost;
+    }
+    if start < value.len() || parts.is_empty() {
+        parts.push(&value[start..]);
+    }
+    parts
+}
+
+fn render_chunk_manifest(manifest: KeyringChunkManifest) -> String {
+    format!(
+        "{KEYRING_CHUNK_MANIFEST_PREFIX}{} {}",
+        manifest.generation, manifest.count
+    )
+}
+
+/// Parse a primary entry as a manifest. `None` means "this is a literal
+/// secret", which is what every value written before this scheme — and every
+/// value small enough to fit one entry — looks like.
+fn parse_chunk_manifest(primary: &str) -> Option<KeyringChunkManifest> {
+    let rest = primary.strip_prefix(KEYRING_CHUNK_MANIFEST_PREFIX)?;
+    let (generation, count) = rest.split_once(' ')?;
+    let generation = match generation {
+        "a" => 'a',
+        "b" => 'b',
+        _ => return None,
+    };
+    let count = count.parse::<usize>().ok()?;
+    (count > 0).then_some(KeyringChunkManifest { generation, count })
+}
+
+fn chunk_key(key: &str, generation: char, index: usize) -> String {
+    format!("{key}.__wlchunk{generation}{index}")
+}
+
+/// Read a value that may span several keyring entries.
+fn chunked_get(raw: &dyn CredentialsStore, key: &str) -> Result<Option<String>, CredentialsError> {
+    let Some(primary) = raw.get(key)? else {
+        return Ok(None);
+    };
+    let Some(manifest) = parse_chunk_manifest(&primary) else {
+        return Ok(Some(primary));
+    };
+    let mut value = String::new();
+    for index in 0..manifest.count {
+        let part = raw.get(&chunk_key(key, manifest.generation, index))?;
+        let Some(part) = part else {
+            // A missing part must be an ERROR, never a short string: returning
+            // the prefix of a credential would hand the caller a secret that
+            // authenticates as nothing and reads as a corrupted-token bug.
+            return Err(CredentialsError::Keyring(format!(
+                "the credential for '{key}' spans {} keyring entries and part {index} is \
+                 missing; refusing to return a truncated secret",
+                manifest.count
+            )));
+        };
+        value.push_str(&part);
+    }
+    Ok(Some(value))
+}
+
+/// Write a value, spanning entries when it exceeds `max_units`.
+///
+/// COMMIT ORDER, and it is not negotiable: **write the parts → flip the
+/// manifest → purge the old parts.** The manifest is the only thing a reader
+/// consults first, so until it flips the reader still sees the OLD value in
+/// full. The new parts go under the OTHER generation for exactly this reason —
+/// reusing the live generation's entry names would let a process killed
+/// mid-write leave a manifest pointing at a mix of old and new parts, which is
+/// a silently corrupt credential rather than an absent one.
+fn chunked_put(
+    raw: &dyn CredentialsStore,
+    key: &str,
+    value: &str,
+    max_units: usize,
+) -> Result<(), CredentialsError> {
+    let previous = raw
+        .get(key)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(parse_chunk_manifest);
+
+    if utf16_units(value) <= max_units {
+        raw.put(key, value)?;
+        purge_chunks(raw, key, previous);
+        return Ok(());
+    }
+
+    let generation = match previous {
+        Some(KeyringChunkManifest {
+            generation: 'a', ..
+        }) => 'b',
+        _ => 'a',
+    };
+    let parts = split_by_utf16_units(value, max_units);
+    for (index, part) in parts.iter().enumerate() {
+        raw.put(&chunk_key(key, generation, index), part)?;
+    }
+    raw.put(
+        key,
+        &render_chunk_manifest(KeyringChunkManifest {
+            generation,
+            count: parts.len(),
+        }),
+    )?;
+    purge_chunks(raw, key, previous);
+    Ok(())
+}
+
+/// Remove a value and every entry it spans.
+fn chunked_delete(raw: &dyn CredentialsStore, key: &str) -> Result<(), CredentialsError> {
+    let previous = raw
+        .get(key)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(parse_chunk_manifest);
+    // Manifest first: once it is gone no reader can reach the parts, so a
+    // process killed here leaves orphans rather than a torn read.
+    raw.delete(key)?;
+    purge_chunks(raw, key, previous);
+    Ok(())
+}
+
+/// Best-effort removal of a superseded generation's parts. A failure here
+/// leaves unreferenced entries behind, which no reader can reach — never a
+/// reason to fail the write that already succeeded.
+fn purge_chunks(raw: &dyn CredentialsStore, key: &str, manifest: Option<KeyringChunkManifest>) {
+    let Some(manifest) = manifest else {
+        return;
+    };
+    for index in 0..manifest.count {
+        if let Err(error) = raw.delete(&chunk_key(key, manifest.generation, index)) {
+            tracing::debug!(
+                target: "wcore_credentials",
+                key,
+                error = %error,
+                "could not remove a superseded keyring chunk; it is unreferenced and harmless"
+            );
+        }
+    }
+}
+
+/// OS-native keyring credentials store.
+///
+/// Backed by the `keyring` crate (macOS Keychain on Apple, Windows
+/// Credential Manager on Windows, Secret Service on Linux). Each
+/// `key` is mapped to a `(service, user)` pair; we use the
+/// configured service name (default `"wayland-core"`) and the key
+/// itself as the user — this keeps lookup O(1) and matches the
+/// `keyring` crate's expected shape.
+///
+/// A value larger than one entry can hold ([`KEYRING_MAX_UTF16_UNITS_PER_ENTRY`])
+/// is spanned across sibling entries under a manifest, so the Windows blob cap
+/// stops being a functional ceiling on what can be stored. Values that fit are
+/// written literally, exactly as before, so entries written by older builds
+/// keep reading back unchanged.
+pub struct KeyringCredentialsStore {
+    raw: RawKeyringEntries,
+}
+
+impl KeyringCredentialsStore {
+    pub fn new(service: impl Into<String>) -> Self {
+        Self {
+            raw: RawKeyringEntries {
+                service: service.into(),
+            },
+        }
+    }
+}
+
+impl CredentialsStore for KeyringCredentialsStore {
+    fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+        chunked_get(&self.raw, key)
+    }
+
+    fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+        chunked_put(&self.raw, key, value, KEYRING_MAX_UTF16_UNITS_PER_ENTRY)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+        chunked_delete(&self.raw, key)
     }
 }
 
@@ -4310,6 +4544,240 @@ mod tests {
 
     fn boxed(tier: &std::sync::Arc<FakeTier>) -> Box<dyn CredentialsStore> {
         Box::new(std::sync::Arc::clone(tier))
+    }
+
+    // -----------------------------------------------------------------------
+    // Spanning the Windows Credential Manager blob cap.
+    // -----------------------------------------------------------------------
+
+    /// A store that enforces the cap Windows Credential Manager enforces, in
+    /// the unit Windows measures: `CRED_MAX_CREDENTIAL_BLOB_SIZE` = 2560
+    /// bytes of UTF-16, i.e. 1280 code units. The `keyring` crate refuses the
+    /// write itself, before the syscall, with exactly this arithmetic.
+    ///
+    /// This is the ONLY shape that can tell the spanning writer apart from a
+    /// writer that merely happens to work: against an uncapped store, deleting
+    /// the spanning logic changes nothing observable.
+    #[derive(Default)]
+    struct CapsBlobLikeWindows {
+        entries: Mutex<HashMap<String, String>>,
+        max_utf16_units: usize,
+    }
+
+    impl CapsBlobLikeWindows {
+        fn new(max_utf16_units: usize) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                entries: Mutex::new(HashMap::new()),
+                max_utf16_units,
+            })
+        }
+    }
+
+    impl CredentialsStore for std::sync::Arc<CapsBlobLikeWindows> {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            Ok(self.entries.lock().unwrap().get(key).cloned())
+        }
+
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            if utf16_units(value) > self.max_utf16_units {
+                return Err(CredentialsError::Keyring(format!(
+                    "Password too long: {} > {} UTF-16 code units",
+                    utf16_units(value),
+                    self.max_utf16_units
+                )));
+            }
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// A realistically sized OAuth token set: access JWT + id JWT + refresh
+    /// token. ~3.4 KB, which is what makes this defect a real Windows
+    /// regression rather than a theoretical one.
+    fn oauth_token_set_json() -> String {
+        let jwt = format!("hdr.{}.sig", "P".repeat(1400));
+        format!(
+            r#"{{"access_token":"{jwt}","id_token":"{jwt}","refresh_token":"{}","token_type":"Bearer","expires_at_unix_secs":1700000000}}"#,
+            "R".repeat(500)
+        )
+    }
+
+    /// POSITIVE CONTROL. The cap is real: writing the token set as ONE entry
+    /// is refused by the capped store, which is precisely what the Windows
+    /// keyring rung did to `auth login`.
+    #[test]
+    fn one_entry_cannot_hold_an_oauth_token_set_under_the_windows_cap() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        let error = raw.put("oauth.chatgpt.tokens", &oauth_token_set_json());
+        assert!(
+            error.is_err(),
+            "the Windows blob cap must reject a whole token set in one entry; \
+             if it does not, this test is not exercising the defect"
+        );
+    }
+
+    /// MUTATION TARGET. Replace `chunked_put`/`chunked_get` with a direct
+    /// `raw.put`/`raw.get` and this fails on the write: the token set does not
+    /// fit, and a Windows user cannot log in.
+    #[test]
+    fn an_oauth_token_set_round_trips_across_the_windows_blob_cap() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        let value = oauth_token_set_json();
+
+        chunked_put(&raw, "oauth.chatgpt.tokens", &value, 1000).expect("spanned write must land");
+        let read_back = chunked_get(&raw, "oauth.chatgpt.tokens").expect("read");
+
+        assert_eq!(
+            read_back.as_deref(),
+            Some(value.as_str()),
+            "a spanned value must read back byte-identical"
+        );
+        assert!(
+            raw.entries.lock().unwrap().len() > 1,
+            "the value must actually span entries, not fit in one"
+        );
+        for (entry_key, entry_value) in raw.entries.lock().unwrap().iter() {
+            assert!(
+                utf16_units(entry_value) <= 1280,
+                "{entry_key} is over the cap at {} units",
+                utf16_units(entry_value)
+            );
+        }
+    }
+
+    /// A value that fits is still written literally, so entries written by
+    /// builds that predate spanning keep reading back unchanged.
+    #[test]
+    fn a_small_value_is_stored_literally_and_reads_back() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        chunked_put(&raw, "providers.anthropic.api_key", "sk-ant-123", 1000).unwrap();
+        assert_eq!(
+            raw.entries
+                .lock()
+                .unwrap()
+                .get("providers.anthropic.api_key")
+                .map(String::as_str),
+            Some("sk-ant-123"),
+            "a value that fits must not be wrapped in a manifest"
+        );
+        assert_eq!(
+            chunked_get(&raw, "providers.anthropic.api_key")
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-123")
+        );
+    }
+
+    /// Rewriting a spanned value must never leave a reader looking at a mix of
+    /// old and new parts. The new generation is written under different entry
+    /// names and the manifest flip is the commit point.
+    #[test]
+    fn rewriting_a_spanned_value_alternates_generations_and_purges_the_old_one() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        let first = "A".repeat(4000);
+        let second = "B".repeat(5000);
+
+        chunked_put(&raw, "k", &first, 1000).unwrap();
+        let gen_a = parse_chunk_manifest(&raw.get("k").unwrap().unwrap()).expect("manifest");
+        assert_eq!(gen_a.generation, 'a');
+
+        chunked_put(&raw, "k", &second, 1000).unwrap();
+        let gen_b = parse_chunk_manifest(&raw.get("k").unwrap().unwrap()).expect("manifest");
+        assert_eq!(
+            gen_b.generation, 'b',
+            "the rewrite must use the other generation"
+        );
+
+        assert_eq!(
+            chunked_get(&raw, "k").unwrap().as_deref(),
+            Some(second.as_str())
+        );
+        assert!(
+            !raw.entries
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|k| k.contains("__wlchunka")),
+            "the superseded generation's parts must be purged"
+        );
+    }
+
+    /// A missing part is an ERROR, never a short string. Returning the prefix
+    /// of a credential hands the caller a secret that authenticates as nothing
+    /// and reads to them as a corrupted-token bug rather than a storage fault.
+    #[test]
+    fn a_missing_part_refuses_rather_than_returning_a_truncated_secret() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        let value = "Z".repeat(4000);
+        chunked_put(&raw, "k", &value, 1000).unwrap();
+        raw.entries.lock().unwrap().remove(&chunk_key("k", 'a', 2));
+
+        let error = chunked_get(&raw, "k").expect_err("a torn value must not read back");
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to return a truncated secret"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Deleting a spanned value must remove every entry it occupies; a
+    /// leftover part is a secret that survived a logout.
+    #[test]
+    fn deleting_a_spanned_value_removes_every_entry() {
+        let raw = CapsBlobLikeWindows::new(1280);
+        chunked_put(&raw, "k", &"Q".repeat(4000), 1000).unwrap();
+        assert!(raw.entries.lock().unwrap().len() > 1);
+
+        chunked_delete(&raw, "k").unwrap();
+        assert!(
+            raw.entries.lock().unwrap().is_empty(),
+            "logout left {:?} behind",
+            raw.entries.lock().unwrap().keys().collect::<Vec<_>>()
+        );
+        assert!(chunked_get(&raw, "k").unwrap().is_none());
+    }
+
+    /// The split must land on `char` boundaries and must count UTF-16 units,
+    /// not bytes and not chars — the unit Windows measures. A 4-byte emoji
+    /// costs TWO units.
+    #[test]
+    fn splitting_counts_utf16_units_and_never_breaks_a_char() {
+        let value = "🔑".repeat(10); // 10 chars, 20 UTF-16 units, 40 bytes
+        assert_eq!(utf16_units(&value), 20);
+        let parts = split_by_utf16_units(&value, 5);
+        assert_eq!(parts.concat(), value, "the split must be lossless");
+        for part in &parts {
+            assert!(utf16_units(part) <= 5, "part over budget: {part}");
+            assert!(part.chars().count() * 2 == utf16_units(part));
+        }
+    }
+
+    /// A literal secret must never be mistaken for a manifest, and a manifest
+    /// must never be mistaken for a secret.
+    #[test]
+    fn manifest_parsing_does_not_collide_with_real_secrets() {
+        assert!(parse_chunk_manifest("sk-ant-123").is_none());
+        assert!(parse_chunk_manifest(r#"{"access_token":"x"}"#).is_none());
+        assert!(parse_chunk_manifest("wayland-core-chunked-v1 a 3").is_none());
+        assert_eq!(
+            parse_chunk_manifest(&render_chunk_manifest(KeyringChunkManifest {
+                generation: 'b',
+                count: 7,
+            })),
+            Some(KeyringChunkManifest {
+                generation: 'b',
+                count: 7,
+            })
+        );
     }
 
     /// ABLATION (d). The downgrade must not be permanent: when the keyring
