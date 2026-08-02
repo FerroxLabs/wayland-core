@@ -49,3 +49,30 @@ jobs:
 
       - name: The committed spanning suite (must not regress)
         run: cargo test -p wcore-config --lib credentials::tests -- --nocapture
+
+      # POSITIVE CONTROL, and it runs last so it cannot disturb the green legs.
+      # Revert the two defects in place and demand the proofs FAIL. A suite that
+      # has only ever run against the fixed code proves nothing about the defect
+      # it claims to pin, so a control that goes green here fails the job.
+      - name: RED CONTROL — the proofs must fail without the fix
+        shell: bash
+        run: |
+          python3 ci/cred-splice-fix/unfix.py
+          set +e
+          cargo test -p wcore-config --lib chunk_write_lock_verification -- --nocapture 2>&1 | tee race.log
+          race=${PIPESTATUS[0]}
+          cargo test -p wcore-config --lib chunk_read_fault_verification -- --nocapture 2>&1 | tee fault.log
+          fault=${PIPESTATUS[0]}
+          set -e
+          echo "--- the splice, as this platform produced it ---"
+          grep -F "the writers must serialize" race.log || true
+          if [ "$race" -eq 0 ]; then
+            echo "RED CONTROL FAILED: the race proofs pass WITHOUT the lock, so they prove nothing"
+            exit 1
+          fi
+          if [ "$fault" -eq 0 ]; then
+            echo "RED CONTROL FAILED: the read-fault proofs pass WITH the fault swallowed"
+            exit 1
+          fi
+          echo "RED CONTROL OK: both proof modules fail without the fix"
+          git checkout -- crates/wcore-config/src/credentials.rs
