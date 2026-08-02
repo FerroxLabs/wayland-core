@@ -558,25 +558,68 @@ pub struct RecoveryReplayItem {
 /// validation, because the field is optional, while breaking the consumer.
 ///
 /// So the absence is now stated rather than implied: `session_id` is always
-/// serialized (`null` when there is none) and this field says which of the two
-/// causes produced the null. The two causes are NOT interchangeable — one is
-/// the operator's choice, the other is a host limitation the operator may want
-/// to fix — and collapsing them is the same mistake as omitting the key.
+/// serialized (`null` when there is none) and this field says which cause
+/// produced the value it holds. The causes are NOT interchangeable — one is the
+/// operator's choice, the others are host limitations the operator may want to
+/// fix — and collapsing them is the same mistake as omitting the key.
+///
+/// # The fourth value, and why a three-value enum was not enough
+///
+/// This type shipped with three values, on the premise that a host which cannot
+/// protect a durable session turns durable sessions OFF. That premise stopped
+/// being true the same night: the session journal is not encrypted, and the
+/// confidential store protects exactly one field — the sealed copy of the exact
+/// provider request that makes AUTOMATIC replay possible. A keyless host now
+/// journals without it.
+///
+/// That produced a state none of the three values described. `session_id` is a
+/// real, resumable id, so `disabled_by_*` is plainly wrong; but the session
+/// cannot recover an interrupted dispatch by itself, so `durable` over-claims
+/// to precisely the consumer that most needs to know — one deciding whether to
+/// wait for auto-recovery or ask its operator. Reporting it as `durable` would
+/// have been the same defect this type was introduced to fix, one layer up: a
+/// wire value that cannot express a state the product reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPersistence {
-    /// `session_id` names a durable, journaled session. It survives a restart
-    /// and can be resumed.
+    /// `session_id` names a durable, journaled session with crash replay. It
+    /// survives a restart, can be resumed, and a turn interrupted mid-dispatch
+    /// resumes itself from the sealed provider request.
     Durable,
+    /// `session_id` names a durable, journaled session WITHOUT crash replay.
+    ///
+    /// The journal is complete — every turn, provider attempt, tool call,
+    /// approval and delivery boundary is recorded, so nothing executes
+    /// unrecorded and history survives a restart. What is missing is the sealed
+    /// copy of the exact provider request, because this host has no usable OS
+    /// keyring and no unlocked credentials vault.
+    ///
+    /// **What a host should do.** Treat the session as durable for history and
+    /// audit: list it, offer resume, keep it. Do NOT show auto-recovery
+    /// affordances or wait on one. If a turn is interrupted mid-dispatch, the
+    /// next message on that session is refused with a reconciliation error
+    /// naming the interrupted turn — surface a resume / reconcile / cancel
+    /// choice to the operator rather than a retry spinner. And if a resume is
+    /// refused with `init_failed` naming the session, that session is LOCKED
+    /// pending a key, not corrupt: leave its journal alone, because restoring
+    /// `WAYLAND_VAULT_PASSPHRASE_FD` and resuming again recovers it.
+    JournaledWithoutReplay,
     /// `session_id` is null: the operator turned durable sessions off
     /// (`[session] enabled = false`). Nothing is journaled and nothing is
     /// resumable, by request.
     DisabledByOperator,
-    /// `session_id` is null: this host cannot protect a durable session — no
-    /// usable OS keyring and no unlocked credentials vault — so Core forced
-    /// them off rather than journaling into storage it cannot seal. The
-    /// operator did not ask for this and can fix it
-    /// (`WAYLAND_VAULT_PASSPHRASE_FD`, or a host with a keyring).
+    /// DECODE-ONLY. `session_id` is null because a host that could not protect
+    /// a durable session turned durable sessions off.
+    ///
+    /// **This producer can no longer emit it**, and that is not an oversight —
+    /// see [`SessionPersistence`]'s own docs. It is retained because the value
+    /// was published on the wire, so an older Core still sends it and a host
+    /// may have stored it against a session it is still tracking. Removing a
+    /// value we once sent breaks those consumers for no gain.
+    ///
+    /// A host meeting it should read it as "an older Core, on a keyless host,
+    /// which journaled nothing" — historical, and not something a current Core
+    /// will ever say again.
     DisabledByHost,
 }
 
@@ -1747,16 +1790,23 @@ mod tests {
         assert_eq!(json2["session_persistence"], "disabled_by_operator");
     }
 
-    /// A consumer that reads ONLY the wire can tell the three `ready` postures
+    /// A consumer that reads ONLY the wire can tell every `ready` posture
     /// apart, and each one carries a `session_id` key.
     ///
     /// This is the property the omit-the-key shape could not provide, written
     /// the way a host actually reads a frame: no Rust types, just the JSON
-    /// object. The three frames must be pairwise distinguishable on
+    /// object. The frames must be pairwise distinguishable on
     /// `session_persistence` alone, and every one of them must publish the
     /// correlation key `EVENT_SPECS` says `ready` correlates on.
+    ///
+    /// FOUR postures now, and the fourth is the one that makes the pairwise
+    /// requirement bite. `journaled_without_replay` and `durable` are the pair
+    /// a consumer is most likely to collapse — both name a session, both are
+    /// resumable, both survive a restart — and they differ on the single
+    /// question a consumer asks this field to decide: may I wait for this
+    /// session to recover itself?
     #[test]
-    fn a_degraded_ready_is_distinguishable_from_a_durable_one_on_the_wire() {
+    fn every_ready_posture_is_distinguishable_from_the_others_on_the_wire() {
         fn ready(session_id: Option<&str>, persistence: SessionPersistence) -> Value {
             serde_json::to_value(ProtocolEvent::Ready {
                 version: "0.12.25".to_string(),
@@ -1770,24 +1820,34 @@ mod tests {
         }
 
         let durable = ready(Some("sess-durable"), SessionPersistence::Durable);
+        let unsealed = ready(
+            Some("sess-unsealed"),
+            SessionPersistence::JournaledWithoutReplay,
+        );
         let by_operator = ready(None, SessionPersistence::DisabledByOperator);
         let by_host = ready(None, SessionPersistence::DisabledByHost);
 
         // Every posture publishes the correlation key. A host can always ask
         // "is session_id present?" and get a truthful yes.
-        for frame in [&durable, &by_operator, &by_host] {
+        for frame in [&durable, &unsealed, &by_operator, &by_host] {
             assert!(
                 frame.as_object().unwrap().contains_key("session_id"),
                 "ready dropped its declared correlation key: {frame}"
             );
         }
 
-        // The two nulls are NOT the same event, and neither is the string.
-        let postures = [&durable, &by_operator, &by_host]
+        // The two nulls are NOT the same event, the two named sessions are NOT
+        // the same event, and no null is a string.
+        let postures = [&durable, &unsealed, &by_operator, &by_host]
             .map(|frame| frame["session_persistence"].as_str().unwrap().to_string());
         assert_eq!(
             postures,
-            ["durable", "disabled_by_operator", "disabled_by_host"],
+            [
+                "durable",
+                "journaled_without_replay",
+                "disabled_by_operator",
+                "disabled_by_host"
+            ],
             "the wire vocabulary drifted from the type"
         );
         assert_eq!(
@@ -1795,12 +1855,19 @@ mod tests {
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            3,
+            4,
             "two postures collapsed to one wire value: {postures:?}"
         );
 
-        // The durable posture is the only one that names a session.
+        // Naming a session no longer implies replay, and that is the whole
+        // reason the fourth value exists. A consumer keying only on
+        // "is session_id non-null?" cannot tell these two apart.
         assert_eq!(durable["session_id"], "sess-durable");
+        assert_eq!(unsealed["session_id"], "sess-unsealed");
+        assert_ne!(
+            durable["session_persistence"], unsealed["session_persistence"],
+            "a journaled session with no crash replay must not report as durable"
+        );
         assert_eq!(by_operator["session_id"], Value::Null);
         assert_eq!(by_host["session_id"], Value::Null);
     }

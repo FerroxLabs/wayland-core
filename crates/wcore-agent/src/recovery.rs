@@ -389,6 +389,89 @@ impl RecoveryCheckpoint {
     }
 }
 
+/// HIGH-1. May this specific session be resumed on this host?
+///
+/// # The measured defect
+///
+/// Seed a profile with a real recoverable turn under a vault, delete the vault,
+/// relaunch with `--resume <that id>`. Measured at 0.12.25: the process starts
+/// `rc=0` and emits `ready` **carrying that session id**, while the six journal
+/// artifacts sit on disk unread. The host is told it resumed a session the
+/// engine cannot open a single sealed byte of. That is strictly worse than an
+/// anonymous refusal — a host that is told nothing retries or asks; a host that
+/// is told `ready(session_id=X)` builds its whole session view on a continuity
+/// claim that is false.
+///
+/// # Why the SESSION and not the PROCESS
+///
+/// The obvious repair — refuse to start when a key is missing — hands anyone who
+/// can suppress the keyring (a stopped D-Bus, an unmounted keyring, a hostile
+/// local process) a complete availability kill. That converts an attack on
+/// confidentiality into an attack on availability, which is the exact mirror of
+/// the downgrade abuse this whole posture exists to prevent, and a previous
+/// version of this remedy did precisely that.
+///
+/// So the refusal is scoped to the thing that is genuinely unreadable. On the
+/// same host, in the same second:
+///
+/// * `--resume <locked id>` is refused, by name, before `ready`;
+/// * a launch with no `--resume`, or with a different session, starts normally
+///   and journals normally;
+/// * the locked session's journal is left untouched — it is evidence, and a
+///   later launch WITH the vault resumes it exactly as before.
+///
+/// An attacker who suppresses the keyring therefore gains nothing they did not
+/// already have: they cannot start turns they could not otherwise start, and
+/// they cannot stop the product from running.
+///
+/// # Why not "fork it into a new session"
+///
+/// The panel's form was "permit a new session under a new id, never reuse the
+/// old id or call the fork a resume". Silently forking here would do the naming
+/// half of that and hide the decision: the operator asked to continue a
+/// specific conversation, and starting a different one under a different id
+/// while reporting success is the same class of false claim as the `ready`
+/// frame this fixes. Refusing by name, and saying that a new session is
+/// available, leaves the fork as the operator's choice — one command away, and
+/// theirs.
+pub(crate) fn admit_session_resume(
+    config: &wcore_config::config::Config,
+    journal: &SessionJournal,
+    protection: &dyn crate::recovery_confidential::RecoveryRequestProtection,
+) -> anyhow::Result<()> {
+    let plan = RecoveryPlan::from_journal(journal)?;
+    if !plan.requires_sealed_replay() {
+        return Ok(());
+    }
+    match protection.sealed_request_key_available(config) {
+        Ok(()) => Ok(()),
+        Err(cause) => anyhow::bail!("{}", locked_session_refusal(&plan.session_id, &cause)),
+    }
+}
+
+/// The operator-facing text for a session whose sealed state cannot be opened.
+///
+/// A `const`-shaped single source, like `DURABILITY_REQUIRED_REFUSAL`, so the
+/// three things it must say cannot drift apart under editing: WHICH session,
+/// WHY, and — the part a refusal usually forgets — what still works. A refusal
+/// that reads like an outage gets escalated as one.
+fn locked_session_refusal(
+    session_id: &str,
+    cause: &crate::recovery_confidential::RecoveryConfidentialError,
+) -> String {
+    format!(
+        "session '{session_id}' cannot be resumed on this host: it was interrupted while a \
+         provider request was in flight, and continuing it means re-opening the sealed copy of \
+         that exact request, which this host cannot read ({cause}). Resuming without it would \
+         mean either re-sending a request that may already have been answered, or claiming to \
+         have resumed a session nothing was read from. Only THIS session is refused — starting \
+         a new session on this host works normally, and its journal is left untouched, so \
+         restoring the key and resuming again recovers it. To restore the key, set \
+         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
+         WAYLAND_VAULT_PASSPHRASE and resume again."
+    )
+}
+
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1177,6 +1260,33 @@ impl RecoveryPlan {
         }
     }
 
+    /// Does continuing this session require OPENING a sealed prepared request?
+    ///
+    /// True for exactly one disposition: a `ProviderDispatch` checkpoint at the
+    /// head. Every other continuation — a bare `TurnStarted`, a tool round, an
+    /// approval gate, a terminal commit, a blocked reconciliation — is decided
+    /// from keyless journal events and needs no key at all.
+    ///
+    /// The predicate reads `sealed_prepared_request`, not `next_action`, even
+    /// though `RecoveryCheckpoint::validate` currently makes the two equivalent
+    /// for `ProviderDispatch`. The question here is literally "is there
+    /// ciphertext that must be opened", and answering it from the field that
+    /// holds the ciphertext keeps this correct if a future action ever carries
+    /// one or a `ProviderDispatch` ever legitimately does not.
+    #[must_use]
+    pub(crate) fn requires_sealed_replay(&self) -> bool {
+        match &self.disposition {
+            RecoveryDisposition::ContinueCheckpoint { checkpoint, .. } => {
+                checkpoint.sealed_prepared_request.is_some()
+            }
+            RecoveryDisposition::Ready
+            | RecoveryDisposition::ContinueTurnStart { .. }
+            | RecoveryDisposition::AwaitApproval { .. }
+            | RecoveryDisposition::ReconciliationRequired { .. }
+            | RecoveryDisposition::Blocked { .. } => false,
+        }
+    }
+
     /// Build the sanitized recovery projection at an already-observed cursor.
     ///
     /// This is the baseline paired with [`Self::replay_after`]. It never labels
@@ -1726,6 +1836,170 @@ mod tests {
                 request_digest: request_digest.into(),
             })
             .unwrap();
+    }
+
+    /// A protection whose answer to "can I read the sealed material" is dictated
+    /// by the test, so both sides of the HIGH-1 gate are reachable without a
+    /// keyring — and, more importantly, without one.
+    ///
+    /// `preflight` deliberately panics. Nothing on the resume path may create a
+    /// key, and a double that quietly allowed it would let the gate be
+    /// re-implemented in terms of `preflight` — which would answer "yes" on a
+    /// keyless host by minting a key that cannot open anything already sealed.
+    struct ScriptedProtection {
+        key_readable: bool,
+    }
+
+    impl crate::recovery_confidential::RecoveryRequestProtection for ScriptedProtection {
+        fn preflight(
+            &self,
+            _config: &wcore_config::config::Config,
+        ) -> Result<(), crate::recovery_confidential::RecoveryConfidentialError> {
+            panic!("the resume gate must never create a key");
+        }
+
+        fn sealed_request_key_available(
+            &self,
+            _config: &wcore_config::config::Config,
+        ) -> Result<(), crate::recovery_confidential::RecoveryConfidentialError> {
+            if self.key_readable {
+                Ok(())
+            } else {
+                Err(crate::recovery_confidential::RecoveryConfidentialError::MissingRecoveryKey)
+            }
+        }
+
+        fn seal(
+            &self,
+            _config: &wcore_config::config::Config,
+            _binding: &crate::recovery_confidential::PreparedRequestBinding<'_>,
+            _request: &serde_json::Value,
+        ) -> Result<
+            crate::recovery_confidential::SealedPreparedRequest,
+            crate::recovery_confidential::RecoveryConfidentialError,
+        > {
+            panic!("the resume gate must never seal");
+        }
+
+        fn open(
+            &self,
+            _config: &wcore_config::config::Config,
+            _binding: &crate::recovery_confidential::PreparedRequestBinding<'_>,
+            _sealed: &crate::recovery_confidential::SealedPreparedRequest,
+        ) -> Result<serde_json::Value, crate::recovery_confidential::RecoveryConfidentialError>
+        {
+            panic!("the resume gate must never open");
+        }
+    }
+
+    /// HIGH-1, at the unit that decides it.
+    ///
+    /// The same journal — one real sealed `ProviderDispatch` checkpoint at the
+    /// head — is admitted or refused purely by whether the key can be read.
+    /// Running BOTH arms over ONE journal is what makes this able to fail: a
+    /// gate that refused everything, and a gate that refused nothing, each pass
+    /// exactly one arm.
+    #[test]
+    fn a_sealed_checkpoint_is_admitted_with_the_key_and_refused_without_it() {
+        let (_dir, journal) = journal();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                user_message: "finish the task".into(),
+            })
+            .unwrap();
+        let message = user_message("finish the task");
+        journal
+            .append(SessionEvent::ConversationMessageCommitted {
+                turn_id: "turn-1".into(),
+                message_index: 0,
+                message: message.clone(),
+                message_digest: state_payload_digest(&message).unwrap(),
+            })
+            .unwrap();
+        append_recovery_checkpoint(
+            &journal,
+            "turn-1",
+            std::slice::from_ref(&message),
+            None,
+            None,
+        );
+        let plan = RecoveryPlan::from_journal(&journal).unwrap();
+        assert!(
+            plan.requires_sealed_replay(),
+            "the fixture must actually need a key, or neither arm below measures \
+             anything: {:?}",
+            plan.disposition
+        );
+        let config = wcore_config::config::Config::default();
+
+        crate::recovery::admit_session_resume(
+            &config,
+            &journal,
+            &ScriptedProtection { key_readable: true },
+        )
+        .expect("a session whose key is readable must resume");
+
+        let refusal = crate::recovery::admit_session_resume(
+            &config,
+            &journal,
+            &ScriptedProtection {
+                key_readable: false,
+            },
+        )
+        .expect_err("a session whose key is gone must be refused")
+        .to_string();
+
+        // The refusal has to be actionable AND bounded. Naming the session is
+        // what makes it a session-scoped refusal rather than an outage report;
+        // saying a new session still works is what stops it being escalated as
+        // one.
+        let session_id = journal.session_id().unwrap();
+        for needle in [
+            session_id.as_str(),
+            "cannot be resumed",
+            "Only THIS session is refused",
+            "starting a new session on this host works normally",
+            "WAYLAND_VAULT_PASSPHRASE",
+        ] {
+            assert!(
+                refusal.contains(needle),
+                "the refusal must say {needle:?}; got: {refusal}"
+            );
+        }
+    }
+
+    /// The gate must not fire on a session that needs no key, whatever the key
+    /// situation. Otherwise "the keyring went away" becomes "nothing resumes",
+    /// which is the availability kill this remedy exists to avoid.
+    ///
+    /// `ScriptedProtection` panics on every method except the read-only probe,
+    /// so a gate that consulted the store for a keyless session would abort here
+    /// rather than pass.
+    #[test]
+    fn a_session_that_needs_no_key_resumes_on_a_host_that_has_none() {
+        let (_dir, journal) = journal();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                user_message: "finish the task".into(),
+            })
+            .unwrap();
+        let plan = RecoveryPlan::from_journal(&journal).unwrap();
+        assert!(
+            !plan.requires_sealed_replay(),
+            "a bare TurnStarted must not be graded as needing a sealed replay: {:?}",
+            plan.disposition
+        );
+
+        crate::recovery::admit_session_resume(
+            &wcore_config::config::Config::default(),
+            &journal,
+            &ScriptedProtection {
+                key_readable: false,
+            },
+        )
+        .expect("a session with no sealed state must resume on a keyless host");
     }
 
     fn assert_checkpoint_continuation(plan: &RecoveryPlan) {

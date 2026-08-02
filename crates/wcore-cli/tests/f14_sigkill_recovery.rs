@@ -1194,20 +1194,67 @@ fn require_durability(env: &TempEnv) {
     fs::write(&path, patched).expect("write durability policy into profile config");
 }
 
-/// Launch packaged Core with no secure store and return its `ready` frame
-/// WITHOUT asserting a session identity.
+/// Launch packaged Core with NO secure store — no OS keyring, no unlocked
+/// vault — and return its `ready` frame.
 ///
-/// [`CoreProcess::launch_with_secure_store`] asserts that `ready` NAMES the
-/// requested session. A degraded launch cannot satisfy that — there is no
-/// durable session to name — so it needs its own launcher and its own
-/// assertions about what the frame does say instead. Those live in
-/// [`without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`].
+/// This function used to exist because a keyless launch could not satisfy
+/// [`CoreProcess::launch`]'s assertion that `ready` names the requested
+/// session: the host-forced degrade turned durable sessions off, so there was
+/// no session to name and `ProtocolEvent::Ready.session_id` was simply OMITTED
+/// (`Option<String>` + `skip_serializing_if`). A `--json-stream` host received a
+/// frame byte-identical in shape to a legacy producer's and was told nothing.
+///
+/// It now asserts the identity itself, because a keyless host HAS a session:
+/// the journal is not encrypted and never needed a key, so it opens, and the
+/// only thing given up is the sealed replay copy of the provider request. The
+/// separate launcher survives only because the environment it builds differs —
+/// it must actively BREAK the keyring rather than supply a vault.
 #[cfg(target_os = "linux")]
-async fn launch_degraded(
+async fn launch_keyless(
     env: &TempEnv,
     fixture: &RunningOpenAiFixture,
     session_id: &str,
 ) -> (CoreProcess, Value) {
+    let (process, ready) = spawn_keyless(keyless_command(env, fixture, Some(session_id))).await;
+    // THE HOST-FACING CONTRACT, read the way a host reads it: off the wire,
+    // from the real packaged binary, on a real keyring-less profile.
+    //
+    // This assertion is the inverse of the one it replaces
+    // (`ready.get("session_id") == None`). That line pinned the DEFECT: a host
+    // was told nothing, in a frame indistinguishable from a legacy producer's,
+    // about a deployment that had just silently lost its audit trail. Now the
+    // keyless launch opens the session it was asked for and says which one, and
+    // the residue assertions downstream prove that identity is backed by real
+    // artifacts rather than being another unbacked claim.
+    assert_eq!(
+        ready.get("session_id").and_then(Value::as_str),
+        Some(session_id),
+        "a keyless host still journals, so its ready frame must name the session \
+         it opened: {ready}"
+    );
+    // …and it must NOT call that session `durable`. This is the assertion the
+    // whole fourth enum value exists for, made against the real binary rather
+    // than a unit mapping: `durable` is what a host reads to decide whether to
+    // WAIT for an interrupted turn to recover itself, and this session cannot.
+    // Naming the session while over-claiming its recovery is the same defect as
+    // dropping the key, moved one field along.
+    assert_eq!(
+        ready["session_persistence"], "journaled_without_replay",
+        "a keyless host names its session but must not promise crash replay: {ready}"
+    );
+    (process, ready)
+}
+
+/// The launch environment that makes this host keyless: no vault unlock
+/// material, and a `DBUS_SESSION_BUS_ADDRESS` pointed at a socket that does not
+/// exist so the Linux Secret Service probe fails deterministically rather than
+/// depending on the worker's desktop state.
+#[cfg(target_os = "linux")]
+fn keyless_command(
+    env: &TempEnv,
+    fixture: &RunningOpenAiFixture,
+    session_id: Option<&str>,
+) -> Command {
     let mut command = Command::new(binary());
     command
         .arg("--json-stream")
@@ -1216,9 +1263,11 @@ async fn launch_degraded(
         .arg("--model")
         .arg(FIXTURE_MODEL)
         .arg("--base-url")
-        .arg(fixture.base_url())
-        .arg("--session-id")
-        .arg(session_id)
+        .arg(fixture.base_url());
+    if let Some(session_id) = session_id {
+        command.arg("--session-id").arg(session_id);
+    }
+    command
         .current_dir(env.path())
         .env("HOME", env.path())
         .env("WAYLAND_HOME", env.home())
@@ -1240,7 +1289,58 @@ async fn launch_degraded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().expect("spawn degraded wayland-core");
+    command
+}
+
+/// THE CONTROL ARM for every presence this file now asserts about a keyless
+/// run: the same keyless host, with `[session] enabled = false`, which must
+/// still leave nothing.
+#[cfg(target_os = "linux")]
+async fn launch_sessions_off(
+    env: &TempEnv,
+    fixture: &RunningOpenAiFixture,
+) -> (CoreProcess, Value) {
+    let (process, ready) = spawn_keyless(keyless_command(env, fixture, None)).await;
+    // THE THIRD LIVE POSTURE, and the one that keeps the other two honest. This
+    // profile is on the SAME keyring-less host as `launch_keyless` — the only
+    // difference is `[session] enabled = false` — so if the producer attributed
+    // a null session to the host rather than the operator, this is where it
+    // would show. It would send an operator hunting for a keyring to restore a
+    // journal they switched off themselves.
+    assert_eq!(
+        ready["session_id"],
+        Value::Null,
+        "an operator who turned sessions off has no session to name: {ready}"
+    );
+    assert_eq!(
+        ready["session_persistence"], "disabled_by_operator",
+        "a keyless host must not claim credit for a choice the operator made: {ready}"
+    );
+    (process, ready)
+}
+
+/// Declare `[session] enabled = false` in a hermetic profile.
+///
+/// Inserted INTO the existing `[session]` table for the reason
+/// [`require_durability`] documents: a second table with the same name is a
+/// TOML duplicate-key error, which the product reports as a config-parse
+/// refusal — indistinguishable at the exit code from the behaviour under test.
+#[cfg(target_os = "linux")]
+fn disable_sessions(env: &TempEnv) {
+    let path = env.home().join("config.toml");
+    let config = fs::read_to_string(&path).expect("read seeded profile config");
+    assert!(
+        config.contains("[session]\n"),
+        "the seeded profile no longer has a [session] table to extend:\n{config}"
+    );
+    let patched = config.replacen("[session]\n", "[session]\nenabled = false\n", 1);
+    assert_ne!(patched, config, "sessions-off policy was not inserted");
+    fs::write(&path, patched).expect("write sessions-off policy into profile config");
+}
+
+#[cfg(target_os = "linux")]
+async fn spawn_keyless(mut command: Command) -> (CoreProcess, Value) {
+    let mut child = command.spawn().expect("spawn keyless wayland-core");
     let stdin = child.stdin.take().expect("Core stdin pipe");
     let stdout = BufReader::new(child.stdout.take().expect("Core stdout pipe")).lines();
     let mut child_stderr = child.stderr.take().expect("Core stderr pipe");
@@ -1270,14 +1370,13 @@ async fn launch_degraded(
 
 /// Every file under a profile home, relative to it, with its bytes.
 ///
-/// Deliberately NOT a glob for `sessions/*.journal`. A degraded run must leave
-/// no durable trace of ANY kind, and the journal family is six artifacts, not
-/// one: `<id>.journal`, `<id>.wal`, `<id>.journal.snapshot`,
+/// Deliberately NOT a glob for `sessions/*.journal`. The journal family is six
+/// artifacts, not one: `<id>.journal`, `<id>.wal`, `<id>.journal.snapshot`,
 /// `<id>.journal.authority`, the `.<id>.journal.effects/` checkpoint directory
 /// and the `.<digest>.<pid>.<seq>.tmp` files inside it
 /// (`session_journal.rs:1075`, `snapshot.rs:262`/`:334`,
-/// `session_journal.rs:1172`/`:735`). A test that asserted only the first would
-/// pass on a degrade that still wrote the other five.
+/// `session_journal.rs:1172`/`:735`). A test that inspected only the first
+/// would miss five sixths of what a run leaves behind — in either direction.
 #[cfg(target_os = "linux")]
 fn profile_contents(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     if !home.exists() {
@@ -1306,14 +1405,79 @@ fn session_directory_entries(home: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Grade one profile for durable-session residue: how many artifacts of the
-/// journal family exist, and in how many files the prompt appears.
+/// Which files under a profile carry a SEALED prepared provider request —
+/// meaning the field is present AND carries a value.
+///
+/// This is the one thing a keyless host must not have written, and the one
+/// thing that separates "journal without the seal" from "journal exactly as
+/// before". Matched on the serialized field rather than on ciphertext, because
+/// ciphertext is unrecognisable by construction: an absence of anything
+/// unreadable is not evidence, whereas an absence of the field that carries it
+/// is.
+///
+/// INSTRUMENT DEFECT, found by this test and repaired rather than written up:
+/// v1 matched the field NAME alone and reported a keyless run as having sealed
+/// a request. `RecoveryCheckpoint.sealed_prepared_request` has no
+/// `skip_serializing_if`, so EVERY checkpoint serializes the key — including
+/// the terminal `CommitTurn` checkpoint that closes a keyless turn, which
+/// writes `"sealed_prepared_request":null`. The name is structural; only the
+/// value is evidence. A needle that matches on every profile can neither pass
+/// nor fail meaningfully, and the vault control would have hidden it by
+/// agreeing.
+///
+/// Paired with a vault control in every caller: on a profile WITH a key this
+/// must return files, or the emptiness asserted on the keyless profile is just
+/// a needle nothing ever writes.
+#[cfg(target_os = "linux")]
+fn sealed_request_artifacts(home: &Path) -> Vec<PathBuf> {
+    profile_contents(home)
+        .into_iter()
+        .filter(|(_, bytes)| {
+            String::from_utf8_lossy(bytes)
+                .split("\"sealed_prepared_request\":")
+                .skip(1)
+                .any(|value| !value.trim_start().starts_with("null"))
+        })
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// The control for [`sealed_request_artifacts`]'s own repair: how many
+/// checkpoints mention the field at all, sealed or not.
+///
+/// Without this, the fixed probe returning empty on a keyless profile is
+/// indistinguishable from a profile whose checkpoints do not carry the field —
+/// which is what the original defect looked like from the other side.
+#[cfg(target_os = "linux")]
+fn checkpoints_mentioning_the_seal(home: &Path) -> usize {
+    profile_contents(home)
+        .into_iter()
+        .map(|(_, bytes)| byte_offsets(&bytes, b"\"sealed_prepared_request\":").len())
+        .sum()
+}
+
+/// The distinct journal event types recorded for a session, as a set.
+///
+/// Read from the journal FILE, not from a live reducer: the question is what a
+/// dead process left on disk for whoever has to reconcile it, and only the file
+/// can answer that.
+#[cfg(target_os = "linux")]
+fn journal_event_types(home: &Path, session_id: &str) -> std::collections::BTreeSet<String> {
+    journal_events(home, session_id)
+        .into_iter()
+        .filter_map(|event| event["type"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Grade one profile for durable-session residue: which artifacts of the
+/// journal family exist, and in which files the prompt appears.
 ///
 /// Returns `(artifact paths, files containing the prompt)` so a caller can
-/// assert an exhaustive zero AND a control caller can prove the same walker
-/// returns non-zero on a profile that really did journal. Without that control
-/// every "zero" below is also what a broken walker, a wrong path, or a home
-/// that never existed would return.
+/// assert either direction AND a control caller can prove the same walker
+/// answers the other way on a profile built to. Without that control every
+/// "zero" is also what a broken walker, a wrong path, or a home that never
+/// existed would return — and every non-zero is what a walker that matched
+/// everything would return.
 #[cfg(target_os = "linux")]
 fn durable_residue(home: &Path, prompt: &str) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const FAMILY: &[&str] = &[
@@ -1474,129 +1638,148 @@ async fn without_secure_store_an_operator_who_requires_durability_gets_a_refusal
     );
 }
 
-/// DEGRADE ALLOWED. The default: the turn runs, the operator is told, and
-/// NOTHING durable is written.
+/// DEGRADE ALLOWED. The default on a keyless host: the turn runs, it IS
+/// recorded, the operator is told what was actually given up, and the ONLY
+/// thing missing from disk is the sealed copy of the provider request.
 ///
-/// The second half of the pair. Its zero-residue assertion is the invariant the
-/// whole degrade posture rests on — if a degraded run can leave even a partial
-/// record, then "no journal" is a lie and a restart forks from state nobody can
-/// read. So it walks the entire profile home rather than globbing for one
-/// filename, and it proves the walker alive on a profile that DID journal
-/// before believing the zero.
+/// The second half of the pair, and the half that changed. It used to assert
+/// that a keyless run leaves NOTHING durable — which was true, and was the
+/// defect: the journal is not encrypted, the confidential store protects one
+/// field, and giving up the whole audit trail to protect that one field made
+/// "suppress the keyring" a way to obtain unrecorded execution.
+///
+/// So this now asserts three things a single "artifacts exist" check cannot
+/// separate:
+///
+/// 1. artifacts EXIST — the journal family is really on disk;
+/// 2. the write-ahead pairs that prove what executed are really IN them;
+/// 3. `sealed_prepared_request` is NOT — the degrade is real, not a no-op.
+///
+/// (3) is what stops (1) and (2) passing on a build where nothing degraded at
+/// all, and the vault control at the end is what stops (3) passing on a needle
+/// nothing ever writes.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable() {
+async fn without_secure_store_the_default_journals_every_effect_but_seals_nothing() {
     let fixture = OpenAiFixtureScript::new([
-        OpenAiStep::text("F14-DEGRADED-REPLY-1"),
-        OpenAiStep::text("F14-DEGRADED-REPLY-2"),
+        OpenAiStep::text("F14-KEYLESS-REPLY-1"),
+        OpenAiStep::text("F14-KEYLESS-REPLY-2"),
     ])
     .start()
     .await
-    .expect("start degraded-run fixture");
+    .expect("start keyless-run fixture");
     let env = environment(&fixture);
     let session_id = "f1400000000000000000000000000005";
-    let prompt = "F14-DEGRADED-PROMPT-MUST-NOT-BECOME-DURABLE";
+    let prompt = "F14-KEYLESS-PROMPT-MUST-BECOME-DURABLE";
 
-    let (mut process, ready) = launch_degraded(&env, &fixture, session_id).await;
-
-    // THE HOST-FACING CONTRACT, read the way a host reads it: off the wire,
-    // from the real packaged binary, on a real keyring-less profile.
-    //
-    // This assertion used to be `ready.get("session_id") == None` — it pinned
-    // the DEFECT. `session_id` is `ready`'s declared correlation key
-    // (`EVENT_SPECS`, `crates/wcore-protocol/src/contract/spec.rs`), and it
-    // was being dropped from the frame entirely under degrade. A host got
-    // `undefined` with no accompanying signal and could not separate
-    // "degraded" from "malformed frame" from "an older Core" — while passing
-    // schema validation, because the field was optional.
-    //
-    // What must be true now: the key is THERE, explicitly null, and a sibling
-    // states the cause — and the cause is the host's, not the operator's. The
-    // operator did not ask for this; a keyring would fix it.
-    let ready_object = ready.as_object().expect("ready frame is a JSON object");
-    assert!(
-        ready_object.contains_key("session_id"),
-        "the degraded ready dropped its declared correlation key: {ready}"
-    );
-    assert_eq!(
-        ready["session_id"],
-        Value::Null,
-        "a degraded run has no session to name, and must say so with null: {ready}"
-    );
-    assert_eq!(
-        ready["session_persistence"], "disabled_by_host",
-        "a degraded run must tell the host that the HOST forced this, not the \
-         operator: {ready}"
-    );
-    // And the descriptor must let a host feature-detect all of the above,
-    // rather than inferring it from a null it cannot date.
-    assert_eq!(
-        ready["contract"]["capabilities"]["session_persistence_v1"], "available",
-        "a host cannot trust a null session_id it cannot attribute to a Core \
-         that declares this: {ready}"
-    );
+    let (mut process, _ready) = launch_keyless(&env, &fixture, session_id).await;
 
     // TWO turns, deliberately. A startup notice is indistinguishable from a
     // per-turn notice if you only ever run one turn, and "the notice fired
     // once, three weeks ago" is precisely the defect. The second turn is the
     // only assertion that can tell them apart.
-    for (index, msg_id) in ["f14-degraded-1", "f14-degraded-2"].into_iter().enumerate() {
+    for (index, msg_id) in ["f14-keyless-1", "f14-keyless-2"].into_iter().enumerate() {
         send_message(&mut process, msg_id, prompt).await;
         let notice = process
-            .next_info_containing("this host has no usable OS keyring", msg_id)
+            .next_info_containing("crash replay protection is OFF", msg_id)
             .await;
         assert_eq!(
             notice["msg_id"], msg_id,
-            "the degraded notice must be correlated to the turn it concerns"
+            "the replay-degrade notice must be correlated to the turn it concerns"
+        );
+        // The notice must say what is STILL true, not only what is lost. Its
+        // predecessor said "this turn is not being recorded" — now false, and
+        // the more alarming half. A notice that overstates the loss is filtered
+        // as noise, and the real loss goes unread with it.
+        let text = notice["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("degrade notice carries no text: {notice}"));
+        assert!(
+            text.contains("IS being recorded"),
+            "the notice must state what survives, not only what is lost: {text}"
         );
         let terminal = process.next_type("stream_end").await;
         assert_eq!(terminal["msg_id"], msg_id);
         assert_eq!(
             terminal["finish_reason"], "stop",
-            "degraded turn {index} must actually complete: {terminal}"
+            "keyless turn {index} must actually complete: {terminal}"
         );
     }
     assert_eq!(
         fixture.observation().requests.len(),
         2,
-        "both degraded turns must reach the provider, exactly once each"
+        "both keyless turns must reach the provider, exactly once each"
     );
 
     let stderr = String::from_utf8_lossy(&process.sigkill().await).into_owned();
     assert!(
-        stderr.contains("durable session persistence is OFF"),
-        "a degraded run must tell the operator; stderr was:\n{stderr}"
+        stderr.contains("crash replay protection is OFF"),
+        "a keyless run must tell the operator; stderr was:\n{stderr}"
     );
 
+    // (1) THE JOURNAL IS REALLY THERE.
     let (artifacts, leaked) = durable_residue(env.home(), prompt);
     assert!(
-        artifacts.is_empty(),
-        "a degraded run wrote durable session artifacts: {artifacts:?}"
+        !artifacts.is_empty(),
+        "a keyless run wrote NO durable session artifacts. That is the amnesia \
+         this posture exists to end: the journal needs no key, and giving it up \
+         to protect one sealed field made suppressing a keyring a way to obtain \
+         unrecorded execution"
     );
     assert!(
-        leaked.is_empty(),
-        "a degraded run persisted the prompt: {leaked:?}"
+        !leaked.is_empty(),
+        "the prompt is nowhere on disk, so no conversation was journaled: \
+         artifacts={artifacts:?}"
     );
-    // MEASURED CORRECTION to what the degrade fix claimed. Its commit message
-    // says a degraded run "creates no sessions/ directory at all". On a profile
-    // built by `tempenv::build` the directory already exists — the HARNESS
-    // creates it — so an `exists()` assertion reds for a reason that has
-    // nothing to do with the product. It did, on this test's second run. The
-    // durable property is that the directory stays EMPTY, which is what is
-    // asserted, with the control below proving the same count is not always 0.
-    assert_eq!(
+    assert_ne!(
         session_directory_entries(env.home()),
         0,
-        "a degraded run put entries in the sessions directory"
+        "a keyless run left the sessions directory empty"
     );
 
-    // KNOWN-POSITIVE CONTROL, in the same test, for the same walker.
+    // (2) AND IT CONTAINS THE WRITE-AHEAD PAIRS, not merely bytes.
     //
-    // Every assertion above is an ABSENCE, and an absence is what a walker
-    // pointed at the wrong path, a home that was never created, or a silently
-    // failing `read_dir` also returns. So run the identical arm WITH vault
-    // unlock material and require the same functions to find artifacts and the
-    // prompt. Without this, deleting the degrade entirely would still pass.
+    // An artifact count cannot tell a real journal from an empty file with the
+    // right name. These are the keyless v1 boundaries — no dispatch id needed,
+    // no key involved — that let someone reconcile what actually executed.
+    let types = journal_event_types(env.home(), session_id);
+    for required in [
+        "turn_started",
+        "provider_attempt_prepared_v2",
+        "provider_attempt_started",
+        "turn_committed",
+    ] {
+        assert!(
+            types.contains(required),
+            "the keyless journal is missing the {required:?} write-ahead record, \
+             so it cannot say what executed. Present: {types:?}"
+        );
+    }
+
+    // (3) AND THE ONE FIELD THAT NEEDS A KEY CARRIES NOTHING.
+    let sealed = sealed_request_artifacts(env.home());
+    assert!(
+        sealed.is_empty(),
+        "a host with no keyring sealed a prepared request anyway, into {sealed:?}. \
+         Either the degrade did not happen, or something wrote ciphertext under a \
+         key it cannot have"
+    );
+    // …and the probe was looking at checkpoints that DO carry the field, so the
+    // emptiness above is about the value and not about the field being absent.
+    assert_ne!(
+        checkpoints_mentioning_the_seal(env.home()),
+        0,
+        "no checkpoint on this profile mentions sealed_prepared_request at all, \
+         so the empty result above says nothing about whether anything was sealed"
+    );
+
+    // KNOWN-POSITIVE CONTROL, in the same test, for the same three probes.
+    //
+    // (3) is an ABSENCE, and an absence is also what a misspelled needle, a
+    // walker pointed at the wrong path, or a home that was never created
+    // returns. So run the identical arm WITH vault unlock material and require
+    // the seal to appear. Without this, a build that never seals ANYTHING —
+    // i.e. one where the repair silently broke durable mode too — passes.
     let control_fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-DURABLE-REPLY")])
         .start()
         .await
@@ -1617,32 +1800,264 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
     assert_eq!(control_terminal["finish_reason"], "stop");
     let _ = control.sigkill().await;
 
-    let (control_artifacts, control_leaked) = durable_residue(control_env.home(), control_prompt);
     assert!(
-        !control_artifacts.is_empty(),
-        "CONTROL FAILED: the residue walker found no artifacts on a profile that \
-         journals, so every zero asserted above is unproven"
+        !sealed_request_artifacts(control_env.home()).is_empty(),
+        "CONTROL FAILED: a profile WITH an unlocked vault sealed nothing either, \
+         so the keyless absence asserted above proves nothing about the degrade — \
+         it only proves the needle is never written"
     );
+
+    // SECOND CONTROL, for the opposite direction: the residue walker must still
+    // be capable of returning EMPTY. Every assertion in (1) is a presence now,
+    // and a walker that matched every file would satisfy all of them. An
+    // operator who turned sessions off is the profile that must stay clean.
+    let off_fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-SESSIONS-OFF-REPLY")])
+        .start()
+        .await
+        .expect("start sessions-off control fixture");
+    let off_env = environment(&off_fixture);
+    let off_prompt = "F14-SESSIONS-OFF-PROMPT-MUST-NOT-BECOME-DURABLE";
+    disable_sessions(&off_env);
+    let (mut off, _off_ready) = launch_sessions_off(&off_env, &off_fixture).await;
+    send_message(&mut off, "f14-sessions-off", off_prompt).await;
+    let off_terminal = off.next_type("stream_end").await;
+    assert_eq!(off_terminal["finish_reason"], "stop");
+    let _ = off.sigkill().await;
+
+    let (off_artifacts, off_leaked) = durable_residue(off_env.home(), off_prompt);
     assert!(
-        !control_leaked.is_empty(),
-        "CONTROL FAILED: the prompt sweep found nothing on a profile that journals, \
-         so the prompt-absence assertions above are unproven"
-    );
-    assert_ne!(
-        session_directory_entries(control_env.home()),
-        0,
-        "CONTROL FAILED: the sessions-directory count is 0 even on a profile that \
-         journals, so the emptiness asserted above proves nothing"
+        off_artifacts.is_empty() && off_leaked.is_empty(),
+        "CONTROL FAILED: the residue walker reports artifacts on a profile with \
+         [session] enabled = false, so the presences asserted above are what this \
+         walker returns for everything: artifacts={off_artifacts:?} \
+         leaked={off_leaked:?}"
     );
 }
 
-/// The crash boundaries a degraded run is killed at.
+/// HIGH-1. A session whose sealed state cannot be opened is refused BY NAME,
+/// and the refusal is scoped to that session — not to the host, not to the
+/// process, and not to the profile.
 ///
-/// A degraded run that completes cleanly and leaves nothing proves very little:
-/// a completed turn has nothing half-written by construction. The invariant the
-/// whole degrade posture rests on is that a run killed MID-EFFECT leaves
-/// nothing either — because if it can leave a partial record, then "no journal"
-/// is false and a restart forks from state nobody can read.
+/// # What was measured before this
+///
+/// Seed a profile with a real recoverable turn under a vault, delete the vault,
+/// relaunch with `--resume <that id>`:
+///
+/// ```text
+/// ARM_RC[journal-exists-key-gone]=0
+/// FRAME_TYPES: ["ready(session_id='da00000000000000000000000000005')"]
+/// SESSION_ENTRIES=6   (unchanged, unread)
+/// ```
+///
+/// It started, emitted `ready` CARRYING that session id, and proceeded, while
+/// six journal artifacts sat on disk untouched and unread. That is worse than
+/// an anonymous degrade: a host told nothing retries or asks; a host told
+/// `ready(session_id=X)` builds its entire session view on a continuity claim
+/// that is false.
+///
+/// # The three arms, and why all three are needed
+///
+/// 1. **REFUSED** — `--resume` the locked session, keyless. No `ready`, one
+///    non-retryable error naming the session, non-zero exit, and the journal
+///    left byte-identical because it is evidence.
+/// 2. **NOT A BRICK** — the SAME profile on the SAME keyless host, launched
+///    without naming that session, starts and journals normally. This is the
+///    arm that separates this remedy from the one it replaces: a refusal that
+///    took the whole process down would hand anyone who can stop a D-Bus a
+///    complete availability kill, converting an attack on confidentiality into
+///    an attack on availability.
+/// 3. **NOT PERMANENT** — the SAME profile, the SAME session, WITH the vault
+///    restored, resumes. Without this, arm 1 also passes on a build that
+///    refuses every resume, and the "restore the key and resume again" promise
+///    in the refusal text would be untested.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_session_whose_key_is_gone_is_refused_by_name_and_only_that_session() {
+    let fixture = OpenAiFixtureScript::new([OpenAiStep::text("MUST-NOT-DISPATCH")])
+        .start()
+        .await
+        .expect("start locked-session fixture");
+    let env = environment(&fixture);
+    let vault = VaultSecret::new();
+    let session_id = "f1400000000000000000000000000009";
+    let prompt = "F14-LOCKED-SESSION-PROMPT";
+
+    // The product's own production-shaped seeder, in a child process, under a
+    // vault: a real interrupted turn at a real sealed provider-dispatch
+    // checkpoint. Nothing here is a hand-written journal.
+    seed_recoverable_profile(
+        &env,
+        &fixture,
+        &vault,
+        session_id,
+        "turn-f14-locked",
+        prompt,
+        false,
+    )
+    .await;
+    let journal_path = env
+        .home()
+        .join("sessions")
+        .join(format!("{session_id}.journal"));
+    let seeded_journal = fs::read(&journal_path).expect("read the seeded journal");
+    let seeded_sessions = session_directory_entries(env.home());
+    assert_ne!(
+        seeded_sessions, 0,
+        "the seeder produced no session artifacts, so there is nothing to lock"
+    );
+    assert!(
+        !sealed_request_artifacts(env.home()).is_empty(),
+        "the seeded profile carries no sealed prepared request, so the arm below \
+         would be refusing a session that never needed a key"
+    );
+
+    // ARM 1 — REFUSED. The vault is gone; the journal is not.
+    let mut command = keyless_command(&env, &fixture, None);
+    command
+        .arg("--resume")
+        .arg(session_id)
+        .stdin(Stdio::null())
+        .kill_on_drop(false);
+    let output = tokio::time::timeout(
+        EVENT_TIMEOUT,
+        command
+            .spawn()
+            .expect("spawn keyless resume of a locked session")
+            .wait_with_output(),
+    )
+    .await
+    .expect("locked-session resume terminated")
+    .expect("collect locked-session resume output");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "resuming a session whose sealed state cannot be opened must not succeed. \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let frames: Vec<Value> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    // THE DEFECT, pinned in the one place it showed: no `ready`, at all. The
+    // frame was the whole of the false claim.
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.get("type").and_then(Value::as_str) == Some("ready")),
+        "a refused resume claimed ready, which is the continuity claim this fixes: \
+         {stdout}"
+    );
+    let errors: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| frame.get("type").and_then(Value::as_str) == Some("error"))
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "the host must receive exactly one refusal frame: {stdout}"
+    );
+    assert_eq!(errors[0]["error"]["retryable"], false);
+    let message = errors[0]["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("refusal frame lacks a message: {}", errors[0]));
+    for needle in [
+        session_id,
+        "cannot be resumed",
+        "Only THIS session is refused",
+        "starting a new session on this host works normally",
+        "WAYLAND_VAULT_PASSPHRASE",
+    ] {
+        assert!(
+            message.contains(needle),
+            "the refusal must tell the host {needle:?}; got: {message}"
+        );
+    }
+
+    // THE JOURNAL IS EVIDENCE. A refusal that consumed, truncated or rotated
+    // what it could not read would destroy the only record of the interrupted
+    // turn — and would make arm 3 impossible.
+    //
+    // NOT byte equality, and not over the whole profile. Both were tried and
+    // both red for reasons that are not the product misbehaving: a launch that
+    // opens a session acquires a writer lease and pins a confidential-backend
+    // marker, and `SessionJournal::open` legitimately folds a leftover WAL into
+    // the journal, so the file grows on its first open after the seeder died.
+    // Byte equality would forbid recovery from doing its job. What must hold is
+    // that nothing was LOST: the record only ever grows, the interrupted turn's
+    // own prompt is still in it, and the sealed material that caused the
+    // refusal is still there. Arm 3 then proves the stronger property end to
+    // end by resuming from it.
+    let after = fs::read(&journal_path).expect("read the journal after the refusal");
+    assert!(
+        after.len() >= seeded_journal.len(),
+        "the refused resume SHRANK the journal it could not read: {} -> {} bytes",
+        seeded_journal.len(),
+        after.len()
+    );
+    assert!(
+        !byte_offsets(&after, prompt.as_bytes()).is_empty(),
+        "the refused resume erased the interrupted turn's own prompt from the \
+         journal, so the evidence it refused to act on is gone"
+    );
+    assert!(
+        !sealed_request_artifacts(env.home()).is_empty(),
+        "the refused resume destroyed the sealed material that made it refuse"
+    );
+
+    // ARM 2 — NOT A BRICK. Same host, same profile, same missing key, one
+    // second later. A launch that did not ask for the locked session must be
+    // completely unaffected.
+    let live_fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-LOCKED-SIBLING-REPLY")])
+        .start()
+        .await
+        .expect("start locked-session sibling fixture");
+    let sibling_id = "f1400000000000000000000000000010";
+    let (mut sibling, _sibling_ready) = launch_keyless(&env, &live_fixture, sibling_id).await;
+    send_message(
+        &mut sibling,
+        "f14-locked-sibling",
+        "F14-LOCKED-SIBLING-PROMPT",
+    )
+    .await;
+    let sibling_terminal = sibling.next_type("stream_end").await;
+    assert_eq!(
+        sibling_terminal["finish_reason"], "stop",
+        "a keyless host with one locked session must still complete turns in \
+         another: {sibling_terminal}"
+    );
+    let _ = sibling.sigkill().await;
+    assert_ne!(
+        session_directory_entries(env.home()),
+        seeded_sessions,
+        "the sibling session journaled nothing, so the refusal did brick this \
+         profile after all"
+    );
+
+    // ARM 3 — NOT PERMANENT. The same session, with the key back.
+    let restore_fixture = OpenAiFixtureScript::new([OpenAiStep::text("F14-LOCKED-RESTORED-REPLY")])
+        .start()
+        .await
+        .expect("start locked-session restore fixture");
+    let restored = CoreProcess::launch(&env, &restore_fixture, &vault, session_id, true).await;
+    // `CoreProcess::launch` already asserts `ready` names this session, which is
+    // the whole of arm 3: with the key present the identical resume that was
+    // refused above now opens.
+    drop(restored);
+}
+
+/// The crash boundaries a keyless run is killed at.
+///
+/// A keyless run that completes cleanly and leaves a journal proves very
+/// little: a completed turn has nothing half-written by construction, and its
+/// record is written at leisure. The property this posture rests on is that a
+/// run killed MID-EFFECT still leaves a record of the effect — because the
+/// whole argument for journaling without the seal is that the ambiguous case,
+/// the one where nobody can say whether the effect landed, is exactly the case
+/// a record is for.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DegradedCrashBoundary {
@@ -1673,17 +2088,18 @@ impl DegradedCrashBoundary {
     }
 }
 
-/// Drive a degraded run to `boundary`, SIGKILL it there, and return the profile
+/// Drive a keyless run to `boundary`, SIGKILL it there, and return the profile
 /// residue plus the number of provider requests the fixture observed.
 ///
 /// The request count is returned so the caller can assert the run REACHED the
 /// boundary it named. Without that, a boundary whose setup silently failed
-/// would produce an empty profile and read as a pass — the same shape as a
-/// concurrency test in which a participant never started.
+/// would produce a profile with no mid-effect record in it and the failure
+/// would be indistinguishable from the product not writing one — the same shape
+/// as a concurrency test in which a participant never started.
 #[cfg(target_os = "linux")]
 async fn crash_degraded_at(boundary: DegradedCrashBoundary) -> (Vec<PathBuf>, Vec<PathBuf>, usize) {
     let label = boundary.label();
-    let prompt = format!("F14-CRASH-{label}-PROMPT-MUST-NOT-BECOME-DURABLE");
+    let prompt = format!("F14-CRASH-{label}-PROMPT-MUST-BECOME-DURABLE");
 
     let seed = OpenAiFixtureScript::new([OpenAiStep::text("unused")])
         .start()
@@ -1730,7 +2146,7 @@ async fn crash_degraded_at(boundary: DegradedCrashBoundary) -> (Vec<PathBuf>, Ve
     };
 
     let (mut process, _ready) =
-        launch_degraded(&env, &fixture, "f1400000000000000000000000000007").await;
+        launch_keyless(&env, &fixture, "f1400000000000000000000000000007").await;
     let msg_id = format!("f14-crash-{label}");
     if boundary != DegradedCrashBoundary::BeforeAnyTurn {
         send_message(&mut process, &msg_id, &prompt).await;
@@ -1773,24 +2189,45 @@ async fn crash_degraded_at(boundary: DegradedCrashBoundary) -> (Vec<PathBuf>, Ve
     // Read the profile AFTER the kill, with no clean shutdown having run, so
     // any temp file, WAL or partially-renamed artifact is still on disk.
     let (artifacts, leaked) = durable_residue(env.home(), &prompt);
-    let entries = session_directory_entries(env.home());
-    assert_eq!(
-        entries, 0,
-        "{label}: a degraded crash left {entries} entries in the sessions directory"
+    assert_ne!(
+        session_directory_entries(env.home()),
+        0,
+        "{label}: a keyless crash left the sessions directory empty, so nothing \
+         durable survived the kill"
+    );
+    // The seal is the one thing that must still be missing at EVERY boundary,
+    // including the ones where a durable run would have written a
+    // `ProviderDispatch` checkpoint. Asserting it per boundary, not once at the
+    // end, is what catches a mode that seals only on some paths.
+    let sealed = sealed_request_artifacts(env.home());
+    assert!(
+        sealed.is_empty(),
+        "{label}: a keyless crash left a sealed prepared request in {sealed:?}"
     );
     (artifacts, leaked, observed)
 }
 
-/// TASK: SIGKILL before and after each effect boundary; ZERO residue of any
-/// kind, not merely no `sessions/*.journal`.
+/// TASK: SIGKILL at each effect boundary; RECOVERABLE RESIDUE at every one of
+/// them, of the whole journal family and not merely a `sessions/` entry.
 ///
-/// Five boundaries run here. The unrun cells are named in the SUMMARY rather
-/// than quietly omitted — outbound channel delivery is the notable one, because
-/// this harness has no channel and inventing one would prove less than saying
-/// so.
+/// The inverse of the matrix it replaces, and the inversion is the repair. A
+/// keyless run used to leave nothing at any boundary, which was asserted as a
+/// virtue; it is the failure. The boundary that matters most is
+/// `provider-request-sent-no-headers` — the request has left and no answer has
+/// come back, so nobody can say whether it landed. That is precisely the state a
+/// durable record exists to bound, and it is the state the old posture recorded
+/// nothing about.
+///
+/// `BeforeAnyTurn` is the one boundary that legitimately has no PROMPT on disk —
+/// no message was ever sent — so it is graded on artifacts alone. Folding it in
+/// with the rest would have meant weakening the prompt assertion for all five.
+///
+/// Five boundaries run here. The unrun cells are named rather than quietly
+/// omitted — outbound channel delivery is the notable one, because this harness
+/// has no channel and inventing one would prove less than saying so.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
+async fn a_keyless_run_killed_at_any_effect_boundary_leaves_recoverable_residue() {
     let boundaries = [
         DegradedCrashBoundary::BeforeAnyTurn,
         DegradedCrashBoundary::ProviderRequestSentNoHeaders,
@@ -1804,16 +2241,21 @@ async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
         let label = boundary.label();
         let (artifacts, leaked, observed) = crash_degraded_at(boundary).await;
         assert!(
-            artifacts.is_empty(),
-            "{label}: a degraded crash left durable artifacts: {artifacts:?}"
+            !artifacts.is_empty(),
+            "{label}: a keyless crash left NO durable artifacts, so nothing records \
+             that this boundary was ever crossed"
         );
-        assert!(
-            leaked.is_empty(),
-            "{label}: a degraded crash persisted the prompt into: {leaked:?}"
-        );
+        if boundary != DegradedCrashBoundary::BeforeAnyTurn {
+            assert!(
+                !leaked.is_empty(),
+                "{label}: the prompt is nowhere on disk after the kill, so the turn \
+                 that reached this boundary left no recoverable trace of itself"
+            );
+        }
         // Prove the run REACHED its boundary. A boundary whose setup silently
-        // failed leaves an empty profile too, which is the same evidence as a
-        // pass.
+        // failed still opens a session and still writes SOMETHING, so the
+        // artifact assertion above would pass on a run that never got near the
+        // effect it names.
         let expected_requests = usize::from(boundary != DegradedCrashBoundary::BeforeAnyTurn);
         assert_eq!(
             observed, expected_requests,
@@ -1829,10 +2271,12 @@ async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
          of 0 would mean nothing was ever exercised"
     );
 
-    // KNOWN-POSITIVE CONTROL for the crash path specifically. The five zeroes
-    // above are absences, and a harness that crashed before Core ever wrote
-    // anything would produce them for free. This kills a DURABLE run at the
-    // same partial-stream boundary and requires residue to exist.
+    // KNOWN-NEGATIVE CONTROL for the crash path specifically, and it is now the
+    // control that has to exist. The five presences above are what a walker
+    // that matched every file in a profile would also return — every profile
+    // has a config.toml. So kill a run at the same partial-stream boundary with
+    // `[session] enabled = false`, where nothing durable may exist, and require
+    // the identical functions to come back empty.
     let fixture = OpenAiFixtureScript::new([OpenAiStep::text_then_stall(
         "F14-CRASH-CONTROL-DELTA",
         60_000,
@@ -1841,33 +2285,28 @@ async fn a_degraded_run_killed_at_any_effect_boundary_leaves_nothing_durable() {
     .await
     .expect("start crash-control fixture");
     let env = environment(&fixture);
-    let vault = VaultSecret::new();
-    let control_prompt = "F14-CRASH-CONTROL-PROMPT-MUST-BECOME-DURABLE";
-    let mut control = CoreProcess::launch(
-        &env,
-        &fixture,
-        &vault,
-        "f1400000000000000000000000000008",
-        false,
-    )
-    .await;
+    let control_prompt = "F14-CRASH-CONTROL-PROMPT-MUST-NOT-BECOME-DURABLE";
+    disable_sessions(&env);
+    let (mut control, _control_ready) = launch_sessions_off(&env, &fixture).await;
     send_message(&mut control, "f14-crash-control", control_prompt).await;
     wait_for_requests(&fixture, 1).await;
     let delta = control.next_type("text_delta").await;
     assert_eq!(delta["text"], "F14-CRASH-CONTROL-DELTA");
     let _ = control.sigkill().await;
 
-    let (control_artifacts, _control_leaked) = durable_residue(env.home(), control_prompt);
+    let (control_artifacts, control_leaked) = durable_residue(env.home(), control_prompt);
     assert!(
-        !control_artifacts.is_empty(),
-        "CONTROL FAILED: killing a DURABLE run at the same partial-stream boundary \
-         left no artifacts either, so the five zeroes above prove nothing about the \
-         degrade — they only prove the walker returns empty"
+        control_artifacts.is_empty() && control_leaked.is_empty(),
+        "CONTROL FAILED: killing a run with [session] enabled = false at the same \
+         partial-stream boundary ALSO left residue, so the five presences above \
+         prove nothing about journaling — they only prove the walker matches \
+         everything: artifacts={control_artifacts:?} leaked={control_leaked:?}"
     );
-    assert_ne!(
+    assert_eq!(
         session_directory_entries(env.home()),
         0,
-        "CONTROL FAILED: the sessions directory is empty after killing a durable run"
+        "CONTROL FAILED: the sessions directory has entries after a run the \
+         operator turned sessions off for"
     );
 }
 

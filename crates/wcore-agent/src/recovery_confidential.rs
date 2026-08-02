@@ -161,6 +161,26 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
     /// but it never writes request content.
     fn preflight(&self, config: &Config) -> Result<(), RecoveryConfidentialError>;
 
+    /// Can sealed material that ALREADY EXISTS be opened?
+    ///
+    /// Deliberately not [`Self::preflight`], and the difference is the whole
+    /// point. `preflight` asks "may I start sealing?" and CREATES the profile's
+    /// key to answer yes. This asks "can I read what is already on disk?", and
+    /// it must never create anything: the question is only ever asked about a
+    /// journal that already contains ciphertext, and minting a fresh key at
+    /// that moment would answer "yes" while guaranteeing every subsequent open
+    /// fails — the worst of both honest answers.
+    ///
+    /// On the trait rather than a free function because the answer belongs to
+    /// whichever protection the caller actually holds. A free function would
+    /// build a fresh `RecoveryRequestProtector` and consult the real store,
+    /// which is wrong for any engine carrying an injected key: it would report
+    /// a locked session for material it can open perfectly well.
+    fn sealed_request_key_available(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError>;
+
     fn seal(
         &self,
         config: &Config,
@@ -179,6 +199,13 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
 impl RecoveryRequestProtection for RecoveryRequestProtector {
     fn preflight(&self, config: &Config) -> Result<(), RecoveryConfidentialError> {
         self.with_key(config, true, |_| Ok(()))
+    }
+
+    fn sealed_request_key_available(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError> {
+        self.with_key(config, false, |_| Ok(()))
     }
 
     fn seal(

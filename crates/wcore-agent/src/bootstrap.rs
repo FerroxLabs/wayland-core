@@ -3023,6 +3023,23 @@ impl AgentBootstrap {
             &media_accounting,
         );
 
+        // HIGH-1. The single chokepoint for every RESUME surface: all three
+        // `main.rs` launch modes and `channel_dispatch` reach an engine through
+        // `AgentBootstrap::resume`, and this is the last point before the
+        // engine exists — so a refusal here reaches a `--json-stream` host as
+        // one `init_failed` frame with NO `ready` before it, which is the whole
+        // point: the false continuity claim was the `ready` frame.
+        //
+        // Scoped to this session by construction. Nothing here can refuse a
+        // launch that did not ask to resume something.
+        if let Some(session) = self.resume_session.as_ref() {
+            crate::recovery::admit_session_resume(
+                &self.config,
+                &session.journal,
+                crate::engine::default_recovery_request_protection().as_ref(),
+            )?;
+        }
+
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_active_with_provider(
                 provider.clone(),

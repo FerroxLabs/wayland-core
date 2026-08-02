@@ -18,21 +18,42 @@ use super::OutputSink;
 ///
 /// * `Engine::current_session_id()` is `Some` iff a `SessionManager` exists,
 ///   which is iff `config.session.enabled` (`engine.rs:3154`/`:3396`), so a
-///   `Some` really is a durable journaled session.
-/// * `session.enabled == false` has exactly two causes, and
-///   [`wcore_config::config::durable_sessions_disabled_by_host`] is the flag
-///   config resolution sets for precisely this question — it exists because
-///   "sessions off" alone cannot tell an operator who asked from a host that
-///   could not comply (`config.rs:2680-2707`).
+///   `Some` really is a journaled session.
+/// * [`wcore_config::config::replay_protection_unavailable`] is the flag config
+///   resolution sets when this host cannot seal a prepared provider request —
+///   no usable OS keyring, no unlocked credentials vault.
+///
+/// # Both inputs changed meaning, and the second one flipped
+///
+/// The second input used to be `durable_sessions_disabled_by_host()`, and a
+/// `true` there meant `session_id` was `None` *because of* the host. That
+/// coupling is gone: a keyless host now journals, so `session.enabled == false`
+/// has exactly ONE cause left — the operator — and the host fact has become
+/// orthogonal to whether a session exists at all.
+///
+/// Which is why `(Some(_), _) => Durable` had to be split. It was correct while
+/// a keyless host had no session; it is an over-claim now that it has one,
+/// because `durable` is what a host reads to decide whether to WAIT for
+/// auto-recovery. `(None, true)` is correspondingly unreachable — sessions off
+/// short-circuits the availability probe before it can set the flag — so
+/// `DisabledByHost` is no longer produced here at all. It survives on the type
+/// as a decode-only legacy value; see its docs.
 ///
 /// Split out from the emitter so the mapping is provable without standing up a
 /// keyring-less host: the degraded frame is the one no developer ever runs by
 /// hand, so it is the one a wrong mapping ships in.
-fn session_persistence_for(session_id: Option<&str>, host_forced_off: bool) -> SessionPersistence {
-    match (session_id, host_forced_off) {
-        (Some(_), _) => SessionPersistence::Durable,
-        (None, true) => SessionPersistence::DisabledByHost,
-        (None, false) => SessionPersistence::DisabledByOperator,
+fn session_persistence_for(
+    session_id: Option<&str>,
+    replay_protection_unavailable: bool,
+) -> SessionPersistence {
+    match (session_id, replay_protection_unavailable) {
+        (Some(_), false) => SessionPersistence::Durable,
+        (Some(_), true) => SessionPersistence::JournaledWithoutReplay,
+        // No session id means the operator asked for none. It is deliberately
+        // NOT conditioned on the host flag: a host that cannot seal no longer
+        // takes the journal away, so attributing this to the host would send an
+        // operator hunting for a keyring to restore a journal they switched off.
+        (None, _) => SessionPersistence::DisabledByOperator,
     }
 }
 
@@ -497,7 +518,7 @@ impl ProtocolSink {
     ) {
         let session_persistence = session_persistence_for(
             session_id.as_deref(),
-            wcore_config::config::durable_sessions_disabled_by_host(),
+            wcore_config::config::replay_protection_unavailable(),
         );
         let _ = self.writer.emit(&ProtocolEvent::Ready {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1265,32 +1286,74 @@ mod tests {
     /// The whole mapping, including the arm nobody can reach on a developer
     /// machine.
     ///
-    /// `disabled_by_host` only happens on a host with no OS keyring and no
-    /// unlocked vault, so on any laptop with a working keychain the degraded
-    /// arm is unreachable and a wrong mapping there would ship green. Pinning
-    /// all four input combinations is the only way this arm is ever exercised
-    /// off a keyring-less server.
+    /// A host with no OS keyring and no unlocked vault is the only way to reach
+    /// the replay-degraded arms, so on any laptop with a working keychain they
+    /// are unreachable and a wrong mapping there would ship green. Pinning all
+    /// four input combinations is the only way they are ever exercised off a
+    /// keyring-less server.
+    ///
+    /// The load-bearing row is `(Some, true)`. It used to assert `Durable`,
+    /// with a comment arguing that a live session is durable whatever the host
+    /// flag says. That was true while a keyless host had NO session — the row
+    /// only described a stale process-global. It is exactly the reachable
+    /// production state now, and calling it `durable` tells a host to wait for
+    /// an auto-recovery that will never come.
     #[test]
-    fn session_persistence_names_the_cause_of_a_missing_session_id() {
+    fn session_persistence_names_what_the_host_can_and_cannot_do() {
         assert_eq!(
             session_persistence_for(Some("sess-1"), false),
             SessionPersistence::Durable
         );
         assert_eq!(
-            session_persistence_for(None, true),
-            SessionPersistence::DisabledByHost,
-            "a host-forced degrade must be reported as such, not as an operator choice"
+            session_persistence_for(Some("sess-1"), true),
+            SessionPersistence::JournaledWithoutReplay,
+            "a journaled session with no sealed request is not `durable`: a host \
+             reading `durable` waits for an auto-recovery this session cannot do"
         );
         assert_eq!(
             session_persistence_for(None, false),
             SessionPersistence::DisabledByOperator
         );
-        // A live session is durable regardless of the process-global host
-        // flag: another config resolved in this process may have degraded,
-        // but THIS engine holds a SessionManager and a journal.
+        // No session id means the operator asked for none — even on a keyless
+        // host. Attributing it to the host would send them hunting for a
+        // keyring to restore a journal they switched off themselves.
         assert_eq!(
-            session_persistence_for(Some("sess-1"), true),
-            SessionPersistence::Durable
+            session_persistence_for(None, true),
+            SessionPersistence::DisabledByOperator
+        );
+    }
+
+    /// `disabled_by_host` must be UNPRODUCIBLE and still DECODABLE.
+    ///
+    /// Two halves that pull in opposite directions, so both are asserted here:
+    /// no input to the mapping may yield it (a keyless host journals now, so
+    /// emitting it would describe a state this Core cannot be in), and the wire
+    /// value must still round-trip, because an older Core sends it and a host
+    /// may have stored it against a session it is still tracking.
+    ///
+    /// Deleting the variant would satisfy the first half and silently break the
+    /// second — which is why removing a value we once published is not the same
+    /// operation as ceasing to send it.
+    #[test]
+    fn disabled_by_host_is_no_longer_produced_but_is_still_decodable() {
+        for session_id in [None, Some("sess-1")] {
+            for replay_unavailable in [false, true] {
+                assert_ne!(
+                    session_persistence_for(session_id, replay_unavailable),
+                    SessionPersistence::DisabledByHost,
+                    "this Core emitted a value it can no longer be in the state of: \
+                     session_id={session_id:?} replay_unavailable={replay_unavailable}"
+                );
+            }
+        }
+
+        let decoded: SessionPersistence = serde_json::from_str("\"disabled_by_host\"")
+            .expect("an older Core's value must decode");
+        assert_eq!(decoded, SessionPersistence::DisabledByHost);
+        assert_eq!(
+            serde_json::to_value(SessionPersistence::JournaledWithoutReplay).unwrap(),
+            serde_json::json!("journaled_without_replay"),
+            "the new value's wire spelling is a published contract"
         );
     }
 

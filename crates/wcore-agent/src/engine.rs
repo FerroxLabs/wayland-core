@@ -3010,7 +3010,13 @@ pub struct AgentEngine {
     length_wedge_fingerprint: Option<[u8; 32]>,
 }
 
-fn default_recovery_request_protection()
+/// The protection an engine gets when nobody injected one.
+///
+/// `pub(crate)` so [`crate::bootstrap`] can ask the SAME implementation whether
+/// a session's sealed state is readable, before it builds the engine that would
+/// hold it. Two spellings of "which protection is in force" is how a resume gate
+/// and the engine it guards end up disagreeing.
+pub(crate) fn default_recovery_request_protection()
 -> Arc<dyn crate::recovery_confidential::RecoveryRequestProtection> {
     #[cfg(test)]
     {
@@ -3808,6 +3814,18 @@ impl AgentEngine {
                 session.id
             );
         }
+        // HIGH-1, the second resume surface. `AgentBootstrap::resume` covers
+        // every LAUNCH; this covers the live TUI `/resume`, which moves an
+        // already-running engine onto another persisted session without going
+        // through bootstrap at all. Same question, same answer, and it is asked
+        // here — inside the validated block, before any live state changes — so
+        // a refusal leaves the engine on the session it was already on rather
+        // than half-moved onto one it cannot read.
+        crate::recovery::admit_session_resume(
+            &self.config,
+            &journal,
+            self.recovery_request_protection.as_ref(),
+        )?;
         let canonical_messages = journal_state
             .conversation
             .into_iter()
@@ -6345,7 +6363,6 @@ impl AgentEngine {
         }
 
         if self.session_journal.is_none() {
-            self.announce_host_forced_degrade_for_this_turn();
             let result = self
                 .run_inner(
                     UserTurnInput::new(user_input, Some(additional_content)),
@@ -6376,9 +6393,44 @@ impl AgentEngine {
         // request can be protected for crash recovery. Failing here keeps an
         // unconfigured headless/profile launch at a clean Ready boundary
         // instead of stranding a TurnStarted that can never dispatch.
-        self.recovery_request_protection
-            .preflight(&self.config)
-            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        //
+        // UNLESS the host cannot seal a request at all, in which case this gate
+        // is the whole amnesia. It is the reason a keyless host used to have to
+        // choose between "no journal" and "every turn fails at dispatch": the
+        // preflight refuses the turn, so `Config::resolve` disabled sessions
+        // upstream to stop it being reached. Neither is necessary. The seal
+        // buys AUTOMATIC replay of an interrupted dispatch and nothing else;
+        // the write-ahead pairs that prove what executed are keyless. So on a
+        // host that cannot seal, journal the turn, decline the promise, and say
+        // so on the turn's own surface.
+        //
+        // The decision is taken from THIS engine's own protection and THIS
+        // engine's config, not from the process-global fact `Config::resolve`
+        // records. That global is right for a status surface and wrong here for
+        // two reasons: it is set by whichever config resolved first in the
+        // process, and it is a measurement of the host taken at startup, while
+        // this is a question about a key that may have been unlocked or removed
+        // since. An engine that skipped sealing because some other config
+        // resolved on a keyless path would silently stop protecting requests it
+        // can perfectly well protect.
+        //
+        // Only ONE cause degrades. `NoSecureBackendAvailable` is the host having
+        // no keyring and no unlocked vault — nobody chose it and nobody can be
+        // blamed for it. `PlaintextBackendRejected` is an operator who
+        // configured a backend that can never hold confidential material, and
+        // `SecureStoreUnreadable` is a vault opened with the wrong passphrase:
+        // both are decisions or mistakes with a specific fix, both must keep
+        // failing loudly, and neither may be quietly reinterpreted as "this
+        // host is just like a headless server".
+        match self.recovery_request_protection.preflight(&self.config) {
+            Ok(()) => {}
+            Err(
+                crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
+            ) => {
+                self.announce_replay_protection_unavailable_for_this_turn();
+            }
+            Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
+        }
         let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
         self.active_journal_turn_id = Some(turn_id.clone());
         if let Err(error) = self
@@ -8898,17 +8950,16 @@ impl AgentEngine {
         self.sync_journal_conversation(turn_id).await
     }
 
-    /// Tell whoever is watching THIS turn that it is not being recorded.
+    /// Tell whoever is watching THIS turn that it is being recorded but cannot
+    /// resume itself.
     ///
     /// The host-forced degrade already announces itself once, on stderr, during
     /// config resolution. That is the right place to explain the situation and
     /// the wrong place to be the only mention of it: a channel gateway resolves
     /// its config when the daemon starts and then serves turns for weeks, so
     /// the notice reaches whoever ran `systemctl start` and nobody after. Every
-    /// person whose message went unrecorded arrived long after that line
-    /// scrolled away, and the `--json-stream` `ready` frame does not carry the
-    /// state either — it simply omits `session_id`, which is also what a legacy
-    /// producer looks like.
+    /// person whose turn could not have been replayed arrived long after that
+    /// line scrolled away.
     ///
     /// So say it per turn, on the surface the turn is observable on:
     /// [`OutputSink::emit_durability_degraded`] reaches the terminal for a
@@ -8916,17 +8967,28 @@ impl AgentEngine {
     /// is already in the pinned contract, so no host has to learn a new frame
     /// to receive it.
     ///
-    /// Deliberately conditioned on `durable_sessions_disabled_by_host()`, not
-    /// on `session_journal.is_none()`. The two causes need opposite treatment:
-    /// an operator who wrote `[session] enabled = false` asked for this and
-    /// must not be nagged once per message; an operator whose HOST took the
-    /// capability away never agreed to anything.
+    /// UNCONDITIONAL, and its single caller is what makes that correct: it
+    /// fires only on the one preflight arm that means "this host has no key",
+    /// having already separated that from an operator who chose a plaintext
+    /// backend and from a vault opened with the wrong passphrase. A second
+    /// condition here would be a second opinion about a question already
+    /// answered, and the two would drift.
+    ///
+    /// An operator who wrote `[session] enabled = false` never reaches this at
+    /// all — there is no journal, so there is no journaled turn — which is the
+    /// right treatment: they asked for it and must not be nagged once per
+    /// message.
+    ///
+    /// The text says what is STILL true as well as what is lost. Its
+    /// predecessor said "this turn is not being recorded", which is now false
+    /// and was the more alarming half — a notice that overstates the loss gets
+    /// filtered as noise, and then the real loss goes unread with it.
     ///
     /// # The record and the notice are separate, and only one of them repeats
     ///
-    /// The `tracing::warn!` below is the RECORD: one line per undurable turn,
-    /// on every surface, wherever the process routed its diagnostics. With
-    /// `RUST_LOG` unset that is the size-bounded log at
+    /// The `tracing::warn!` below is the RECORD: one line per unreplayable
+    /// turn, on every surface, wherever the process routed its diagnostics.
+    /// With `RUST_LOG` unset that is the size-bounded log at
     /// `$WAYLAND_HOME/logs/wayland-core.log` (`~/.wayland/logs/` when
     /// `WAYLAND_HOME` is not set); with `RUST_LOG` set it is stderr, because
     /// `RUST_LOG` is authoritative and routes everything there. Either way the
@@ -8936,18 +8998,15 @@ impl AgentEngine {
     /// named rather than intra-doc linked, since that crate sits ABOVE this one
     /// and the path would not resolve from here. It is the durable artifact the
     /// gateway case actually needs: an operator debugging "which of last week's
-    /// messages went unrecorded" reads a file, not a terminal that scrolled
-    /// away three weeks ago.
+    /// messages could not have been recovered" reads a file, not a terminal
+    /// that scrolled away three weeks ago.
     ///
     /// The sink call is the NOTICE, and whether it repeats is the sink's
     /// decision — see [`OutputSink::emit_durability_degraded`]. A protocol
     /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
-    fn announce_host_forced_degrade_for_this_turn(&self) {
-        if !wcore_config::config::durable_sessions_disabled_by_host() {
-            return;
-        }
+    fn announce_replay_protection_unavailable_for_this_turn(&self) {
         tracing::warn!(
             target: "wcore_agent::session",
             session = %self
@@ -8955,15 +9014,18 @@ impl AgentEngine {
                 .as_ref()
                 .map(|s| s.id.as_str())
                 .unwrap_or("<none>"),
-            "this turn is NOT being recorded: durable session persistence is off because the \
-             host has no usable OS keyring and no unlocked credentials vault"
+            "this turn cannot be replayed if it is interrupted: the host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request is not \
+             sealed. The turn IS journaled"
         );
         self.output.emit_durability_degraded(
-            "durable session persistence is OFF for this run: this host has no usable OS \
-             keyring and no unlocked credentials vault. This turn is not being recorded, so \
-             if it is interrupted there will be no way to tell whether its effects already \
-             happened. Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE to restore \
-             durability, [session] enabled = false to accept it silently, or \
+            "crash replay protection is OFF for this run: this host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request \
+             cannot be sealed. This turn IS being recorded — the journal keeps its \
+             provider, tool, approval and delivery boundaries — but if it is interrupted \
+             mid-dispatch it will not resume itself; you will be asked to resume, \
+             reconcile or cancel it. Set WAYLAND_VAULT_PASSPHRASE_FD or \
+             WAYLAND_VAULT_PASSPHRASE to restore replay, or \
              [session] require_durability = true to refuse to run this way at all.",
         );
     }
@@ -10103,19 +10165,59 @@ impl AgentEngine {
                     })?)
                 } else if let Some(turn_id) = journal_turn_id {
                     self.sync_journal_conversation(turn_id).await?;
-                    let checkpoint = self
-                        .commit_provider_recovery_checkpoint(
-                            turn_id,
-                            &request,
-                            turn,
-                            stream_attempt,
-                            overflow_retried,
-                            length_wedge_retried,
-                            &loop_guard,
-                            &failure_guard,
-                        )
-                        .await?;
-                    checkpoint.dispatch_id
+                    // Asked of this engine's own protection, for the reason the
+                    // preflight above gives. It is cheap: a successful preflight
+                    // has already cached the key, so this is a mutex lock and a
+                    // `Some` check, and it is READ-ONLY — it can never create
+                    // the key it is asking about.
+                    //
+                    // The preflight has already screened every cause that must
+                    // fail closed, so the only way to be here without a key is
+                    // the host having none.
+                    if self
+                        .recovery_request_protection
+                        .sealed_request_key_available(&self.config)
+                        .is_err()
+                    {
+                        // A `ProviderDispatch` checkpoint is REQUIRED to carry a
+                        // sealed prepared request (`recovery.rs:331`), so on a
+                        // host that cannot seal one there is no honest
+                        // checkpoint to write — and writing one without the
+                        // seal would be a durable claim that this dispatch can
+                        // be replayed, which is exactly the lie this posture
+                        // exists to avoid.
+                        //
+                        // Mint the dispatch identity directly instead. It is
+                        // not decoration: with a journal and an active turn the
+                        // provider adapter REQUIRES one (see the `ok_or_else`
+                        // below), and it is what binds every physical
+                        // retry/fallback attempt to one logical send, so the
+                        // keyless write-ahead pairs still say "these four
+                        // attempts were one dispatch" rather than "four
+                        // dispatches happened". That distinction is the whole
+                        // value of the record to whoever has to reconcile it.
+                        //
+                        // On restart `recovery_plan()` finds a `turn_started`
+                        // with no terminal and no checkpoint, which is not
+                        // `Ready`, so the honest refusal already at
+                        // `run_with_content` names the interrupted turn and
+                        // asks for a decision. Nothing auto-continues.
+                        Some(format!("provider-dispatch-{}", uuid::Uuid::new_v4()))
+                    } else {
+                        let checkpoint = self
+                            .commit_provider_recovery_checkpoint(
+                                turn_id,
+                                &request,
+                                turn,
+                                stream_attempt,
+                                overflow_retried,
+                                length_wedge_retried,
+                                &loop_guard,
+                                &failure_guard,
+                            )
+                            .await?;
+                        checkpoint.dispatch_id
+                    }
                 } else {
                     None
                 };

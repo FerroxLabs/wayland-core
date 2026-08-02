@@ -2570,10 +2570,10 @@ impl Config {
             crucible: merged.crucible,
         };
 
-        // A durable session cannot be opened on a host with no confidential-
-        // capable credential store, which is the normal state of a headless
-        // Linux server: no OS keyring exists and no vault passphrase has been
-        // supplied. Before this, `session.enabled` stayed true there and the
+        // A host with no confidential-capable credential store — the normal
+        // state of a headless Linux server, where no OS keyring exists and no
+        // vault passphrase has been supplied — cannot SEAL a prepared provider
+        // request. Before this, `session.enabled` stayed true there and the
         // product accepted the work anyway — `gateway run` started, `channel
         // health` reported `Healthy`, and then EVERY turn died at dispatch with
         // "Session persistence authority unavailable". Two live UAT lanes hit it
@@ -2582,18 +2582,29 @@ impl Config {
         // the signature of one decision taken too late and in two places.
         //
         // So take it once, here, at the single point that governs every engine,
-        // every entrance and every surface: give the capability up and say so,
-        // rather than promising something this host cannot deliver.
+        // every entrance and every surface.
+        //
+        // WHAT IS GIVEN UP IS REPLAY, NOT THE JOURNAL. This arm used to also set
+        // `session.enabled = false`, which cost the deployment its entire audit
+        // trail. That was measured to be far more than the host actually forces:
+        // the session journal is NOT encrypted (a framed JSONL log at 0600
+        // inside a 0700 directory, `session_journal.rs:712/744/819`), and the
+        // confidential store holds exactly ONE key protecting exactly ONE field,
+        // `RecoveryCheckpoint.sealed_prepared_request` (`recovery.rs:157`), the
+        // field that makes AUTOMATIC replay of an interrupted dispatch possible.
+        // Every keyless write-ahead pair this product records — provider, tool,
+        // approval and delivery — is already a legal v1 event with no key
+        // involved (`LEGACY_EVENT_TYPES`, `session_journal.rs:2376`). So a
+        // missing key costs REPLAY and nothing else, and turning that into total
+        // amnesia converted "an attacker suppressed the keyring" into
+        // "an attacker obtained unrecorded execution".
         //
         // Deliberately narrow — see `durable_sessions_must_be_disabled` for the
         // two cases this must NOT swallow.
         //
-        // The degrade is a CAPABILITY the operator may decline. Without that,
-        // "make the keyring unavailable" is a way to obtain execution with no
-        // recovery journal — a misconfiguration or an attacker gets unrecorded
-        // work, and the product cannot tell the two apart. So the same
-        // condition that degrades by default fails CLOSED for an operator who
-        // has said this deployment requires durable sessions.
+        // The degrade is still a CAPABILITY the operator may decline. An
+        // operator who declared that this deployment requires full durability,
+        // replay included, still gets a refusal rather than a quieter promise.
         match host_durability_disposition(
             resolved.session.enabled,
             resolved.session.require_durability,
@@ -2603,8 +2614,11 @@ impl Config {
             HostDurabilityDisposition::Keep => {}
             HostDurabilityDisposition::Refuse => anyhow::bail!("{}", DURABILITY_REQUIRED_REFUSAL),
             HostDurabilityDisposition::Degrade => {
-                resolved.session.enabled = false;
-                record_durable_sessions_disabled_by_host();
+                let outcome = durability_outcome(HostDurabilityDisposition::Degrade);
+                resolved.session.enabled &= outcome.sessions_stay_enabled;
+                if outcome.replay_protection_unavailable {
+                    record_replay_protection_unavailable();
+                }
             }
         }
 
@@ -2673,15 +2687,23 @@ impl Config {
     }
 }
 
-/// Must durable session persistence be turned off because this host cannot
-/// protect it?
+/// Is this host unable to protect the one confidential field a durable session
+/// wants — the sealed prepared provider request that makes automatic replay
+/// possible?
+///
+/// The name is historical: it used to answer "must durable sessions be turned
+/// off", and the answer was used to turn them off. The PREDICATE is unchanged
+/// and still exactly right; only what resolution DOES with a `true` changed
+/// (journal without the seal, rather than no journal at all). Renaming it would
+/// have obscured that the condition is the same one two decisions have now been
+/// taken on.
 ///
 /// Pure and short-circuiting. `measure_availability` is the expensive,
 /// environment-reading probe; it is deliberately a closure so this predicate
 /// can be exercised exhaustively without one, and so the probe is NOT run in
 /// the two cases whose answer is already decided:
 ///
-/// * sessions already off — nothing to disable;
+/// * sessions already off — nothing to protect;
 /// * `backend = "plaintext"` — the operator configured a backend that can never
 ///   hold confidential material. That is their own choice and it must keep
 ///   failing loudly at session open (`reject_backend_without_confidential_storage`),
@@ -2695,15 +2717,19 @@ fn durable_sessions_must_be_disabled(
     session_enabled && backend.supports_confidential_material() && !measure_availability()
 }
 
-/// What resolution must do about a host that cannot protect durable sessions.
+/// What resolution must do about a host that cannot seal a prepared provider
+/// request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostDurabilityDisposition {
-    /// Nothing to do: either the host can protect them, or they were already
+    /// Nothing to do: either the host can protect it, or sessions were already
     /// off, or the operator chose a backend whose refusal happens elsewhere.
     Keep,
-    /// The host cannot protect them and the operator accepts running without.
+    /// The host cannot seal the request and the operator accepts running
+    /// without replay protection. Sessions stay ON and the journal keeps
+    /// recording; only `sealed_prepared_request` is given up.
     Degrade,
-    /// The host cannot protect them and the operator required them.
+    /// The host cannot seal the request and the operator required full
+    /// durability.
     Refuse,
 }
 
@@ -2715,6 +2741,13 @@ pub(crate) enum HostDurabilityDisposition {
 /// keyring decides *whether the host can deliver durability*, and the operator
 /// decides *what should happen when it cannot*. Collapsing the two is how
 /// "disable the credentials backend" became a way to get unrecorded execution.
+///
+/// `Refuse` is deliberately UNCHANGED by the journal-without-the-seal repair.
+/// An operator who wrote `require_durability = true` asked for durability
+/// including recoverability of an interrupted dispatch, and this host cannot
+/// deliver that. Silently re-reading their setting as "a journal is enough"
+/// because the product now offers a weaker mode would be answering a question
+/// they did not ask.
 ///
 /// The availability probe stays a closure for the reason
 /// [`durable_sessions_must_be_disabled`] gives, and this function must not
@@ -2736,6 +2769,40 @@ pub(crate) fn host_durability_disposition(
     }
 }
 
+/// What resolution must actually DO once a disposition is decided.
+///
+/// Split out from the `match` in `Config::resolve_inner` because the arm that
+/// matters is unreachable on a developer machine: `Degrade` needs a host with
+/// no OS keyring AND no unlocked vault, so a wrong action there ships green
+/// through every local run and every macOS CI leg. It shipped exactly that way
+/// for three days — as `session.enabled = false`, which cost a keyless
+/// deployment its entire audit trail to protect one field it could not seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DurabilityOutcome {
+    /// Does the journal survive? Only the operator may turn it off.
+    pub sessions_stay_enabled: bool,
+    /// Must the process record that an interrupted dispatch cannot be replayed?
+    pub replay_protection_unavailable: bool,
+}
+
+#[must_use]
+pub(crate) fn durability_outcome(disposition: HostDurabilityDisposition) -> DurabilityOutcome {
+    match disposition {
+        // `Refuse` never reaches an outcome — resolution bails before this — but
+        // it is spelled out rather than merged into `Keep` so that adding a
+        // fourth disposition is a compile error here rather than a silent
+        // fall-through into "change nothing".
+        HostDurabilityDisposition::Keep | HostDurabilityDisposition::Refuse => DurabilityOutcome {
+            sessions_stay_enabled: true,
+            replay_protection_unavailable: false,
+        },
+        HostDurabilityDisposition::Degrade => DurabilityOutcome {
+            sessions_stay_enabled: true,
+            replay_protection_unavailable: true,
+        },
+    }
+}
+
 /// What an operator who set `[session] require_durability = true` is told when
 /// the host cannot deliver it.
 ///
@@ -2743,24 +2810,33 @@ pub(crate) fn host_durability_disposition(
 /// from the notice emitted on the degrade path, and so a test can assert the
 /// exact operator-visible text rather than a substring it invented.
 pub const DURABILITY_REQUIRED_REFUSAL: &str = "[session] require_durability = true, but this host cannot protect a durable session: it \
-     has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than \
-     running with no recovery journal. Unlock the encrypted vault by setting \
+     has no usable OS keyring and no unlocked credentials vault, so an interrupted provider \
+     dispatch could not be replayed. Refusing to start rather than running with unrecoverable \
+     turns. Unlock the encrypted vault by setting \
      WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
      WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = \"keyring\" on a host that \
-     has one. To accept running without durable sessions on this host, set \
+     has one. To accept running with a journal but no replay protection on this host, set \
      [session] require_durability = false.";
 
 /// Set when [`durable_sessions_must_be_disabled`] fired during resolution.
-static DURABLE_SESSIONS_DISABLED_BY_HOST: std::sync::atomic::AtomicBool =
+static REPLAY_PROTECTION_UNAVAILABLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Were durable sessions turned off because this HOST cannot protect them, as
-/// opposed to the operator asking for them to be off?
+/// Can this host NOT seal a prepared provider request, so that journaled turns
+/// are recorded but an interrupted dispatch cannot be replayed automatically?
 ///
-/// `session.enabled == false` alone cannot answer that: the two causes are
-/// indistinguishable in the resolved value, and a status surface that reports
-/// "sessions off" for an operator who never asked is exactly as unhelpful as
-/// one that reports "Healthy" for a product that cannot answer.
+/// Renamed from `durable_sessions_disabled_by_host()`, and the rename is the
+/// point. That name described what the flag CAUSED — durable sessions turned
+/// off — and that consequence is gone: a keyless host now journals. What
+/// remains true is the host fact underneath it, and a flag that outlives the
+/// consequence it was named for is how a status surface ends up reporting a
+/// state the product can no longer reach.
+///
+/// `session.enabled == false` never could answer this: the operator's own
+/// `[session] enabled = false` and a host limitation are indistinguishable in
+/// the resolved value, and they want opposite reporting. Under the current
+/// posture they are not even the same question — a host limitation no longer
+/// disables anything.
 ///
 /// Process-global on purpose. The answer is a property of the host — no OS
 /// keyring, no unlocked vault — not of one config value, so every `Config`
@@ -2774,19 +2850,19 @@ static DURABLE_SESSIONS_DISABLED_BY_HOST: std::sync::atomic::AtomicBool =
 /// resolves two configs with different credential backends in one process gets
 /// one flag for both. That is acceptable while the flag reports a host fact.
 #[must_use]
-pub fn durable_sessions_disabled_by_host() -> bool {
-    DURABLE_SESSIONS_DISABLED_BY_HOST.load(std::sync::atomic::Ordering::Relaxed)
+pub fn replay_protection_unavailable() -> bool {
+    REPLAY_PROTECTION_UNAVAILABLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Both effects of the host-forced degrade, in one place so they cannot drift
-/// apart: record it for status surfaces, and tell the operator.
-fn record_durable_sessions_disabled_by_host() {
-    DURABLE_SESSIONS_DISABLED_BY_HOST.store(true, std::sync::atomic::Ordering::Relaxed);
-    warn_durable_sessions_disabled_once();
+/// Both effects of the host-forced replay degrade, in one place so they cannot
+/// drift apart: record it for status surfaces, and tell the operator.
+fn record_replay_protection_unavailable() {
+    REPLAY_PROTECTION_UNAVAILABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    warn_replay_protection_unavailable_once();
 }
 
-/// Tell the operator, exactly once per process, that durable sessions are off
-/// and why.
+/// Tell the operator, exactly once per process, that crash replay is off and
+/// why — and, just as importantly, what is still on.
 ///
 /// `Once`-guarded for the same reason [`crate::credentials`]'s isolated-profile
 /// warning is: config resolution runs more than once per launch (fallback
@@ -2794,19 +2870,21 @@ fn record_durable_sessions_disabled_by_host() {
 /// turn. The whole point of moving this decision to startup is that the
 /// operator hears it ONCE, at a moment that is about configuration — not
 /// repeatedly, attached to a message they were trying to answer.
-fn warn_durable_sessions_disabled_once() {
+fn warn_replay_protection_unavailable_once() {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         eprintln!(
-            "notice: durable session persistence is OFF for this run. This host has no \
-             usable OS keyring and no unlocked credentials vault, and a durable session \
-             seals every provider request into its recovery journal, which cannot be done \
-             without one. Everything else works normally — prompts, channels, tools and \
-             replies — but conversation history is not saved to disk and an interrupted \
-             turn cannot be recovered. To turn durable sessions back on, unlock the \
-             encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file \
-             descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and \
-             silence the notice, set [session] enabled = false in config.toml."
+            "notice: crash replay protection is OFF for this run. This host has no \
+             usable OS keyring and no unlocked credentials vault, and sealing the exact \
+             provider request that automatic replay re-sends needs one. Durable sessions \
+             stay ON: the journal still records every turn, every provider attempt, every \
+             tool call, every approval and every delivery, so nothing executes unrecorded \
+             and conversation history is still saved. What is lost is automatic \
+             continuation — a turn interrupted mid-dispatch will ask you to resume, \
+             reconcile or cancel it rather than resuming itself. To restore replay, unlock \
+             the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file \
+             descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To refuse to run this \
+             way at all, set [session] require_durability = true."
         );
     });
 }
@@ -5599,24 +5677,71 @@ mod tests {
         assert!(measured.get(), "the probe must run in the undecided case");
     }
 
-    /// `session.enabled == false` cannot tell a status surface WHY sessions are
-    /// off, and the two causes need opposite reporting: an operator who asked
-    /// for it wants silence, an operator whose host forced it wants to know.
-    /// This is the seam `channel health` / `--doctor` read.
+    /// `session.enabled` cannot tell a status surface that replay protection is
+    /// gone — under the current posture it stays TRUE while replay is off, so
+    /// reading it reports a fully durable session that cannot recover an
+    /// interrupted dispatch. This is the seam `channel health` / `--doctor`
+    /// read.
     ///
     /// The assertion is on the TRANSITION, not on an absolute initial value:
     /// any earlier `Config::resolve` in the same test binary could legitimately
     /// have set the flag already on a keyring-less machine, and a test that
     /// depended on that would be order-dependent and flaky rather than wrong.
     #[test]
-    fn a_host_forced_degrade_is_reportable_afterwards() {
-        record_durable_sessions_disabled_by_host();
+    fn a_host_forced_replay_degrade_is_reportable_afterwards() {
+        record_replay_protection_unavailable();
         assert!(
-            durable_sessions_disabled_by_host(),
-            "recording a host-forced degrade must make it readable by a status \
-             surface; otherwise the only trace of it is a stderr line that has \
-             already scrolled away"
+            replay_protection_unavailable(),
+            "recording a host-forced replay degrade must make it readable by a \
+             status surface; otherwise the only trace of it is a stderr line \
+             that has already scrolled away"
         );
+    }
+
+    /// THE REPAIR. A host that cannot seal one field must not cost the
+    /// deployment its entire record of what it did.
+    ///
+    /// `Degrade` used to also set `session.enabled = false`. The journal is not
+    /// encrypted and never was; the key protects exactly
+    /// `RecoveryCheckpoint.sealed_prepared_request`, and every effect boundary
+    /// this product records has a keyless v1 write-ahead pair that needs no key
+    /// at all. So "no key" costs REPLAY — and turning that into amnesia made
+    /// "suppress the keyring" a way to obtain unrecorded execution.
+    ///
+    /// Both directions are asserted in the same table, which is what stops this
+    /// passing on a function that returns one constant: `Keep` must NOT claim
+    /// replay is unavailable, and `Degrade` must.
+    #[test]
+    fn a_host_that_cannot_seal_a_request_still_journals() {
+        assert_eq!(
+            durability_outcome(HostDurabilityDisposition::Degrade),
+            DurabilityOutcome {
+                sessions_stay_enabled: true,
+                replay_protection_unavailable: true,
+            },
+            "the host-forced degrade must give up REPLAY and nothing else"
+        );
+        assert_eq!(
+            durability_outcome(HostDurabilityDisposition::Keep),
+            DurabilityOutcome {
+                sessions_stay_enabled: true,
+                replay_protection_unavailable: false,
+            },
+            "a host that CAN seal must not be reported as one that cannot"
+        );
+
+        // The operator's own `[session] enabled = false` must still win. The
+        // resolve arm applies the outcome with `&=`, so a future outcome that
+        // said `sessions_stay_enabled: true` could not switch the journal back
+        // ON for an operator who turned it off.
+        for operator_choice in [false, true] {
+            let mut enabled = operator_choice;
+            enabled &= durability_outcome(HostDurabilityDisposition::Degrade).sessions_stay_enabled;
+            assert_eq!(
+                enabled, operator_choice,
+                "the host degrade must neither disable nor re-enable the journal"
+            );
+        }
     }
 
     /// The degrade must be a capability the operator can DECLINE.
