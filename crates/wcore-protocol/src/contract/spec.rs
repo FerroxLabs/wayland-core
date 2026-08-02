@@ -26,9 +26,9 @@ use crate::events::{
     OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
     OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
     RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
-    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, ToolCategory, ToolInfo,
-    ToolStatus, TurnCost, Usage, WorkflowChildTerminalState, WorkflowNodeState,
-    WorkflowTerminalState,
+    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, SessionPersistence,
+    ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage, WorkflowChildTerminalState,
+    WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use crate::goal::{
@@ -318,10 +318,22 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
 ];
 
 pub const EVENT_SPECS: &[WireSpec] = &[
+    // `session_id` and `session_persistence` are BOTH required. `session_id` is
+    // this variant's declared correlation key, and a correlation key that the
+    // producer may drop is indistinguishable at the host from a malformed
+    // frame — so it is always on the wire, `null` when there is no session, and
+    // `session_persistence` (never null) says which cause produced the null.
     wire!(
         "ready",
         "events/ready.json",
-        ["version", "capabilities", "contract", "execution_policy"],
+        [
+            "version",
+            "session_id",
+            "session_persistence",
+            "capabilities",
+            "contract",
+            "execution_policy"
+        ],
         Required,
         "session_id",
         "available"
@@ -1917,6 +1929,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::Ready {
                 version: "0.12.25".into(),
                 session_id: Some("session-desktop-001".into()),
+                session_persistence: SessionPersistence::Durable,
                 capabilities: capabilities(),
                 contract: None,
                 execution_policy: Some(initial_policy),
@@ -2064,7 +2077,29 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
 
 pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
     use wcore_types::message::FinishReason;
+    let (initial_policy, _) = execution_policy_sequence();
     BTreeMap::from([
+        (
+            // The frame a Desktop host meets on a keyring-less server: current
+            // producer, current capabilities, current policy — and no durable
+            // session to name. Identical to `events/ready.json` apart from the
+            // two fields this posture changes, including the contract
+            // descriptor `insert_negotiation_fixtures` stamps onto both.
+            //
+            // It is a REAL serialization of `ProtocolEvent::Ready`, not a JSON
+            // edit of the durable fixture, so a producer that goes back to
+            // dropping `session_id` under `None` produces a fixture missing
+            // its correlation key and the corpus schema check reds.
+            "compat/events/ready.degraded.json".into(),
+            ProtocolEvent::Ready {
+                version: "0.12.25".into(),
+                session_id: None,
+                session_persistence: SessionPersistence::DisabledByHost,
+                capabilities: capabilities(),
+                contract: None,
+                execution_policy: Some(initial_policy),
+            },
+        ),
         (
             "compat/events/budget_grant_result.turn-in-progress.json".into(),
             ProtocolEvent::BudgetGrantResult {
@@ -2149,10 +2184,16 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
             },
         ),
         (
+            // Still the LEGACY minimum — no `contract`, no `execution_policy`,
+            // so it has never satisfied the current `ready` schema branch and
+            // is not meant to. The keyring-less PRODUCTION shape is
+            // `compat/events/ready.degraded.json`, derived in
+            // `insert_negotiation_fixtures` with the descriptor stamped.
             "compat/events/ready.minimal.json".into(),
             ProtocolEvent::Ready {
                 version: "0.12.25".into(),
                 session_id: None,
+                session_persistence: SessionPersistence::DisabledByOperator,
                 capabilities: Capabilities::default(),
                 contract: None,
                 execution_policy: None,

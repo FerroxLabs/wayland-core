@@ -197,6 +197,16 @@ impl CoreProcess {
             Some(session_id),
             "packaged Core opened a different session: {ready}"
         );
+        // THE OTHER HALF of the degraded assertion in
+        // `without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`.
+        // Every vault-backed launch in this file runs through here, so the
+        // durable posture is proved on the same wire, by the same binary, as
+        // the degraded one — which is what makes the two distinguishable
+        // rather than merely differently asserted.
+        assert_eq!(
+            ready["session_persistence"], "durable",
+            "a launch that opened a journaled session must say so: {ready}"
+        );
         process
     }
 
@@ -1187,13 +1197,11 @@ fn require_durability(env: &TempEnv) {
 /// Launch packaged Core with no secure store and return its `ready` frame
 /// WITHOUT asserting a session identity.
 ///
-/// [`CoreProcess::launch_without_secure_store`] asserts that `ready` names the
-/// requested session. A degraded launch cannot satisfy that, and finding out
-/// why is a result in itself: `ProtocolEvent::Ready.session_id` is
-/// `Option<String>` with `skip_serializing_if = "Option::is_none"`
-/// (`wcore-protocol/src/events.rs:559-562`), so the degraded `ready` simply
-/// OMITS the field. A `--json-stream` host therefore receives a frame that is
-/// byte-identical in shape to a legacy producer's and is told nothing at all.
+/// [`CoreProcess::launch_with_secure_store`] asserts that `ready` NAMES the
+/// requested session. A degraded launch cannot satisfy that — there is no
+/// durable session to name — so it needs its own launcher and its own
+/// assertions about what the frame does say instead. Those live in
+/// [`without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`].
 #[cfg(target_os = "linux")]
 async fn launch_degraded(
     env: &TempEnv,
@@ -1491,15 +1499,41 @@ async fn without_secure_store_the_default_runs_degraded_and_leaves_nothing_durab
 
     let (mut process, ready) = launch_degraded(&env, &fixture, session_id).await;
 
-    // MEASURED, and worth pinning: the degraded `ready` omits `session_id`
-    // entirely. That is the whole of what a Desktop host is told. Asserting it
-    // here means a later change that starts naming the degraded state in-band
-    // reds this line and gets read, rather than passing silently.
+    // THE HOST-FACING CONTRACT, read the way a host reads it: off the wire,
+    // from the real packaged binary, on a real keyring-less profile.
+    //
+    // This assertion used to be `ready.get("session_id") == None` — it pinned
+    // the DEFECT. `session_id` is `ready`'s declared correlation key
+    // (`EVENT_SPECS`, `crates/wcore-protocol/src/contract/spec.rs`), and it
+    // was being dropped from the frame entirely under degrade. A host got
+    // `undefined` with no accompanying signal and could not separate
+    // "degraded" from "malformed frame" from "an older Core" — while passing
+    // schema validation, because the field was optional.
+    //
+    // What must be true now: the key is THERE, explicitly null, and a sibling
+    // states the cause — and the cause is the host's, not the operator's. The
+    // operator did not ask for this; a keyring would fix it.
+    let ready_object = ready.as_object().expect("ready frame is a JSON object");
+    assert!(
+        ready_object.contains_key("session_id"),
+        "the degraded ready dropped its declared correlation key: {ready}"
+    );
     assert_eq!(
-        ready.get("session_id"),
-        None,
-        "the degraded ready frame is expected to omit session_id today; if it \
-         now carries one, the host-facing contract changed: {ready}"
+        ready["session_id"],
+        Value::Null,
+        "a degraded run has no session to name, and must say so with null: {ready}"
+    );
+    assert_eq!(
+        ready["session_persistence"], "disabled_by_host",
+        "a degraded run must tell the host that the HOST forced this, not the \
+         operator: {ready}"
+    );
+    // And the descriptor must let a host feature-detect all of the above,
+    // rather than inferring it from a null it cannot date.
+    assert_eq!(
+        ready["contract"]["capabilities"]["session_persistence_v1"], "available",
+        "a host cannot trust a null session_id it cannot attribute to a Core \
+         that declares this: {ready}"
     );
 
     // TWO turns, deliberately. A startup notice is indistinguishable from a

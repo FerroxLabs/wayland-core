@@ -14,7 +14,7 @@
 //! Contract" section for the authoritative host-side spec.
 
 use serde_json::{Value, json};
-use wcore_protocol::events::{Capabilities, ProtocolEvent};
+use wcore_protocol::events::{Capabilities, ProtocolEvent, SessionPersistence};
 
 /// What the host decoder returns for one input line.
 ///
@@ -85,6 +85,7 @@ fn host_decodes_ready_with_default_capabilities() {
     let event = ProtocolEvent::Ready {
         version: "0.1.21".into(),
         session_id: None,
+        session_persistence: SessionPersistence::DisabledByOperator,
         capabilities: Capabilities::default(),
         contract: None,
         execution_policy: None,

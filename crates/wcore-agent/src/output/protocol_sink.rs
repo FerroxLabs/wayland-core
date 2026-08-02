@@ -3,11 +3,38 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::tools::AdvertisedCapabilitiesConfig;
-use wcore_protocol::events::{Capabilities, ErrorInfo, FinishReason, ProtocolEvent, Usage};
+use wcore_protocol::events::{
+    Capabilities, ErrorInfo, FinishReason, ProtocolEvent, SessionPersistence, Usage,
+};
 use wcore_protocol::execution_policy::ExecutionPolicySnapshot;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 use super::OutputSink;
+
+/// Classify a `ready` frame's `session_id` for the host.
+///
+/// The two inputs are exactly the two facts that decide the answer, and both
+/// are unambiguous at the emission site:
+///
+/// * `Engine::current_session_id()` is `Some` iff a `SessionManager` exists,
+///   which is iff `config.session.enabled` (`engine.rs:3154`/`:3396`), so a
+///   `Some` really is a durable journaled session.
+/// * `session.enabled == false` has exactly two causes, and
+///   [`wcore_config::config::durable_sessions_disabled_by_host`] is the flag
+///   config resolution sets for precisely this question — it exists because
+///   "sessions off" alone cannot tell an operator who asked from a host that
+///   could not comply (`config.rs:2680-2707`).
+///
+/// Split out from the emitter so the mapping is provable without standing up a
+/// keyring-less host: the degraded frame is the one no developer ever runs by
+/// hand, so it is the one a wrong mapping ships in.
+fn session_persistence_for(session_id: Option<&str>, host_forced_off: bool) -> SessionPersistence {
+    match (session_id, host_forced_off) {
+        (Some(_), _) => SessionPersistence::Durable,
+        (None, true) => SessionPersistence::DisabledByHost,
+        (None, false) => SessionPersistence::DisabledByOperator,
+    }
+}
 
 /// Wave SC SECURITY MAJOR fix — shared set of active approval-bridge
 /// correlation ids. The bridge updates this set on every `request` /
@@ -468,9 +495,14 @@ impl ProtocolSink {
         advertised: &AdvertisedCapabilitiesConfig,
         execution_policy: Option<ExecutionPolicySnapshot>,
     ) {
+        let session_persistence = session_persistence_for(
+            session_id.as_deref(),
+            wcore_config::config::durable_sessions_disabled_by_host(),
+        );
         let _ = self.writer.emit(&ProtocolEvent::Ready {
             version: env!("CARGO_PKG_VERSION").to_string(),
             session_id,
+            session_persistence,
             capabilities: self.build_capabilities_with_plugins(
                 compat,
                 has_mcp,
@@ -1229,6 +1261,38 @@ fn message_carries_status(msg: &str, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole mapping, including the arm nobody can reach on a developer
+    /// machine.
+    ///
+    /// `disabled_by_host` only happens on a host with no OS keyring and no
+    /// unlocked vault, so on any laptop with a working keychain the degraded
+    /// arm is unreachable and a wrong mapping there would ship green. Pinning
+    /// all four input combinations is the only way this arm is ever exercised
+    /// off a keyring-less server.
+    #[test]
+    fn session_persistence_names_the_cause_of_a_missing_session_id() {
+        assert_eq!(
+            session_persistence_for(Some("sess-1"), false),
+            SessionPersistence::Durable
+        );
+        assert_eq!(
+            session_persistence_for(None, true),
+            SessionPersistence::DisabledByHost,
+            "a host-forced degrade must be reported as such, not as an operator choice"
+        );
+        assert_eq!(
+            session_persistence_for(None, false),
+            SessionPersistence::DisabledByOperator
+        );
+        // A live session is durable regardless of the process-global host
+        // flag: another config resolved in this process may have degraded,
+        // but THIS engine holds a SessionManager and a journal.
+        assert_eq!(
+            session_persistence_for(Some("sess-1"), true),
+            SessionPersistence::Durable
+        );
+    }
 
     /// W7 F2-3.2: a default-built ProtocolSink (no builder methods called)
     /// must NOT advertise sub_agent_traces. This is the W0 byte-identity
