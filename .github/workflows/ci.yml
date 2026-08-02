@@ -540,6 +540,280 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
+  # ── SECOND WINDOWS SUPPLIER (2026-08-02, lane/ci-windows-fallback) ────────
+  #
+  # THE PROBLEM IS THE ARCHITECTURE, NOT THE OUTAGE. Until this job, Windows
+  # had exactly ONE supplier — the self-hosted `CI (Array)` leg above — and no
+  # fallback. When that supplier stops serving, the platform produces no verdict
+  # at all, and a release would be tagged blind on Windows.
+  #
+  # It is not hypothetical and it is not transient. MEASURED 2026-08-02T01:58Z:
+  # `gh api repos/FerroxLabs/wayland-core/actions/runners` reported BOTH
+  # `ferrox-win-msvc` and `SEANDESKTOP` as `online, busy=true`, yet enumerating
+  # every in-progress job across the 40 most recent runs found NOT ONE assigned
+  # to either. They advertise busy and serve nothing. Consequences, both on the
+  # release-candidate critical path:
+  #   * `mutation-lock proof (self-hosted Windows client)` queued 01:18:00Z,
+  #     still `queued` forty minutes later;
+  #   * integration run 30727391782's `CI (Array)` — the ONLY Windows test leg
+  #     and a release gate — never started, while its macOS and Linux legs ran
+  #     normally.
+  # A previously-closed issue, recurring, now on BOTH Windows runners, and a
+  # lane reported the same night that direct ssh to the box "returned not one
+  # byte in fifty minutes".
+  #
+  # WHY HOSTED WINDOWS IS VIABLE NOW, when v0.8.6 round 18 abandoned it (see the
+  # `matrix.os` note above): the two reasons recorded there were ~70-minute
+  # cold-cache cycles and `LNK1318: Unexpected PDB error; LIMIT (12)` with
+  # "Free space left: 4 MB" on run 26396718138. Both were addressed since:
+  #   * `CARGO_PROFILE_DEV_DEBUG: line-tables-only` + `CARGO_INCREMENTAL: 0` are
+  #     now set across the matrix specifically for that disk pressure (~80%
+  #     smaller PDBs, ~30-40% less target/), and are set here too;
+  #   * this job additionally drops ~15-20 GB of preinstalled toolchains the
+  #     build never touches, the same trick the Linux jobs already use;
+  #   * cold-cache latency is no longer the binding constraint. A supplier that
+  #     answers in 90 minutes beats a faster one that answers never.
+  # And hosted Windows demonstrably runs THIS workspace today: run 30727017681
+  # executed `wcore-agent --lib` on `windows-latest` from a cold cache in 8m52s
+  # and reported `2246 passed; 5 failed`.
+  #
+  # WHEN IT RUNS, AND WHY NOT "ON FAILURE".
+  #
+  # An automatic fallback is the shape everyone reaches for first —
+  # `needs: ci` + `if: failure()` — and it CANNOT WORK HERE. A job that never
+  # STARTS never fails; it sits `queued`, `needs:` never resolves, and the
+  # fallback never becomes eligible. It would inherit the exact failure mode it
+  # exists to survive. GitHub Actions has no "start B if A has not started
+  # within N minutes" primitive. So this job takes NO `needs:` on `ci` at all:
+  # it is scheduled at dispatch, independently, and its verdict does not depend
+  # on the self-hosted leg reaching any state whatsoever.
+  #
+  # The self-hosted box stays the PREFERRED supplier and is untouched: warm
+  # `target/` makes it far faster (measured on run 30699019736: 41 min for the
+  # whole leg, of which test-ci was 19m14s). This job is the second supplier,
+  # not a replacement, and both run on every ref where Windows gates a release.
+  #
+  # `lane/**` BEHAVIOUR IS PRESERVED (b8d51309). A token-less lane push still
+  # gets NO heavy Windows work: the condition below is byte-compatible with the
+  # `ci` job's — pull_request, `main`, the integration branch, or an explicit
+  # `[ci-windows]` marker. What changes for a lane that DOES ask for Windows is
+  # that its request is served by the idle hosted pool as well as by the single
+  # contended box.
+  #
+  # FAILURE MODES COVERED:
+  #   * self-hosted runner offline, wedged, busy-but-serving-nothing, or queued
+  #     behind other lanes — this leg is on a different pool and still answers;
+  #   * self-hosted runner's accumulated state corrupting a result (the locked
+  #     `.install-action/tmp` class) — this leg is an ephemeral clean VM;
+  #   * a Windows-only compile break or test regression — caught here as well.
+  # FAILURE MODES **NOT** COVERED, stated plainly:
+  #   * the aggregate `ci` job and therefore the `report` job still wait on
+  #     `CI (Array)`. If the self-hosted leg hangs, `report` hangs with it. What
+  #     this job buys is that the Windows PASS/FAIL is OBSERVABLE as its own
+  #     check without waiting on that supplier — not that the run completes.
+  #   * a GitHub-wide hosted-Windows outage takes both this leg and the
+  #     `Build (*-pc-windows-msvc)` jobs down. Two suppliers, one vendor.
+  #   * this leg does NOT run fmt (platform-independent and enforced on
+  #     Linux/macOS; `just fmt-check` is a documented no-op on Windows anyway),
+  #     the contract-drift check, the F01 packaged-driver gate, the eval gate,
+  #     or `cargo audit` — all platform-independent and already gated on Linux.
+  #     Note that on the last COMPLETED self-hosted leg (run 30699019736) every
+  #     one of those steps was SKIPPED because the test step failed first, so in
+  #     practice this leg reproduces what the self-hosted leg actually reaches.
+  #
+  # STEP ORDER IS DELIBERATELY NOT THE MATRIX'S. There, clippy runs BEFORE the
+  # tests, so a clippy red skips the test step and the platform yields no test
+  # signal — the same ordering defect that was already fixed once for the
+  # contract-drift check (see its comment above). A leg whose entire purpose is
+  # "a Windows test verdict is always obtainable" must not let a lint failure
+  # suppress it, so tests run first and clippy runs after under `!cancelled()`.
+  # Both still gate: neither is `continue-on-error`.
+  #
+  # ANTI-DRIFT. The test command is `vx just test-ci` — the SAME justfile recipe
+  # the self-hosted leg invokes, not an inline nextest line. This file already
+  # records what inline duplication costs: the `ci-linux` job's hand-written
+  # nextest command silently lost `--no-fail-fast`, which made every historical
+  # CI failure count a lower bound rather than a total.
+  ci-windows-hosted:
+    name: CI (windows-latest, hosted)
+    runs-on: windows-latest
+    # Byte-compatible with the `ci` job's `if:` minus the two Darwin tokens:
+    # Windows work is requested by `[ci-windows]`, and `[ci-darwin]` must not
+    # drag a Windows leg along with it.
+    if: >-
+      github.event_name == 'pull_request'
+      || github.ref_name == 'main'
+      || github.ref_name == 'plan/f20-unified-audit-repair'
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+    # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
+    # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
+    # would otherwise burn six hours of hosted minutes per run. Sized from the
+    # measured parts: ~30 min for the release pre-build (Build
+    # (x86_64-pc-windows-msvc) measures 32 min cold on this same image), plus a
+    # debug workspace compile, plus the 12.8k-test run.
+    timeout-minutes: 180
+    env:
+      # Identical to the matrix job's. These two are the reason the v0.8.6
+      # LNK1318/"Free space left: 4 MB" verdict no longer applies.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      # The Linux jobs already do this (see "Free disk space" in `ci-linux`);
+      # Windows never had it, and Windows is the leg that actually ran out.
+      # Deliberately conservative about WHAT is removed:
+      #   * Visual Studio, the Windows SDK ("Windows Kits") and Git are the
+      #     toolchain this job needs and are NOT touched.
+      #   * `C:\hostedtoolcache` is NOT removed wholesale — `python` lives there
+      #     on this image and `wcore-cli::portability_hostile_corpus` shells out
+      #     to it (23 tests died of its absence on the self-hosted box; see the
+      #     "Ensure a Python interpreter" step above). Only three
+      #     unambiguously-unused language caches inside it are dropped.
+      # Every removal is failure-tolerant: a missing or locked path must never
+      # be able to fail this job, whose entire point is producing an answer.
+      - name: Free disk space (drop preinstalled toolchains this build never uses)
+        shell: pwsh
+        run: |
+          $before = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+          Write-Host "C: free BEFORE = $before GB"
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\ghcup',
+            'C:\Miniconda',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\MySQL',
+            'C:\Program Files\Microsoft SDKs\Azure',
+            'C:\Program Files\Azure Cosmos DB Emulator',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\PyPy'
+          )
+          foreach ($p in $paths) {
+            if (Test-Path -LiteralPath $p) {
+              try {
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+                Write-Host "removed $p"
+              } catch {
+                Write-Host "skipped $p ($($_.Exception.Message))"
+              }
+            }
+          }
+          $after = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+          Write-Host "C: free AFTER  = $after GB (reclaimed $([math]::Round($after - $before, 2)) GB)"
+
+      # The matrix job provisions Python from the embeddable zip because the
+      # SELF-HOSTED box has it installed per-user, invisible to the
+      # NetworkService account the runner service uses. That is a property of
+      # that machine, not of Windows: the hosted image ships Python on PATH for
+      # whatever account runs the job. So this leg asserts rather than
+      # provisions — and it ASSERTS rather than assuming, because a silent
+      # absence here would fail 23 tests later with a far worse message.
+      - name: Assert a Python interpreter is present (corpus generators shell to it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then py=python3
+          elif command -v python >/dev/null 2>&1; then py=python
+          else
+            echo "::error title=No Python::The hosted Windows image is expected to ship Python on PATH, and this job found none. crates/wcore-cli/tests/portability_hostile_corpus.rs shells out to it and .expect()s, so 23 tests would fail with 'program not found'. Check whether the disk-cleanup step above removed a hostedtoolcache path it should not have."
+            exit 1
+          fi
+          echo "python: $(command -v $py)"
+          "$py" --version
+          "$py" -c "import argparse,hashlib,json,os,platform,sys,unicodedata; print('stdlib-ok')"
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # Same two pre-builds as the matrix leg, for the same two reasons recorded
+      # there: `scripted_run_writes_expected_markdown` shells to
+      # `cargo run --bin tool_token_bench`, and
+      # `release_binary_ready_event_advertises_plugin_capabilities` shells to
+      # `cargo build --release -p wcore-cli` — which on Windows deadlocks against
+      # parallel tests holding NTFS mandatory file locks on target/.
+      - name: Pre-build tool_token_bench
+        run: vx cargo build -p wcore-agent --bin tool_token_bench --features test-utils
+
+      - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
+        run: vx cargo build --release -p wcore-cli
+
+      - name: Disk after the release pre-build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          Write-Host "C: free = $([math]::Round((Get-PSDrive C).Free / 1GB, 2)) GB"
+
+      # FIRST, not after clippy — see the step-order note in this job's header.
+      - name: Run tests (nextest CI profile)
+        run: vx just test-ci
+
+      # Byte-identical intent to the matrix job's per-leg gate: a leg that ran
+      # zero tests must be reported as an ABSENCE of signal, never as a pass.
+      # This job exists to supply a Windows verdict, so a vacuous run here is
+      # strictly worse than a red one.
+      - name: Assert this leg produced test signal (zero tests is not a pass)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          report=target/nextest/ci/junit.xml
+          if [ ! -f "$report" ]; then
+            echo "::error title=NO TEST SIGNAL (hosted Windows)::The test step produced no $report, so cargo-nextest never ran on this leg. This is NOT a test failure — it is the absence of a test result, and it must not be read as one."
+            exit 1
+          fi
+          tests=$(grep -oE 'tests="[0-9]+"' "$report" | head -1 | grep -oE '[0-9]+' || true)
+          echo "leg: hosted-windows   junit: $report   tests declared: ${tests:-<unparsed>}"
+          if [ -z "${tests:-}" ] || [ "$tests" -eq 0 ]; then
+            echo "::error title=ZERO TESTS (hosted Windows)::$report exists but declares ${tests:-no} tests. A suite that collected nothing certifies nothing."
+            exit 1
+          fi
+
+      # Windows has no other clippy supplier: `ci-linux` and the macOS leg
+      # cannot compile the `#[cfg(windows)]` branches at all. Runs AFTER the
+      # tests (and under `!cancelled()`) so a lint red cannot suppress the test
+      # verdict this job exists to produce — it still gates, it just no longer
+      # gates the wrong thing first.
+      - name: Clippy (warnings = errors)
+        if: ${{ !cancelled() }}
+        run: vx just lint
+
+      # Cheap here (nextest already compiled this binary) and genuinely
+      # Windows-specific: it catches `inventory::submit!` items being dead-code
+      # stripped under `profile.release`, on the `.exe` this platform ships.
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
+      # rather than a silent skip (#190).
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        if: ${{ !cancelled() }}
+        run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
+        env:
+          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
+
+      # The v0.8.6 abandonment verdict was a DISK verdict. Measure it on every
+      # run rather than re-deriving it from a link error two years later.
+      - name: Report disk (the constraint that closed this route in v0.8.6)
+        if: always()
+        shell: pwsh
+        run: Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,2)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,2)}}
+
+      - name: Upload nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-windows-latest-hosted
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
   # ── Full CI on Linux (host runner + per-step docker exec) ─────────────
   # Mirrors the macOS/Windows matrix steps (fmt + lint + tests + release
   # smoke + audit) on Linux x86_64, executing each command inside
@@ -1596,11 +1870,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
+      # Every producing leg uploads its report under the SAME filename,
+      # `junit.xml` (the path baked into the `ci` nextest profile), and
+      # merge-multiple extracts every artifact into ONE directory — so the four
+      # legs' reports all landed on `junit-reports/junit.xml` and clobbered each
+      # other. `COUNT` in the assertion below could read 1 with four legs
+      # reporting, and `dorny/test-reporter` published whichever leg happened to
+      # be extracted last. Without the flag each artifact gets its own directory
+      # (`junit-reports/nextest-junit-<leg>/junit.xml`); the `**/*.xml` globs
+      # already used by both consumers below match either layout, so nothing
+      # else changes. This lane added a FOURTH producer, which is what surfaced
+      # it — but the defect predates the addition and cost the aggregate report
+      # its per-leg detail for as long as more than one leg has been uploading.
       - name: Download nextest JUnit artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: nextest-junit-*
-          merge-multiple: true
           path: junit-reports
         continue-on-error: true
 
