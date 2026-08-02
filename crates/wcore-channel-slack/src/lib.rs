@@ -850,6 +850,63 @@ mod tests {
         );
     }
 
+    /// The same lifecycle, with the code a Slack ADMIN produces rather than the
+    /// one a token rotation produces.
+    ///
+    /// Deactivating the bot user is the other way a live Slack credential dies,
+    /// and it is not recoverable by retrying — the token must be reissued
+    /// against a live account, which is the same operator action as a rotation.
+    /// `account_inactive` was in `api::is_auth_rejection` but missing from the
+    /// hand-rolled list in `post_message_keyed`, so it returned
+    /// `SlackError::Api`, `post()` never took the `SlackError::Auth` arm, no
+    /// `AuthExpired` was published, and the channel went on reporting
+    /// `Healthy` while every send failed.
+    #[tokio::test]
+    async fn a_deactivated_bot_user_publishes_auth_expired_on_send() {
+        let mut server = mockito::Server::new_async().await;
+        let auth_mock = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+        let send_mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"account_inactive"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        auth_mock.assert_async().await;
+        let _ = ch.poll_events().await.unwrap();
+
+        let err = ch
+            .send_message(OutgoingMessage::text("C1", "hi"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ChannelError::Auth(_)),
+            "a deactivated bot user is a credential verdict, not a request \
+             fault: got {err:?}"
+        );
+        send_mock.assert_async().await;
+
+        let evs = ch.poll_events().await.unwrap();
+        let expired: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, ChannelEvent::AuthExpired { .. }))
+            .collect();
+        assert_eq!(
+            expired.len(),
+            1,
+            "a deactivated bot user must reach the health surface: {evs:?}"
+        );
+    }
+
     #[tokio::test]
     async fn send_message_hits_chat_postmessage_with_bearer() {
         let mut server = mockito::Server::new_async().await;
