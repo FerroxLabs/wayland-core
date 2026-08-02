@@ -1,0 +1,169 @@
+name: windows-flake-ledger
+
+# Re-measure the tests CI reported as `FLAKY` on the Windows leg, with nextest
+# RETRIES DISABLED, on the same self-hosted Windows box that produced the
+# original reports.
+#
+# Why this workflow exists
+# ------------------------
+# `.config/nextest.toml` sets `retries = 2` for the `ci` profile. A test that
+# fails twice and passes on the third attempt is reported as `FLAKY 3/3` and
+# counted in the PASSED total. Two consecutive CI runs on the Windows leg:
+#
+#   run 30698794888 (job 91366049013) -- 2 flaky
+#   run 30699019736 (job 91372229704) -- 6 flaky
+#
+# and `wcore-swarm::worker_runtime_limits
+# multi_worker_output_exhaustion_fails_without_retaining_buffers` was
+# `FLAKY 3/3` in BOTH. That is four consecutive failed attempts retried into
+# two green-looking runs.
+#
+# Worse, the diagnostic is gone: job 91372229704's log holds 6 `FLAKY` lines and
+# 66 `TRY 3 FAIL` lines and ZERO `TRY 1` / `TRY 2` lines, so not one of those
+# failed attempts left any output behind to triage.
+#
+# `scripts/flake-ledger.py` runs each named test `--runs` times with
+# `--retries 0`, under three conditions (isolated / batch / batch-under-CPU-load),
+# and prints a pass/fail count per test per condition. A test that needs a retry
+# is graded as what it is: a failure.
+#
+# This is a MEASUREMENT job, not a gate. It never fails the build on a red test
+# -- the ledger is the artifact. It is dispatched by hand or by pushing the lane
+# branch that owns it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Repetitions per test per condition"
+        type: string
+        required: false
+        default: "10"
+      conditions:
+        description: "Comma-separated subset of isolated,batch,loaded"
+        type: string
+        required: false
+        default: "isolated,batch,loaded"
+  push:
+    branches:
+      - lane/win-hidden-fails
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-flake-ledger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: Windows flake ledger (self-hosted msvc, retries=0)
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The self-hosted checkout dir is owned by BUILTIN\Administrators while
+      # the runner service is NT AUTHORITY\NETWORK SERVICE, so git aborts on
+      # "dubious ownership". Same treatment as nightly-windows-soak.yml.
+      - name: Trust the checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      # Python is installed PER-USER in Sean's profile on this box and is NOT on
+      # the NetworkService account's PATH, so the harness has to provision its
+      # own. Lifted from ci.yml's `Ensure a Python interpreter` step, including
+      # the bsdtar detail: PATH `tar` on this runner is GNU tar 1.35, which
+      # cannot read a zip at all.
+      - name: Ensure a Python interpreter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            echo "python already present: $(command -v python3)"; python3 --version; exit 0
+          fi
+          if command -v python >/dev/null 2>&1; then
+            echo "python already present: $(command -v python)"; python --version; exit 0
+          fi
+          ver=3.12.10
+          dest="$RUNNER_TEMP/py-embed"
+          mkdir -p "$dest"
+          curl -fsSL -o "$dest/py.zip" \
+            "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
+          bsdtar=/c/Windows/System32/tar.exe
+          if [ ! -x "$bsdtar" ]; then
+            echo "::error title=No bsdtar::$bsdtar is missing; PATH tar is GNU tar and cannot read zip."
+            exit 1
+          fi
+          ( cd "$dest" && "$bsdtar" -xf py.zip )
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/python.exe" --version
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Clear stale install-action state (partner-runner-images#169)
+        shell: bash
+        run: |
+          for base in "$USERPROFILE" "/c/Users/$USERNAME" \
+                      "/c/WINDOWS/ServiceProfiles/NetworkService" \
+                      "/c/WINDOWS/system32/config/systemprofile"; do
+            [ -n "$base" ] && rm -rf "$base/.install-action/tmp" "$base/.install-action/init" 2>/dev/null || true
+          done
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # Compile the three test binaries BEFORE measuring, so the first
+      # repetition of the first test is not the one that pays for the build and
+      # blows its own wall-clock budget.
+      - name: Warm the test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo nextest list --profile ci \
+            -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
+            > /dev/null
+          cargo nextest list --profile ci \
+            -E 'package(wcore-cli) and binary(deterministic_openai_loop)' \
+            > /dev/null
+
+      - name: Measure with retries disabled
+        shell: bash
+        env:
+          LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
+          LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
+        run: |
+          set -euo pipefail
+          py=python3
+          command -v python3 >/dev/null 2>&1 || py=python
+          "$py" scripts/flake-ledger.py \
+            --runs "$LEDGER_RUNS" \
+            --conditions "$LEDGER_CONDITIONS" \
+            --profile ci \
+            --out windows-flake-ledger.json \
+            --logdir flake-ledger-logs \
+            | tee flake-ledger.txt
+
+      - name: Upload the ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-flake-ledger-${{ github.run_id }}
+          path: |
+            windows-flake-ledger.json
+            flake-ledger.txt
+            flake-ledger-logs/
+          retention-days: 14
+          # A measurement job that uploaded nothing measured nothing.
+          if-no-files-found: error
