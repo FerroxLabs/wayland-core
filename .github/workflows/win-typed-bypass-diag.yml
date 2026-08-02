@@ -79,3 +79,10 @@ jobs:
           cargo test -p wcore-agent --test win_bash_path_diag
           windows_engine_side_effect_fork
           -- --ignored --nocapture --test-threads=1
+
+      - name: FORENSICS - stderr survival and post-run control
+        continue-on-error: true
+        run: >
+          cargo test -p wcore-agent --test win_bash_path_diag
+          windows_engine_capture_forensics
+          -- --ignored --nocapture --test-threads=1

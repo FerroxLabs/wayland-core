@@ -392,6 +392,88 @@ async fn windows_engine_path_bisect() {
     );
 }
 
+/// L8/L9 — forensics on the surviving question. L7 established that the child
+/// RUNS (its redirect lands in the workspace) and exits 0 while its stdout comes
+/// back empty, and only through the engine dispatch. Two things are still
+/// unseparated:
+///
+///   L8  does STDERR survive the same run? If it does, the loss is specific to
+///       one pipe rather than to the capture as a whole.
+///   L9  is the PROCESS poisoned by the engine run? The same direct BashTool
+///       call that was green BEFORE the run is repeated AFTER it. Green means
+///       the loss lives inside the dispatch; red means the run leaves the
+///       process unable to capture a sandboxed child's output at all.
+#[tokio::test]
+#[ignore = "Windows diagnostic; run explicitly with --ignored --nocapture"]
+async fn windows_engine_capture_forensics() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("l8-ran.txt");
+    let out_needle = format!("{NEEDLE}-OUT");
+    let err_needle = format!("{NEEDLE}-ERR");
+    let command = if cfg!(windows) {
+        format!(
+            "echo {out_needle} & echo {err_needle} 1>&2 & echo ran> \"{}\"",
+            marker.display()
+        )
+    } else {
+        format!(
+            "echo {out_needle}; echo {err_needle} 1>&2; echo ran > '{}'",
+            marker.display()
+        )
+    };
+    banner("L8 ENGINE RUN, STDOUT AND STDERR TOGETHER");
+    println!("  command = {command:?}");
+
+    let physical = physical_attempt_server().await;
+    let mut config = diag_config();
+    config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut config, workspace.path());
+    let capture = Arc::new(DiagSink::default());
+    let sink: Arc<dyn OutputSink> = capture.clone();
+    let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
+        .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use(
+                "typed-bash",
+                "Bash",
+                serde_json::json!({ "command": command }),
+            )
+            .with_physical_url(physical.uri()),
+        ))
+        .without_channels(true)
+        .build()
+        .await
+        .expect("bootstrap must succeed");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("session");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+
+    let run = result
+        .engine
+        .run(
+            "run the harmless proof command",
+            "typed-bypass-bash-forensic",
+        )
+        .await;
+    println!("  run_ok       = {}", run.is_ok());
+    let results = capture.tool_results.lock().unwrap().clone();
+    println!("  tool_results = {results:?}");
+    let joined: String = results.iter().map(|(_, _, c)| c.as_str()).collect();
+    println!("  child_ran (marker)   = {}", marker.exists());
+    println!("  stdout_needle_present= {}", joined.contains(&out_needle));
+    println!("  stderr_needle_present= {}", joined.contains(&err_needle));
+
+    // L9 — the same direct call that was green before the run, repeated after it.
+    let engine_registry = result.engine.tools();
+    let engine_policy = engine_registry
+        .workspace_policy()
+        .expect("bootstrap installs a workspace policy");
+    let engine_sandbox = engine_registry.sandbox_runtime();
+    run_bash_with_registry("9-postrun-control", engine_policy, engine_sandbox).await;
+}
+
 /// L7 — the decisive fork. The same engine path, but the model-issued command
 /// ALSO writes the proof to a file inside the workspace. A missing needle with
 /// the file PRESENT means the child ran and only its stdout was lost; a missing
