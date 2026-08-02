@@ -5618,7 +5618,7 @@ mod chunk_write_lock_verification {
         writer_a.join().unwrap().expect("writer A reports success");
         writer_b.join().unwrap().expect("writer B reports success");
 
-        let final_value = chunked_get(&Scheduled::plain(&shared), KEY)
+        let final_value = chunked_get(&Scheduled::plain(&shared), KEY, &locks)
             .unwrap()
             .expect("a credential must still be present");
         let mut tags: Vec<char> = final_value.chars().collect();
@@ -5667,7 +5667,7 @@ mod chunk_write_lock_verification {
                 handle.join().unwrap().expect("both writers must succeed");
             }
 
-            let value = chunked_get(&Scheduled::plain(&shared), KEY)
+            let value = chunked_get(&Scheduled::plain(&shared), KEY, &locks)
                 .unwrap()
                 .expect("a credential must still be present");
             assert!(
@@ -5707,7 +5707,7 @@ mod chunk_write_lock_verification {
         )
         .expect("a write must not be wedged forever by a dead holder");
         assert_eq!(
-            chunked_get(&Scheduled::plain(&shared), KEY)
+            chunked_get(&Scheduled::plain(&shared), KEY, &locks)
                 .unwrap()
                 .as_deref(),
             Some("R".repeat(4000).as_str())
@@ -5753,7 +5753,7 @@ mod chunk_write_lock_verification {
             "the refusal must name the lock it could not take: {error}"
         );
         assert_eq!(
-            chunked_get(&Scheduled::plain(&shared), KEY)
+            chunked_get(&Scheduled::plain(&shared), KEY, &locks)
                 .unwrap()
                 .as_deref(),
             Some("L".repeat(4000).as_str()),
