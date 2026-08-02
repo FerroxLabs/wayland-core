@@ -6403,12 +6403,33 @@ impl AgentEngine {
         // the write-ahead pairs that prove what executed are keyless. So on a
         // host that cannot seal, journal the turn, decline the promise, and say
         // so on the turn's own surface.
-        if wcore_config::config::replay_protection_unavailable() {
-            self.announce_replay_protection_unavailable_for_this_turn();
-        } else {
-            self.recovery_request_protection
-                .preflight(&self.config)
-                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        //
+        // The decision is taken from THIS engine's own protection and THIS
+        // engine's config, not from the process-global fact `Config::resolve`
+        // records. That global is right for a status surface and wrong here for
+        // two reasons: it is set by whichever config resolved first in the
+        // process, and it is a measurement of the host taken at startup, while
+        // this is a question about a key that may have been unlocked or removed
+        // since. An engine that skipped sealing because some other config
+        // resolved on a keyless path would silently stop protecting requests it
+        // can perfectly well protect.
+        //
+        // Only ONE cause degrades. `NoSecureBackendAvailable` is the host having
+        // no keyring and no unlocked vault — nobody chose it and nobody can be
+        // blamed for it. `PlaintextBackendRejected` is an operator who
+        // configured a backend that can never hold confidential material, and
+        // `SecureStoreUnreadable` is a vault opened with the wrong passphrase:
+        // both are decisions or mistakes with a specific fix, both must keep
+        // failing loudly, and neither may be quietly reinterpreted as "this
+        // host is just like a headless server".
+        match self.recovery_request_protection.preflight(&self.config) {
+            Ok(()) => {}
+            Err(
+                crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
+            ) => {
+                self.announce_replay_protection_unavailable_for_this_turn();
+            }
+            Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
         }
         let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
         self.active_journal_turn_id = Some(turn_id.clone());
@@ -8946,11 +8967,17 @@ impl AgentEngine {
     /// is already in the pinned contract, so no host has to learn a new frame
     /// to receive it.
     ///
-    /// Deliberately conditioned on `replay_protection_unavailable()`, not on
-    /// the journal. The two causes need opposite treatment: an operator who
-    /// wrote `[session] enabled = false` asked for that and must not be nagged
-    /// once per message; an operator whose HOST took replay away never agreed
-    /// to anything.
+    /// UNCONDITIONAL, and its single caller is what makes that correct: it
+    /// fires only on the one preflight arm that means "this host has no key",
+    /// having already separated that from an operator who chose a plaintext
+    /// backend and from a vault opened with the wrong passphrase. A second
+    /// condition here would be a second opinion about a question already
+    /// answered, and the two would drift.
+    ///
+    /// An operator who wrote `[session] enabled = false` never reaches this at
+    /// all — there is no journal, so there is no journaled turn — which is the
+    /// right treatment: they asked for it and must not be nagged once per
+    /// message.
     ///
     /// The text says what is STILL true as well as what is lost. Its
     /// predecessor said "this turn is not being recorded", which is now false
@@ -8980,9 +9007,6 @@ impl AgentEngine {
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
     fn announce_replay_protection_unavailable_for_this_turn(&self) {
-        if !wcore_config::config::replay_protection_unavailable() {
-            return;
-        }
         tracing::warn!(
             target: "wcore_agent::session",
             session = %self
@@ -10141,7 +10165,20 @@ impl AgentEngine {
                     })?)
                 } else if let Some(turn_id) = journal_turn_id {
                     self.sync_journal_conversation(turn_id).await?;
-                    if wcore_config::config::replay_protection_unavailable() {
+                    // Asked of this engine's own protection, for the reason the
+                    // preflight above gives. It is cheap: a successful preflight
+                    // has already cached the key, so this is a mutex lock and a
+                    // `Some` check, and it is READ-ONLY — it can never create
+                    // the key it is asking about.
+                    //
+                    // The preflight has already screened every cause that must
+                    // fail closed, so the only way to be here without a key is
+                    // the host having none.
+                    if self
+                        .recovery_request_protection
+                        .sealed_request_key_available(&self.config)
+                        .is_err()
+                    {
                         // A `ProviderDispatch` checkpoint is REQUIRED to carry a
                         // sealed prepared request (`recovery.rs:331`), so on a
                         // host that cannot seal one there is no honest
