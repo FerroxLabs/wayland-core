@@ -49,7 +49,8 @@ jobs:
 
       - name: Show what is actually being tested
         shell: bash
-        run: echo "commit: $(git rev-parse HEAD)"
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
 
       - name: Run ${{ matrix.crate }} ${{ matrix.args }}
         shell: bash
