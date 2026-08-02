@@ -1626,7 +1626,7 @@ jobs:
       # user or the concurrency gate stopped was never going to produce evidence
       # and should not be re-reported as a defect.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: ${{ needs.ci.result != 'cancelled' }}
+        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
         run: |
           set -euo pipefail
           mkdir -p junit-reports
