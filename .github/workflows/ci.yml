@@ -777,6 +777,17 @@ jobs:
       # on the real pre-redaction values and stays silent on redacted
       # evidence plus the fixture corpora. A checker that has quietly stopped
       # matching therefore fails loudly instead of passing everything.
+      #
+      # Absolute home paths are deliberately NOT blocking inside `.planning/`.
+      # 2967 of the 2998 in this tree are there, in evidence that transcribes
+      # what a real machine printed; every in-flight lane adds more, so one
+      # blocking number over them turns integration red on whichever lane
+      # merges first, about a change the gate has nothing to say about — and
+      # the fix would be to bump the baseline, which teaches everyone to bump
+      # the baseline. Outside `.planning/` they DO block (baseline 31), where a
+      # hardcoded /Users/<name> is a portability defect in its own right. The
+      # self-test drives the real scanner over throwaway git repos to prove
+      # exactly that split, in both directions, on every run.
       - name: No personal identifiers in committed content
         run: |
           python3 scripts/check-no-personal-identifiers.py --self-test
