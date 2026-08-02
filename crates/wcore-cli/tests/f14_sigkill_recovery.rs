@@ -1379,14 +1379,25 @@ fn session_directory_entries(home: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Which files under a profile carry a SEALED prepared provider request.
+/// Which files under a profile carry a SEALED prepared provider request —
+/// meaning the field is present AND carries a value.
 ///
-/// The one thing a keyless host must not have written, and the one thing that
-/// separates "journal without the seal" from "journal exactly as before". It is
-/// matched on the serialized field name rather than on ciphertext, because
-/// ciphertext is unrecognisable by construction — an absence of anything
+/// This is the one thing a keyless host must not have written, and the one
+/// thing that separates "journal without the seal" from "journal exactly as
+/// before". Matched on the serialized field rather than on ciphertext, because
+/// ciphertext is unrecognisable by construction: an absence of anything
 /// unreadable is not evidence, whereas an absence of the field that carries it
 /// is.
+///
+/// INSTRUMENT DEFECT, found by this test and repaired rather than written up:
+/// v1 matched the field NAME alone and reported a keyless run as having sealed
+/// a request. `RecoveryCheckpoint.sealed_prepared_request` has no
+/// `skip_serializing_if`, so EVERY checkpoint serializes the key — including
+/// the terminal `CommitTurn` checkpoint that closes a keyless turn, which
+/// writes `"sealed_prepared_request":null`. The name is structural; only the
+/// value is evidence. A needle that matches on every profile can neither pass
+/// nor fail meaningfully, and the vault control would have hidden it by
+/// agreeing.
 ///
 /// Paired with a vault control in every caller: on a profile WITH a key this
 /// must return files, or the emptiness asserted on the keyless profile is just
@@ -1395,9 +1406,28 @@ fn session_directory_entries(home: &Path) -> usize {
 fn sealed_request_artifacts(home: &Path) -> Vec<PathBuf> {
     profile_contents(home)
         .into_iter()
-        .filter(|(_, bytes)| !byte_offsets(bytes, b"sealed_prepared_request").is_empty())
+        .filter(|(_, bytes)| {
+            String::from_utf8_lossy(bytes)
+                .split("\"sealed_prepared_request\":")
+                .skip(1)
+                .any(|value| !value.trim_start().starts_with("null"))
+        })
         .map(|(path, _)| path)
         .collect()
+}
+
+/// The control for [`sealed_request_artifacts`]'s own repair: how many
+/// checkpoints mention the field at all, sealed or not.
+///
+/// Without this, the fixed probe returning empty on a keyless profile is
+/// indistinguishable from a profile whose checkpoints do not carry the field —
+/// which is what the original defect looked like from the other side.
+#[cfg(target_os = "linux")]
+fn checkpoints_mentioning_the_seal(home: &Path) -> usize {
+    profile_contents(home)
+        .into_iter()
+        .map(|(_, bytes)| byte_offsets(&bytes, b"\"sealed_prepared_request\":").len())
+        .sum()
 }
 
 /// The distinct journal event types recorded for a session, as a set.
@@ -1700,13 +1730,21 @@ async fn without_secure_store_the_default_journals_every_effect_but_seals_nothin
         );
     }
 
-    // (3) AND THE ONE FIELD THAT NEEDS A KEY IS ABSENT.
+    // (3) AND THE ONE FIELD THAT NEEDS A KEY CARRIES NOTHING.
     let sealed = sealed_request_artifacts(env.home());
     assert!(
         sealed.is_empty(),
         "a host with no keyring sealed a prepared request anyway, into {sealed:?}. \
          Either the degrade did not happen, or something wrote ciphertext under a \
          key it cannot have"
+    );
+    // …and the probe was looking at checkpoints that DO carry the field, so the
+    // emptiness above is about the value and not about the field being absent.
+    assert_ne!(
+        checkpoints_mentioning_the_seal(env.home()),
+        0,
+        "no checkpoint on this profile mentions sealed_prepared_request at all, \
+         so the empty result above says nothing about whether anything was sealed"
     );
 
     // KNOWN-POSITIVE CONTROL, in the same test, for the same three probes.
