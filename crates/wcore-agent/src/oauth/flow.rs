@@ -24,7 +24,6 @@ use std::time::Duration;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 use super::pkce::{PkceChallenge, PkceMode};
 
@@ -603,12 +602,37 @@ pub enum RefreshError {
     Transport(String),
     #[error("internal: refresh task panicked")]
     JoinError,
+    /// The primary refresh future was dropped before it produced a result — a
+    /// cancelled turn, or an upstream timeout. Subscribers are woken with this
+    /// rather than left waiting for a result that will never arrive.
+    #[error("the refresh was cancelled before it completed")]
+    Cancelled,
+    /// The refresh could not be attempted, and trying again later is expected
+    /// to work. Distinct from [`RefreshError::ProviderRejected`] because a
+    /// caller must NOT read it as an authentication failure and prompt for a
+    /// fresh sign-in.
+    #[error("{0}")]
+    Retryable(String),
 }
 
-/// Lazily-resolved cell for the result of one refresh attempt.
-/// Concurrent callers subscribe to the same cell and read once the
-/// primary completes the network round-trip.
-type RefreshCell = Arc<tokio::sync::OnceCell<Result<OAuthTokens, RefreshError>>>;
+/// Lazily-resolved cell for the result of one refresh attempt, plus the
+/// wake-up subscribers wait on. Concurrent callers subscribe to the same cell
+/// and read once the primary completes the network round-trip.
+struct RefreshCell {
+    result: tokio::sync::OnceCell<Result<OAuthTokens, RefreshError>>,
+    /// Signalled exactly once, when `result` is filled — including when the
+    /// primary was CANCELLED and filled it with [`RefreshError::Cancelled`].
+    settled: tokio::sync::Notify,
+}
+
+impl RefreshCell {
+    fn settle(&self, value: Result<OAuthTokens, RefreshError>) {
+        // Ignore the set error: only one writer ever settles a cell, and the
+        // cancellation guard checks `initialized` before it tries.
+        let _ = self.result.set(value);
+        self.settled.notify_waiters();
+    }
+}
 
 /// Coalesces concurrent refresh requests so the provider sees one POST
 /// per refresh window, no matter how many tool calls fired into the
@@ -616,16 +640,53 @@ type RefreshCell = Arc<tokio::sync::OnceCell<Result<OAuthTokens, RefreshError>>>
 ///
 /// Usage: `let new_tokens = refresher.refresh(&fetcher).await?;`
 /// where `fetcher` is a closure that hits the token endpoint.
+///
+/// **Cancellation.** Dropping the primary's future — a cancelled turn, an
+/// upstream timeout — must not strand the subscribers. It used to: the slot
+/// stayed occupied and every subscriber busy-spun on `yield_now` forever.
+/// #172 makes the primary's hold much longer (a cross-process file lock plus
+/// the network round-trip plus the store write), which turns that from a narrow
+/// window into a routine one, so the guard below settles the cell with
+/// [`RefreshError::Cancelled`] and vacates the slot on drop.
 pub struct SingleFlightRefresh {
     // `Option<Arc<...>>` so concurrent callers can subscribe to the
     // in-flight result without holding the mutex while awaiting.
-    inner: Mutex<Option<RefreshCell>>,
+    //
+    // A std mutex, not an async one: it is never held across an await, and the
+    // cancellation guard's `Drop` has to vacate the slot without being able to
+    // await.
+    inner: std::sync::Mutex<Option<Arc<RefreshCell>>>,
 }
 
 impl Default for SingleFlightRefresh {
     fn default() -> Self {
         Self {
-            inner: Mutex::new(None),
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Vacates the single-flight slot when the primary finishes OR is dropped.
+struct PrimaryGuard<'a> {
+    slot: &'a std::sync::Mutex<Option<Arc<RefreshCell>>>,
+    cell: Arc<RefreshCell>,
+}
+
+impl Drop for PrimaryGuard<'_> {
+    fn drop(&mut self) {
+        // Vacate the slot — but only if it still holds OUR cell, so a
+        // successor's cell is never evicted.
+        if let Ok(mut guard) = self.slot.lock()
+            && guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.cell))
+        {
+            *guard = None;
+        }
+        // If the primary was cancelled before it settled, wake the subscribers
+        // with a distinguishable error instead of leaving them to spin.
+        if !self.cell.result.initialized() {
+            self.cell.settle(Err(RefreshError::Cancelled));
         }
     }
 }
@@ -639,54 +700,85 @@ impl SingleFlightRefresh {
     /// caller through installs the cell and drives `fetcher`; later
     /// callers attach to the same cell and read the result when
     /// `fetcher` completes.
+    ///
+    /// `fetcher`'s future is awaited inline and never spawned, so it may borrow
+    /// from the caller. That is load-bearing for #172: the request body has to
+    /// be built from a pair re-read INSIDE the critical section, and a
+    /// `'static` bound would force the caller to clone the refresh token into
+    /// the closure before anything runs — which is exactly the bug.
     pub async fn refresh<F, Fut>(&self, fetcher: F) -> Result<OAuthTokens, RefreshError>
     where
-        F: FnOnce() -> Fut + Send,
-        Fut: std::future::Future<Output = Result<OAuthTokens, RefreshError>> + Send + 'static,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<OAuthTokens, RefreshError>>,
     {
         // Acquire-and-publish the cell under the mutex, then drop the
         // mutex BEFORE awaiting `fetcher` so concurrent callers can see
         // the same cell.
         let (cell, primary) = {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock().expect("single-flight slot poisoned");
             if let Some(existing) = guard.as_ref() {
                 (existing.clone(), false)
             } else {
-                let new_cell = Arc::new(tokio::sync::OnceCell::new());
+                let new_cell = Arc::new(RefreshCell {
+                    result: tokio::sync::OnceCell::new(),
+                    settled: tokio::sync::Notify::new(),
+                });
                 *guard = Some(new_cell.clone());
                 (new_cell, true)
             }
         };
 
         if primary {
-            // Drive the fetcher once; clear the cell when done so a
-            // future refresh attempt isn't permanently fused.
+            // The guard vacates the slot on EVERY exit path, including a drop
+            // of this future mid-`fetcher`.
+            let guard = PrimaryGuard {
+                slot: &self.inner,
+                cell: cell.clone(),
+            };
             let result = fetcher().await;
-            // Ignore set_err — only the primary calls set, and we have
-            // a fresh OnceCell, so the first set always succeeds.
-            let _ = cell.set(result.clone());
-            // Clear the slot so the NEXT refresh window can start fresh.
-            {
-                let mut guard = self.inner.lock().await;
-                *guard = None;
-            }
+            cell.settle(result.clone());
+            drop(guard);
             return result;
         }
 
-        // Subscriber path: await the same cell. `get_or_init` would
-        // double-fire `fetcher`, so we wait_initialized via `wait`.
-        // (OnceCell only exposes get_or_init that consumes a closure;
-        // we instead spin-wait by polling `get()` with a short sleep.
-        // For the test surface this is fine; v0.9.1 can switch to a
-        // notify-once primitive.)
-        loop {
-            if let Some(v) = cell.get() {
-                return v.clone();
+        // Subscriber path. Register interest BEFORE re-reading the cell:
+        // `Notify::notified()` only starts listening once enabled, so checking
+        // first and awaiting second would drop a notification that landed in
+        // between and leave this caller waiting for a wake-up that already
+        // happened.
+        //
+        // The outer timeout is a liveness BACKSTOP, not the mechanism: the cell
+        // is settled on every primary exit path, cancellation included, so a
+        // subscriber that reaches the ceiling has found a bug. It bounds the
+        // wait rather than letting one hang a turn forever.
+        let subscribe = async {
+            loop {
+                let listener = cell.settled.notified();
+                tokio::pin!(listener);
+                listener.as_mut().enable();
+                if let Some(value) = cell.result.get() {
+                    return value.clone();
+                }
+                listener.await;
+                if let Some(value) = cell.result.get() {
+                    return value.clone();
+                }
             }
-            tokio::task::yield_now().await;
+        };
+        match tokio::time::timeout(SUBSCRIBER_CEILING, subscribe).await {
+            Ok(value) => value,
+            Err(_) => Err(RefreshError::Retryable(
+                "the in-process refresh this call was waiting on never settled; retry the request"
+                    .into(),
+            )),
         }
     }
 }
+
+/// Backstop for a subscriber waiting on the primary. Comfortably above the
+/// primary's own worst case (the cross-process lock's wait ceiling plus a full
+/// refresh hold), so it can only fire on a bug.
+const SUBSCRIBER_CEILING: Duration = Duration::from_secs(120);
 
 /// Generate a 32-byte CSRF state token, base64url-encoded.
 pub fn new_state_token() -> String {

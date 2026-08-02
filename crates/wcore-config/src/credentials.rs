@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2002,30 +2002,113 @@ fn warn_no_secure_credential_tier(path: &Path) {
     });
 }
 
-/// Exclusive, self-recovering lock guarding the one-shot migration against a
-/// concurrent opener on the same profile home. Held only for the brief
-/// import+verify+delete window.
+/// Timing contract for an [`ExclusiveFileLock`]: how long a lockfile may sit
+/// untouched before a waiter treats its holder as crashed, how long a waiter
+/// keeps trying, and whether the holder refreshes the lockfile while it works.
 ///
-/// It is a create-`O_EXCL` lockfile (atomic on every platform). A concurrent
-/// migrator spins briefly for it; a holder that CRASHED leaves a stale lockfile
-/// that is stolen once it ages past a minute (so a crash defers migration by at
-/// most that long — and until then the plaintext store keeps serving, so no
-/// secret is ever lost). The lockfile is removed on drop.
+/// The two durations are not independent. `wait_ceiling` must sit ABOVE
+/// `stale_after`, or a crashed holder becomes a hard refusal for every waiter
+/// until the crash ages out: the waiter would give up before it ever reached
+/// the steal. Sitting past `stale_after` means the steal is always reached and
+/// the waiter proceeds holding the lock instead.
+#[derive(Debug, Clone, Copy)]
+pub struct LockPolicy {
+    stale_after: std::time::Duration,
+    wait_ceiling: std::time::Duration,
+    /// When set, the holder spawns a dedicated OS thread that re-stamps the
+    /// lockfile at this interval so its mtime tracks liveness rather than
+    /// acquisition time. See [`LockPolicy::with_heartbeat`].
+    heartbeat: Option<std::time::Duration>,
+}
+
+impl LockPolicy {
+    /// A holder that has not finished in a minute is treated as crashed. Long
+    /// enough that no healthy holder is ever stolen from (the migration is
+    /// sub-second), short enough that a crash costs at most that long.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+    /// Poll interval while waiting. The uncontended path never sleeps at all —
+    /// the first `create_new` succeeds.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// Migration: give up quickly. The plaintext store keeps serving in the
+    /// meantime, so deferring to the next open loses nothing.
+    pub const MIGRATION: Self = Self {
+        stale_after: Self::STALE_AFTER,
+        wait_ceiling: std::time::Duration::from_secs(10),
+        heartbeat: None,
+    };
+
+    /// A policy whose durations a caller derives from its own hold time. The
+    /// caller owns the derivation because only it knows the maximum hold — see
+    /// `wcore_agent::oauth::refresh_lock` for a worked example.
+    pub const fn new(
+        stale_after: std::time::Duration,
+        wait_ceiling: std::time::Duration,
+    ) -> Self {
+        Self {
+            stale_after,
+            wait_ceiling,
+            heartbeat: None,
+        }
+    }
+
+    /// Re-stamp the lockfile every `every` while the lock is held.
+    ///
+    /// Without a heartbeat, `stale_after` has to exceed the maximum hold, so a
+    /// hold measured in tens of seconds forces a staleness measured in minutes
+    /// — and a crashed holder wedges every waiter for that long. With one, the
+    /// lockfile's mtime tracks LIVENESS rather than acquisition time, so
+    /// `stale_after` is sized against the heartbeat interval instead and a
+    /// crash is detected in seconds regardless of how long the work takes.
+    ///
+    /// The heartbeat runs on a dedicated OS thread, never on a task executor:
+    /// a heartbeat that can be starved by the same executor the holder is
+    /// blocking would let a LIVE holder be judged stale and stolen from, which
+    /// is the exact failure the lock exists to prevent.
+    pub const fn with_heartbeat(mut self, every: std::time::Duration) -> Self {
+        self.heartbeat = Some(every);
+        self
+    }
+}
+
+/// Exclusive, self-recovering cross-process lock: a create-`O_EXCL` lockfile,
+/// which is atomic on every platform.
 ///
-/// This matters because two migrators that both saw no `.enc`/`.kdf` would
-/// generate DIFFERENT random salts and interleave their two-file writes into a
-/// mismatched (undecryptable) vault — serializing here prevents that.
-struct MigrationLock {
+/// A concurrent holder is spun for; a holder that CRASHED leaves a stale
+/// lockfile that is stolen once it ages past [`LockPolicy::stale_after`]. The
+/// lockfile is removed on drop.
+///
+/// Callers:
+///
+/// * the one-shot plaintext→vault migration ([`migrate_plaintext_into_vault`]),
+///   because two migrators that both saw no `.enc`/`.kdf` would generate
+///   DIFFERENT random salts and interleave their two-file writes into a
+///   mismatched (undecryptable) vault;
+/// * the OAuth refresh critical section (`wcore-agent`), because a rotating
+///   refresh token is single-use and two processes that both POST it burn the
+///   whole authorization grant.
+pub struct ExclusiveFileLock {
     path: PathBuf,
     /// Unique per-acquisition token stamped into the lockfile, so `drop` only
     /// removes a lockfile that is STILL ours — never one a concurrent stealer
     /// created after our lock was (wrongly) judged stale.
     nonce: String,
+    heartbeat: Option<Heartbeat>,
 }
 
-impl MigrationLock {
-    fn acquire(dir: &Path) -> Result<Self, CredentialsError> {
-        let path = dir.join(".credentials.migrate.lock");
+impl ExclusiveFileLock {
+    /// `label` names the lock in the busy error, so a caller can tell a wedged
+    /// migration from a wedged refresh.
+    pub fn acquire(
+        path: PathBuf,
+        policy: LockPolicy,
+        label: &str,
+    ) -> Result<Self, CredentialsError> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         // Unique per acquisition (pid + a process-local sequence) so different
         // processes/acquisitions never collide.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2034,9 +2117,8 @@ impl MigrationLock {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        // ~10s ceiling (200 × 50ms) — migration itself is sub-second; this only
-        // waits out a genuinely concurrent migrator.
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + policy.wait_ceiling;
+        loop {
             match std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -2048,48 +2130,113 @@ impl MigrationLock {
                     // file's existence) still holds; we simply won't nonce-match
                     // on drop and will conservatively leave the file.
                     let _ = f.write_all(nonce.as_bytes());
-                    return Ok(Self { path, nonce });
+                    drop(f);
+                    let heartbeat = policy
+                        .heartbeat
+                        .map(|every| Heartbeat::start(path.clone(), nonce.clone(), every));
+                    return Ok(Self {
+                        path,
+                        nonce,
+                        heartbeat,
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Self::is_stale(&path) {
+                    if Self::is_stale(&path, policy.stale_after) {
                         // Crashed holder — steal it and re-race the create_new
                         // (whoever wins the atomic create proceeds).
                         let _ = std::fs::remove_file(&path);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
                     }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(CredentialsError::BackendUnavailable(format!(
+                            "the {label} lock at {} is held by another process and did not \
+                             free within {:?}",
+                            path.display(),
+                            policy.wait_ceiling
+                        )));
+                    }
+                    std::thread::sleep(LockPolicy::POLL);
                 }
                 Err(e) => return Err(CredentialsError::Io(e)),
             }
         }
-        Err(CredentialsError::BackendUnavailable(
-            "credentials migration lock is busy; will retry on next open".into(),
-        ))
     }
 
-    /// A lockfile older than a minute is treated as abandoned by a crashed
-    /// holder. Any error reading the mtime (clock skew, missing) → not stale.
-    fn is_stale(path: &Path) -> bool {
+    /// A lockfile untouched for longer than `stale_after` is treated as
+    /// abandoned by a crashed holder. Any error reading the mtime (clock skew,
+    /// missing) → not stale.
+    fn is_stale(path: &Path, stale_after: std::time::Duration) -> bool {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
-            .map(|t| {
-                t.elapsed()
-                    .map(|age| age > std::time::Duration::from_secs(60))
-            })
+            .map(|t| t.elapsed().map(|age| age > stale_after))
             .map(|r| r.unwrap_or(false))
             .unwrap_or(false)
     }
 }
 
-impl Drop for MigrationLock {
+impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
+        // Stop the heartbeat FIRST, so it cannot re-stamp (and so resurrect)
+        // a lockfile we are about to release.
+        self.heartbeat.take();
         // Remove ONLY if the lockfile still carries our nonce. If a stale-steal
         // replaced it with another holder's token, deleting it would let a third
-        // migrator in concurrently — so leave it for the current owner.
+        // holder in concurrently — so leave it for the current owner.
         if let Ok(contents) = std::fs::read_to_string(&self.path)
             && contents == self.nonce
         {
             let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Dedicated OS thread that re-stamps a held lockfile so its mtime tracks the
+/// holder's liveness. Stopping is immediate (condvar), not a sleep the drop has
+/// to wait out.
+struct Heartbeat {
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    fn start(path: PathBuf, nonce: String, every: std::time::Duration) -> Self {
+        let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let signal = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("wayland-lock-heartbeat".into())
+            .spawn(move || {
+                let (lock, cvar) = &*signal;
+                loop {
+                    let Ok(guard) = lock.lock() else { return };
+                    let Ok((guard, _)) = cvar.wait_timeout(guard, every) else {
+                        return;
+                    };
+                    if *guard {
+                        return;
+                    }
+                    drop(guard);
+                    // Re-stamp only while the file is still OURS. A lockfile a
+                    // stealer already replaced belongs to them; refreshing its
+                    // mtime would hide their crash from the next waiter.
+                    if std::fs::read_to_string(&path).ok().as_deref() == Some(nonce.as_str()) {
+                        let _ = std::fs::write(&path, nonce.as_bytes());
+                    }
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.stop;
+        if let Ok(mut stopped) = lock.lock() {
+            *stopped = true;
+        }
+        cvar.notify_all();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -2114,7 +2261,7 @@ impl Drop for MigrationLock {
 ///   * A `.enc` with no `.kdf` can only be a crash artifact of an interrupted
 ///     write (a healthy vault has both); it is permanently undecryptable, and
 ///     the plaintext still holds the truth, so it is discarded and rebuilt.
-///   * The whole sequence runs under [`MigrationLock`] so two concurrent
+///   * The whole sequence runs under an [`ExclusiveFileLock`] so two concurrent
 ///     openers cannot corrupt the vault with mismatched salts.
 ///
 /// Only runs when non-interactive unlock material is present, so `open_store`
@@ -2137,7 +2284,11 @@ fn migrate_plaintext_into_vault(
 
     // Serialize against a concurrent opener on the same home for the whole
     // import → verify → delete window.
-    let _lock = MigrationLock::acquire(dir)?;
+    let _lock = ExclusiveFileLock::acquire(
+        dir.join(".credentials.migrate.lock"),
+        LockPolicy::MIGRATION,
+        "credentials migration",
+    )?;
 
     // Re-read UNDER the lock — a migrator we waited on may have already
     // finished and removed the plaintext file.
@@ -4263,7 +4414,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".credentials.migrate.lock");
         {
-            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            let _lock =
+                ExclusiveFileLock::acquire(path.clone(), LockPolicy::MIGRATION, "test").unwrap();
             assert!(path.exists());
             std::fs::write(&path, "another-process-nonce").unwrap();
             // _lock drops here.
@@ -4277,10 +4429,64 @@ mod tests {
         // its own lock on drop.
         std::fs::remove_file(&path).unwrap();
         {
-            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            let _lock =
+                ExclusiveFileLock::acquire(path.clone(), LockPolicy::MIGRATION, "test").unwrap();
             assert!(path.exists());
         }
         assert!(!path.exists(), "drop removes our own lockfile");
+    }
+
+    #[test]
+    fn exclusive_lock_wait_ceiling_refuses_a_live_holder() {
+        // A second acquirer must NOT get in while a live holder is inside its
+        // critical section, and must surface a labelled busy error rather than
+        // silently proceeding.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("refresh.lock");
+        let policy = LockPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(150),
+        );
+        let _held = ExclusiveFileLock::acquire(path.clone(), policy, "refresh").unwrap();
+        let error = ExclusiveFileLock::acquire(path.clone(), policy, "refresh")
+            .expect_err("a live holder must not be displaced");
+        assert!(
+            error.to_string().contains("refresh"),
+            "the busy error must name the lock: {error}"
+        );
+    }
+
+    #[test]
+    fn exclusive_lock_steals_a_stale_holder_but_never_a_heartbeating_one() {
+        // Two halves of one invariant, which is why they are one test: an
+        // ABANDONED lockfile must be stolen, and a LIVE one must not be — and
+        // the only thing separating them is the heartbeat.
+        let dir = tempdir().unwrap();
+
+        // (a) Abandoned: a lockfile nobody is refreshing ages out and is stolen.
+        let abandoned = dir.path().join("abandoned.lock");
+        std::fs::write(&abandoned, "dead-holder-nonce").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let stale_policy = LockPolicy::new(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_secs(2),
+        );
+        let stolen = ExclusiveFileLock::acquire(abandoned.clone(), stale_policy, "refresh");
+        assert!(stolen.is_ok(), "a stale lockfile must be stealable");
+        drop(stolen);
+
+        // (b) Live: the same staleness threshold, but the holder heartbeats, so
+        // the waiter must time out instead of stealing.
+        let live = dir.path().join("live.lock");
+        let held_policy = stale_policy.with_heartbeat(std::time::Duration::from_millis(20));
+        let _held = ExclusiveFileLock::acquire(live.clone(), held_policy, "refresh").unwrap();
+        let waiter_policy = LockPolicy::new(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(400),
+        );
+        let error = ExclusiveFileLock::acquire(live.clone(), waiter_policy, "refresh")
+            .expect_err("a heartbeating holder must never be judged stale");
+        assert!(error.to_string().contains("did not free within"));
     }
 
     #[test]

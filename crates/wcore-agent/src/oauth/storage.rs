@@ -250,6 +250,23 @@ impl OAuthStorage {
         self.root.join(format!("{safe}.json"))
     }
 
+    /// Path of the cross-process refresh lock guarding `provider`'s token pair
+    /// (#172).
+    ///
+    /// **Every writer of the pair must hold this**, not just the refresh: a
+    /// store-write lock serializes two writes but does nothing about a stale
+    /// read-modify-write ACROSS operations. A refresh that read the pair before
+    /// a `logout` and stores it after would resurrect the credential the user
+    /// just removed — they believe they are signed out and they are not. The
+    /// writers are enumerated in `wcore_agent::oauth::refresh_lock`.
+    ///
+    /// [`Self::store`] and [`Self::delete`] deliberately do NOT take it
+    /// themselves: the refresh critical section spans load → POST → store and
+    /// holds it across all three, and this lockfile is not reentrant.
+    pub fn refresh_lock_path(&self, provider: &str) -> PathBuf {
+        super::refresh_lock::lock_path(&self.root, provider)
+    }
+
     /// Path of the non-secret marker recording that `provider` has a login in
     /// the secure credential store.
     ///
