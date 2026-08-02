@@ -65,6 +65,10 @@ pub struct TerminalSink {
     /// an answer that already ends in a newline must not gain a second one.
     wrote_text: AtomicBool,
     last_byte_newline: AtomicBool,
+    /// Set once [`OutputSink::emit_durability_degraded`] has printed. See that
+    /// method's override below — the fact is a process property, not a turn
+    /// property, so the human hears it once.
+    durability_degrade_announced: AtomicBool,
 }
 
 struct SpinnerHandle {
@@ -89,6 +93,7 @@ impl TerminalSink {
             one_shot: false,
             wrote_text: AtomicBool::new(false),
             last_byte_newline: AtomicBool::new(false),
+            durability_degrade_announced: AtomicBool::new(false),
         }
     }
 
@@ -321,6 +326,23 @@ impl OutputSink for TerminalSink {
     }
 
     fn emit_info(&self, msg: &str) {
+        self.formatter.session_info(msg);
+    }
+
+    /// Once per sink, which for a CLI/REPL/TUI run is once per process.
+    ///
+    /// The condition is `durable_sessions_disabled_by_host()` — a host fact
+    /// resolved at startup that cannot change while the process lives — so
+    /// every repeat carries zero new information. The trait default (per turn)
+    /// stays in force for `ProtocolSink`, where the frame is machine-consumed
+    /// and correlated to a `msg_id`.
+    fn emit_durability_degraded(&self, msg: &str) {
+        if self
+            .durability_degrade_announced
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
         self.formatter.session_info(msg);
     }
 }

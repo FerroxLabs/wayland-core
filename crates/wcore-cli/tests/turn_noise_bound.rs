@@ -1,0 +1,235 @@
+//! #147 — what a headless run repeats on the terminal, per turn.
+//!
+//! # What was measured, and why a per-turn count is the only honest assertion
+//!
+//! A trivial 9-turn `--no-tui` run on a host with no usable OS keyring emitted
+//! **573 bytes of stderr per turn**, of which **448** were one paragraph
+//! reprinted verbatim on every turn: "durable session persistence is OFF for
+//! this run…". The condition it reports —
+//! `wcore_config::config::durable_sessions_disabled_by_host()` — is resolved
+//! once at startup and cannot change while the process lives, so every repeat
+//! after the first carried no information at all.
+//!
+//! The operator had *already* been told, on the same stderr, by
+//! `wcore_config::config`'s `warn_durable_sessions_disabled_once`, whose own
+//! doc comment says the point is that they hear it "ONCE, at a moment that is
+//! about configuration — **not repeatedly, attached to a message they were
+//! trying to answer**". The engine's per-turn announcement re-introduced
+//! exactly what that `Once` guard exists to prevent, one layer up.
+//!
+//! A single-turn run cannot tell a startup notice from a per-turn notice, so
+//! every test here runs THREE turns. That is also why the assertions are
+//! `==` counts rather than `contains`: `contains` is satisfied by 1 and by 3
+//! alike, and 3 is the defect.
+//!
+//! # The three legs, and what each would let through on its own
+//!
+//! 1. **The notice is announced once.** Alone, this passes if the notice were
+//!    deleted outright — which would be a real regression, since a degraded
+//!    run must still tell the operator.
+//! 2. **The per-turn RECORD survives, three times, in the diagnostics log.**
+//!    This is the leg that refuses "quieted by deletion". Quieting the terminal
+//!    is only legitimate because the forensic record moved to a durable,
+//!    size-bounded file (`wcore_cli::log_rotate`) instead of a terminal that
+//!    scrolls; a gateway operator asking "which of last week's messages went
+//!    unrecorded" reads that file.
+//! 3. **A known-repeating line still repeats three times.** The positive
+//!    control. Without it, leg 1 is equally consistent with the run having
+//!    executed one turn, or none — and a count of 1 proves nothing about
+//!    suppression if nothing was ever counted twice.
+//!
+//! The per-turn frame a `--json-stream` host receives is deliberately NOT
+//! changed and is asserted elsewhere, by
+//! `f14_sigkill_recovery::without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`,
+//! which drives two turns for the same reason this file drives three. A host
+//! consumes `ProtocolEvent::Info` by machine and correlates it to a `msg_id`;
+//! a human at a terminal does neither.
+//!
+//! Linux-only for the same reason the f14 degraded leg is: the degrade is
+//! forced by pointing `DBUS_SESSION_BUS_ADDRESS` at a socket that does not
+//! exist, which is how you deny a Secret Service keyring on Linux and nothing
+//! at all anywhere else. The product behaviour under test is platform-neutral;
+//! only the way to construct the precondition is not.
+#![cfg(target_os = "linux")]
+
+use std::process::Stdio;
+
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
+use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
+use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
+use wcore_eval_scenarios::tempenv::{self, TempEnv};
+
+const FIXTURE_MODEL: &str = "fixture-chat-v1";
+const FIXTURE_KEY: &str = "fixture-local-token";
+const TURNS: usize = 3;
+
+/// The immutable host fact. Matched on the distinctive clause rather than the
+/// whole paragraph so a wording edit does not silently turn the count into 0
+/// and paint the defect green.
+const DEGRADE_NOTICE: &str = "This turn is not being recorded";
+
+/// The same fact as it reaches the size-bounded diagnostics log, once per turn.
+const DEGRADE_RECORD: &str = "this turn is NOT being recorded";
+
+/// A line the engine emits once per completed turn, unrelated to this change.
+/// The positive control for the counting method itself.
+const PER_TURN_CONTROL: &str = "[turns:";
+
+fn binary() -> &'static str {
+    env!("CARGO_BIN_EXE_wayland-core")
+}
+
+fn count(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+/// Run `TURNS` REPL turns against a loopback fixture in a home where no
+/// credential backend can work, and return `(stderr, diagnostics log)`.
+async fn run_degraded_repl() -> (String, String) {
+    let fixture =
+        OpenAiFixtureScript::new((0..TURNS).map(|i| OpenAiStep::text(format!("NOISE-REPLY-{i}"))))
+            .start()
+            .await
+            .expect("start loopback fixture");
+
+    let provider = ProviderConfig::new(ProviderId::OpenAI, FIXTURE_MODEL)
+        .with_api_key(FIXTURE_KEY)
+        .with_known_free_cost()
+        .with_base_url(fixture.base_url());
+    let env: TempEnv = tempenv::build(&provider).expect("build hermetic Core environment");
+
+    let mut child = Command::new(binary())
+        .arg("--no-tui")
+        .arg("--provider")
+        .arg("openai")
+        .arg("--model")
+        .arg(FIXTURE_MODEL)
+        .arg("--base-url")
+        .arg(fixture.base_url())
+        .current_dir(env.path())
+        .env("HOME", env.path())
+        .env("WAYLAND_HOME", env.home())
+        .env("OPENAI_API_KEY", FIXTURE_KEY)
+        .env("NO_COLOR", "1")
+        // `log_to_file` is `will_enter_tui || !rust_log_set`. Stdout is a pipe
+        // so the TUI half is already false; inheriting a developer's or CI's
+        // RUST_LOG would route the record to stderr instead of the file and
+        // make leg 2 assert on an empty log.
+        .env_remove("RUST_LOG")
+        // Deny every credential backend, which is what forces the degrade.
+        .env_remove("WAYLAND_VAULT_PASSPHRASE")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!(
+                "unix:path={}",
+                env.path().join("missing-secret-service-bus").display()
+            ),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn wayland-core");
+
+    let mut stdin = child.stdin.take().expect("Core stdin pipe");
+    let mut script = String::new();
+    for i in 0..TURNS {
+        script.push_str(&format!("noise probe turn {i}\n"));
+    }
+    // The REPL treats an empty line as `/quit`.
+    script.push('\n');
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("write REPL script");
+    stdin.flush().await.expect("flush REPL script");
+    drop(stdin);
+
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        child.wait_with_output(),
+    )
+    .await
+    .expect("the REPL must terminate")
+    .expect("collect Core output");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let log = std::fs::read_to_string(env.home().join("logs").join("wayland-core.log"))
+        .unwrap_or_default();
+    (stderr, log)
+}
+
+#[tokio::test]
+async fn the_degrade_notice_is_announced_once_while_its_per_turn_record_survives() {
+    let (stderr, log) = run_degraded_repl().await;
+
+    // POSITIVE CONTROL, first, because every other count in this test is
+    // meaningless if the run did not actually execute three turns — and a
+    // suppression assertion that passes because nothing happened is the
+    // exact false green this file exists to refuse.
+    assert_eq!(
+        count(&stderr, PER_TURN_CONTROL),
+        TURNS,
+        "the run did not execute {TURNS} turns, so no count below measures \
+         suppression. stderr was:\n{stderr}"
+    );
+
+    // LEG 1 — the human hears the immutable host fact once, not once per
+    // message they were trying to answer.
+    assert_eq!(
+        count(&stderr, DEGRADE_NOTICE),
+        1,
+        "the degrade notice appeared {} times across {TURNS} turns. It reports \
+         a startup-resolved host fact that cannot change mid-process, and the \
+         operator was already told at config resolution.\nstderr was:\n{stderr}",
+        count(&stderr, DEGRADE_NOTICE)
+    );
+
+    // LEG 2 — and it was quieted by MOVING the record, not by deleting it.
+    // Without this, leg 1 is satisfied by dropping the announcement entirely,
+    // which would leave a degraded gateway with no per-turn evidence anywhere.
+    assert_eq!(
+        count(&log, DEGRADE_RECORD),
+        TURNS,
+        "the diagnostics log holds {} per-turn undurable-turn records for \
+         {TURNS} undurable turns. Quieting the terminal is only legitimate \
+         while the record survives in the size-bounded log.\nlog was:\n{log}",
+        count(&log, DEGRADE_RECORD)
+    );
+}
+
+/// The other half of #147: a per-turn log line that reported nothing.
+///
+/// `fire_auto_memorize` runs at the end of every turn and logged
+/// "auto-memorize skipped this session; no facts saved … candidates=0" at INFO
+/// each time — measured as the ONLY per-turn line in the diagnostics log, on a
+/// healthy host as well as a degraded one, 9 of them in a 9-turn run. Nothing
+/// was extracted and nothing was rejected, so there was no decision to report.
+///
+/// The #664 requirement it was added for — surface WHY an operator's facts were
+/// not saved — only has content when there were facts, so INFO is now
+/// conditioned on that and the empty case dropped to DEBUG. This asserts the
+/// empty case is silent at the default level; `RUST_LOG=debug` still shows it.
+#[tokio::test]
+async fn an_empty_auto_memorize_pass_says_nothing_at_the_default_level() {
+    let (_stderr, log) = run_degraded_repl().await;
+
+    let skips = count(&log, "auto-memorize skipped this session");
+    assert_eq!(
+        skips, 0,
+        "auto-memorize logged {skips} skip lines at INFO across {TURNS} turns \
+         in which it extracted no candidates at all. A per-turn line reporting \
+         that nothing happened is the whole of the finding.\nlog was:\n{log}"
+    );
+
+    // Control: the log is not empty, so the count above measures silence
+    // rather than a log that was never written or never read.
+    assert!(
+        !log.trim().is_empty(),
+        "the diagnostics log is empty, so a zero count proves nothing about \
+         auto-memorize"
+    );
+}
