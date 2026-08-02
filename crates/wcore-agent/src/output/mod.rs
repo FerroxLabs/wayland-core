@@ -119,10 +119,11 @@ pub trait OutputSink: Send + Sync {
     /// treatment for the SAME fact, and only the sink knows which it is:
     ///
     /// * A **protocol host** must receive it every turn, correlated to that
-    ///   turn's `msg_id`. `f14_sigkill_recovery::…degraded…` runs two turns
-    ///   specifically to assert this ("a startup notice is indistinguishable
-    ///   from a per-turn notice if you only ever run one turn"). The default
-    ///   body below is that behaviour, unchanged.
+    ///   turn's `msg_id`. `wcore-cli`'s integration test
+    ///   `f14_sigkill_recovery::without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`
+    ///   runs two turns specifically to assert this ("a startup notice is
+    ///   indistinguishable from a per-turn notice if you only ever run one
+    ///   turn"). The default body below is that behaviour, unchanged.
     ///
     /// * A **human at a terminal** must NOT. It is one person, in one process,
     ///   who was already told at config resolution by

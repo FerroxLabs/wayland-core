@@ -8925,11 +8925,19 @@ impl AgentEngine {
     /// # The record and the notice are separate, and only one of them repeats
     ///
     /// The `tracing::warn!` below is the RECORD: one line per undurable turn,
-    /// on every surface, into the size-bounded diagnostics log
-    /// (`crate::…`/`wcore_cli::log_rotate`). That is the durable artifact the
-    /// gateway case actually needs — an operator debugging "which of last
-    /// week's messages went unrecorded" reads a file, not a terminal that
-    /// scrolled away three weeks ago.
+    /// on every surface, wherever the process routed its diagnostics. With
+    /// `RUST_LOG` unset that is the size-bounded log at
+    /// `$WAYLAND_HOME/logs/wayland-core.log` (`~/.wayland/logs/` when
+    /// `WAYLAND_HOME` is not set); with `RUST_LOG` set it is stderr, because
+    /// `RUST_LOG` is authoritative and routes everything there. Either way the
+    /// record exists per turn.
+    ///
+    /// The file is bounded and rotated by `wcore-cli`'s `log_rotate` module —
+    /// named rather than intra-doc linked, since that crate sits ABOVE this one
+    /// and the path would not resolve from here. It is the durable artifact the
+    /// gateway case actually needs: an operator debugging "which of last week's
+    /// messages went unrecorded" reads a file, not a terminal that scrolled
+    /// away three weeks ago.
     ///
     /// The sink call is the NOTICE, and whether it repeats is the sink's
     /// decision — see [`OutputSink::emit_durability_degraded`]. A protocol
