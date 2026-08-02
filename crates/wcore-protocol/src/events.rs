@@ -960,12 +960,24 @@ pub enum ProtocolEvent {
     /// **Wave SC SECURITY MAJOR (correlation-id model).** The
     /// `correlation_id` field is the opaque public handle the host UI
     /// uses to match this `ApprovalRequired` against the eventual
-    /// `ApprovalResume`. `resume_token` carries the same opaque value
-    /// (kept for backwards-compat with existing hosts; new hosts
-    /// should prefer `correlation_id`). The actual bridge-side secret
-    /// never appears on the wire — `ProtocolSink::redact_tokens`
-    /// strips matching strings from streaming tool output as
-    /// defense-in-depth against tools that snoop stdout.
+    /// resolution. It always equals `call_id`.
+    ///
+    /// `resume_token` is NOT the same value, and is not always present:
+    ///
+    /// - **Bridge-backed** approvals (Crucible council, egress consent)
+    ///   carry the unguessable bridge SECRET, and are answered with
+    ///   `ProtocolCommand::ApprovalResume { resume_token }`. The secret
+    ///   is deliberately not the `call_id`, which the model can see —
+    ///   routing on it would let a tool approve itself (GHSA-8r7g).
+    /// - **Ordinary tool** gates have no bridge entry, so `resume_token`
+    ///   is the EMPTY STRING. They are answered with
+    ///   `ProtocolCommand::ToolApprove` / `ToolDeny`, keyed by `call_id`.
+    ///   A host that echoes the empty token back in `ApprovalResume`
+    ///   resolves nothing and the tool hangs until its TTL.
+    ///
+    /// `ProtocolSink::redact_tokens` strips in-flight secrets from
+    /// streaming tool output as defense-in-depth against tools that
+    /// snoop stdout.
     ApprovalRequired {
         call_id: String,
         resume_token: String,

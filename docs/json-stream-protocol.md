@@ -930,7 +930,7 @@ with the original operation or fails it with a deny reason.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `resume_token` | string | yes | Echoed verbatim from the `approval_required` event. Routes the decision to the right pending bridge. |
+| `resume_token` | string | yes | Echoed verbatim from the `approval_required` event. Routes the decision to the right pending bridge. Only ever valid for a NON-EMPTY token: an ordinary tool gate carries `""` and is answered with `tool_approve` / `tool_deny` instead (§1.N+4). |
 | `approved` | bool | yes | `true` to approve and proceed, `false` to deny. |
 | `modifications` | object \| null | no | Reserved for forward-compat: host-side edits to the pending operation (e.g. an edited tool input). Engine currently ignores; future waves may wire this through. |
 
@@ -1460,9 +1460,27 @@ All three are gated by the W0-reserved `capabilities.hitl_suspend` flag.
 | Field | Type | Description |
 |---|---|---|
 | `call_id` | string | The pending tool/operation `call_id` awaiting approval. |
-| `resume_token` | string | Opaque server-generated token. Host MUST echo this back verbatim in the corresponding `approval_resume` command — it routes the decision to the right pending `ApprovalBridge`. |
+| `resume_token` | string | Bridge secret, present ONLY for bridge-backed approvals. **EMPTY for an ordinary tool gate** — see "Which command answers this" below. Never echo an empty token. |
+| `correlation_id` | string | Opaque public handle for UI matching. Always equals `call_id`. Omitted from the JSON when empty. |
 | `reason` | string | Short machine-readable reason category (e.g. `"Edit outside workspace root"`, `"Exec — destructive command"`). |
 | `context` | string | Human-readable detail — the host displays this in the approval modal. |
+| `plan` | object | Crucible council proposal card. Present only for a council approval; absent otherwise. |
+
+**Which command answers this.** There are two kinds of `approval_required`
+and they are answered by DIFFERENT commands. A host that always replies with
+`approval_resume` hangs on every ordinary tool gate, because that gate's
+`resume_token` is the empty string and the engine has no bridge entry to
+route it to.
+
+| Kind | How to recognise it | Answer with |
+|---|---|---|
+| Ordinary tool gate (Write outside the workspace, a destructive Bash, …) | `resume_token` is `""` | [`tool_approve`](#23-tool_approve) / [`tool_deny`](#24-tool_deny), keyed by `call_id` |
+| Bridge-backed gate (Crucible council, egress consent) | `resume_token` is a non-empty opaque secret | [`approval_resume`](#210-approval_resume-w7), keyed by `resume_token` |
+
+The bridge secret is deliberately NOT the `call_id`: the model can see the
+`call_id`, so routing approvals on it would let a tool approve itself
+(GHSA-8r7g). `ProtocolSink` additionally strips in-flight secrets from
+streaming tool output.
 
 **`suspend`** — session-level state transition emitted alongside
 `approval_required`. Hosts that render a state pill (Idle / Streaming /
