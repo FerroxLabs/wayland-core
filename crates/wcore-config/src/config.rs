@@ -4820,12 +4820,77 @@ fn merge_config_files_with_trust(
         global.storage
     };
 
-    // M3.1 — memory section: a PRESENT project `[memory]` table wins outright;
-    // an absent one inherits global. Mirrors the bedrock/vertex `Option`
-    // override pattern. Presence (not "differs from default") is the gate, so
-    // an explicit project `enabled = true` is honored over a global
-    // `enabled = false` even though `true` now equals `MemoryConfig::default`.
-    let memory = project.memory.or(global.memory);
+    // M3.1, revised — memory merges FIELD-WISE with a TIGHTEN-ONLY `enabled`,
+    // exactly like `[anvil]` below and `observability.skills_lifecycle` above.
+    //
+    // This line used to be `project.memory.or(global.memory)` under a comment
+    // arguing that PRESENCE (not value) should be the gate, so that an explicit
+    // project `enabled = true` could win over a global `enabled = false`. Both
+    // halves of that were wrong for a privacy switch:
+    //
+    // 1. `Option::or` is presence-gated, and `MemoryConfig::enabled` carries
+    //    `#[serde(default = "default_true")]`. A BARE `[memory]` table — even
+    //    one that only sets `dream_cycle_throttle_secs` — deserializes to
+    //    `Some(MemoryConfig { enabled: true, .. })`. That `Some` won the `.or()`
+    //    outright, so any cloned repository shipping a `[memory]` block silently
+    //    switched long-term memory back ON for a user who had deliberately
+    //    written `memory.enabled = false` in their global config, and began
+    //    recording across sessions with no prompt and no warning. The
+    //    documented opt-out ("Opt out via `memory.enabled = false` in
+    //    wcore.toml") was defeated by repo content.
+    // 2. Value-gating alone would not have fixed it either: `.wayland-core.toml`
+    //    travels with a cloned repo and is UNTRUSTED, so honouring an explicit
+    //    project `enabled = true` over a global opt-out is the same defect with
+    //    one extra line of attacker input. The project layer must never be able
+    //    to GRANT memory — only to narrow it. That is the rule this codebase
+    //    already applies to every other posture switch it merges here:
+    //    `tools.auto_approve` (global only), `security.enabled` (global only),
+    //    `session.enabled`, `hooks.dispatch_enabled`, `anvil.enabled` and
+    //    `observability.skills_lifecycle` (all `global && project`).
+    //
+    // `&&` is the correct operator precisely BECAUSE `enabled` defaults to
+    // `true`: `true` is the identity element for `&&`, so a project file that is
+    // silent about `enabled` — including a bare `[memory]` table or a block that
+    // only tunes throttles — is neutral and the operator's value stands. (This
+    // is the mirror image of the `security.enabled` note below, where the same
+    // default-true field is a BOUNDARY rather than a recorder, so `&&` there
+    // would let a project switch the boundary off. Polarity, not habit, picks
+    // the operator.)
+    //
+    // The rest of the block still merges project-wins-when-present, so an
+    // operator who wants per-project memory TUNING keeps it: a project
+    // `dream_cycle_throttle_secs` / `decay_interval_secs` / `embedder` applies
+    // for any user who has not opted out globally. Only the on/off bit is
+    // ratcheted.
+    //
+    // Deliberate behaviour change, and the one test that pinned the old shape
+    // (`test_merge_project_memory_enabled_overrides_global_disabled`) is
+    // inverted below with its reasoning. Locked by
+    // `a_global_memory_opt_out_survives_a_bare_project_memory_block`.
+    let memory = match (global.memory, project.memory) {
+        (global_memory, None) => global_memory,
+        (None, Some(project_memory)) => Some(project_memory),
+        (Some(global_memory), Some(project_memory)) => {
+            // Warn rather than ratchet silently, matching the `max_tokens` /
+            // `max_turns` clamps above: the whole defect here was that the
+            // operator was never told their preference had been overridden, so
+            // the fix should not invert into "the repository is never told its
+            // request was refused". Only fires when the ratchet actually bit —
+            // a bare `[memory]` block asks for nothing and warns about nothing.
+            if project_memory.enabled && !global_memory.enabled {
+                tracing::warn!(
+                    "ignored the project config's [memory] enabled = true; long-term memory \
+                     stays off because the global config opts out. A project config travels \
+                     with a cloned repository and may narrow the memory posture but never \
+                     grant it"
+                );
+            }
+            Some(MemoryConfig {
+                enabled: global_memory.enabled && project_memory.enabled,
+                ..project_memory
+            })
+        }
+    };
 
     // B2 — security. GHSA-8r7g, same family as `auto_approve` above: the egress
     // master switch is OPERATOR-OWNED. It is read from the trusted GLOBAL layer
@@ -5119,6 +5184,34 @@ fn restrict_untrusted_project_config(project: ConfigFile, global: &ConfigFile) -
     // `read_only` and `max_turns` narrowing this same function already honours.
     if project.observability.skills_lifecycle == Some(false) {
         restricted.observability.skills_lifecycle = Some(false);
+    }
+
+    // Same shape, same reasoning, for `[memory] enabled = false`. `restricted`
+    // starts from `ConfigFile::default()`, whose `memory` is `None`, so before
+    // this an untrusted repository's memory OPT-OUT was dropped on the floor and
+    // the merge inherited the global (memory-ON-by-default) block — a privacy
+    // narrowing failing OPEN, which is exactly the F23A-01-H1 failure above.
+    // The untrusted path is the DEFAULT state of any freshly cloned workspace,
+    // so this was the common case, not the exotic one.
+    //
+    // Only the restricting direction travels. A project `enabled = true` is not
+    // forwarded (the merge's `&&` could not act on it anyway, but keeping the
+    // allowlist one-directional makes "project may narrow, never grant" true by
+    // construction). The TUNING fields are not forwarded either, and that is
+    // deliberate rather than lazy: `embedder = "open_ai"` / `"voyage"` ships
+    // memory contents to a third-party API on the operator's key — an egress
+    // grant, not a narrowing — and `dream_cycle_throttle_secs = 0` would let a
+    // cloned repo churn the consolidation pipeline. An untrusted repository can
+    // therefore switch its own workspace's memory off and do nothing else.
+    if project
+        .memory
+        .as_ref()
+        .is_some_and(|memory| !memory.enabled)
+    {
+        restricted.memory = Some(MemoryConfig {
+            enabled: false,
+            ..MemoryConfig::default()
+        });
     }
 
     if !project.providers.is_empty()
@@ -6567,23 +6660,192 @@ mod tests {
         assert!(merged.profiles.is_empty());
     }
 
-    /// F2 regression: an explicit project `[memory] enabled = true` must win
-    /// over a global `enabled = false`, even though `true` equals
-    /// `MemoryConfig::default()`. The old "differs from default" gate dropped
-    /// the project opt-in; the Option-presence gate honors it.
+    /// INVERTED from the original F2 regression, deliberately.
+    ///
+    /// This test used to assert that an explicit project `[memory] enabled =
+    /// true` wins over a global `enabled = false`. F2's actual complaint was
+    /// that the then-current "differs from default" gate silently dropped a
+    /// project block; it replaced that with `Option::or`, and in doing so made
+    /// a checked-in, untrusted `.wayland-core.toml` able to overrule a
+    /// deliberate global privacy opt-out.
+    ///
+    /// A project config travels with a cloned repository. It may narrow the
+    /// memory posture and it may tune it, but it must never GRANT recording
+    /// that the operator turned off — the rule already enforced for
+    /// `tools.auto_approve`, `security.enabled`, `anvil.enabled`,
+    /// `hooks.dispatch_enabled` and `observability.skills_lifecycle`. Note that
+    /// value-gating alone would NOT have been enough here: it would have closed
+    /// the bare-`[memory]`-block case and left this explicit one open, which is
+    /// the same defect one line of attacker input later.
     #[test]
-    fn test_merge_project_memory_enabled_overrides_global_disabled() {
+    fn a_project_memory_opt_in_cannot_overrule_a_global_opt_out() {
         let global: ConfigFile = toml::from_str("[memory]\nenabled = false\n").unwrap();
         let project: ConfigFile = toml::from_str("[memory]\nenabled = true\n").unwrap();
 
         let merged = merge_config_files(global, project);
 
         assert!(
-            merged
+            !merged
                 .memory
-                .expect("project [memory] table is present")
+                .expect("a [memory] table is present on both sides")
                 .enabled,
-            "explicit project enabled=true must win over global enabled=false",
+            "an untrusted project's enabled=true must not overrule a global opt-out",
+        );
+    }
+
+    /// THE DEFECT, direction 1: a global opt-out must survive a project
+    /// `[memory]` block that never mentions `enabled` at all.
+    ///
+    /// `MemoryConfig::enabled` carries `#[serde(default = "default_true")]`, so
+    /// a bare table — or one that only tunes a throttle — deserializes to
+    /// `Some(MemoryConfig { enabled: true, .. })`. Under the old
+    /// `project.memory.or(global.memory)` that `Some` won on PRESENCE and
+    /// silently re-enabled cross-session recording for a user who had written
+    /// the documented opt-out. Every shape of "present but silent about
+    /// enabled" is enumerated because they are exactly the shapes an ordinary,
+    /// non-malicious repository ships.
+    #[test]
+    fn a_global_memory_opt_out_survives_a_bare_project_memory_block() {
+        for project_src in [
+            "[memory]\n",
+            "[memory]\ndream_cycle_throttle_secs = 60\n",
+            "[memory]\ndecay_interval_secs = 7\n",
+            "[memory]\n[memory.embedder]\nbackend = \"hashed\"\n",
+        ] {
+            let global: ConfigFile = toml::from_str("[memory]\nenabled = false\n").unwrap();
+            let project: ConfigFile = toml::from_str(project_src).unwrap();
+            assert!(
+                project
+                    .memory
+                    .as_ref()
+                    .expect("the project block is present")
+                    .enabled,
+                "precondition: serde resolves a silent `enabled` to true ({project_src:?})",
+            );
+
+            let merged = merge_config_files(global, project);
+
+            assert!(
+                !merged
+                    .memory
+                    .expect("a [memory] table is present on both sides")
+                    .enabled,
+                "a project [memory] block that never mentions `enabled` must not \
+                 re-enable memory against a global opt-out ({project_src:?})",
+            );
+        }
+    }
+
+    /// THE DEFECT, direction 2 — the half a careless fix breaks.
+    ///
+    /// A user who has NOT opted out globally must still get the project's
+    /// memory settings. The `enabled` ratchet is the only thing clamped; the
+    /// tuning fields still merge project-wins-when-present, so a repository can
+    /// still say "consolidate more often here" and be obeyed.
+    #[test]
+    fn a_project_memory_block_still_applies_when_the_user_has_not_opted_out() {
+        // (a) Global silent entirely — project block stands whole.
+        let merged = merge_config_files(
+            toml::from_str("[default]\nprovider = \"anthropic\"\n").unwrap(),
+            toml::from_str("[memory]\ndream_cycle_throttle_secs = 60\n").unwrap(),
+        );
+        let memory = merged.memory.expect("the project block is inherited");
+        assert!(memory.enabled, "no global opt-out ⇒ memory stays on");
+        assert_eq!(memory.dream_cycle_throttle_secs, 60);
+
+        // (b) Global explicitly ON, project tunes — the tuning must land, and
+        //     must not be collateral damage of the `enabled` ratchet.
+        let merged = merge_config_files(
+            toml::from_str("[memory]\nenabled = true\ndecay_interval_secs = 3600\n").unwrap(),
+            toml::from_str("[memory]\ndecay_interval_secs = 42\n").unwrap(),
+        );
+        let memory = merged.memory.expect("a [memory] table is present");
+        assert!(
+            memory.enabled,
+            "the project asked for no change to `enabled`"
+        );
+        assert_eq!(
+            memory.decay_interval_secs, 42,
+            "a legitimate project memory setting must still take effect",
+        );
+
+        // (c) Global explicitly ON, project opts OUT — the narrowing direction
+        //     is honoured, which is what makes this a ratchet and not a
+        //     global-only read.
+        let merged = merge_config_files(
+            toml::from_str("[memory]\nenabled = true\n").unwrap(),
+            toml::from_str("[memory]\nenabled = false\n").unwrap(),
+        );
+        assert!(
+            !merged.memory.expect("a [memory] table is present").enabled,
+            "a project opt-out must still win over a global opt-in",
+        );
+    }
+
+    /// The untrusted path — the DEFAULT state of a freshly cloned workspace,
+    /// and the one `merge_config_files` (which hardcodes `project_trusted =
+    /// true`) never exercises. Same omission that let F23A-01-H1 sit green.
+    #[test]
+    fn untrusted_project_memory_narrowing_survives_and_granting_does_not() {
+        // A global opt-out survives a bare untrusted project block.
+        let merged = merge_config_files_with_trust(
+            toml::from_str("[memory]\nenabled = false\n").unwrap(),
+            toml::from_str("[memory]\ndream_cycle_throttle_secs = 60\n").unwrap(),
+            false,
+        );
+        assert!(!merged.memory.expect("global block inherited").enabled);
+
+        // An untrusted project's OWN opt-out is honoured — before the fix
+        // `restrict_untrusted_project_config` dropped it and the global
+        // memory-ON default was inherited instead.
+        for global_src in [
+            "[default]\nprovider = \"anthropic\"\n",
+            "[memory]\nenabled = true\n",
+        ] {
+            let merged = merge_config_files_with_trust(
+                toml::from_str(global_src).unwrap(),
+                toml::from_str("[memory]\nenabled = false\n").unwrap(),
+                false,
+            );
+            assert!(
+                !merged
+                    .memory
+                    .expect("the forwarded opt-out is present")
+                    .enabled,
+                "an untrusted project's memory opt-out must survive restriction \
+                 (global={global_src:?})",
+            );
+        }
+
+        // An untrusted project must never GRANT memory, and must never smuggle
+        // a third-party embedder (an egress grant) through the narrowing.
+        let merged = merge_config_files_with_trust(
+            toml::from_str("[memory]\nenabled = false\n").unwrap(),
+            toml::from_str("[memory]\nenabled = true\n[memory.embedder]\nbackend = \"open_ai\"\n")
+                .unwrap(),
+            false,
+        );
+        let memory = merged.memory.expect("global block inherited");
+        assert!(
+            !memory.enabled,
+            "an untrusted project must never grant memory"
+        );
+        assert_eq!(
+            memory.embedder.backend,
+            EmbedderBackend::Hashed,
+            "an untrusted project must not select a third-party embedder backend",
+        );
+
+        // Both sides silent ⇒ the shipped memory-ON default is untouched, so
+        // the fix did not turn the feature off for everyone.
+        let merged = merge_config_files_with_trust(
+            toml::from_str("[default]\nprovider = \"anthropic\"\n").unwrap(),
+            toml::from_str("[default]\nprovider = \"anthropic\"\n").unwrap(),
+            false,
+        );
+        assert!(
+            merged.memory.unwrap_or_default().enabled,
+            "the shipped default must survive when neither layer configures memory",
         );
     }
 

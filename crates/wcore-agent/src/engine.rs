@@ -14297,10 +14297,23 @@ impl AgentEngine {
 
         // W3 (v0.6.3 B.1): fire the auto-memorize SessionEnd trigger.
         // `AutoMemorizer` existed but `run_session_end` was never invoked
-        // on the production path. It is consent-gated internally (OFF
-        // unless the user creates the opt-in consent file) and uses the
-        // episodic/fact partitions — no KG dependency. Non-fatal: a memory
-        // failure must not block session teardown.
+        // on the production path. It uses the episodic/fact partitions — no
+        // KG dependency. Non-fatal: a memory failure must not block session
+        // teardown.
+        //
+        // This comment used to add "consent-gated internally (OFF unless the
+        // user creates the opt-in consent file)". That is FALSE as of the
+        // 2026-06-04 smart default: `auto_memorize::consent_granted` returns
+        // `true` for an absent decision file, so this writes `Tier::Project`
+        // facts by default. It also consults NO config field — in particular
+        // not `[memory] enabled`, which the docs advertise as the opt-out — so
+        // whenever `AgentBootstrap` handed the engine a real `MemoryApi` this
+        // records across sessions for a user who opted out. Bootstrap does hand
+        // over a real one on a stock install, because its `want_memory` gate is
+        // `memory.enabled || observability.skills_lifecycle` and the latter
+        // defaults ON. Gating this on the resolved `[memory] enabled` needs a
+        // new `AgentEngine` field (the engine keeps extracted values, not the
+        // `Config`), so it is filed rather than patched here.
         self.fire_auto_memorize().await;
 
         // Wave W3 (closes B.1): direct invocation of W9 Curator + PUM
