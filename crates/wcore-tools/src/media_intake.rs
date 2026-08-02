@@ -540,9 +540,6 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
                 // regression `IntakeError::NotFound` exists to prevent, and it
                 // also named the PARENT rather than the path the caller asked
                 // for.
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return IntakeError::NotFound(path.to_path_buf());
-                }
                 IntakeError::OpenComponent {
                     noun,
                     path: parent.to_path_buf(),

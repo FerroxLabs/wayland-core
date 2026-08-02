@@ -412,7 +412,12 @@ fn observe_real_file(path: &Path) -> Result<IdentifiedFileObservation, VfsError>
     }
     #[cfg(windows)]
     {
-        observe_real_file_windows(path)
+        // MUTATION PROOF ONLY
+        let _ = (path, observe_real_file_windows);
+        Err(VfsError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "identity-aware file observation is unavailable on this platform",
+        )))
     }
     #[cfg(not(any(unix, windows)))]
     {

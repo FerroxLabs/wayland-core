@@ -489,11 +489,7 @@ mod tests {
     /// place so no case re-derives it. Mirrors `wcore_sandbox`'s
     /// `hard_fixture_root`.
     fn private_scratch_root() -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(r"C:\srv\wayland\private\scratch")
-        } else {
-            PathBuf::from("/srv/wayland/private/scratch")
-        }
+        PathBuf::from("/srv/wayland/private/scratch")
     }
 
     fn requirement(gate_id: &str, closure_digest: &str) -> ChildGateRequirement {
@@ -662,11 +658,7 @@ mod tests {
         // Same fixture defect, same fix, as `wcore_sandbox`'s
         // `hard_fixture_root`. The path is never created on disk.
         let live = FakeCandidate {
-            root: Ok(if cfg!(windows) {
-                PathBuf::from(r"C:\srv\wayland\candidate\checkout")
-            } else {
-                PathBuf::from("/srv/wayland/candidate/checkout")
-            }),
+            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
         };
         let error = executor
             .execute_gate(

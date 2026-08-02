@@ -829,11 +829,7 @@ mod tests {
         // on absoluteness before it ever reaches the not-found branch this test
         // is about. `/nonexistent/...` is absolute on unix and not on Windows,
         // where `Path::is_absolute` demands a drive or UNC prefix.
-        let missing = if cfg!(windows) {
-            r"C:\nonexistent\path\audio.mp3"
-        } else {
-            "/nonexistent/path/audio.mp3"
-        };
+        let missing = "/nonexistent/path/audio.mp3";
         let r = must_exec(&tool, json!({ "audio_path": missing }));
         assert!(r.is_error);
         assert!(
@@ -847,9 +843,8 @@ mod tests {
         // on every platform instead of "the refusal contains these raw bytes" —
         // which no correct Windows message could ever satisfy. On unix the
         // encoding is the identity.
-        let named = serde_json::to_string(missing).expect("encode refused path");
         assert!(
-            r.content.contains(named.trim_matches('"')),
+            r.content.contains(missing),
             "the refusal must name the path it refused; got: {}",
             r.content
         );
