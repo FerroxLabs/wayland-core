@@ -157,6 +157,54 @@ impl SlackChannel {
             inbound::Parsed::Ignored => Ok(None),
         }
     }
+
+    /// Route a credential refusal from an outbound call onto the health
+    /// surface, and return it to the caller unchanged.
+    ///
+    /// # Why every outbound call site must go through this
+    ///
+    /// Slack inbound is webhooks, so on a running gateway an outbound refusal
+    /// is the ONLY moment a revoked or deactivated token becomes observable.
+    /// `HealthState::Unauthenticated` has exactly one Slack producer after
+    /// `start()`: a `ChannelEvent::AuthExpired` drained by the manager's poll
+    /// loop. A call site that maps `SlackError::Auth` straight to
+    /// `ChannelError::Auth` therefore hands the refusal to one caller and
+    /// tells the health surface nothing — the channel keeps reading `Healthy`.
+    ///
+    /// Only `send_message` published. `react`, `edit_message`, `delete_message`
+    /// and `fetch_media` did not, and `react` is the first outbound call the
+    /// engine makes on an inbound message (the ack emoji), so the most likely
+    /// discovery point for a mid-run revocation was also a silent one.
+    ///
+    /// Bounded push: with a dead token, one refusal arrives per inbound
+    /// message until the manager drains and stops the loop, and drop-oldest
+    /// keeps the newest `AuthExpired` — the one that matters.
+    async fn publish_auth_expired(&self, surface: &str, code: &str) -> ChannelError {
+        tracing::error!(
+            target: "wcore_channel_slack",
+            channel = %self.name,
+            surface = %surface,
+            code = %code,
+            "slack refused the bot token; publishing AuthExpired"
+        );
+        let mut guard = self.inbox.lock().await;
+        wcore_channels::push_bounded(
+            &mut guard,
+            ChannelEvent::AuthExpired {
+                reason: format!("slack refused the bot token on {surface}: {code}"),
+            },
+        );
+        ChannelError::Auth(code.to_string())
+    }
+
+    /// Map an outbound [`SlackError`] to a [`ChannelError`], publishing
+    /// `AuthExpired` first when the platform refused the credential.
+    async fn outbound_error(&self, surface: &str, e: SlackError) -> ChannelError {
+        match e {
+            SlackError::Auth(code) => self.publish_auth_expired(surface, &code).await,
+            other => ChannelError::from(other),
+        }
+    }
 }
 
 #[async_trait]
@@ -394,9 +442,10 @@ impl Channel for SlackChannel {
             timestamp: message_id.to_string(),
             name: name.to_string(),
         };
-        api::add_reaction(&self.http, &self.config.api_base_url, bot_token, &req)
-            .await
-            .map_err(ChannelError::from)
+        match api::add_reaction(&self.http, &self.config.api_base_url, bot_token, &req).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.outbound_error("reactions.add", e).await),
+        }
     }
 
     /// Slack: `chat.update` and `chat.delete` are real, `reactions.add` is real,
@@ -431,9 +480,12 @@ impl Channel for SlackChannel {
             ts: message_id.to_string(),
             text: new_text.to_string(),
         };
-        let resp = api::update_message(&self.http, &self.config.api_base_url, bot_token, &req)
+        let resp = match api::update_message(&self.http, &self.config.api_base_url, bot_token, &req)
             .await
-            .map_err(ChannelError::from)?;
+        {
+            Ok(r) => r,
+            Err(e) => return Err(self.outbound_error("chat.update", e).await),
+        };
         let ts = resp.ts.unwrap_or_else(|| message_id.to_string());
         let secs: i64 = ts
             .split('.')
@@ -461,10 +513,10 @@ impl Channel for SlackChannel {
             channel: conversation_id.to_string(),
             ts: message_id.to_string(),
         };
-        api::delete_message(&self.http, &self.config.api_base_url, bot_token, &req)
-            .await
-            .map(|_| ())
-            .map_err(ChannelError::from)
+        match api::delete_message(&self.http, &self.config.api_base_url, bot_token, &req).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.outbound_error("chat.delete", e).await),
+        }
     }
 
     async fn fetch_media(
@@ -475,9 +527,10 @@ impl Channel for SlackChannel {
             .bot_token
             .as_deref()
             .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
-        api::download_file(&self.http, &attachment.url, bot_token, api::MEDIA_HOSTS)
-            .await
-            .map_err(ChannelError::from)
+        match api::download_file(&self.http, &attachment.url, bot_token, api::MEDIA_HOSTS).await {
+            Ok(bytes) => Ok(bytes),
+            Err(e) => Err(self.outbound_error("files.download", e).await),
+        }
     }
 
     /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], which is
@@ -554,27 +607,11 @@ impl SlackChannel {
 
         let resp = match send_result {
             Ok(r) => r,
-            Err(SlackError::Auth(code)) => {
-                // A token that authenticated at start() can be revoked
-                // underneath a running gateway. For a webhook-driven adapter an
-                // outbound refusal is the ONLY moment that becomes observable,
-                // so publish it into the inbox instead of letting it die as a
-                // one-off send error the health surface never sees.
-                tracing::error!(
-                    target: "wcore_channel_slack",
-                    channel = %self.name,
-                    code = %code,
-                    "slack refused the bot token on send; publishing AuthExpired"
-                );
-                self.inbox
-                    .lock()
-                    .await
-                    .push_back(ChannelEvent::AuthExpired {
-                        reason: format!("slack refused the bot token on send: {code}"),
-                    });
-                return Err(ChannelError::Auth(code));
-            }
-            Err(e) => return Err(ChannelError::from(e)),
+            // A token that authenticated at start() can be revoked underneath a
+            // running gateway. For a webhook-driven adapter an outbound refusal
+            // is the ONLY moment that becomes observable — see
+            // [`Self::publish_auth_expired`].
+            Err(e) => return Err(self.outbound_error("chat.postMessage", e).await),
         };
 
         let ts = resp
@@ -904,6 +941,110 @@ mod tests {
             expired.len(),
             1,
             "a deactivated bot user must reach the health surface: {evs:?}"
+        );
+    }
+
+    /// Start a channel against `server` with a token Slack accepts, and drain
+    /// the `Connected` event so later counts are unambiguous.
+    async fn started_against(server: &mockito::Server) -> SlackChannel {
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.expect("auth.test mock accepts the token");
+        let _ = ch.poll_events().await.unwrap();
+        ch
+    }
+
+    fn ok_false(code: &str) -> String {
+        format!(r#"{{"ok":false,"error":"{code}"}}"#)
+    }
+
+    /// Every outbound surface must publish, not just `send_message`.
+    ///
+    /// `react` is the first outbound call the engine makes on an inbound
+    /// message (the ack emoji), so on a token revoked mid-run it is the most
+    /// likely discovery point — and it mapped the refusal straight to
+    /// `ChannelError::Auth`, telling the caller and telling health nothing.
+    /// `edit_message`, `delete_message` and `fetch_media` had the same hole.
+    #[tokio::test]
+    async fn every_outbound_surface_publishes_auth_expired_on_a_refusal() {
+        for (method, path) in [
+            ("react", "/api/reactions.add"),
+            ("edit", "/api/chat.update"),
+            ("delete", "/api/chat.delete"),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let _auth = server
+                .mock("POST", "/api/auth.test")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+                .create_async()
+                .await;
+            let _refuse = server
+                .mock("POST", path)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(ok_false("token_revoked"))
+                .create_async()
+                .await;
+
+            let mut ch = started_against(&server).await;
+            let err = match method {
+                "react" => ch.react("C1", "1234.5678", "👀").await.unwrap_err(),
+                "edit" => ch.edit_message("C1", "1234.5678", "new").await.unwrap_err(),
+                _ => ch.delete_message("C1", "1234.5678").await.unwrap_err(),
+            };
+            assert!(
+                matches!(err, ChannelError::Auth(_)),
+                "{method}: got {err:?}"
+            );
+
+            let evs = ch.poll_events().await.unwrap();
+            let expired = evs
+                .iter()
+                .filter(|e| matches!(e, ChannelEvent::AuthExpired { .. }))
+                .count();
+            assert_eq!(
+                expired, 1,
+                "{method}: a refused credential discovered here must reach the \
+                 health surface, or the channel keeps reading Healthy: {evs:?}"
+            );
+        }
+    }
+
+    /// The publish must be able to NOT happen. A surface that published on
+    /// every failure would pass the test above and would drive a live channel
+    /// to `Unauthenticated` the first time an edit targeted a deleted message.
+    #[tokio::test]
+    async fn a_request_fault_on_an_outbound_surface_publishes_nothing() {
+        let mut server = mockito::Server::new_async().await;
+        let _auth = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+        let _refuse = server
+            .mock("POST", "/api/chat.update")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_false("message_not_found"))
+            .create_async()
+            .await;
+
+        let mut ch = started_against(&server).await;
+        let err = ch.edit_message("C1", "1234.5678", "new").await.unwrap_err();
+        assert!(
+            !matches!(err, ChannelError::Auth(_)),
+            "a missing message is not a credential verdict: {err:?}"
+        );
+        let evs = ch.poll_events().await.unwrap_or_default();
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, ChannelEvent::AuthExpired { .. }))
+                .count(),
+            0,
+            "a request fault must not accuse the credential: {evs:?}"
         );
     }
 
