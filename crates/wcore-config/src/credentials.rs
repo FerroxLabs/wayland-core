@@ -5209,3 +5209,307 @@ mod tests {
         );
     }
 }
+
+// ===========================================================================
+// ADVERSARIAL VERIFICATION HARNESS (verify-cred lane) — NOT FOR MERGE.
+//
+// The committed suite asserts `chunked_put`'s commit order by reading it.
+// This module asserts it by EXECUTION: a child process is killed with
+// `abort()` at every single mutating step of a spanned write, and the parent
+// then reads the store back and demands the result be the complete OLD value,
+// the complete NEW value, or a clean error — never a mix and never a prefix.
+// ===========================================================================
+#[cfg(test)]
+mod crash_injection_verification {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One file per entry, each written temp+rename.
+    ///
+    /// This models what a keyring daemon actually gives us: an individual
+    /// entry commit is atomic and out of our address space, so killing OUR
+    /// process can never leave one ENTRY half-written — it can only leave the
+    /// SEQUENCE of entry writes half-finished. That sequence is precisely what
+    /// `chunked_put`'s "parts → manifest → purge" order claims to make safe.
+    struct FileStore {
+        dir: PathBuf,
+        /// `abort()` immediately BEFORE the op with this 0-based index, so
+        /// `crash_at = n` means ops 0..n landed and op n never happened.
+        crash_at: usize,
+        ops: AtomicUsize,
+        /// Force `get` on the PRIMARY key to fail, to exercise the
+        /// `raw.get(key).ok()` swallow at the head of `chunked_put`.
+        fail_primary_get: bool,
+    }
+
+    impl FileStore {
+        fn open(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                crash_at: usize::MAX,
+                ops: AtomicUsize::new(0),
+                fail_primary_get: false,
+            }
+        }
+        fn crashing(dir: &Path, crash_at: usize) -> Self {
+            Self {
+                crash_at,
+                ..Self::open(dir)
+            }
+        }
+        fn path(&self, key: &str) -> PathBuf {
+            let mut name = String::new();
+            for byte in key.as_bytes() {
+                name.push_str(&format!("{byte:02x}"));
+            }
+            self.dir.join(name)
+        }
+        /// Count this mutating op; abort the process if it is the injected one.
+        fn tick(&self) {
+            if self.ops.fetch_add(1, Ordering::SeqCst) == self.crash_at {
+                // Hard kill. No unwinding, no Drop, no buffer flush — the
+                // closest thing to a power cut a test can produce.
+                std::process::abort();
+            }
+        }
+        fn entry_names(dir: &Path) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|e| {
+                    let name = e.ok()?.file_name().to_string_lossy().into_owned();
+                    let bytes: Vec<u8> = (0..name.len())
+                        .step_by(2)
+                        .filter_map(|i| u8::from_str_radix(name.get(i..i + 2)?, 16).ok())
+                        .collect();
+                    String::from_utf8(bytes).ok()
+                })
+                .collect();
+            out.sort();
+            out
+        }
+    }
+
+    impl CredentialsStore for FileStore {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            if self.fail_primary_get && !key.contains("__wlchunk") {
+                return Err(CredentialsError::Keyring("injected read fault".into()));
+            }
+            match std::fs::read_to_string(self.path(key)) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(CredentialsError::Io(e)),
+            }
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            self.tick();
+            let final_path = self.path(key);
+            let tmp = final_path.with_extension("tmp");
+            std::fs::write(&tmp, value)?;
+            std::fs::rename(&tmp, &final_path)?;
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.tick();
+            match std::fs::remove_file(self.path(key)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    fn value_of(tag: char, len: usize) -> String {
+        std::iter::repeat(tag).take(len).collect()
+    }
+
+    // -- child mode -------------------------------------------------------
+    // Re-entered as a subprocess by the sweeps below. Not a test in its own
+    // right; it early-returns when the harness env is absent.
+    #[test]
+    fn crash_child() {
+        let Ok(dir) = std::env::var("WLV_DIR") else {
+            return;
+        };
+        let crash_at: usize = std::env::var("WLV_CRASH_AT").unwrap().parse().unwrap();
+        let new_tag = std::env::var("WLV_NEW_TAG")
+            .unwrap()
+            .chars()
+            .next()
+            .unwrap();
+        let new_len: usize = std::env::var("WLV_NEW_LEN").unwrap().parse().unwrap();
+        let fail_get = std::env::var("WLV_FAIL_GET").is_ok();
+
+        let mut store = FileStore::crashing(Path::new(&dir), crash_at);
+        store.fail_primary_get = fail_get;
+        let _ = chunked_put(&store, KEY, &value_of(new_tag, new_len), UNITS);
+        // Reaching here means the injected index was past the end of the write.
+        std::process::exit(0);
+    }
+
+    fn run_child(dir: &Path, crash_at: usize, new_tag: char, new_len: usize, fail_get: bool) {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "credentials::crash_injection_verification::crash_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("WLV_DIR", dir)
+        .env("WLV_CRASH_AT", crash_at.to_string())
+        .env("WLV_NEW_TAG", new_tag.to_string())
+        .env("WLV_NEW_LEN", new_len.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+        if fail_get {
+            cmd.env("WLV_FAIL_GET", "1");
+        }
+        let _ = cmd.status().expect("spawn crash child");
+    }
+
+    /// Kill a spanned rewrite at EVERY step and demand the store still reads
+    /// as exactly one whole value (or refuses).
+    ///
+    /// `old_len`/`new_len` pick the shape: growing, shrinking and
+    /// literal<->spanned transitions each move the part count differently, and
+    /// the shrink case is the one where reusing a generation would tear.
+    fn sweep(label: &str, old_len: usize, new_len: usize, fail_get: bool) -> Vec<String> {
+        let old = value_of('O', old_len);
+        let new = value_of('N', new_len);
+        let mut verdicts = Vec::new();
+
+        for crash_at in 0..24usize {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+
+            // Seed the OLD value with a clean, uninterrupted write.
+            chunked_put(&FileStore::open(dir), KEY, &old, UNITS).unwrap();
+            assert_eq!(
+                chunked_get(&FileStore::open(dir), KEY).unwrap().as_deref(),
+                Some(old.as_str()),
+                "{label}: seeding is broken"
+            );
+
+            run_child(dir, crash_at, 'N', new_len, fail_get);
+
+            let read = chunked_get(&FileStore::open(dir), KEY);
+            let verdict = match &read {
+                Ok(Some(v)) if *v == old => "OLD".to_string(),
+                Ok(Some(v)) if *v == new => "NEW".to_string(),
+                Ok(Some(v)) => {
+                    let tags: String = {
+                        let mut t: Vec<char> = v.chars().collect();
+                        t.dedup();
+                        t.into_iter().collect()
+                    };
+                    format!(
+                        "CORRUPT(len={} of old={old_len}/new={new_len}, tags=[{tags}])",
+                        v.len()
+                    )
+                }
+                Ok(None) => "ABSENT".to_string(),
+                Err(_) => "ERR".to_string(),
+            };
+            verdicts.push(format!("{crash_at}:{verdict}"));
+
+            assert!(
+                !verdict.starts_with("CORRUPT"),
+                "{label}: killing the writer before mutating op {crash_at} produced a \
+                 value that is neither the old secret nor the new one — {verdict}"
+            );
+            assert_ne!(
+                verdict, "ABSENT",
+                "{label}: killing the writer before mutating op {crash_at} DESTROYED the \
+                 credential (the store now reports no value at all)"
+            );
+        }
+        verdicts
+    }
+
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_same_size() {
+        let v = sweep("same-size", 4000, 4000, false);
+        println!("SWEEP same-size(4000->4000): {v:?}");
+    }
+
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_growing() {
+        let v = sweep("growing", 2500, 9000, false);
+        println!("SWEEP growing(2500->9000): {v:?}");
+    }
+
+    /// The sharp one. New value needs FEWER parts than the live manifest
+    /// counts, so any in-place reuse of the live generation leaves the reader
+    /// splicing new parts onto an old tail.
+    #[test]
+    fn spanned_rewrite_survives_a_kill_at_every_step_shrinking() {
+        let v = sweep("shrinking", 9000, 2500, false);
+        println!("SWEEP shrinking(9000->2500): {v:?}");
+    }
+
+    #[test]
+    fn spanned_to_literal_survives_a_kill_at_every_step() {
+        let v = sweep("spanned->literal", 9000, 40, false);
+        println!("SWEEP spanned->literal(9000->40): {v:?}");
+    }
+
+    #[test]
+    fn literal_to_spanned_survives_a_kill_at_every_step() {
+        let v = sweep("literal->spanned", 40, 9000, false);
+        println!("SWEEP literal->spanned(40->9000): {v:?}");
+    }
+
+    /// `chunked_put` opens with `raw.get(key).ok().flatten()`, so a READ fault
+    /// on the primary entry is indistinguishable from "there is no previous
+    /// manifest" and the writer picks generation 'a'. If the live value is
+    /// already generation 'a', that is an in-place overwrite of the entries a
+    /// concurrent reader is still reading through the live manifest.
+    #[test]
+    fn a_read_fault_on_the_primary_entry_must_not_tear_the_live_value() {
+        let v = sweep("read-fault/shrinking", 9000, 2500, true);
+        println!("SWEEP read-fault shrinking(9000->2500): {v:?}");
+    }
+
+    /// Item 2: do interrupted writes leak entries without bound across many
+    /// rotations, and can an orphan ever be spliced into a later generation?
+    #[test]
+    fn interrupted_rotations_do_not_leak_entries_without_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        chunked_put(&FileStore::open(dir), KEY, &value_of('O', 2000), UNITS).unwrap();
+
+        let mut census = Vec::new();
+        for round in 0..40usize {
+            // Alternate long/short so part counts move around, and inject a
+            // kill partway through the part-writing phase every round.
+            let len = if round % 2 == 0 { 12000 } else { 2600 };
+            let tag = char::from(b'A' + (round % 20) as u8);
+            run_child(dir, 2, tag, len, false);
+
+            // Then a clean write of the same value, so the store settles.
+            let settled = value_of(tag, len);
+            chunked_put(&FileStore::open(dir), KEY, &settled, UNITS).unwrap();
+            let read = chunked_get(&FileStore::open(dir), KEY).unwrap();
+            assert_eq!(
+                read.as_deref(),
+                Some(settled.as_str()),
+                "round {round}: a settled write after an interrupted one did not read \
+                 back as itself — an orphan was spliced in"
+            );
+            census.push(FileStore::entry_names(dir).len());
+        }
+        println!("CENSUS entries-after-each-round: {census:?}");
+        println!("CENSUS final entries: {:?}", FileStore::entry_names(dir));
+
+        let first_half = census[..20].iter().max().copied().unwrap();
+        let second_half = census[20..].iter().max().copied().unwrap();
+        assert_eq!(
+            first_half, second_half,
+            "entry count is still growing after 40 rotations ({first_half} -> \
+             {second_half}); orphans leak without bound"
+        );
+    }
+}
