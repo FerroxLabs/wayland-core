@@ -43,6 +43,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
@@ -212,17 +213,30 @@ def run_nextest(
 
 
 class Load:
-    """N busy-spin child processes, to reproduce suite-level CPU contention."""
+    """N busy-spin child processes, to reproduce suite-level CPU contention.
 
-    def __init__(self, workers: int) -> None:
+    Each worker carries its OWN deadline and exits on its own. `__exit__` kills
+    them in the normal path, but a `SIGKILL`/crash of this process skips
+    `__exit__` entirely, and an orphaned busy-spinner pins a core forever. This
+    harness runs on a machine somebody else owns, so the lifetime bound lives
+    inside the child where nothing can skip it.
+    """
+
+    def __init__(self, workers: int, lifetime_s: int) -> None:
         self.workers = workers
+        self.lifetime_s = lifetime_s
         self.procs: list[subprocess.Popen] = []
 
     def __enter__(self) -> "Load":
+        spin = (
+            "import time;"
+            f"end=time.monotonic()+{self.lifetime_s};"
+            "\nwhile time.monotonic()<end: pass"
+        )
         for _ in range(self.workers):
             self.procs.append(
                 subprocess.Popen(
-                    [sys.executable, "-c", "while True: pass"],
+                    [sys.executable, "-c", spin],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -309,14 +323,22 @@ def main() -> int:
         f"({filterset(r.package, r.binary, r.test)})" for r in present
     )
 
-    def batch_pass(cond: str) -> None:
+    def batch_pass(cond: str, loaded: bool = False) -> None:
         print(f"== condition: {cond} ==")
         if not present:
             return
         for i in range(args.runs):
-            out, blob = run_nextest(
-                args.root, args.profile, batch_expr, len(present), args.timeout
+            # A fresh, short-lived Load per repetition: even an abandoned set of
+            # spinners expires within one repetition's budget.
+            ctx = (
+                Load(load_workers, args.timeout + 60)
+                if loaded
+                else contextlib.nullcontext()
             )
+            with ctx:
+                out, blob = run_nextest(
+                    args.root, args.profile, batch_expr, len(present), args.timeout
+                )
             # A batch invocation grades the SET. Attribute per test from the log.
             for row in present:
                 if out.verdict in ("ERROR", "NOTRUN"):
@@ -332,8 +354,7 @@ def main() -> int:
     if "batch" in conditions:
         batch_pass("batch")
     if "loaded" in conditions:
-        with Load(load_workers):
-            batch_pass("loaded")
+        batch_pass("loaded", loaded=True)
 
     print()
     print("| test | condition | runs | passes | failures | verdict |")
