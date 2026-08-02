@@ -29,17 +29,23 @@ fn utf16_units(value: &str) -> usize {
 /// Grades three states, not two: a write that is refused and a write that is
 /// ACCEPTED but reads back different are both "no", and they are different
 /// kinds of no — the second is silent truncation, which is far worse.
-fn holds(store: &KeyringCredentialsStore, key: &str, units: usize) -> Result<bool, String> {
+///
+/// Written through a BARE `keyring::Entry`. `KeyringCredentialsStore` is the
+/// spanning writer, so measuring through it would measure the chunker, not the
+/// backend — the exact mistake that makes a cap probe report a cap that is not
+/// there.
+fn holds(key: &str, units: usize) -> Result<bool, String> {
     let value = "x".repeat(units);
-    match store.put(key, &value) {
+    let entry = keyring::Entry::new(SERVICE, key).map_err(|e| format!("entry: {e}"))?;
+    match entry.set_password(&value) {
         Err(_) => Ok(false),
-        Ok(()) => match store.get(key) {
-            Ok(Some(read)) if read == value => Ok(true),
-            Ok(Some(read)) => Err(format!(
+        Ok(()) => match entry.get_password() {
+            Ok(read) if read == value => Ok(true),
+            Ok(read) => Err(format!(
                 "SILENT TRUNCATION: the backend ACCEPTED {units} units and returned {} units",
                 utf16_units(&read)
             )),
-            Ok(None) => Err(format!(
+            Err(keyring::Error::NoEntry) => Err(format!(
                 "SILENT LOSS: the backend ACCEPTED {units} units and then returned nothing"
             )),
             Err(e) => Err(format!("read failed at {units} units: {e}")),
@@ -63,7 +69,7 @@ fn measure_the_real_per_entry_ceiling_of_this_hosts_credential_store() {
     );
 
     // The threshold itself must be holdable, or the product is broken here.
-    let at_threshold = holds(&store, key, THRESHOLD).unwrap_or_else(|e| panic!("{e}"));
+    let at_threshold = holds(key, THRESHOLD).unwrap_or_else(|e| panic!("{e}"));
     assert!(
         at_threshold,
         "DEFECT — this host cannot hold the {THRESHOLD}-unit chunk size the writer uses, so \
@@ -77,7 +83,7 @@ fn measure_the_real_per_entry_ceiling_of_this_hosts_credential_store() {
     let mut hi = None; // smallest known NOT holdable
     let mut size = THRESHOLD * 2;
     while size <= CEILING {
-        match holds(&store, key, size).unwrap_or_else(|e| panic!("{e}")) {
+        match holds(key, size).unwrap_or_else(|e| panic!("{e}")) {
             true => {
                 lo = size;
                 size *= 2;
@@ -91,7 +97,7 @@ fn measure_the_real_per_entry_ceiling_of_this_hosts_credential_store() {
     if let Some(mut high) = hi {
         while high - lo > 1 {
             let mid = lo + (high - lo) / 2;
-            match holds(&store, key, mid).unwrap_or_else(|e| panic!("{e}")) {
+            match holds(key, mid).unwrap_or_else(|e| panic!("{e}")) {
                 true => lo = mid,
                 false => high = mid,
             }

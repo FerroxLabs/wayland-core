@@ -34,7 +34,7 @@ jobs:
       # skip.
       - name: Install a Secret Service (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11 libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11 libdbus-1-dev libasound2-dev
 
       - name: Crash-injection sweeps (all platforms)
         continue-on-error: true
@@ -42,7 +42,9 @@ jobs:
 
       - name: Concurrent-writer race (all platforms)
         continue-on-error: true
-        run: cargo test -p wcore-config --lib scheduled_race_verification concurrency_verification -- --nocapture
+        run: |
+          cargo test -p wcore-config --lib scheduled_race_verification -- --nocapture
+          cargo test -p wcore-config --lib concurrency_verification -- --nocapture
 
       - name: Real per-entry cap probe + live OAuth lifecycle (Windows/macOS)
         continue-on-error: true
