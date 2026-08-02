@@ -391,3 +391,72 @@ async fn windows_engine_path_bisect() {
         }
     );
 }
+
+/// L7 — the decisive fork. The same engine path, but the model-issued command
+/// ALSO writes the proof to a file inside the workspace. A missing needle with
+/// the file PRESENT means the child ran and only its stdout was lost; a missing
+/// needle with the file ABSENT means the payload never executed at all. Those
+/// two have completely different fixes, and nothing observed so far separates
+/// them.
+#[tokio::test]
+#[ignore = "Windows diagnostic; run explicitly with --ignored --nocapture"]
+async fn windows_engine_side_effect_fork() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("l7-proof.txt");
+    let command = if cfg!(windows) {
+        format!("echo {NEEDLE}> \"{}\" & echo {NEEDLE}", marker.display())
+    } else {
+        format!("printf {NEEDLE} > '{}'; echo {NEEDLE}", marker.display())
+    };
+    banner("L7 ENGINE RUN WITH A SIDE EFFECT");
+    println!("  command = {command:?}");
+    println!("  marker  = {marker:?}");
+
+    let physical = physical_attempt_server().await;
+    let mut config = diag_config();
+    config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut config, workspace.path());
+    let capture = Arc::new(DiagSink::default());
+    let sink: Arc<dyn OutputSink> = capture.clone();
+    let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
+        .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use(
+                "typed-bash",
+                "Bash",
+                serde_json::json!({ "command": command }),
+            )
+            .with_physical_url(physical.uri()),
+        ))
+        .without_channels(true)
+        .build()
+        .await
+        .expect("bootstrap must succeed");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("session");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+
+    let run = result
+        .engine
+        .run("run the harmless proof command", "typed-bypass-bash-side")
+        .await;
+    println!("  run_ok       = {}", run.is_ok());
+    let results = capture.tool_results.lock().unwrap().clone();
+    println!("  tool_results = {results:?}");
+    let stdout_carried = results
+        .iter()
+        .any(|(name, _, content)| name == "Bash" && content.contains(NEEDLE));
+    let marker_present = marker.exists();
+    println!("  stdout_carried_needle = {stdout_carried}");
+    println!("  marker_file_present   = {marker_present}");
+    println!(
+        "  VERDICT = {}",
+        match (stdout_carried, marker_present) {
+            (true, _) => "stdout round-trips — no loss on this host",
+            (false, true) => "CHILD RAN, STDOUT LOST — capture defect",
+            (false, false) => "CHILD NEVER RAN THE PAYLOAD — command/spawn defect",
+        }
+    );
+}
