@@ -558,8 +558,17 @@ struct ChunkWriteLockSite {
 
 impl ChunkWriteLockSite {
     fn for_service(service: &str) -> Self {
+        Self::anchored(service, crate::config::profile_home())
+    }
+
+    /// The same site with the profile home named explicitly rather than read
+    /// from the environment. Only [`purge_profile_confidential_keys`] needs it:
+    /// it runs against ANOTHER profile's keyring service while `WAYLAND_HOME`
+    /// still points at the caller's, so the ambient home would place its lock
+    /// where no writer in the target profile looks for one.
+    fn anchored(service: &str, dir: PathBuf) -> Self {
         Self {
-            dir: crate::config::profile_home(),
+            dir,
             namespace: service.to_string(),
             policy: LockPolicy::CREDENTIAL_WRITE,
         }
@@ -818,6 +827,16 @@ impl KeyringCredentialsStore {
         let service = service.into();
         Self {
             locks: ChunkWriteLockSite::for_service(&service),
+            raw: RawKeyringEntries { service },
+        }
+    }
+
+    /// [`Self::new`] with the write lock anchored at an explicit profile home.
+    /// See [`ChunkWriteLockSite::anchored`] for why one caller needs that.
+    fn anchored_at(service: impl Into<String>, profile_home: PathBuf) -> Self {
+        let service = service.into();
+        Self {
+            locks: ChunkWriteLockSite::anchored(&service, profile_home),
             raw: RawKeyringEntries { service },
         }
     }
@@ -2783,8 +2802,13 @@ pub fn purge_profile_confidential_keys(credentials_path: &Path) -> Result<(), Cr
         return Ok(());
     };
 
+    // The TARGET profile's home, not the caller's: `WAYLAND_HOME` still points
+    // at whoever is running `profile delete`.
+    let target_home = credentials_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let store = ConfidentialCredentialsStore::new(
-        Box::new(KeyringCredentialsStore::new(service)),
+        Box::new(KeyringCredentialsStore::anchored_at(service, target_home)),
         credentials_path.with_file_name(".credentials.confidential-key.lock"),
         None,
     );

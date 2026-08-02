@@ -594,8 +594,23 @@ async fn status_cmd() -> Result<()> {
             // sees signed-in status without an explicit import step.
             match chatgpt::import_codex_cli_tokens() {
                 Ok(t) => {
-                    let _ = storage.store(chatgpt::PROVIDER, &t);
-                    println!("(imported an existing ChatGPT login from the Codex CLI)");
+                    // The store can REFUSE (no secure rung on this host), and
+                    // discarding that refusal is what let `auth status` print
+                    // "signed in" on the same host where `auth login` printed a
+                    // loud refusal. The imported tokens are genuinely valid, so
+                    // still report them — but say plainly that nothing was
+                    // saved, or the next command silently reports logged out.
+                    match storage.store(chatgpt::PROVIDER, &t) {
+                        Ok(()) => {
+                            println!("(imported an existing ChatGPT login from the Codex CLI)");
+                        }
+                        Err(error) => {
+                            println!(
+                                "(found an existing ChatGPT login in the Codex CLI, but it \
+                                 could NOT be saved to this profile)\n{error}"
+                            );
+                        }
+                    }
                     Some(t)
                 }
                 Err(_) => None,

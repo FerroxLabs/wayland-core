@@ -4115,10 +4115,19 @@ fn xai_oauth_available() -> bool {
     if crate::oauth::xai::read_grok_cli_tokens().is_some() {
         return true;
     }
-    crate::oauth::OAuthStorage::from_home()
-        .ok()
-        .and_then(|s| s.load(crate::oauth::xai::PROVIDER).ok().flatten())
-        .is_some()
+    let Ok(storage) = crate::oauth::OAuthStorage::from_home() else {
+        return false;
+    };
+    match storage.load(crate::oauth::xai::PROVIDER) {
+        Ok(tokens) => tokens.is_some(),
+        // "This profile IS signed in and the secure store cannot produce the
+        // token right now" is not the same as "there is no login". Treating it
+        // as absent routes the user to the static-key provider, which then
+        // fails with a generic missing-API-key error instead of the store's own
+        // message naming the locked vault or the stopped Secret Service.
+        Err(crate::oauth::OAuthStorageError::SecureStoreUnavailable { .. }) => true,
+        Err(_) => false,
+    }
 }
 
 /// OAuth-aware analogue of [`wcore_providers::create_provider`].

@@ -612,11 +612,17 @@ impl Router {
         // on the first turn. Refuse the swap (leaving the engine untouched)
         // with an actionable hint when not signed in. Non-OAuth providers
         // return `None` here and fall through to the normal swap.
-        if oauth_provider_signed_in(name) == Some(false) {
-            return format!(
-                "Not signed in to ChatGPT. Run `wayland-core auth login chatgpt` \
-                 first, then retry /provider {name}."
-            );
+        match oauth_provider_login_probe(name) {
+            Some(OAuthLoginProbe::NotSignedIn) => {
+                return format!(
+                    "Not signed in to ChatGPT. Run `wayland-core auth login chatgpt` \
+                     first, then retry /provider {name}."
+                );
+            }
+            Some(OAuthLoginProbe::StoreLocked(detail)) => {
+                return format!("Can't switch to {name} right now.\n{detail}");
+            }
+            Some(OAuthLoginProbe::SignedIn) | None => {}
         }
         // Drive the live swap first and capture the OWNED outcome, so the
         // `&self` borrow of the engine ends before the `self`/`app` mutations
@@ -3018,24 +3024,42 @@ fn provider_is_oauth(name: &str) -> bool {
     matches!(name, "openai-chatgpt" | "chatgpt")
 }
 
+/// What a login probe can find. Three states, never two: "the secure store
+/// cannot produce this profile's token right now" is not "you were never signed
+/// in", and telling the user to run `auth login` over a login that is still
+/// there sends them to re-authenticate for nothing. `/config`'s provider badge
+/// makes the same distinction (`OAuthStoreLocked`).
+enum OAuthLoginProbe {
+    SignedIn,
+    NotSignedIn,
+    /// A login IS recorded and no tier can produce it. Carries the store's own
+    /// message, which names the remedy.
+    StoreLocked(String),
+}
+
 /// For an OAuth provider, report whether a stored login exists (sync, no
 /// network/refresh). Returns `None` for non-OAuth providers (no precheck
-/// applies) and `Some(bool)` for OAuth providers (`true` = signed in). Reads
-/// the same stored token the provider's bearer source would, via the
-/// single-source [`wcore_agent::oauth::chatgpt_login_status`] helper.
-fn oauth_provider_signed_in(name: &str) -> Option<bool> {
+/// applies). Reads the same stored token the provider's bearer source would,
+/// via the single-source [`wcore_agent::oauth::chatgpt_login_status`] helper.
+fn oauth_provider_login_probe(name: &str) -> Option<OAuthLoginProbe> {
     if !provider_is_oauth(name) {
         return None;
     }
     // Today every OAuth provider is ChatGPT-backed; a future provider routes
-    // on `name` here. A storage open/read error is treated as "not signed in"
-    // — the swap is refused rather than risking a first-turn auth failure.
-    let signed_in = wcore_agent::oauth::OAuthStorage::from_home()
-        .ok()
-        .and_then(|s| wcore_agent::oauth::chatgpt_login_status(&s).ok().flatten())
-        .map(|status| status.signed_in)
-        .unwrap_or(false);
-    Some(signed_in)
+    // on `name` here.
+    let Ok(storage) = wcore_agent::oauth::OAuthStorage::from_home() else {
+        return Some(OAuthLoginProbe::NotSignedIn);
+    };
+    Some(match wcore_agent::oauth::chatgpt_login_status(&storage) {
+        Ok(Some(status)) if status.signed_in => OAuthLoginProbe::SignedIn,
+        Ok(_) => OAuthLoginProbe::NotSignedIn,
+        Err(error @ wcore_agent::oauth::OAuthStorageError::SecureStoreUnavailable { .. }) => {
+            OAuthLoginProbe::StoreLocked(error.to_string())
+        }
+        // Any other read failure is genuinely inconclusive; refuse the swap
+        // rather than risk a first-turn auth failure.
+        Err(_) => OAuthLoginProbe::NotSignedIn,
+    })
 }
 
 /// Whether a built-in provider is ready to use right now, decided synchronously
