@@ -5631,3 +5631,129 @@ mod concurrency_verification {
         );
     }
 }
+
+// ===========================================================================
+// ADVERSARIAL VERIFICATION HARNESS 3 — the race, scheduled deterministically.
+//
+// Harness 2 raced two writers and they happened not to collide: the shorter
+// writer finished and flipped before the longer one had written its parts,
+// which is the SAFE interleave. Luck is not a proof, so this pins the ONE
+// schedule that is unsafe. It contains no sleeps and no crashes — only an
+// ordinary preemption of writer A between its last part write and its manifest
+// write, which any OS may impose at any time.
+// ===========================================================================
+#[cfg(test)]
+mod scheduled_race_verification {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Shared {
+        entries: Mutex<HashMap<String, String>>,
+    }
+
+    /// A view of the shared store that can be told to hand control to the other
+    /// writer at a named point.
+    struct Scheduled {
+        shared: Arc<Shared>,
+        /// Fired the first time this writer is about to commit its manifest.
+        at_manifest: Mutex<Option<Sender<()>>>,
+        /// Waited on before that commit proceeds.
+        resume: Mutex<Option<Receiver<()>>>,
+    }
+
+    impl CredentialsStore for Scheduled {
+        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+            Ok(self.shared.entries.lock().unwrap().get(key).cloned())
+        }
+        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+            if value.starts_with(KEYRING_CHUNK_MANIFEST_PREFIX) {
+                // Writer A is preempted here: its parts are all on disk, its
+                // manifest is not yet committed.
+                if let Some(tx) = self.at_manifest.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.resume.lock().unwrap().take() {
+                    let _ = rx.recv();
+                }
+            }
+            self.shared
+                .entries
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+            self.shared.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    const KEY: &str = "oauth.chatgpt.tokens";
+    const UNITS: usize = 1000;
+
+    #[test]
+    fn a_preempted_writer_commits_a_manifest_over_another_writers_parts() {
+        let shared = Arc::new(Shared::default());
+        let plain = Scheduled {
+            shared: Arc::clone(&shared),
+            at_manifest: Mutex::new(None),
+            resume: Mutex::new(None),
+        };
+        // A live spanned value, generation 'a'.
+        chunked_put(&plain, KEY, &"S".repeat(6000), UNITS).unwrap();
+
+        let (reached_tx, reached_rx) = channel::<()>();
+        let (resume_tx, resume_rx) = channel::<()>();
+
+        // Writer A: the long token set. Suspended just before its manifest
+        // commit, after all nine of its parts have landed.
+        let a_shared = Arc::clone(&shared);
+        let writer_a = std::thread::spawn(move || {
+            let store = Scheduled {
+                shared: a_shared,
+                at_manifest: Mutex::new(Some(reached_tx)),
+                resume: Mutex::new(Some(resume_rx)),
+            };
+            chunked_put(&store, KEY, &"A".repeat(9000), UNITS)
+        });
+
+        // Wait until A is parked at its manifest commit.
+        reached_rx.recv().expect("writer A reaches its manifest");
+
+        // Writer B: a short token set, runs to completion while A is parked.
+        let writer_b = Scheduled {
+            shared: Arc::clone(&shared),
+            at_manifest: Mutex::new(None),
+            resume: Mutex::new(None),
+        };
+        chunked_put(&writer_b, KEY, &"B".repeat(3000), UNITS).expect("writer B completes");
+        assert_eq!(
+            chunked_get(&writer_b, KEY).unwrap().as_deref(),
+            Some("B".repeat(3000).as_str()),
+            "writer B must be the committed value while A is still parked"
+        );
+
+        // Let A finish. Both writers now report success.
+        resume_tx.send(()).unwrap();
+        writer_a.join().unwrap().expect("writer A reports success");
+
+        let final_value = chunked_get(&plain, KEY).expect("read").expect("present");
+        let mut tags: Vec<char> = final_value.chars().collect();
+        tags.dedup();
+        let tags: String = tags.into_iter().collect();
+        println!(
+            "RACE RESULT len={} tags=[{tags}] (candidates: 9000×'A', 3000×'B')",
+            final_value.len()
+        );
+
+        assert!(
+            final_value == "A".repeat(9000) || final_value == "B".repeat(3000),
+            "the store committed a value that is NEITHER token set: len={} tags=[{tags}]",
+            final_value.len()
+        );
+    }
+}
