@@ -599,7 +599,7 @@ Every other exactly-once row in §2 rests on a key being *present on the wire*. 
 now rests on something stronger: the shipped `wayland-core` binary crashed mid-send against
 `matrix.org` and the replay was collapsed by the homeserver.
 
-Measured by `lane/matrix-live` on `hetzner-dsm`, room `!kntRqkQCkPjhPvMMvf:matrix.org`. The
+Measured by `lane/matrix-live` on `hetzner-dsm`, room `!REDACTED-MATRIX-ROOM:matrix.org`. The
 product spoke to the real homeserver through a recording forwarder
 (`scripts/matrix-live-proxy.mjs`) which forwarded the first send upstream **for real** and then
 withheld the response, so the event landed while the product's outcome stayed unknown. The room

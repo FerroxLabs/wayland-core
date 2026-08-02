@@ -67,7 +67,7 @@ ask() {
 ask codex codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check "$BODY"
 ask gemini gemini -p "$BODY" -m gemini-3.1-pro-preview -o text --skip-trust
 # ABSOLUTE path required: a non-interactive shell here predates the PATH entry.
-ask kimi /Users/seandonahoe/.kimi-code/bin/kimi -p "$BODY" --output-format text
+ask kimi "$HOME/.kimi-code/bin/kimi" -p "$BODY" --output-format text
 
 if [ "$RC" -ne 0 ]; then
     echo "panel-ask: one or more members failed; the panel is INCOMPLETE" >&2

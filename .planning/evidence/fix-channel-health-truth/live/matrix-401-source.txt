@@ -1,5 +1,5 @@
 -- our token identity (no secret) --
-{"user_id":"@seandonahoe:matrix.org","is_guest":false,"device_id":"oRqn0FqTG2"}
+{"user_id":"@REDACTED-MATRIX-USER:matrix.org","is_guest":false,"device_id":"oRqn0FqTG2"}
 -- BOGUS token: a real matrix.org rejection --
 status=401
 "errcode":"M_UNKNOWN_TOKEN"

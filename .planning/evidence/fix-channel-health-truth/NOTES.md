@@ -156,7 +156,7 @@ Measured before use, instrument alive in both directions in one session
 |---|---|
 | unauthenticated `/_matrix/client/versions` | **200** with a real payload — server reachable |
 | `/whoami` with **no** token | **401 `M_MISSING_TOKEN`** — a *different* error, so auth IS enforced |
-| `/whoami` with **our** token | **200**, `@seandonahoe:matrix.org` — **the token WORKS** |
+| `/whoami` with **our** token | **200**, `@REDACTED-MATRIX-USER:matrix.org` — **the token WORKS** |
 
 Had I trusted the brief, quadrant 1 would have been built on a working credential. Substitute
 401 source: a syntactically-valid unregistered token, which **matrix.org itself** rejects

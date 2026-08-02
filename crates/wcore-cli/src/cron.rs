@@ -1348,7 +1348,7 @@ mod tests {
                 slash: None,
                 channel: Some("mxlive".into()),
                 text: Some("status check".into()),
-                conversation: Some("!kntRqkQCkPjhPvMMvf:matrix.org".into()),
+                conversation: Some("!REDACTED-MATRIX-ROOM:matrix.org".into()),
                 skill: None,
                 args: None,
             },
@@ -1366,7 +1366,7 @@ mod tests {
                 assert_eq!(channel_name, "mxlive");
                 assert_eq!(
                     conversation_id.as_deref(),
-                    Some("!kntRqkQCkPjhPvMMvf:matrix.org"),
+                    Some("!REDACTED-MATRIX-ROOM:matrix.org"),
                     "the destination must be the room, never the channel name"
                 );
                 assert_ne!(

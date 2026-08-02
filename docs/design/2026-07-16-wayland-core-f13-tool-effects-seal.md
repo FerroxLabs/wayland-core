@@ -17,7 +17,7 @@ stable idempotency key, or authoritative reconciliation.
 ## Exact integration-source Linux proof
 
 Every command below ran through
-`/Users/seandonahoe/dev/ratchet-worktrees/wt-remote-cargo-cache/harness/remote-cargo.sh`
+`$HOME/dev/ratchet-worktrees/wt-remote-cargo-cache/harness/remote-cargo.sh`
 against committed source `e50ed42`; no Cargo command ran on the Mac.
 
 | Gate | Cargo command | Result |

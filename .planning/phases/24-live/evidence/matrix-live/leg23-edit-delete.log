@@ -4,7 +4,7 @@ note: to see what the problems were, use the option `--future-incompat-report`, 
      Running tests/matrix_live_room.rs (target/debug/deps/matrix_live_room-a0df2add8deff3eb)
 
 running 1 test
-test matrix_edit_and_delete_against_a_real_room ... MLR_ROOM=!kntRqkQCkPjhPvMMvf:matrix.org
+test matrix_edit_and_delete_against_a_real_room ... MLR_ROOM=!REDACTED-MATRIX-ROOM:matrix.org
 MLR_NONCE=mlact-1785383837
 MLR_DECLARED_IDEMPOTENT=true
 MLR_DECLARED_ACTIONS edit=implemented delete=implemented react=implemented typing=implemented

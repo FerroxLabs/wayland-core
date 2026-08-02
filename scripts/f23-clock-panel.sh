@@ -57,7 +57,7 @@ MANIFEST="$OUT_DIR/23B-04-panel-manifest.txt"
 MEMBERS="codex gemini kimi internal"
 OPTIONS="real-time-full real-time-linux-accelerated-elsewhere accelerated-except-absolute-deadline escalate"
 
-KIMI=/Users/seandonahoe/.kimi-code/bin/kimi
+KIMI="$HOME/.kimi-code/bin/kimi"
 
 # ── Stage: run ───────────────────────────────────────────────────────────────
 if [ "$STAGE" = "run" ]; then

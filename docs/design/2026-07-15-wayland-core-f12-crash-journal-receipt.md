@@ -53,9 +53,9 @@ No Cargo build or test was run on the Mac.
 ### Final affected-package gate
 
 ```bash
-/Users/seandonahoe/dev/ratchet/harness/remote-cargo.sh \
+$HOME/dev/ratchet/harness/remote-cargo.sh \
   wcore-f12-gate \
-  /Users/seandonahoe/dev/waylandcore-worktrees/wt-691 \
+  $HOME/dev/waylandcore-worktrees/wt-691 \
   nextest run \
   -p wcore-agent -p wcore-providers -p wcore-egress -p wcore-cli \
   --no-fail-fast
@@ -71,9 +71,9 @@ At exact committed source `661b0ed337aae9480fe70da708f3050a1272d4ec`:
 ### Strict lint gate
 
 ```bash
-/Users/seandonahoe/dev/ratchet/harness/remote-cargo.sh \
+$HOME/dev/ratchet/harness/remote-cargo.sh \
   wcore-f12-clippy \
-  /Users/seandonahoe/dev/waylandcore-worktrees/wt-691 \
+  $HOME/dev/waylandcore-worktrees/wt-691 \
   clippy \
   -p wcore-agent -p wcore-providers -p wcore-egress -p wcore-cli \
   --all-targets --all-features -- -D warnings

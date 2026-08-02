@@ -27,7 +27,7 @@ hostile tests.
 2. **Git-author binding is satisfiable but forgeable.** Authorship is NOT
    uniform — the Phase 20 source was authored by `Wayland F20 Builder
    <f20-builder@ferroxlabs.invalid>` (in-lineage commits ce3464f, 4d98c1b,
-   b57f9b7, b9cc669), distinct from `ci/Sean <sean@seandonahoe.com>` who
+   b57f9b7, b9cc669), distinct from `ci/Sean <REDACTED-MAINTAINER@redacted.invalid>` who
    authored the planning/review commits. So binding `source_executor_id` /
    `reviewer_id` to commit authorship IS satisfiable — but `git commit
    --author=` and `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are freely settable by a

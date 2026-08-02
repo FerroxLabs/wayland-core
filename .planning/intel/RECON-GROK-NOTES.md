@@ -13,7 +13,7 @@ Lane `recon-grok`. Peer: `/Users/seandonahoe/dev/resources/grok-build`. READ-ONL
 
 - remote `https://github.com/xai-org/grok-build.git`; working tree HEAD
   `a7d0968f…`, branch `research/wayland-integration-audit`, tree CLEAN (0 porcelain lines).
-- `a7d0968` is LOCAL, by `ci <sean@seandonahoe.com>`, adds ONLY
+- `a7d0968` is LOCAL, by `ci <REDACTED-MAINTAINER@redacted.invalid>`, adds ONLY
   `WAYLAND-INTEGRATION-AUDIT.md` +662, **0 `.rs`** (control: 1 `.md` matched).
 - parent `c68e39f` IS an ancestor of `origin/main` (`merge-base --is-ancestor` → YES).
 - `origin/main` = `98c3b24` (2026-07-17), **2 commits ahead**; delta 304 files
@@ -93,5 +93,5 @@ prompt-queue 176.
 ## Provenance
 
 `WAYLAND-INTEGRATION-AUDIT.md` (662 lines) in the peer tree is **ours**
-(sean@seandonahoe.com), not xAI's. Prior recon exists and never reached
+(REDACTED-MAINTAINER@redacted.invalid), not xAI's. Prior recon exists and never reached
 `COMPETITIVE-LEDGER.md`. Read for provenance only; not used as peer evidence.
