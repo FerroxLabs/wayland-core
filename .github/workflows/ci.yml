@@ -125,6 +125,18 @@ jobs:
   ci:
     name: CI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 2026-08-02. Skip this job entirely on a `lane/**` push that opted into
+    # neither platform. See the matrix note below for why the self-hosted
+    # Windows entry stopped being unconditional. Lanes keep `Lint`, the
+    # containerized Linux job, the `Build (…)` artifacts that the `lane/**`
+    # trigger exists to provide, and their own lane-scoped proof workflows.
+    if: >-
+      github.event_name == 'pull_request'
+      || github.ref_name == 'main'
+      || github.ref_name == 'plan/f20-unified-audit-repair'
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
     # Shrink debug info + disable incremental compile across the matrix.
     # The Windows runner has ~14GB free disk and the default Rust dev
     # profile + full PDB debug info blew past it on CI run 26396718138
@@ -139,15 +151,37 @@ jobs:
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
-      # Selects between two literals (see the admission-control note at the top
+      # Selects between three literals (see the admission-control note at the top
       # of `jobs:`). Full value is
       #   ["macos-latest",["self-hosted","Windows","X64","msvc"]]
       # — byte-identical to the literal list this replaced, so the job names
-      # `CI (macos-latest)` and `CI (Array)` are unchanged. On a `lane/**` push
-      # without a `[ci-darwin]` opt-in the `macos-latest` entry is omitted; the
-      # self-hosted Windows entry is ALWAYS present, so the vector is never empty.
+      # `CI (macos-latest)` and `CI (Array)` are unchanged. `main`, every PR and
+      # the integration branch always get both entries.
+      #
+      # On a `lane/**` push, EACH platform is now opt-in:
+      #   `[ci-darwin]` / `[ci-macos]` in a commit message → `macos-latest`
+      #   `[ci-windows]`                                    → self-hosted Windows
+      # and with neither marker the whole `ci` job is skipped by the `if:` above,
+      # so the vector is never empty.
+      #
+      # 2026-08-02. The self-hosted Windows entry used to be UNCONDITIONAL on
+      # lane pushes. There is exactly ONE self-hosted Windows runner and it
+      # executes one job at a time, so a repair wave of six concurrent lanes —
+      # each pushing several times — kept it saturated for hours and the
+      # INTEGRATION branch's own `CI (Array)` queued behind all of them. Measured
+      # during the v0.12.26-rc.1 wave: 25 runs pending, integration CI still
+      # `queued` after ninety minutes, and a lane resorted to standing up its own
+      # hosted-`windows-latest` workflow because direct ssh to the box returned
+      # nothing in fifty minutes. That is the mechanism behind "91 of 100
+      # integration runs cancelled before starting a single job".
+      #
+      # This does NOT remove Windows coverage from anything that gates a release:
+      # `main`, PRs and the integration branch are unchanged. A lane that needs
+      # real Windows evidence asks for it with `[ci-windows]`, and lane-scoped
+      # hosted-`windows-latest` workflows remain the cheaper route for a
+      # narrow proof.
       matrix:
-        os: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || '[["self-hosted","Windows","X64","msvc"]]') }}
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
         # Windows runs on a self-hosted runner (Sean's box, labels:
         # self-hosted,Windows,X64,msvc). Switched off windows-latest
         # during v0.8.6 round 18 — GHA's hosted Windows runner has
