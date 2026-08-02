@@ -15,8 +15,10 @@
 //! Token source. Two places hold xAI credentials, and the manager prefers
 //! whichever is FRESHER so it rarely has to refresh itself (which avoids
 //! racing the Grok CLI for the single-use, rotating refresh token):
-//! - the engine's own store `~/.wayland/oauth/xai.json` (written by the Wayland
-//!   app's "Sign in with X (Grok)" flow or by a prior refresh);
+//! - the engine's own store — the credential ladder (OS keyring → encrypted
+//!   vault → REFUSE), written by the Wayland app's "Sign in with X (Grok)" flow
+//!   or by a prior refresh. `~/.wayland/oauth/xai.json` is the pre-migration
+//!   form: still readable, promoted into the ladder and removed on first load;
 //! - the Grok CLI's `~/.grok/auth.json` (the CLI keeps it fresh), whose `key`
 //!   field is the access token, nested under a `"https://auth.x.ai::<cid>"`
 //!   wrapper.
