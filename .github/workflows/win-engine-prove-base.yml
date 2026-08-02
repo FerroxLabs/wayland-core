@@ -1,0 +1,69 @@
+name: win-engine-prove BASE (hosted Windows)
+
+# TEMPORARY, lane-scoped. Delete with the lane.
+#
+# The integration tip cfb3e19c, UNTOUCHED, run through the exact same command
+# `lane/win-engine-prove` runs on hosted Windows. Its only purpose is to
+# answer one question with a measurement instead of an assertion: when the
+# lane's Windows run shows failures in `wcore-agent`, are they the lane's or
+# were they already there?
+#
+# "Pre-existing" is not a disposition and does not excuse anything. It decides
+# repair ORDER, not whether something is owed. But attributing another lane's
+# red to this one — or absorbing it — is its own failure, and the only way to
+# tell is to run the base.
+
+on:
+  push:
+    branches:
+      - 'lane/win-engine-prove-base'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  RUST_BACKTRACE: '1'
+
+jobs:
+  baseline:
+    name: BASE cfb3e19c (${{ matrix.crate }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: wcore-tools
+            args: '--lib --tests'
+          - crate: wcore-agent
+            args: '--lib'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vx (installs the Rust pinned in vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Show what is actually being tested
+        shell: bash
+        run: echo "commit: $(git rev-parse HEAD)"
+
+      - name: Run ${{ matrix.crate }} ${{ matrix.args }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          vx cargo test --no-fail-fast -p ${{ matrix.crate }} ${{ matrix.args }} \
+            -- --test-threads=4 2>&1 | tee result.txt
+
+      - name: Name every failure on the untouched base
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          echo "=== failing tests on the UNTOUCHED integration tip ==="
+          grep -E '^test .* FAILED$' result.txt | sort -u || echo "(none)"
+          echo "=== totals ==="
+          grep -E '^test result:' result.txt || true
