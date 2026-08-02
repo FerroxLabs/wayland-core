@@ -218,7 +218,7 @@ role-scoped trust root and load-bearing domain separation.
 | 20A Native UAT | COMPLETE — same-day live pass on that exact sealed binary found **3 HIGH** |
 | 21 Child authority | **NOT ACHIEVED** (graded 4x) |
 | 22 Supervision/Goals/Fleet | **NOT ACHIEVED** — "surfaces observe, cannot control" |
-| 23A Governed skills | **SC1 NOT MET** — "it ships to nobody" |
+| 23A Governed skills | ~~**SC1 NOT MET** — "it ships to nobody"~~ **SUPERSEDED 2026-08-02 — see the block at the end of this file. This row is false at the RC base.** |
 | 23B Continuous agency | **NOT ACHIEVED** — 1 met / 2 partial / 3 not met |
 | 24 Gateway/Channels/API | **NOT ACHIEVED** — "'support' is the word that fails" |
 | 25 Remote reach/Plugins | NOT FULLY ACHIEVED — 1 MET, 1 MET-w-exc, 2 PARTIAL |
@@ -318,3 +318,79 @@ that most of our gates could not fail.
 The most valuable thing built in these 19 days is not a feature. It is that we can
 now tell the difference between working and appearing to work — and the reason we
 can tell is that we kept finding cases where we could not.
+
+---
+
+# SUPERSEDING BLOCK — 2026-08-02, lane `doc-truth-residual`, base `b8d51309`
+
+**This block supersedes the `23A Governed skills` row of §5.** That row published
+**"SC1 NOT MET — it ships to nobody"**. Measured against the tree at the RC base,
+**it is false**, and it was already false when this document was written.
+
+Two of our own planning documents were publishing opposite grades for the same
+criterion with no retraction between them. `.planning/POSITION-AND-RC-PLAN-2026-08-01.md`
+("WHAT'S UGLY") called this row FALSE; `.planning/HANDOFF-2026-08-02.md` §7 agreed;
+this file carried the original grade unmarked. **POSITION and the handoff are right.**
+Re-derived here from the code rather than taken from either document.
+
+## The evidence
+
+The governed-skill surface reaches the binary customers install. `wcore-cli`'s
+`[[bin]]` is `name = "wayland-core"` (`crates/wcore-cli/Cargo.toml:13`), and all
+three verbs are declared on it and dispatched:
+
+| Verb | Declared | Dispatched |
+|---|---|---|
+| `--skills-revoke <SKILL>` | `crates/wcore-cli/src/main.rs:501` | `:1703` → `wcore_cli::skill_govern::run_revoke` |
+| `--skills-rollback <REVOCATION_ID>` | `main.rs:507` | `:1707` → `skill_govern::run_rollback` |
+| `--skills-govern` | `main.rs:512` | `:1711` → `skill_govern::run_list` |
+
+They landed in `c3f5b4fc` (2026-07-29, *"feat(23A-C1): the implementation half that
+a masked git-add failure dropped"*), which is an ancestor of `b8d51309`.
+
+## The gate that produced the grade can never pass
+
+The grade descends from `23A-GRADE-NOTES.md` §M3, which measured the absence of a
+**separate helper binary** in the release workflow:
+
+```
+git show 861d1b1a:.github/workflows/release.yml | grep -c "wayland-core"  -> 31  [KNOWN-POSITIVE]
+git show 861d1b1a:.github/workflows/release.yml | grep -c "skill-govern"  ->  0  [the absence]
+```
+
+Re-run against the working tree at `b8d51309`:
+
+```
+grep -c "wayland-core"  .github/workflows/release.yml  -> 45   [KNOWN-POSITIVE — the instrument is alive]
+grep -c "skill-govern"  .github/workflows/release.yml  ->  0   [unchanged, and it will stay 0]
+```
+
+**The needle returns 0 while the instrument is demonstrably alive, and the capability
+ships anyway** — because it moved out of `wcore-skill-govern` and into the binary
+`release.yml` names 45 times. `.planning/23A-C1-GOVERNED.md:10` records the same thing
+in the project's own words: *"wcore-skill-govern still unpackaged (superseded by the
+wayland-core flags, not removed)"*. The gate greps for the name of a workaround that
+the real fix made redundant, so no amount of shipping can turn it green. That is the
+governing rule of this window pointed the other way:
+
+> **A gate that cannot fail and a gate that cannot pass are the same bug wearing
+> different colours.**
+
+The grade was honest **at `861d1b1a`**, the SHA it was measured at, and it named its
+own successor in front matter. The successor merged; the grade did not follow it.
+
+## Scope of this correction — read this before generalising it
+
+**Only the 23A row.** `lane/verdict-truth-text` (`ba9d163a`, 2026-08-01) swept the
+per-phase verdicts and moved four *criteria* — `22-C1`, `23A-C1`, `24-C4`, `27-C4` —
+writing dated superseding blocks into `21-04`, `22`, `23A`, `24` and `27`. Table and
+method: `.planning/VERDICT-TRUTH-2026-08-01.md`.
+
+§5 above predates that sweep. A criterion moving does **not** by itself lift a
+phase-level verdict, so the `22`, `24` and `27` rows are left standing: they grade the
+phase, not the criterion, and this lane did not re-derive them. The `23A` row is
+different because it is stated *as* a criterion (`SC1`) — the exact one that moved.
+Every other row in §5 is untouched and should be treated as measured at `02575b6f`.
+
+**Text only.** No file under `crates/`, `.github/`, `docs/` or `scripts/` was changed
+by this correction, and no cargo was run.
