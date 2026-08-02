@@ -68,7 +68,7 @@ concurrency:
 
 jobs:
   windows:
-    name: "${{ matrix.leg }}${{ github.event.inputs.mutate != 'none' && format(' [mutant {0}]', github.event.inputs.mutate) || '' }}"
+    name: "${{ matrix.leg }}${{ (github.event.inputs.mutate != '' && github.event.inputs.mutate != 'none') && format(' [mutant {0}]', github.event.inputs.mutate) || '' }}"
     runs-on: windows-latest
     strategy:
       fail-fast: false
