@@ -547,6 +547,39 @@ pub struct RecoveryReplayItem {
     pub kind: RecoveryReplayKind,
 }
 
+/// Why `Ready.session_id` holds what it holds.
+///
+/// `ready` publishes `session_id` as its correlation key, and a host keys its
+/// own session tracking on it. It can legitimately be absent — a run with no
+/// durable session has no id to give — and until this type existed the
+/// producer expressed that by dropping the key off the wire entirely. A host
+/// then received `undefined` with no accompanying signal and could not tell
+/// "degraded" from "malformed frame" from "an older Core". That passes schema
+/// validation, because the field is optional, while breaking the consumer.
+///
+/// So the absence is now stated rather than implied: `session_id` is always
+/// serialized (`null` when there is none) and this field says which of the two
+/// causes produced the null. The two causes are NOT interchangeable — one is
+/// the operator's choice, the other is a host limitation the operator may want
+/// to fix — and collapsing them is the same mistake as omitting the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPersistence {
+    /// `session_id` names a durable, journaled session. It survives a restart
+    /// and can be resumed.
+    Durable,
+    /// `session_id` is null: the operator turned durable sessions off
+    /// (`[session] enabled = false`). Nothing is journaled and nothing is
+    /// resumable, by request.
+    DisabledByOperator,
+    /// `session_id` is null: this host cannot protect a durable session — no
+    /// usable OS keyring and no unlocked credentials vault — so Core forced
+    /// them off rather than journaling into storage it cannot seal. The
+    /// operator did not ask for this and can fix it
+    /// (`WAYLAND_VAULT_PASSPHRASE_FD`, or a host with a keyring).
+    DisabledByHost,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -558,8 +591,14 @@ pub struct RecoveryReplayItem {
 pub enum ProtocolEvent {
     Ready {
         version: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// ALWAYS serialized, `null` when this run has no durable session.
+        /// Deliberately NOT `skip_serializing_if`: this is the wire type's
+        /// declared correlation key (`EVENT_SPECS`), and a correlation key
+        /// that can vanish is indistinguishable from a bug at the consumer.
+        /// [`SessionPersistence`] carries the reason for a null.
         session_id: Option<String>,
+        /// Why `session_id` holds what it holds. Never omitted.
+        session_persistence: SessionPersistence,
         capabilities: Capabilities,
         /// Pinned producer contract for contract-aware hosts. This remains
         /// optional on the Rust type so legacy fixtures can prove their old
@@ -1652,6 +1691,7 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.1.0".to_string(),
             session_id: Some("abc123".to_string()),
+            session_persistence: SessionPersistence::Durable,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
@@ -1665,12 +1705,18 @@ mod tests {
         assert_eq!(json["type"], "ready");
         assert_eq!(json["version"], "0.1.0");
         assert_eq!(json["session_id"], "abc123");
+        assert_eq!(json["session_persistence"], "durable");
         assert_eq!(json["capabilities"]["tool_approval"], true);
 
-        // session_id omitted when None
+        // A `None` session id is STATED, not implied by an absent key. The
+        // previous assertion here was `json2.get("session_id").is_none()` —
+        // it pinned the defect rather than the contract: a host reading
+        // `ready.session_id` got `undefined` and could not tell a degraded
+        // Core from a malformed frame from a Core too old to know.
         let event_no_sid = ProtocolEvent::Ready {
             version: "0.1.0".to_string(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
@@ -1681,7 +1727,70 @@ mod tests {
             execution_policy: None,
         };
         let json2 = serde_json::to_value(&event_no_sid).unwrap();
-        assert!(json2.get("session_id").is_none());
+        assert_eq!(
+            json2.get("session_id"),
+            Some(&Value::Null),
+            "session_id must be present and null, never absent: {json2}"
+        );
+        assert_eq!(json2["session_persistence"], "disabled_by_operator");
+    }
+
+    /// A consumer that reads ONLY the wire can tell the three `ready` postures
+    /// apart, and each one carries a `session_id` key.
+    ///
+    /// This is the property the omit-the-key shape could not provide, written
+    /// the way a host actually reads a frame: no Rust types, just the JSON
+    /// object. The three frames must be pairwise distinguishable on
+    /// `session_persistence` alone, and every one of them must publish the
+    /// correlation key `EVENT_SPECS` says `ready` correlates on.
+    #[test]
+    fn a_degraded_ready_is_distinguishable_from_a_durable_one_on_the_wire() {
+        fn ready(session_id: Option<&str>, persistence: SessionPersistence) -> Value {
+            serde_json::to_value(ProtocolEvent::Ready {
+                version: "0.12.25".to_string(),
+                session_id: session_id.map(str::to_string),
+                session_persistence: persistence,
+                capabilities: Capabilities::default(),
+                contract: None,
+                execution_policy: None,
+            })
+            .unwrap()
+        }
+
+        let durable = ready(Some("sess-durable"), SessionPersistence::Durable);
+        let by_operator = ready(None, SessionPersistence::DisabledByOperator);
+        let by_host = ready(None, SessionPersistence::DisabledByHost);
+
+        // Every posture publishes the correlation key. A host can always ask
+        // "is session_id present?" and get a truthful yes.
+        for frame in [&durable, &by_operator, &by_host] {
+            assert!(
+                frame.as_object().unwrap().contains_key("session_id"),
+                "ready dropped its declared correlation key: {frame}"
+            );
+        }
+
+        // The two nulls are NOT the same event, and neither is the string.
+        let postures = [&durable, &by_operator, &by_host]
+            .map(|frame| frame["session_persistence"].as_str().unwrap().to_string());
+        assert_eq!(
+            postures,
+            ["durable", "disabled_by_operator", "disabled_by_host"],
+            "the wire vocabulary drifted from the type"
+        );
+        assert_eq!(
+            postures
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3,
+            "two postures collapsed to one wire value: {postures:?}"
+        );
+
+        // The durable posture is the only one that names a session.
+        assert_eq!(durable["session_id"], "sess-durable");
+        assert_eq!(by_operator["session_id"], Value::Null);
+        assert_eq!(by_host["session_id"], Value::Null);
     }
 
     #[test]
@@ -1703,6 +1812,7 @@ mod tests {
         let json = serde_json::to_value(ProtocolEvent::Ready {
             version: "0.12.25".to_owned(),
             session_id: Some("session-1".to_owned()),
+            session_persistence: SessionPersistence::Durable,
             capabilities: Capabilities::default(),
             contract: None,
             execution_policy: Some(snapshot),
@@ -2042,6 +2152,7 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.2.0".to_string(),
             session_id: Some("abc".to_string()),
+            session_persistence: SessionPersistence::Durable,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
@@ -2157,6 +2268,7 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.1.21".into(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: Capabilities::default(),
             contract: None,
             execution_policy: None,
@@ -2292,6 +2404,7 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.2.0".into(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: caps,
             contract: None,
             execution_policy: None,

@@ -459,6 +459,88 @@ fn event_schema_distinguishes_correlated_and_legacy_child_shapes() {
     );
 }
 
+/// The published schema must accept the DEGRADED `ready`, and the corpus must
+/// contain one.
+///
+/// `ready.session_id` is `ready`'s declared correlation key and is null on any
+/// host with no OS keyring and no unlocked vault. The schema is inferred from
+/// a single fixture, and `events/ready.json` names a session — so without an
+/// explicit nullable rule the published contract would say `session_id` is a
+/// string and reject a frame Core genuinely emits. A host validating Core
+/// against Core's own corpus would then call a valid degraded frame malformed:
+/// the same lie as omitting the key, moved into the schema.
+///
+/// The `session_persistence` half is asserted with the same rigour, because a
+/// null nobody can attribute is only marginally better than a missing key.
+#[test]
+fn the_published_schema_accepts_the_degraded_ready_and_pins_its_vocabulary() {
+    let event_schema = generated_json("schema/core-event.schema.json");
+
+    let durable = generated_json("events/ready.json");
+    assert_eq!(durable["session_persistence"], "durable");
+    assert!(durable["session_id"].is_string());
+    assert!(schema_accepts(&event_schema, &durable));
+
+    let degraded = generated_json("compat/events/ready.degraded.json");
+    assert_eq!(
+        degraded["session_id"],
+        Value::Null,
+        "the corpus lost its degraded ready; nothing below proves anything: {degraded}"
+    );
+    assert_eq!(degraded["session_persistence"], "disabled_by_host");
+    assert!(
+        schema_accepts(&event_schema, &degraded),
+        "the published schema rejects a ready frame Core really emits: {degraded}"
+    );
+    // It is the durable frame in every OTHER respect — same contract, same
+    // policy, same capabilities. A degrade is not a different protocol.
+    for shared in [
+        "type",
+        "version",
+        "capabilities",
+        "contract",
+        "execution_policy",
+    ] {
+        assert_eq!(
+            degraded[shared], durable[shared],
+            "the degraded ready diverged from the durable one on {shared}"
+        );
+    }
+
+    // A null correlation key is only legible because a sibling explains it, so
+    // the sibling is mandatory and its vocabulary is closed.
+    let mut without_persistence = degraded.clone();
+    without_persistence
+        .as_object_mut()
+        .unwrap()
+        .remove("session_persistence");
+    assert!(
+        !schema_accepts(&event_schema, &without_persistence),
+        "a ready without session_persistence must not validate"
+    );
+
+    let mut invented = degraded.clone();
+    invented["session_persistence"] = Value::String("degraded".into());
+    assert!(
+        !schema_accepts(&event_schema, &invented),
+        "session_persistence must be a closed enum, not free text"
+    );
+
+    // And the key itself cannot go back to vanishing.
+    let mut omitted = degraded.clone();
+    omitted.as_object_mut().unwrap().remove("session_id");
+    assert!(
+        !schema_accepts(&event_schema, &omitted),
+        "a ready that omits its correlation key must not validate"
+    );
+
+    // The descriptor is what dates the guarantee for a host.
+    assert_eq!(
+        durable["contract"]["capabilities"]["session_persistence_v1"],
+        "available"
+    );
+}
+
 #[test]
 fn generated_schemas_reject_malformed_authority_types_and_enums() {
     let event_schema = generated_json("schema/core-event.schema.json");

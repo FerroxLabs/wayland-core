@@ -1,4 +1,4 @@
-use wcore_protocol::events::{Capabilities, ProtocolEvent};
+use wcore_protocol::events::{Capabilities, ProtocolEvent, SessionPersistence};
 
 #[test]
 fn capabilities_serialize_with_all_fields() {
@@ -12,6 +12,7 @@ fn capabilities_serialize_with_all_fields() {
     let event = ProtocolEvent::Ready {
         version: "0.2.0".into(),
         session_id: None,
+        session_persistence: SessionPersistence::DisabledByOperator,
         capabilities: caps,
         contract: None,
         execution_policy: None,
@@ -62,6 +63,7 @@ fn capabilities_with_effort_levels_roundtrip() {
     let event = ProtocolEvent::Ready {
         version: "0.2.0".into(),
         session_id: Some("test-session".into()),
+        session_persistence: SessionPersistence::Durable,
         capabilities: caps,
         contract: None,
         execution_policy: None,

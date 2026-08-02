@@ -21,8 +21,8 @@ use super::spec::{
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 10;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/11";
+pub const CONTRACT_MINOR: u64 = 11;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/12";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -195,6 +195,16 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         ("runtime_diagnostics_unavailable", "reason") => {
             json!({"enum": ["unsupported_version", "invalid_request"], "type": "string"})
         }
+        // `ready`'s correlation key, always present, `null` when this run has
+        // no durable session. Inference would read the ONE `events/ready.json`
+        // fixture, see a string, and publish `{"type": "string"}` — a schema
+        // that rejects the degraded frame Core really emits, i.e. the published
+        // contract calling a valid Core frame malformed.
+        ("ready", "session_id") => nullable_schema(json!({"type": "string"})),
+        ("ready", "session_persistence") => json!({
+            "enum": ["durable", "disabled_by_operator", "disabled_by_host"],
+            "type": "string"
+        }),
         ("continue_with_budget" | "budget_grant_result", "request_id") => json!({
             "minLength": 1,
             "maxLength": BUDGET_GRANT_REQUEST_ID_MAX_BYTES,
@@ -1158,6 +1168,7 @@ fn fixtures_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> ContractResult<Stri
         }
         let mut bytes = bytes.clone();
         if path == "events/ready.json"
+            || path == "compat/events/ready.degraded.json"
             || path == "adversarial/events/version-mismatch.jsonl"
             || path == "adversarial/events/schema-mismatch.jsonl"
             || path == "adversarial/events/fixture-mismatch.jsonl"
@@ -1228,6 +1239,15 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "semantic_failover_receipts".into(),
             ContractCapabilityStatus::Available,
         ),
+        // The feature-detect a host needs to trust `ready.session_id`'s
+        // absence. Declared => `session_id` is always on the wire (`null` when
+        // there is no session) and `session_persistence` states the cause.
+        // Undeclared => an older Core, whose missing `session_id` means
+        // nothing in particular.
+        (
+            "session_persistence_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         (
             "turn_recovery_v1".into(),
             ContractCapabilityStatus::Available,
@@ -1279,6 +1299,21 @@ fn insert_negotiation_fixtures(
     let mut ready: Value = serde_json::from_slice(ready)?;
     ready["contract"] = serde_json::to_value(descriptor)?;
     artifacts.insert("events/ready.json".into(), canonical_json(&ready)?);
+
+    // The keyring-less frame gets the SAME descriptor stamp as the durable
+    // one. It lives in the corpus because Desktop validates Core frames
+    // against this corpus: without it, the one deployment shape where
+    // `session_id` is null is the one shape the host contract has no example
+    // of, and a host that tests only `events/ready.json` ships a session
+    // tracker that has never seen a null. Its body comes from
+    // `compatibility_event_values`, i.e. a real `ProtocolEvent` serialization.
+    let degraded_path = "compat/events/ready.degraded.json";
+    let degraded = artifacts
+        .get(degraded_path)
+        .ok_or_else(|| std::io::Error::other("degraded Ready fixture is missing"))?;
+    let mut degraded: Value = serde_json::from_slice(degraded)?;
+    degraded["contract"] = serde_json::to_value(descriptor)?;
+    artifacts.insert(degraded_path.into(), canonical_json(&degraded)?);
 
     let mut unsupported_major = descriptor.clone();
     unsupported_major.major += 1;

@@ -40,6 +40,7 @@ Emitted once after initialization completes. Client MUST wait for this before se
   "type": "ready",
   "version": "0.12.25",
   "session_id": "a1b2c3",
+  "session_persistence": "durable",
   "capabilities": {
     "tool_approval": true,
     "thinking": true,
@@ -52,8 +53,8 @@ Emitted once after initialization completes. Client MUST wait for this before se
   "contract": {
     "name": "wayland-desktop-core",
     "major": 1,
-    "minor": 10,
-    "generator": "wcore-desktop-contract-gen/11",
+    "minor": 11,
+    "generator": "wcore-desktop-contract-gen/12",
     "fixture_digest": "sha256:0704...",
     "schema_digest": "sha256:e5d1...",
     "source_inputs_digest": "sha256:9d59...",
@@ -82,10 +83,29 @@ negotiation when either is absent or malformed, and `ready` must be the first
 line on the stream. See the pinned corpus at
 `crates/wcore-protocol/contracts/desktop/v1/` for the byte-exact shape.
 
+`session_id` is **required and nullable**, never omitted. It is this event's
+correlation key, and a host keys its own session tracking on it — so a producer
+that drops the key hands the host `undefined` with no accompanying signal, and
+the host cannot tell a degraded Core from a malformed frame from a Core too old
+to know. `session_persistence` states which of the two causes produced a null:
+
+| Value | Meaning |
+|-------|---------|
+| `durable` | `session_id` names a journaled session. It survives a restart and can be resumed |
+| `disabled_by_operator` | `session_id` is `null` because `[session] enabled = false`. Nothing is journaled, by request |
+| `disabled_by_host` | `session_id` is `null` because this host has no usable OS keyring and no unlocked credentials vault, so Core forced durable sessions off rather than journaling into storage it cannot seal. The operator did not ask for this: unlock the vault with `WAYLAND_VAULT_PASSPHRASE_FD`, or run on a host with a keyring. Set `[session] require_durability = true` to make Core refuse to start instead |
+
+Feature-detect via `ready.contract.capabilities.session_persistence_v1`: when
+it is `available`, both guarantees above hold. A Core that does not
+declare it may omit `session_id` entirely, and its absence means nothing in
+particular. The keyring-less frame is pinned byte-exact at
+`crates/wcore-protocol/contracts/desktop/v1/compat/events/ready.degraded.json`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Protocol version (semver) |
-| `session_id` | string? | Session ID (omitted when sessions are disabled in config) |
+| `session_id` | string \| null | Session ID. **Always present**, `null` when this run has no durable session. Never omitted — see below |
+| `session_persistence` | string | Why `session_id` holds what it holds: `durable`, `disabled_by_operator`, or `disabled_by_host`. Required |
 | `contract` | object | Pinned producer-contract descriptor. Required. Host compares `name`, `major`, `minor`, `generator` and all three digests against its own pin and fails closed on any mismatch |
 | `execution_policy` | object | Launch policy snapshot at `revision` 0 with `reason` `launch` or `resume`. Required. Same envelope as the `execution_policy` event (§1.1a) |
 | `capabilities.tool_approval` | bool | Whether agent supports pause-and-wait tool approval |
