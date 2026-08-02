@@ -2,21 +2,31 @@ name: win-engine-prove (hosted Windows)
 
 # TEMPORARY, lane-scoped. Delete with the lane.
 #
-# `ci.yml`'s Windows test leg runs on the two SELF-HOSTED runners, which this
-# wave keeps saturated: at the time this was added, `CI (Array)` for two other
-# lanes had been executing on SEANDESKTOP and ferrox-win-msvc for over 90
-# minutes with three more Windows lanes queued behind them, and direct ssh to
-# the box did not return a single byte in fifty minutes. That is a supply
-# problem, not a proof problem — GitHub-hosted `windows-latest` is a different
-# and idle pool, and the ONE thing this lane must not do is report a Windows
+# `ci.yml`'s Windows test leg runs only on the two SELF-HOSTED runners, and
+# this wave keeps both saturated: at the time this was written, `CI (Array)`
+# for two other lanes had been executing on SEANDESKTOP and ferrox-win-msvc
+# for over ninety minutes with three more Windows lanes queued behind them,
+# and direct ssh to the box returned not one byte in fifty minutes. That is a
+# SUPPLY problem, not a proof problem — hosted `windows-latest` is a different
+# and idle pool, and the one thing this lane must not do is report a Windows
 # result it did not observe.
 #
-# So: run exactly the code the seven lane/win-engine changes live in, on real
-# Windows, and print the per-binary counts. Narrow on purpose — `wcore-tools`
-# and `wcore-agent` contain every changed file, and a targeted run returns in
-# a fraction of the full-workspace compile.
+# Two jobs:
 #
-# This does NOT replace the self-hosted leg. `ci.yml` still runs the whole
+#   baseline  — the changed crates must be GREEN on real Windows.
+#
+#   mutation  — each of the seven lane/win-engine changes is reverted ON ITS
+#               OWN and the same suites re-run. A mutation that leaves the
+#               suite green SURVIVED, and the job says so and fails, because a
+#               change no test can miss is a change no test is guarding.
+#               One mutation per job on purpose: the lane's earlier mutant
+#               reverted five changes at once, so a single red could not be
+#               attributed to any particular one — and two different changes
+#               can both break the SAME assertion (reverting the media-intake
+#               NotFound mapping and reverting the transcription fixture each
+#               redden `missing_local_path_rejected`).
+#
+# This does not replace the self-hosted leg. `ci.yml` still runs the whole
 # workspace on Windows and is still the gate.
 
 on:
@@ -32,28 +42,29 @@ concurrency:
   group: win-engine-prove-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  RUST_BACKTRACE: '1'
+
 jobs:
-  windows-targeted:
-    name: Targeted Windows suites (${{ matrix.crate }})
+  baseline:
+    name: Baseline (${{ matrix.crate }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           # Every file the seven changes touch:
-          #   wcore-tools  -> vfs.rs, grep.rs, media_intake.rs,
-          #                   transcription_tools.rs (4 of 7, plus the new
-          #                   real_fs_identity_observation integration suite)
-          #   wcore-agent  -> child_transaction/gate_executor.rs (2 changes),
-          #                   journal_effects.rs
+          #   wcore-tools -> vfs.rs, grep.rs, media_intake.rs,
+          #                  transcription_tools.rs, plus the new
+          #                  real_fs_identity_observation integration suite
+          #   wcore-agent -> child_transaction/gate_executor.rs (two changes),
+          #                  journal_effects.rs
           - crate: wcore-tools
             args: '--lib --tests'
           - crate: wcore-agent
             args: '--lib'
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      RUST_BACKTRACE: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -71,20 +82,18 @@ jobs:
           echo "commit: $(git rev-parse HEAD)"
           echo "branch: $BRANCH"
           vx cargo --version
-          rustc --version || true
 
-      # `cargo test`, not nextest, and deliberately: the per-binary
-      # `test result: ok. N passed` lines are the evidence this lane owes, and
-      # the zero-test guard below is asserted here rather than inferred.
+      # `cargo test`, not nextest: the per-binary `test result: ok. N passed`
+      # lines are the evidence this lane owes. `--no-fail-fast` because a stop
+      # at the first failing binary hides every later one.
       - name: Run ${{ matrix.crate }} ${{ matrix.args }}
         shell: bash
         run: |
           set -o pipefail
-          vx cargo test -p ${{ matrix.crate }} ${{ matrix.args }} -- --test-threads=4 2>&1 | tee result.txt
+          vx cargo test --no-fail-fast -p ${{ matrix.crate }} ${{ matrix.args }} \
+            -- --test-threads=4 2>&1 | tee result.txt
 
-      # A suite that collected nothing certifies nothing. Assert a non-trivial
-      # test count survived, so a compile-empty or filtered-out run can never
-      # be reported as a Windows pass.
+      # A suite that collected nothing certifies nothing.
       - name: Assert this leg produced real test signal
         if: ${{ !cancelled() }}
         shell: bash
@@ -97,3 +106,97 @@ jobs:
             echo "::error::Only $total tests passed on this leg — that is not a Windows proof, it is an empty run."
             exit 1
           fi
+
+  mutation:
+    name: Mutation ${{ matrix.name }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          # --- production code ---
+          - name: vfs-windows-observe
+            crate: wcore-tools
+            args: '--lib --tests'
+          - name: grep-target-exists
+            crate: wcore-tools
+            args: '--lib --tests'
+          - name: media-intake-notfound
+            crate: wcore-tools
+            args: '--lib --tests'
+          # --- fixtures ---
+          - name: gate-candidate-root
+            crate: wcore-agent
+            args: '--lib'
+          # NOT covered by the lane's original mutant.
+          - name: gate-writable-root
+            crate: wcore-agent
+            args: '--lib'
+          - name: journal-workspace-file
+            crate: wcore-agent
+            args: '--lib'
+          # NOT covered by the lane's original mutant (both halves).
+          - name: transcription-missing-path
+            crate: wcore-tools
+            args: '--lib --tests'
+          - name: transcription-json-encoded-compare
+            crate: wcore-tools
+            args: '--lib --tests'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vx (installs the Rust pinned in vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # A mutation whose search text no longer matches is a HARD ERROR inside
+      # the script, so a rebased tree can never yield a silently vacuous run.
+      - name: Apply mutation ${{ matrix.name }}
+        shell: bash
+        run: |
+          python scripts/win-engine-mutate.py apply "${{ matrix.name }}"
+          git --no-pager diff --stat
+
+      - name: Run ${{ matrix.crate }} ${{ matrix.args }} under the mutation
+        id: run
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          vx cargo test --no-fail-fast -p ${{ matrix.crate }} ${{ matrix.args }} \
+            -- --test-threads=4 2>&1 | tee result.txt
+
+      - name: Verdict for ${{ matrix.name }}
+        shell: bash
+        env:
+          MUTATION: ${{ matrix.name }}
+        run: |
+          # A compile error also counts as KILLED only if it is in test code;
+          # report the distinction rather than hiding it.
+          failed=$(grep -oE 'test result: FAILED\. [0-9]+ passed; [0-9]+ failed' result.txt \
+            | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' \
+            | awk '{s+=$1} END {print s+0}')
+          passed=$(grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' result.txt \
+            | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' \
+            | awk '{s+=$1} END {print s+0}')
+          compile_error=no
+          if grep -qE '^error(\[E[0-9]+\])?:' result.txt; then compile_error=yes; fi
+          echo "mutation:      $MUTATION"
+          echo "tests passed:  $passed"
+          echo "tests failed:  $failed"
+          echo "compile error: $compile_error"
+          echo "--- failing test names ---"
+          grep -E '^test .* FAILED$' result.txt | sort -u || true
+          if [ "$failed" -gt 0 ]; then
+            echo "VERDICT: KILLED — the mutation was caught by $failed test(s) on Windows."
+            exit 0
+          fi
+          if [ "$compile_error" = yes ]; then
+            echo "VERDICT: KILLED (compile) — the mutation does not build."
+            exit 0
+          fi
+          echo "::error::VERDICT: SURVIVED — reverting '$MUTATION' left the suite GREEN on Windows ($passed passed, 0 failed). Nothing is guarding this change."
+          exit 1
