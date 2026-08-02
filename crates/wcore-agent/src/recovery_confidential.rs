@@ -147,24 +147,6 @@ pub(crate) fn reject_backend_without_confidential_storage(
     }
 }
 
-/// Can this host still OPEN a sealed prepared request it wrote earlier?
-///
-/// Read-only in the strong sense: `create = false`, so it never mints this
-/// profile's recovery key as a side effect of asking. That matters — the
-/// question is asked about a journal that ALREADY contains sealed material, and
-/// creating a fresh key at that moment would answer "yes" while guaranteeing
-/// every open still fails, which is worse than either honest answer.
-///
-/// Deliberately NOT `preflight`. `preflight` asks "may I start sealing?" and
-/// creates a key to say yes. This asks "can I read what is already there?", and
-/// the two have opposite side effects and opposite correct answers on a profile
-/// whose key was deleted while its journal survived.
-pub(crate) fn sealed_request_key_available(
-    config: &Config,
-) -> Result<(), RecoveryConfidentialError> {
-    RecoveryRequestProtector::default().with_key(config, false, |_| Ok(()))
-}
-
 /// Lazily caches a successfully loaded key for one engine. Backend failures
 /// are not cached, so unlocking the configured store can make a later retry
 /// succeed without restarting Core.
@@ -178,6 +160,26 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
     /// journaled turn is accepted. This may create the profile's sealing key,
     /// but it never writes request content.
     fn preflight(&self, config: &Config) -> Result<(), RecoveryConfidentialError>;
+
+    /// Can sealed material that ALREADY EXISTS be opened?
+    ///
+    /// Deliberately not [`Self::preflight`], and the difference is the whole
+    /// point. `preflight` asks "may I start sealing?" and CREATES the profile's
+    /// key to answer yes. This asks "can I read what is already on disk?", and
+    /// it must never create anything: the question is only ever asked about a
+    /// journal that already contains ciphertext, and minting a fresh key at
+    /// that moment would answer "yes" while guaranteeing every subsequent open
+    /// fails — the worst of both honest answers.
+    ///
+    /// On the trait rather than a free function because the answer belongs to
+    /// whichever protection the caller actually holds. A free function would
+    /// build a fresh `RecoveryRequestProtector` and consult the real store,
+    /// which is wrong for any engine carrying an injected key: it would report
+    /// a locked session for material it can open perfectly well.
+    fn sealed_request_key_available(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError>;
 
     fn seal(
         &self,
@@ -197,6 +199,13 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
 impl RecoveryRequestProtection for RecoveryRequestProtector {
     fn preflight(&self, config: &Config) -> Result<(), RecoveryConfidentialError> {
         self.with_key(config, true, |_| Ok(()))
+    }
+
+    fn sealed_request_key_available(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError> {
+        self.with_key(config, false, |_| Ok(()))
     }
 
     fn seal(

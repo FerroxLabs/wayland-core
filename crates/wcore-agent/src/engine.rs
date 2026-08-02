@@ -3010,7 +3010,13 @@ pub struct AgentEngine {
     length_wedge_fingerprint: Option<[u8; 32]>,
 }
 
-fn default_recovery_request_protection()
+/// The protection an engine gets when nobody injected one.
+///
+/// `pub(crate)` so [`crate::bootstrap`] can ask the SAME implementation whether
+/// a session's sealed state is readable, before it builds the engine that would
+/// hold it. Two spellings of "which protection is in force" is how a resume gate
+/// and the engine it guards end up disagreeing.
+pub(crate) fn default_recovery_request_protection()
 -> Arc<dyn crate::recovery_confidential::RecoveryRequestProtection> {
     #[cfg(test)]
     {
@@ -3815,7 +3821,11 @@ impl AgentEngine {
         // here — inside the validated block, before any live state changes — so
         // a refusal leaves the engine on the session it was already on rather
         // than half-moved onto one it cannot read.
-        crate::recovery::admit_session_resume(&self.config, &journal)?;
+        crate::recovery::admit_session_resume(
+            &self.config,
+            &journal,
+            self.recovery_request_protection.as_ref(),
+        )?;
         let canonical_messages = journal_state
             .conversation
             .into_iter()

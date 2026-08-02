@@ -3000,7 +3000,11 @@ impl AgentBootstrap {
         // Scoped to this session by construction. Nothing here can refuse a
         // launch that did not ask to resume something.
         if let Some(session) = self.resume_session.as_ref() {
-            crate::recovery::admit_session_resume(&self.config, &session.journal)?;
+            crate::recovery::admit_session_resume(
+                &self.config,
+                &session.journal,
+                crate::engine::default_recovery_request_protection().as_ref(),
+            )?;
         }
 
         let mut engine = if let Some(session) = self.resume_session {

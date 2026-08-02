@@ -437,12 +437,13 @@ impl RecoveryCheckpoint {
 pub(crate) fn admit_session_resume(
     config: &wcore_config::config::Config,
     journal: &SessionJournal,
+    protection: &dyn crate::recovery_confidential::RecoveryRequestProtection,
 ) -> anyhow::Result<()> {
     let plan = RecoveryPlan::from_journal(journal)?;
     if !plan.requires_sealed_replay() {
         return Ok(());
     }
-    match crate::recovery_confidential::sealed_request_key_available(config) {
+    match protection.sealed_request_key_available(config) {
         Ok(()) => Ok(()),
         Err(cause) => anyhow::bail!("{}", locked_session_refusal(&plan.session_id, &cause)),
     }
@@ -1835,6 +1836,170 @@ mod tests {
                 request_digest: request_digest.into(),
             })
             .unwrap();
+    }
+
+    /// A protection whose answer to "can I read the sealed material" is dictated
+    /// by the test, so both sides of the HIGH-1 gate are reachable without a
+    /// keyring — and, more importantly, without one.
+    ///
+    /// `preflight` deliberately panics. Nothing on the resume path may create a
+    /// key, and a double that quietly allowed it would let the gate be
+    /// re-implemented in terms of `preflight` — which would answer "yes" on a
+    /// keyless host by minting a key that cannot open anything already sealed.
+    struct ScriptedProtection {
+        key_readable: bool,
+    }
+
+    impl crate::recovery_confidential::RecoveryRequestProtection for ScriptedProtection {
+        fn preflight(
+            &self,
+            _config: &wcore_config::config::Config,
+        ) -> Result<(), crate::recovery_confidential::RecoveryConfidentialError> {
+            panic!("the resume gate must never create a key");
+        }
+
+        fn sealed_request_key_available(
+            &self,
+            _config: &wcore_config::config::Config,
+        ) -> Result<(), crate::recovery_confidential::RecoveryConfidentialError> {
+            if self.key_readable {
+                Ok(())
+            } else {
+                Err(crate::recovery_confidential::RecoveryConfidentialError::MissingRecoveryKey)
+            }
+        }
+
+        fn seal(
+            &self,
+            _config: &wcore_config::config::Config,
+            _binding: &crate::recovery_confidential::PreparedRequestBinding<'_>,
+            _request: &serde_json::Value,
+        ) -> Result<
+            crate::recovery_confidential::SealedPreparedRequest,
+            crate::recovery_confidential::RecoveryConfidentialError,
+        > {
+            panic!("the resume gate must never seal");
+        }
+
+        fn open(
+            &self,
+            _config: &wcore_config::config::Config,
+            _binding: &crate::recovery_confidential::PreparedRequestBinding<'_>,
+            _sealed: &crate::recovery_confidential::SealedPreparedRequest,
+        ) -> Result<serde_json::Value, crate::recovery_confidential::RecoveryConfidentialError>
+        {
+            panic!("the resume gate must never open");
+        }
+    }
+
+    /// HIGH-1, at the unit that decides it.
+    ///
+    /// The same journal — one real sealed `ProviderDispatch` checkpoint at the
+    /// head — is admitted or refused purely by whether the key can be read.
+    /// Running BOTH arms over ONE journal is what makes this able to fail: a
+    /// gate that refused everything, and a gate that refused nothing, each pass
+    /// exactly one arm.
+    #[test]
+    fn a_sealed_checkpoint_is_admitted_with_the_key_and_refused_without_it() {
+        let (_dir, journal) = journal();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                user_message: "finish the task".into(),
+            })
+            .unwrap();
+        let message = user_message("finish the task");
+        journal
+            .append(SessionEvent::ConversationMessageCommitted {
+                turn_id: "turn-1".into(),
+                message_index: 0,
+                message: message.clone(),
+                message_digest: state_payload_digest(&message).unwrap(),
+            })
+            .unwrap();
+        append_recovery_checkpoint(
+            &journal,
+            "turn-1",
+            std::slice::from_ref(&message),
+            None,
+            None,
+        );
+        let plan = RecoveryPlan::from_journal(&journal).unwrap();
+        assert!(
+            plan.requires_sealed_replay(),
+            "the fixture must actually need a key, or neither arm below measures \
+             anything: {:?}",
+            plan.disposition
+        );
+        let config = wcore_config::config::Config::default();
+
+        crate::recovery::admit_session_resume(
+            &config,
+            &journal,
+            &ScriptedProtection { key_readable: true },
+        )
+        .expect("a session whose key is readable must resume");
+
+        let refusal = crate::recovery::admit_session_resume(
+            &config,
+            &journal,
+            &ScriptedProtection {
+                key_readable: false,
+            },
+        )
+        .expect_err("a session whose key is gone must be refused")
+        .to_string();
+
+        // The refusal has to be actionable AND bounded. Naming the session is
+        // what makes it a session-scoped refusal rather than an outage report;
+        // saying a new session still works is what stops it being escalated as
+        // one.
+        let session_id = journal.session_id().unwrap();
+        for needle in [
+            session_id.as_str(),
+            "cannot be resumed",
+            "Only THIS session is refused",
+            "starting a new session on this host works normally",
+            "WAYLAND_VAULT_PASSPHRASE",
+        ] {
+            assert!(
+                refusal.contains(needle),
+                "the refusal must say {needle:?}; got: {refusal}"
+            );
+        }
+    }
+
+    /// The gate must not fire on a session that needs no key, whatever the key
+    /// situation. Otherwise "the keyring went away" becomes "nothing resumes",
+    /// which is the availability kill this remedy exists to avoid.
+    ///
+    /// `ScriptedProtection` panics on every method except the read-only probe,
+    /// so a gate that consulted the store for a keyless session would abort here
+    /// rather than pass.
+    #[test]
+    fn a_session_that_needs_no_key_resumes_on_a_host_that_has_none() {
+        let (_dir, journal) = journal();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+                user_message: "finish the task".into(),
+            })
+            .unwrap();
+        let plan = RecoveryPlan::from_journal(&journal).unwrap();
+        assert!(
+            !plan.requires_sealed_replay(),
+            "a bare TurnStarted must not be graded as needing a sealed replay: {:?}",
+            plan.disposition
+        );
+
+        crate::recovery::admit_session_resume(
+            &wcore_config::config::Config::default(),
+            &journal,
+            &ScriptedProtection {
+                key_readable: false,
+            },
+        )
+        .expect("a session with no sealed state must resume on a keyless host");
     }
 
     fn assert_checkpoint_continuation(plan: &RecoveryPlan) {
