@@ -1,0 +1,51 @@
+# cred-splice-fix lane — TEMPORARY cross-platform proof harness. DELETE AT MERGE.
+#
+# The self-hosted Windows pool is wedged, so the Windows and macOS legs of the
+# credential-splice fix run on hosted runners from this branch only. It proves,
+# on all three platforms:
+#   1. the spanned-write race is closed (the pinned two-writer schedule that
+#      produced `len=9000 tags=[BA]`, plus a free-running race, plus dead-holder
+#      lock recovery and fail-closed acquisition);
+#   2. a read fault on the primary entry aborts the write and the delete;
+#   3. the per-entry ceiling is the backend's own, and values spanned by older
+#      builds still read back and then collapse;
+#   4. the crash-safety ordering the lock must not break still holds — a child
+#      killed with abort() at every mutating step of a spanned write always
+#      leaves the complete OLD value or the complete NEW one.
+#
+# The `--exact` re-entry the crash sweeps use needs the plain libtest harness,
+# so these run under `cargo test`, not nextest.
+name: cred-splice-fix
+
+on:
+  push:
+    branches: [lane/cred-splice-fix]
+  workflow_dispatch:
+
+jobs:
+  credential-splice:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libasound2-dev
+
+      - name: Concurrency — the race, pinned and free-running
+        run: cargo test -p wcore-config --lib chunk_write_lock_verification -- --nocapture
+
+      - name: Read fault, per-backend ceiling, legacy collapse
+        run: cargo test -p wcore-config --lib chunk_read_fault_verification -- --nocapture
+
+      - name: Crash safety — abort at every mutating step
+        run: cargo test -p wcore-config --lib chunk_crash_injection -- --nocapture --test-threads=2
+
+      - name: The committed spanning suite (must not regress)
+        run: cargo test -p wcore-config --lib credentials::tests -- --nocapture
