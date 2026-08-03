@@ -182,3 +182,140 @@ async fn lifecycle_off_keeps_memory_but_omits_legacy_skill_drafter() {
         "skills_lifecycle=false must prevent legacy SkillDrafter construction"
     );
 }
+
+/// #170 — the product-level assertion: `[memory] enabled = false` with the
+/// STOCK `skills_lifecycle` default must record nothing.
+///
+/// The test directly above is its mirror image (lifecycle off, memory on) and
+/// it passed throughout, which is precisely why this defect survived: the
+/// combination a privacy-conscious user actually produces — turn memory off,
+/// leave everything else alone — was never built. `want_memory` was
+/// `memory.enabled || skills_lifecycle`, and `skills_lifecycle` defaults ON,
+/// so the opt-out was a no-op: a real `Memory` opened on disk, the durable
+/// write tools were registered, and auto-memorize ran every session end.
+///
+/// Note the config here is built with `..Default::default()`, never through
+/// `Config::resolve` — exactly like a programmatic host. That is deliberate:
+/// a fix applied only at config resolution would leave this path recording,
+/// and this test would still be red.
+#[tokio::test]
+async fn memory_opt_out_records_nothing_at_the_stock_lifecycle_default() {
+    let cfg = cfg_with_memory(false);
+    assert!(
+        cfg.observability.skills_lifecycle,
+        "precondition: the stock lifecycle default must be ON, or this test \
+         proves nothing about the combination that produced the defect"
+    );
+
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap must still succeed with memory switched off");
+
+    // 1. No durable store. `NullMemory::record_episode` returns Ok with a
+    //    default id and keeps nothing, so a write that "succeeds" proves
+    //    nothing — the read-back is what separates a real store from a sink.
+    let episode = wcore_memory::v2_types::Episode {
+        id: wcore_memory::v2_types::EpisodeId::new(),
+        tier: wcore_memory::v2_types::Tier::Project,
+        ts: 1_700_000_000,
+        episode_type: "opt-out-proof".to_string(),
+        summary: "this must not survive a memory opt-out".to_string(),
+        atomic_facts: Vec::new(),
+        source: "test".to_string(),
+        source_product: "wcore-agent-test".to_string(),
+        session_id: None,
+        project_root: Some(workdir.path().to_string_lossy().into_owned()),
+        decay_score: 1.0,
+        status: wcore_memory::v2_types::EpisodeStatus::Active,
+    };
+    let episode_id = result
+        .engine
+        .memory_api()
+        .record_episode(episode, wcore_memory::AccessToken::System)
+        .await
+        .expect("NullMemory accepts and discards");
+    assert!(
+        result
+            .engine
+            .memory_api()
+            .get_episode(&episode_id, wcore_memory::AccessToken::System)
+            .await
+            .is_err(),
+        "an episode must NOT be readable back when the user opted out of \
+         memory — a successful read means a real store was opened anyway"
+    );
+
+    // 2. No durable write tools advertised to the model. Registering these
+    //    against a discarding sink would also tell the model it can remember
+    //    things it cannot.
+    let tools = result.engine.tool_names();
+    for name in ["record_episode", "assert_fact"] {
+        assert!(
+            !tools.iter().any(|t| t == name),
+            "`{name}` must not be registered when memory is off; registered: {tools:?}"
+        );
+    }
+
+    // 3. No skills-lifecycle drafter — its output is a durable artifact
+    //    derived from the user's session, which is what they opted out of.
+    assert!(
+        result.engine.skill_drafter().is_none(),
+        "the memory opt-out must dominate the (defaulted-ON) lifecycle switch"
+    );
+}
+
+/// The control for the test above. Same shape, opt-out removed: a stock
+/// install must still open a real store and advertise the write tools.
+///
+/// Without this half, the assertions above pass just as well against a build
+/// where memory is simply broken for everyone — which is the failure mode this
+/// codebase has repeatedly shipped, a gate whose two states were never both
+/// observed.
+#[tokio::test]
+async fn stock_install_still_records() {
+    let cfg = cfg_with_memory(true);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed with memory enabled");
+
+    let episode = wcore_memory::v2_types::Episode {
+        id: wcore_memory::v2_types::EpisodeId::new(),
+        tier: wcore_memory::v2_types::Tier::Project,
+        ts: 1_700_000_000,
+        episode_type: "control".to_string(),
+        summary: "a default install still remembers".to_string(),
+        atomic_facts: Vec::new(),
+        source: "test".to_string(),
+        source_product: "wcore-agent-test".to_string(),
+        session_id: None,
+        project_root: Some(workdir.path().to_string_lossy().into_owned()),
+        decay_score: 1.0,
+        status: wcore_memory::v2_types::EpisodeStatus::Active,
+    };
+    let expected_summary = episode.summary.clone();
+    let episode_id = result
+        .engine
+        .memory_api()
+        .record_episode(episode, wcore_memory::AccessToken::System)
+        .await
+        .expect("a real store must accept the episode");
+    let loaded = result
+        .engine
+        .memory_api()
+        .get_episode(&episode_id, wcore_memory::AccessToken::System)
+        .await
+        .expect("a real store must read it back");
+    assert_eq!(loaded.summary, expected_summary);
+
+    let tools = result.engine.tool_names();
+    for name in ["record_episode", "assert_fact"] {
+        assert!(
+            tools.iter().any(|t| t == name),
+            "`{name}` must be registered on a stock install; registered: {tools:?}"
+        );
+    }
+}

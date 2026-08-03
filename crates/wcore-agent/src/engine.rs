@@ -2650,6 +2650,17 @@ pub struct AgentEngine {
     /// construction; the field is cheap-cloneable and never mutated
     /// for the engine's lifetime.
     skills_lifecycle: bool,
+    /// #170: cached `config.memory.enabled` — the opt-out the docs
+    /// advertise. Gates `fire_auto_memorize`, which previously consulted no
+    /// config field at all.
+    ///
+    /// Config resolution already forces `NullMemory` when this is false (see
+    /// the `#170` note in `wcore_config::config`), which makes those writes
+    /// no-ops. This field is the second, explicit line: a host may install a
+    /// real `MemoryApi` through `set_memory_api()` AFTER construction, which
+    /// bypasses the bootstrap gate entirely. Read at construction and never
+    /// mutated.
+    memory_enabled: bool,
     /// F-092 (W7-N): cached `config.observability.online_evolution` flag.
     /// Gates live `EvolutionEvent` emission + Paraphrase mutator application
     /// at session-end. Default off. Opt-in via CLI `--online-evolution` or
@@ -3251,7 +3262,12 @@ impl AgentEngine {
             // construction. The flag is operator-controlled and never
             // flips at runtime; caching here saves a per-turn config
             // dereference on the hot path.
-            skills_lifecycle: config.observability.skills_lifecycle,
+            // #170 — via the accessor, NOT the raw field: `[memory] enabled =
+            // false` dominates, and this engine may be built from a `Config`
+            // that never went through resolution.
+            skills_lifecycle: config.skills_lifecycle_enabled(),
+            // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
+            memory_enabled: config.memory.enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
@@ -3513,7 +3529,12 @@ impl AgentEngine {
             #[cfg(any(test, feature = "test-utils"))]
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): cache the gate; see new_with_provider note.
-            skills_lifecycle: config.observability.skills_lifecycle,
+            // #170 — via the accessor, NOT the raw field: `[memory] enabled =
+            // false` dominates, and this engine may be built from a `Config`
+            // that never went through resolution.
+            skills_lifecycle: config.skills_lifecycle_enabled(),
+            // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
+            memory_enabled: config.memory.enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
@@ -14407,19 +14428,15 @@ impl AgentEngine {
         // KG dependency. Non-fatal: a memory failure must not block session
         // teardown.
         //
-        // This comment used to add "consent-gated internally (OFF unless the
-        // user creates the opt-in consent file)". That is FALSE as of the
-        // 2026-06-04 smart default: `auto_memorize::consent_granted` returns
-        // `true` for an absent decision file, so this writes `Tier::Project`
-        // facts by default. It also consults NO config field — in particular
-        // not `[memory] enabled`, which the docs advertise as the opt-out — so
-        // whenever `AgentBootstrap` handed the engine a real `MemoryApi` this
-        // records across sessions for a user who opted out. Bootstrap does hand
-        // over a real one on a stock install, because its `want_memory` gate is
-        // `memory.enabled || observability.skills_lifecycle` and the latter
-        // defaults ON. Gating this on the resolved `[memory] enabled` needs a
-        // new `AgentEngine` field (the engine keeps extracted values, not the
-        // `Config`), so it is filed rather than patched here.
+        // Consent: NOT opt-in. As of the 2026-06-04 smart default,
+        // `auto_memorize::consent_granted` returns `true` for an ABSENT
+        // decision file, so this writes `Tier::Project` facts by default.
+        // That default is deliberate and documented; what was NOT is that this
+        // path also consulted no config field — in particular not
+        // `[memory] enabled`, which the docs advertise as the opt-out. #170
+        // closes that: `fire_auto_memorize` now returns early on the cached
+        // `memory_enabled`, and config resolution independently forces
+        // `NullMemory` for an opted-out user.
         self.fire_auto_memorize().await;
 
         // Wave W3 (closes B.1): direct invocation of W9 Curator + PUM
@@ -14785,6 +14802,22 @@ impl AgentEngine {
     async fn fire_auto_memorize(&self) {
         use wcore_memory::auto_memorize::{AutoMemorize, FactCandidate, SessionDigest};
         use wcore_memory::fact_extractor::FactExtractor;
+
+        // #170 — `[memory] enabled = false` is the opt-out the docs advertise,
+        // and this path used to consult no config field at all. Config
+        // resolution now also forces `NullMemory` in that case (which would
+        // make the writes below no-ops), but a host can install a real
+        // `MemoryApi` through `set_memory_api()` after construction, so the
+        // refusal is stated here too rather than inferred from the handle.
+        // Returning before extraction also means an opted-out session does no
+        // fact-extraction work at all.
+        if !self.memory_enabled {
+            tracing::debug!(
+                target: "wcore_agent::memory",
+                "auto-memorize refused: [memory] enabled = false"
+            );
+            return;
+        }
 
         // Gather plain-text content surfaced during the session. Tool-use /
         // tool-result / thinking blocks are skipped — the extractor scores
@@ -16183,6 +16216,7 @@ mod set_config_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -17866,6 +17900,7 @@ mod phase6_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -18185,6 +18220,7 @@ mod compact_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -19578,6 +19614,7 @@ mod plan_mode_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -20030,6 +20067,7 @@ mod hook_integration_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -20644,6 +20682,99 @@ mod hook_integration_tests {
             "the extracted fact must be persisted via assert_fact when consent is granted"
         );
     }
+
+    /// #170 — `[memory] enabled = false` must stop auto-memorize from
+    /// recording, and must do so on the engine itself.
+    ///
+    /// The two W3 tests above gate on CONSENT (`WAYLAND_AUTO_MEMORIZE` / the
+    /// decision file). Neither could see this defect, because
+    /// `fire_auto_memorize` consulted no config field at all: with consent
+    /// granted — which is the default, since an absent decision file means ON
+    /// — it wrote `Tier::Project` facts through whatever `MemoryApi` the
+    /// engine happened to hold. Config resolution now also forces `NullMemory`
+    /// for an opted-out user, but a host can install a real handle through
+    /// `set_memory_api()` afterwards, so the refusal is asserted here against
+    /// a real, counting handle rather than inferred from `NullMemory` being a
+    /// no-op.
+    ///
+    /// Both directions, same fixture: consent is granted throughout and the
+    /// ONLY thing that differs between the two halves is the opt-out. That
+    /// makes the control exact — a refusal that also fired with memory on
+    /// would be indistinguishable from auto-memorize simply being broken,
+    /// which is the shape of vacuous gate this project keeps finding.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn memory_opt_out_refuses_auto_memorize_with_consent_granted() {
+        let prior_env = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
+        unsafe {
+            std::env::remove_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE);
+        }
+        let consent_path = wcore_memory::auto_memorize::consent_file_path();
+        let consent_existed = consent_path.is_file();
+        if !consent_existed {
+            if let Some(parent) = consent_path.parent() {
+                std::fs::create_dir_all(parent).expect("create consent dir");
+            }
+            std::fs::write(&consent_path, b"opt-in").expect("write consent file");
+        }
+
+        // "X uses Y" is a default FactExtractor pattern at confidence 0.70,
+        // which clears the 0.5 min_confidence threshold — the same phrase the
+        // positive control above relies on.
+        let messages = vec![Message::new(
+            super::Role::Assistant,
+            vec![super::ContentBlock::Text {
+                text: "wayland uses tokio".into(),
+            }],
+        )];
+
+        // Opted OUT.
+        let opted_out_counter = Arc::new(FactCountingMem::default());
+        let mut engine = make_engine("m");
+        engine.memory_enabled = false;
+        engine.set_memory_api(opted_out_counter.clone());
+        engine.messages = messages.clone();
+        engine.fire_auto_memorize().await;
+        let opted_out_writes = opted_out_counter
+            .fact_writes
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Opted IN — the control.
+        let opted_in_counter = Arc::new(FactCountingMem::default());
+        let mut engine = make_engine("m");
+        engine.memory_enabled = true;
+        engine.set_memory_api(opted_in_counter.clone());
+        engine.messages = messages;
+        engine.fire_auto_memorize().await;
+        let opted_in_writes = opted_in_counter
+            .fact_writes
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Restore fixture state before asserting so a failure does not leak
+        // into the user's config dir.
+        if !consent_existed {
+            let _ = std::fs::remove_file(&consent_path);
+        }
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
+        unsafe {
+            if let Some(v) = prior_env {
+                std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v);
+            }
+        }
+
+        assert_eq!(
+            opted_out_writes, 0,
+            "`[memory] enabled = false` must persist nothing — consent being \
+             granted is not permission to record for a user who switched \
+             memory off"
+        );
+        assert_eq!(
+            opted_in_writes, 1,
+            "and the control must still record: if this half goes to 0 the \
+             refusal above proves nothing"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -20892,6 +21023,7 @@ mod approval_bridge_engine_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -21951,6 +22083,7 @@ mod user_model_writeback_tests {
             #[cfg(any(test, feature = "test-utils"))]
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             skills_lifecycle: false,
+            memory_enabled: true,
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
             drafted_skill_signatures: std::collections::HashSet::new(),
