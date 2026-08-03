@@ -20819,7 +20819,7 @@ mod hook_integration_tests {
                 Arc::new(NullProvider),
                 config,
                 ToolRegistry::new(),
-                Arc::new(NullSink),
+                Arc::new(crate::output::null_sink::NullSink),
             )
         }
 
