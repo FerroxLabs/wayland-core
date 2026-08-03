@@ -156,6 +156,32 @@ diverged on **every** run. It could not pass.
   daemon took the posture off `Config::default()`, a constant, and would have run
   skill shell unattended in a session the operator had made read-only; a config it
   cannot read is now a refusal, not `false`.
+- ~~`[memory] enabled = false` does not stop memory from recording.~~
+  **FIXED — `35510975`, plus `7b6ffd0a`.** The advertised privacy opt-out was
+  ORed with `[observability] skills_lifecycle`, which **defaults on**, so the
+  combination a privacy-conscious user actually produces — switch memory off,
+  leave everything else alone — still opened a real store on disk, registered
+  the `record_episode` / `assert_fact` write tools, drafted skills into
+  `$WAYLAND_HOME/skills/`, and ran auto-memorize at every session end.
+  `fire_auto_memorize` consulted no config field at all. The opt-out now
+  dominates, and `35510975` alone was not enough: `7b6ffd0a` closes a host
+  bypass a four-way cross audit found unanimously — `set_memory_api()` is
+  public API and reinstated every durable write (session-end consolidation, KG
+  transcript ingest, and the verbatim pre-compaction transcript written by
+  smart handoff). Both directions are tested at three layers, and four
+  mutations of the fix each turn a specific test red.
+  **If you set `enabled = false` before v0.12.26, content was recorded anyway
+  — check `~/.wayland` and your project's memory directory.**
+- **Two Wayland processes signed into the same ChatGPT account can collide when
+  the token refreshes.** The refresh POST is single-flighted only *within* a
+  process, and ChatGPT refresh tokens rotate and are single-use, so if two
+  processes reach expiry together both POST and one gets `invalid_grant`. It is
+  recoverable — sign in again — and it needs two concurrent processes on one
+  profile to happen at all. A fix is designed and cross-audited but deliberately
+  **not** in this candidate: getting the failure policy wrong risks revoking the
+  whole grant rather than failing one call, and that is not a trade to make
+  under release pressure. Run one Wayland process per account and you will not
+  see it.
 - Ollama (local inference) cannot make tool calls — chat only.
 - `[browser.stealth]` keys are parsed and discarded; `allow_cloud_fallback = false`
   does not prevent a Browserbase fallback.
