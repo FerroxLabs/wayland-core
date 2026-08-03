@@ -265,6 +265,22 @@ jobs:
       - name: Live keyring blob-size test
         shell: pwsh
         run: |
+          # The readback is BELOW this invocation rather than above it, which is why
+          # scripts/check-no-vacuous-cargo-test.py could not see it and flagged this
+          # line: the check was always real, the annotation was missing. Same shape
+          # and same resolution as the voice suite in ci.yml.
+          #
+          # The marker is the LAST comment line on purpose. It is matched within a
+          # 10-line window ABOVE each hit, and this step has two hits — the
+          # invocation and the `throw` on the rc check three lines later, whose
+          # message quotes the words in prose. Only a marker adjacent to the
+          # invocation is inside both windows.
+          #
+          # vacuity-checked: the two Select-String assertions below read this run's own
+          # markers back out of keyring-blob.log — the test's `PASS
+          # an_oauth_sized_secret_survives_the_hosts_real_keyring` line and its
+          # `single_entry_write=REFUSED` positive control — and throw when either is
+          # absent, so a run that selected zero tests reds instead of passing on rc=0.
           cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath keyring-blob.log
           $rc = $LASTEXITCODE
           Get-Content keyring-blob.log | Select-String -Pattern 'MEASURED|PASS an_oauth'

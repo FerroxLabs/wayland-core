@@ -454,6 +454,42 @@ jobs:
             exit 1
           fi
 
+      # Names an absence that would otherwise be invisible. The three acoustic
+      # arms in voice_live_capture_mac.rs need a real speaker->mic path, which a
+      # GitHub-hosted macOS runner does not have — they were failing EVERY
+      # hosted run with rms=0/tone=0.00, which is the missing microphone, not
+      # the product. They are `#[ignore]`d (nextest reports them skipped, never
+      # passed) and the reason travels with each one.
+      #
+      # A skipped gate reports the same green as a passing one, so this step
+      # exists to say out loud, on every macOS run, that the live arms did NOT
+      # run here and where they DO run. It is not decorative: it re-derives the
+      # count from the source, so deleting an arm — or quietly un-ignoring one
+      # back into permanent redness — fails this step instead of passing
+      # unnoticed. Both directions of the drift are caught, which is the whole
+      # point of the guard.
+      - name: Report live acoustic arms NOT RUN on this host (hosted macOS has no mic)
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          f=crates/wcore-agent/tests/voice_live_capture_mac.rs
+          if [ ! -f "$f" ]; then
+            echo "::error title=ACOUSTIC SUITE MISSING::$f is gone. The live capture proof for Phase 27 C4 was deleted, not skipped."
+            exit 1
+          fi
+          n=$(grep -c '^#\[ignore' "$f" || true)
+          if [ "${n:-0}" -ne 3 ]; then
+            echo "::error title=ACOUSTIC ARM DRIFT::Expected exactly 3 '#[ignore]'d acoustic arms in $f, found ${n:-0}. Either an arm was deleted, or one was un-ignored and will now fail every hosted macOS run on a missing microphone. Fix the arm or update this count deliberately."
+            exit 1
+          fi
+          # The invocation is deliberately NOT repeated here. It lives in the
+          # '# Running' section of the file itself, which is the copy that stays
+          # correct when the arms move — and spelling it out in an echo trips
+          # scripts/check-no-vacuous-cargo-test.py, which cannot tell a quoted
+          # example from a real invocation (measured: it flagged this very line).
+          echo "::notice title=Live acoustic arms NOT RUN::3 arms in $f require a real speaker->mic path and are ignored on hosted runners, so they are NOT evidence for this run. See the '# Running' section of that file to run them on a Mac with audio hardware."
+
       # 2026-07-27: MOVED to after the test step. It used to run before it, so a
       # contract digest drift failed the job at that step and macOS and
       # self-hosted Windows never reached the tests at all — three separate

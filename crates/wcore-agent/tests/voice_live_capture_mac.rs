@@ -26,14 +26,44 @@
 //!
 //! # Running
 //!
+//! The three acoustic arms are `#[ignore]`d and run only when asked for by
+//! name, on a host that actually has the hardware:
+//!
 //! ```text
-//! cargo test -p wcore-agent --features voice --test voice_live_capture_mac
+//! cargo test -p wcore-agent --features voice --test voice_live_capture_mac -- --ignored
 //! ```
 //!
-//! The acoustic arms need a real speaker→mic path. When no tone is detected
-//! the test reports **INDETERMINATE** and fails loudly — it never silently
-//! skips, because a silent skip is the self-passing shape this programme keeps
-//! being bitten by.
+//! [`goertzel_instrument_self_test`] is NOT ignored. It is pure arithmetic
+//! over a synthesised buffer, needs no device, and runs on every leg — so the
+//! instrument these arms depend on stays continuously proven even where the
+//! arms themselves cannot run.
+//!
+//! ## Why the acoustic arms are `#[ignore]`d rather than always-on
+//!
+//! They need a real speaker→mic path. **A GitHub-hosted macOS runner has no
+//! capture device at all**, so on that host they do not measure the product —
+//! they measure the absence of a microphone, and they did it on every run:
+//! `CI (macos-latest)` failed three arms out of 13,844 tests with
+//! `rms=0`/`tone=0.00`, i.e. the exact INDETERMINATE the arms are built to
+//! declare. A gate that cannot pass is worth no more than one that cannot
+//! fail; left as-is it made the whole macOS leg permanently red and every
+//! future macOS regression invisible behind it.
+//!
+//! `#[ignore]` is the honest shape here, NOT a silent skip: nextest reports
+//! these as *skipped*, never as *passed*, and the reason string travels with
+//! them. That is the difference the rest of this file is built around —
+//! absence stays declared, and no arm ever reports a pass it did not earn.
+//!
+//! ## A correction, because it is the premise that hid this
+//!
+//! The paragraph above once read: *"`voice` is off by default, so no CI host
+//! has ever executed it."* That is false, and it is why these arms ran
+//! somewhere nobody intended. `wcore-cli` lists `voice` in its **default**
+//! features (`crates/wcore-cli/Cargo.toml:31` → `voice =
+//! ["wcore-agent/voice"]`), so Cargo feature unification turns
+//! `wcore-agent/voice` ON for every `--workspace` build — which is what
+//! `just test-ci` runs on all three legs. The feature is off by default for a
+//! *consumer* depending on `wcore-agent` alone; it is on for *us*, always.
 
 #![cfg(all(feature = "voice", target_os = "macos"))]
 
@@ -388,6 +418,7 @@ async fn capture_arm(label: &str, tone_wav: Option<&Path>) -> Arm {
 /// **The capture-liveness control.** Two arms on the same device, same
 /// duration, differing only in whether a known tone was injected.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real speaker->mic acoustic path; a hosted macOS runner has no capture device, where this measures the missing microphone rather than the product. Run with -- --ignored on a Mac with audio hardware"]
 async fn live_capture_contains_known_tone_and_control_arm_does_not() {
     let dir = std::env::temp_dir();
     let tone_path = dir.join("wl-c4-probe-1khz.wav");
@@ -460,6 +491,7 @@ async fn live_capture_contains_known_tone_and_control_arm_does_not() {
 /// seconds**, i.e. deep into the overflow regime. If the callback has stalled
 /// or is dropping buffers, the retained tail will not contain the tone.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real speaker->mic acoustic path AND runs for ~77s; on a hosted macOS runner the injected tone never reaches a microphone, so the arm reports INDETERMINATE by construction. Run with -- --ignored on a Mac with audio hardware"]
 async fn capture_survives_ring_buffer_overflow_past_60s() {
     const TOTAL_SECS: u64 = 70;
     const TONE_TAIL_SECS: f64 = 4.0;
@@ -627,6 +659,7 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
 /// C4 `cancellation`. Proves the stream was flowing *before* the cancel, so
 /// "it stopped" is not free.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real capture device: the pre-cancel liveness proof requires current_rms > 0, which a hosted macOS runner with no microphone can never produce. Run with -- --ignored on a Mac with audio hardware"]
 async fn cancel_discards_a_stream_proven_to_be_flowing() {
     let rec = CpalAudioRecorder::try_default().expect("no default input device");
 
