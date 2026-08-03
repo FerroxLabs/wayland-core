@@ -542,6 +542,8 @@ skills_lifecycle = false
 
 The flag is also valid in the global config file under the same `[observability]` section. An explicit `false` in either source wins; an absent value keeps the smart default enabled. Disabling the lifecycle does not disable memory itself.
 
+The converse does hold, and it is asymmetric on purpose: `[memory] enabled = false` switches this flag off too, whatever it is set to. Everything the lifecycle produces is a durable artifact derived from the user's session, so a memory opt-out is an opt-out of all of it — see [memory.md](memory.md).
+
 Generated drafts are written once to the canonical skills directory with an
 `auto_drafted` manifest. They remain inspectable but hidden from model listings,
 routers, guessed-name execution, and cross-project resolution. Review metadata

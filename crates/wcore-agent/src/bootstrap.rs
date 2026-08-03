@@ -1823,8 +1823,21 @@ impl AgentBootstrap {
         // on `NullMemory`.
         let smart_compaction_enabled = self.config.compact.smart_enabled;
         let smart_handoff_enabled = self.config.compact.smart_handoff_to_memory;
-        let skills_lifecycle_enabled = self.config.observability.skills_lifecycle;
-        let want_memory = self.config.memory.enabled || skills_lifecycle_enabled;
+        // #170 — `want_memory` used to be `memory.enabled ||
+        // skills_lifecycle`, and `skills_lifecycle` defaults ON. So a user who
+        // set the advertised `[memory] enabled = false` still got a real
+        // `Memory` opened on disk, the durable memory WRITE tools registered
+        // below, a procedural telemetry sink feeding it, and auto-memorize
+        // running at every session end. The opt-out changed nothing it claims
+        // to change.
+        //
+        // `skills_lifecycle_enabled()` now folds `memory.enabled` in, so the
+        // `||` collapses to the opt-out itself. Written as `memory.enabled`
+        // directly rather than left as an OR that is only *incidentally*
+        // correct: this is the gate the user is promised, and it should read
+        // that way at the site that enforces it.
+        let skills_lifecycle_enabled = self.config.skills_lifecycle_enabled();
+        let want_memory = self.config.memory.enabled;
         let mut decay_handle: Option<tokio::task::JoinHandle<()>> = None;
         // v0.8.1 U1 — capture the `Arc<Db>` handle from the opened
         // `Memory` so we can hand it to `wcore_evolve::PromptStore::new`

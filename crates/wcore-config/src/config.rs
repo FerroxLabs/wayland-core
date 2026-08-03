@@ -2211,6 +2211,27 @@ pub struct CliArgs {
 }
 
 impl Config {
+    /// #170 — the effective skills-lifecycle switch. **Read this, never
+    /// `config.observability.skills_lifecycle` directly.**
+    ///
+    /// `[memory] enabled = false` is the opt-out the docs advertise, and it
+    /// dominates: every effect of the skills-lifecycle pipeline is a durable
+    /// artifact derived from the user's own session — `SkillDrafter` writes
+    /// candidate skills under `$WAYLAND_HOME/skills/`, and the `Curator`, the
+    /// procedural telemetry sink and the user-model inferencer all write
+    /// through a real `MemoryApi`.
+    ///
+    /// `resolve_inner_from_files` already applies this rule to the resolved
+    /// field itself, so a config that came from disk is truthful when it is
+    /// serialized or reported. This accessor exists because that is not the
+    /// only way a `Config` is built: tests and programmatic hosts construct
+    /// one with `..Default::default()`, which bypasses resolution entirely and
+    /// leaves `skills_lifecycle` at its default (ON). Reading through here is
+    /// correct for every construction path.
+    pub fn skills_lifecycle_enabled(&self) -> bool {
+        self.observability.skills_lifecycle && self.memory.enabled
+    }
+
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
         Self::resolve_inner(cli, true)
@@ -2520,6 +2541,34 @@ impl Config {
             Vec::new()
         };
 
+        // #170 — the memory opt-out dominates the skills-lifecycle switch.
+        //
+        // `[memory] enabled = false` is the opt-out the docs advertise, and it
+        // is a privacy decision rather than a performance hint. But
+        // `observability.skills_lifecycle` defaults ON, and EVERY one of its
+        // effects is a durable artifact derived from the user's own session:
+        // `SkillDrafter` writes candidate skills under `$WAYLAND_HOME/skills/`,
+        // and the `Curator`, the procedural telemetry sink and the user-model
+        // inferencer all write through a real `MemoryApi`. Bootstrap opened
+        // that real `Memory` on `memory.enabled || skills_lifecycle`, so a
+        // stock install kept recording for a user who had switched memory off.
+        //
+        // Resolving the dominance HERE — at the single point every consumer
+        // reads through — rather than at each of the sites that read one flag
+        // or the other is deliberate: `AgentEngine` caches
+        // `config.observability.skills_lifecycle` at construction independently
+        // of bootstrap, so a per-site fix would have left the engine's own
+        // per-turn draft/curate path recording. Correcting the resolved value
+        // fixes every present reader and every future one.
+        //
+        // This is resolution, not merge: the layer-merge rule
+        // (`global && project`) is unchanged and still tested separately.
+        let memory = merged.memory.unwrap_or_default();
+        let mut observability = merged.observability.resolve();
+        if !memory.enabled {
+            observability.skills_lifecycle = false;
+        }
+
         let mut resolved = Config {
             provider_label,
             provider,
@@ -2554,14 +2603,16 @@ impl Config {
             vertex: merged.vertex,
             mcp: merged.mcp,
             debug: merged.debug,
-            observability: merged.observability.resolve(),
+            observability,
             provider_chain: merged.provider_chain,
             provider_policy: merged.provider_policy,
             resolved_fallbacks: Vec::new(),
             budget: merged.budget,
             storage: merged.storage,
-            // Absent `[memory]` resolves to the (memory-ON) default.
-            memory: merged.memory.unwrap_or_default(),
+            // Absent `[memory]` resolves to the (memory-ON) default; see the
+            // `#170` note above, which binds `observability.skills_lifecycle`
+            // to this value.
+            memory,
             browser: merged.browser,
             security: merged.security,
             execution_policy,
@@ -6157,6 +6208,89 @@ mod tests {
             !resolve(false).read_only,
             "and it must not invent the posture when the file did not ask for it"
         );
+    }
+
+    /// #170 — `[memory] enabled = false` must dominate
+    /// `observability.skills_lifecycle` at RESOLUTION.
+    ///
+    /// The merge-layer tests above assert `resolved_skills_lifecycle() ==
+    /// global && project` and deliberately iterate `memory` in both states
+    /// without it changing the answer — that is the correct rule for merging
+    /// two config LAYERS, and it stays. What none of them could see is the
+    /// cross-field rule applied one step later, when the layered file becomes
+    /// the runtime `Config`: a user who set `enabled = false` still got
+    /// `skills_lifecycle = true` (its default), which is the flag bootstrap
+    /// ORs into `want_memory` and the engine caches for its per-turn draft and
+    /// session-end curate paths. So the advertised opt-out left a real memory
+    /// DB open, the durable write tools registered, and auto-memorize running.
+    ///
+    /// Asserted in BOTH directions. A one-directional test here would pass
+    /// just as well against a resolver that hardcoded `false`, which would
+    /// break every default install instead — the failure this project has
+    /// repeatedly shipped is a gate whose two states were never both observed.
+    #[test]
+    fn memory_opt_out_dominates_skills_lifecycle_at_resolution() {
+        fn resolve(memory_enabled: bool, skills_lifecycle: Option<bool>) -> Config {
+            let merged = ConfigFile {
+                memory: Some(MemoryConfig {
+                    enabled: memory_enabled,
+                    ..MemoryConfig::default()
+                }),
+                observability: ObservabilityFileConfig {
+                    skills_lifecycle,
+                    ..ObservabilityFileConfig::default()
+                },
+                ..ConfigFile::default()
+            };
+            let files = ResolvedConfigFiles {
+                merged,
+                workspace_trust: wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
+                    wcore_types::workspace_trust::AuthoritySource::LocalSession,
+                    "test-fingerprint",
+                    "memory opt-out resolution test",
+                ),
+                provenance: ConfigResolutionProvenance::default(),
+            };
+            let cli = CliArgs {
+                api_key: Some("test-key".to_string()),
+                ..CliArgs::default()
+            };
+            Config::resolve_inner_from_files(&cli, false, files).expect("resolve config")
+        }
+
+        // Direction 1 — the opt-out is honoured, and honouring it is not
+        // conditional on the user having ALSO found the second switch.
+        let opted_out = resolve(false, None);
+        assert!(!opted_out.memory.enabled);
+        assert!(
+            !opted_out.observability.skills_lifecycle,
+            "`[memory] enabled = false` must switch the skills-lifecycle \
+             pipeline off: every one of its effects is a durable artifact \
+             derived from the user's session"
+        );
+        assert!(
+            !resolve(false, Some(true)).observability.skills_lifecycle,
+            "an explicit `skills_lifecycle = true` must not reinstate \
+             recording for a user who opted out of memory"
+        );
+
+        // Direction 2 — the control. A default install still records; if this
+        // half ever goes green by accident, the fix above has been replaced by
+        // a switch that is simply always off.
+        let stock = resolve(true, None);
+        assert!(stock.memory.enabled);
+        assert!(
+            stock.observability.skills_lifecycle,
+            "a stock install must keep the learn-and-evolve pipeline on — \
+             the smart default is unchanged for users who did not opt out"
+        );
+
+        // And the two axes stay independent in the direction that does not
+        // involve the opt-out: `skills_lifecycle = false` with memory ON is
+        // still the operator's call.
+        let lifecycle_off = resolve(true, Some(false));
+        assert!(lifecycle_off.memory.enabled);
+        assert!(!lifecycle_off.observability.skills_lifecycle);
     }
 
     /// The headless cron daemon has no resolved `Config` — it reads the merged
