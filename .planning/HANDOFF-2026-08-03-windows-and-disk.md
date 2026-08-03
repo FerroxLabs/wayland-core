@@ -130,36 +130,38 @@ the Mac.
 it would destroy work. `wayland-worktrees` (14 GB) is Sean's Desktop repo —
 not this lane's to touch.
 
-## 4. OPEN — ranked
+## 4. OPEN — RE-GRADED against integration `655ed88c`
 
-**RELEASE BLOCKERS**
-- **#170 P0 privacy:** `memory.enabled = false` does **not** stop memory recording.
-  `want_memory = config.memory.enabled || skills_lifecycle_enabled`, and
-  skills_lifecycle **defaults ON**. Both-directions bar: opt-out must record
-  nothing, *and* a default install must still record.
-- **#162 / #163** Windows stdout + `read_only` vacuity. Root causes fixed and
-  merged (CRLF in `collapse_cr_lines`; shell-string quoting). Open until the
-  Windows lanes land and re-prove them.
+**The previous ranked list was STALE. Four of its five named blockers are
+already closed on integration.** Verified by reading the enforcement sites and
+their tests, not by trusting the list. Do not re-open these without new evidence.
 
-**HIGH**
-- **#172 refresh single-flight.** Plan v3 at
-  `.planning/PLAN-172-refresh-single-flight.md`, four-leg cross-audited (Gemini
-  REJECT; Kimi + Codex SOUND-WITH-FIXES; internal). Lane `refresh-single-flight`
-  stalled on a watchdog at `93432b1f`; work is pushed. **Failure policy reversed
-  twice** — final: on lock timeout reload and succeed if a new pair appeared,
-  otherwise **fail retryably, never POST unlocked**, because replaying a
-  single-use refresh token can make a compliant provider revoke the whole grant.
-- **#165** Desktop follow-up: `ready.session_id` is now JSON `null`; Desktop types
-  it `string | undefined` and assigns directly. Must reach Sean **before** the
-  Desktop branch merges.
-- **#173** A TUI operator on a keyless host is never told crash replay is off.
-- **#164 / #138** Both self-hosted Windows runners advertise busy, serve zero jobs.
-  **Sean-only** — his machines.
+| was | verdict | evidence |
+|---|---|---|
+| **#170** P0 privacy: `memory.enabled=false` still records | **CLOSED** | `bootstrap.rs:1840` is now `want_memory = config.memory.enabled` — the `\|\| skills_lifecycle` disjunct is gone. Both-directions bar MET: `memory_opt_out_records_nothing_at_the_stock_lifecycle_default` (episode not readable back, write tools not registered, no skill drafter) **and** `stock_install_still_records` as the positive control. |
+| **#171** RELEASE BLOCKER: `chunked_put` splices two secrets | **CLOSED** | The lock is acquired BEFORE `read_previous_manifest`, so it spans the read — the half that makes the generation decision. Read faults propagate instead of `.ok().flatten()`. Commit order enforced: parts under the OTHER generation -> flip manifest -> purge. |
+| **#173** keyless TUI operator never told replay is off | **CLOSED** | `emit_durability_degraded` + `tracing::warn`. The message states replay is OFF, that the turn IS still journaled, what happens on interruption, and all three remedies. Covered by `f14_sigkill_recovery.rs`. |
+| **#165** `ready.session_id` / `session_persistence` | **CORE SIDE DONE** | `session_persistence` is in the protocol with its variants. What REMAINS is not code: Sean must be told before the Desktop branch merges, because Desktop types `session_id` as `string \| undefined` and assigns it directly. **Communication item, not a Core blocker.** |
+| **#162 / #163** Windows stdout + `read_only` vacuity | **ROOT CAUSES MERGED** | Fixed earlier (CRLF in `collapse_cr_lines`; shell-string quoting) and the Windows lanes that re-prove them are now merged. Close once a hosted-Windows leg is green on integration. |
 
-**MEDIUM:** #166, #167, #168 (a test mutates a committed evidence file — the gate
-now reports `dirty=1` after every run), #169, #149, #155, #156.
+**GENUINELY OPEN — this is the real list:**
 
----
+- **#172 refresh single-flight (HIGH).** The one named blocker still open. Plan
+  v3 at `.planning/PLAN-172-refresh-single-flight.md`, four-leg cross-audited.
+  Lane `refresh-single-flight` stalled on a watchdog at `93432b1f`; work IS
+  pushed. Failure policy was reversed twice — FINAL: on lock timeout, reload and
+  succeed if a new pair appeared, otherwise **fail retryably, never POST
+  unlocked**, because replaying a single-use refresh token can make a compliant
+  provider revoke the entire grant (RFC 6819 5.2.2.3).
+- **#174 retry-masked reaping flake** (new this session — see section 0).
+- **#164 / #138** both self-hosted Windows runners advertise busy, serve zero
+  jobs; the Darwin self-hosted leg also skips. **Sean-only** — his machines.
+- **MEDIUM:** #166, #167, #168, #169, #149, #155, #156.
+
+**Lesson worth keeping: a blocker list decays faster than code.** Four items
+here were fixed and never re-graded, which makes the release look further away
+than it is and hides which single item actually gates it. Re-grade before
+planning off it.
 
 ## 5. LESSONS — why this record is worth keeping
 
