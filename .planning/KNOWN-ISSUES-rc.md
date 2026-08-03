@@ -23,26 +23,58 @@ something a user reported.
 
 ## Test status, measured on all three platforms
 
-Measured at `2280e205` / `02575b6f`, GitHub Actions run 30698794888 / 30699019736.
+**Re-derived 2026-08-03. Every row now carries its own provenance**, because the
+previous version of this table did not and could not: its three rows were sourced
+from a `report` job that merged artifacts with `merge-multiple: true` and silently
+kept ONE — proven on run 30699019736, where three artifacts were uploaded and the
+report counted `junit report count : 1`. A table whose rows come from an unnamed
+runner is not a measurement.
 
-| Platform | Tests run | Passed | Failed | Skipped |
-|---|---:|---:|---:|---:|
-| Linux (containerized) | 13,775 | 13,774 | 1 | 74 |
-| macOS (hosted runner) | 13,718 | 13,700 | 18 | 105 |
-| Windows (self-hosted) | 13,379 | 13,349 | 30 | 130 |
+| Platform | Runner | Run / job | Commit | Executed | Failed |
+|---|---|---|---:|---:|---:|
+| macOS 15 | GitHub-hosted `macos-latest` | 30800234966 / 91642878745 | `c615daed` | 13,844 | **3** |
+| Windows | GitHub-**hosted** `windows-latest` | 30800234966 / 91642878530 | `c615daed` | 13,507 | **14** |
+| Linux | hetzner `orch-gate` (not CI) | local gate | `3750c916` | 13,904 | **0** |
 
-Windows worst case **99.78%**. Two consecutive Windows runs measured 30 and 33
-failures with 6 flaky, so read the hard-failure count as ~30 with a few points of
-noise.
+Read the columns literally. **"Executed" is not "total".** `cargo-nextest`'s JUnit
+records only tests that ran — it emits no `skipped` elements at all — so a Skipped
+column cannot be derived from the same artifact as the failure counts, and the
+previous table's Skipped column therefore came from somewhere else. It has been
+removed rather than guessed at.
 
-**Of the macOS 18: eleven cannot pass on that runner by construction** — eight
-`wcore-swarm` tests need a Docker backend on a leg where the feature is off, and
-three voice-capture tests need a microphone the hosted runner does not have.
+**The Linux row is not from CI.** `CI (linux-containerized)` never reached its test
+step on this run — it failed at a repository lint (`No vacuous cargo test
+invocations`) four steps in. The number quoted is a real full-suite run on our own
+Linux hardware at the lockfile-bump commit, and it is labelled as such rather than
+being dressed up as a CI result.
 
-**Partly closed.** The eight `wcore-swarm` tests now skip loudly with a ledger CI
-reads back (`9ddf929a`); the skip is armed three ways on Linux so it cannot spread
-silently. **The three voice-capture tests are unchanged** — nothing in the wave
-touched them, and they still fail rather than skip. **[PENDING WAVE — voice only]**
+**There is no self-hosted Windows row, and that is the finding.** `CI (Array)` — the
+self-hosted Windows leg, and a *required* check on `main` — has served **zero jobs
+across the last 60 CI runs**; every instance ever scheduled is still `queued` or
+died at the 24-hour runner-wait timeout. Both registered Windows runners report
+`online` **and** `busy` while executing nothing. The hosted `windows-latest` leg
+above exists precisely because of that single point of failure, and this is the
+first complete hosted-Windows verdict this branch has ever produced.
+
+**macOS: 18 → 3.** Of the previously-reported 18, the eight `wcore-swarm` tests now
+skip loudly against a ledger CI reads back (`9ddf929a`). The remaining **3 are the
+live acoustic arms**, and they are now `#[ignore]`d with reasons: they require a real
+speaker→microphone path that no hosted runner has, so they were failing on the
+missing hardware rather than on the product — which made the macOS leg permanently
+red and every future macOS regression invisible behind it. `goertzel_instrument_self_test`
+stays un-ignored so the instrument itself is still proven every run, and a CI step
+names the absence and re-derives the count of 3 from source so an arm cannot be
+deleted or silently un-ignored. **[PENDING WAVE — voice only] is closed.**
+
+**Windows: 14, and most are not product defects.** Triaged individually: three were
+tests asserting hardcoded Unix paths against an absoluteness check; two were `sh`
+syntax handed to `cmd.exe` (`;` is not a separator there, so `exit 1` never ran —
+the capture path is fine, and the control test using `exit 3`, valid in both
+dialects, passed on the same run); one needs a Docker daemon that runs Linux images.
+Fixes for those are in this branch. What remains genuinely open on Windows is
+recorded in the defect sections below — including one swarm-dispatch path that
+reports a cause it cannot have established, and the sandbox differential that has
+never run on Windows at all.
 
 ---
 
@@ -77,10 +109,20 @@ bucket (macOS `/var` → `/private/var`; Windows `\\?\C:\…` → `C:\…` via
 
 **Deterministic replay diverges** off Linux
 (`deterministic_openai_loop::packaged_f04_run_is_repeatable_and_content_addressed`).
-**FIXED — `7cdb5ca6`**, and this one was a real product defect rather than a test
-artefact: `workspace_forms` normalized only the caller's spelling, so the random
+**PARTLY FIXED — `7cdb5ca6`**, and this one was a real product defect rather than a
+test artefact: `workspace_forms` normalized only the caller's spelling, so the random
 per-run tempdir name stayed inside the leaf digest and the repeatability gate
 diverged on **every** run. It could not pass.
+
+**Correction, 2026-08-03 — this entry said "FIXED" and the test is still red on
+Windows.** The *digest* half is genuinely fixed; the three `read.input.contains(...)`
+assertions were not given the same treatment. On a hosted Windows runner the raw
+`TempDir` spelling is the 8.3 short form (`C:\Users\RUNNER~1\...`) while
+`AgentBootstrap::new` canonicalizes the session workspace through `dunce::simplified`,
+so the trace carries the long form and those three asserts fail. Measured on
+run 30800234966, job 91642878530. No product defect remains here — but claiming a
+named test FIXED while it fails is exactly the thing this file exists to prevent
+(see the opening section), so it is retracted rather than quietly amended.
 
 ### Windows-specific
 
@@ -123,6 +165,22 @@ diverged on **every** run. It could not pass.
   (`crates/wcore-tools/src/vfs.rs:406`), and durable receipts use it precisely so
   that matching bytes alone can never resolve an uncertain effect — so **the durable
   filesystem-receipt, crash-reconciliation and rollback path is inert on Windows**.
+
+  **Correction, 2026-08-03 — read the previous sentence carefully, because it
+  implied something false.** Saying the path is inert *on Windows* invites the
+  reading that Linux and macOS users have the guarantee. They do not. **The path
+  is dormant on every platform**, for a reason that has nothing to do with
+  `observe_file`: no production tool implements `prepare_effect` at all. The only
+  three definitions in the tree are the trait default
+  (`crates/wcore-tools/src/lib.rs:394`), the `Box`/`Arc` forwarder (`:616`) and one
+  in a test file — and `Write` and `Edit` both return `ToolEffectContract::default()`
+  (`write.rs`, `edit.rs:419`) rather than declaring `FilesystemTransactional`. The
+  dispatcher retains the type for a future opt-in backend, which the code says
+  outright. So the honest statement is: **no user on any platform is currently
+  getting durable filesystem-receipt crash recovery.** Where the path *is* reached
+  it fails closed and says so — an unresolved effect stays `Unknown{Interrupted}`
+  and rollback returns `suspended(...)` with a reason — so nothing lies and nothing
+  is lost; the capability is simply not yet wired.
   A candidate fix exists and was **deliberately held**: it is `cfg(windows)`-gated
   throughout (Linux has no power to prove any of it), its mutant does not cover two
   of seven changes, and it adds ~200 lines of `NtCreateFile` FFI with no tests on any
@@ -257,7 +315,18 @@ on real hardware, with controls proven able to fail in both directions:
 - `goal` durable objectives — survive `kill -9` mid-wave on Linux and Windows,
   effects 12/12/12
 - `backup` create/verify/restore/recover — including a real Windows long-path fix
-- `sandbox` status/exec — 50 greens, each with a differential activeness observation
+- `sandbox` status/exec — 50 greens, each with a differential activeness
+  observation — **Linux and macOS only. The differential has NEVER run on
+  Windows.** This row shipped with no platform scope while every row around it
+  carried one; corrected 2026-08-03. `sandbox_activeness.rs` drives its
+  uncontained baseline with `touch <path> 2>/dev/null; echo RAN`, and on Windows
+  that string is handed to `cmd /C`, which has no `touch`, no `/dev/null`, and
+  does not treat `;` as a separator — so the baseline cannot execute and the
+  test fails with "the uncontained baseline did not run". It is `cfg!(windows)`,
+  so this has never passed on any Windows host. The test behaved correctly: it
+  refused to grade containment on a control that did not run. `sandbox status`
+  *not* reporting a bypass is not a substitute — that only reads what `status`
+  says about itself.
 - `plugin` 10-verb lifecycle — Linux and Windows
 - `migrate` — against real Hermes and OpenClaw installations
 - glibc floor lowered 2.39 → 2.34, live on five distribution families
