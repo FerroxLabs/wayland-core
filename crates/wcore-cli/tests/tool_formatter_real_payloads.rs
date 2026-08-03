@@ -101,6 +101,48 @@ fn render_real(tool: &dyn Tool, input: Value) -> (String, Vec<String>) {
     (summary, detail)
 }
 
+/// The real shell these Bash cases drive, and why two expectations are
+/// platform-split.
+///
+/// `BashTool` runs the command through `wcore_config::shell::
+/// bash_shell_argv_prefix` — `sh -c <cmd>` on Unix, `cmd /C <cmd>` on
+/// Windows. The formatter properties under test (real exit code, real byte
+/// count, real stderr) are platform-neutral, but the *inputs that produce
+/// them* are not, and hard-coding the Unix answers made two of these cases
+/// assert something false on Windows:
+///
+/// * `;` is a statement separator in `sh` and **ordinary text** in `cmd`.
+///   `echo BOOM_TOKEN 1>&2; exit 1` therefore echoed the literal
+///   `BOOM_TOKEN ; exit 1` to stderr and exited **0** — a command that
+///   genuinely succeeded. The test demanded `exit 1` from it. `cmd`'s
+///   unconditional separator is `&` and its non-zero exit is `exit /b N`.
+/// * `echo` terminates its line with `\n` under `sh` (15 bytes) and `\r\n`
+///   under `cmd` (16 bytes).
+///
+/// Measured on Windows 10.0.26200 at the parent commit, the formatter
+/// rendered `exit 0 · 0 bytes stdout · 21 bytes stderr` and
+/// `exit 0 · 16 bytes stdout`. Both are the TRUTH about what `cmd` did.
+/// Neither was a misformat, and `bash_failure_never_reports_exit_zero`
+/// (which uses `exit 3`, valid in both dialects) passed there unchanged —
+/// the fail-loud guarantee held. So the defect was in this file, not in the
+/// formatter.
+///
+/// These stay hard-coded per platform rather than being derived from the
+/// observed output: an expectation computed from the result under test
+/// cannot fail, which is the exact disease this file was written to cure.
+#[cfg(unix)]
+const ECHO_STDOUT_BYTES: usize = 15; // "HELLO_FROM_UAT\n"
+#[cfg(windows)]
+const ECHO_STDOUT_BYTES: usize = 16; // "HELLO_FROM_UAT\r\n"
+
+/// A command that writes to stderr AND exits non-zero, in each shell's own
+/// dialect. Both halves matter: the exit code proves the card cannot claim
+/// success on a failure, the stderr proves a failure still explains itself.
+#[cfg(unix)]
+const STDERR_THEN_FAIL: &str = "echo BOOM_TOKEN 1>&2; exit 1";
+#[cfg(windows)]
+const STDERR_THEN_FAIL: &str = "echo BOOM_TOKEN 1>&2 & exit /b 1";
+
 /// Assert the invariant that the whole defect class violated.
 fn assert_never_fabricates(summary: &str, detail: &[String], ctx: &str) {
     assert!(
@@ -122,13 +164,14 @@ fn bash_success_renders_the_real_exit_code_and_byte_count() {
     );
 
     // The exact case the UAT reported as `Ran `?` · exit 0 · 0 bytes`.
-    // "HELLO_FROM_UAT\n" is 15 bytes.
+    // The real payload is "HELLO_FROM_UAT" plus the shell's own line
+    // terminator — see `ECHO_STDOUT_BYTES`.
     assert!(
         summary.contains("exit 0"),
         "real exit code missing: {summary}"
     );
     assert!(
-        summary.contains("15 bytes stdout"),
+        summary.contains(&format!("{ECHO_STDOUT_BYTES} bytes stdout")),
         "byte count still wrong (was always 0): {summary}"
     );
     assert!(
@@ -161,7 +204,7 @@ fn bash_failure_never_reports_exit_zero() {
 fn bash_stderr_is_surfaced() {
     let (summary, detail) = render_real(
         &wcore_tools::bash::BashTool,
-        serde_json::json!({ "command": "echo BOOM_TOKEN 1>&2; exit 1" }),
+        serde_json::json!({ "command": STDERR_THEN_FAIL }),
     );
     assert!(summary.contains("exit 1"), "wrong exit code: {summary}");
     assert!(
