@@ -2654,11 +2654,13 @@ pub struct AgentEngine {
     /// advertise. Gates `fire_auto_memorize`, which previously consulted no
     /// config field at all.
     ///
-    /// Config resolution already forces `NullMemory` when this is false (see
-    /// the `#170` note in `wcore_config::config`), which makes those writes
-    /// no-ops. This field is the second, explicit line: a host may install a
-    /// real `MemoryApi` through `set_memory_api()` AFTER construction, which
-    /// bypasses the bootstrap gate entirely. Read at construction and never
+    /// Also the gate in `set_memory_api`, which is what stops a host
+    /// reinstating a durable backend after construction.
+    ///
+    /// Note on the division of labour, because an audit caught this comment
+    /// getting it wrong: config RESOLUTION forces
+    /// `observability.skills_lifecycle = false`; it is BOOTSTRAP's
+    /// `want_memory` that binds `NullMemory`. Read at construction and never
     /// mutated.
     memory_enabled: bool,
     /// F-092 (W7-N): cached `config.observability.online_evolution` flag.
@@ -4981,7 +4983,34 @@ impl AgentEngine {
     /// W7 Pre-flight 0: replace the engine's `MemoryApi` handle.
     /// Called by `AgentBootstrap::build` when the user has opted into a
     /// real backend; otherwise the default `NullMemory` is kept.
+    ///
+    /// #170 — **refuses when `[memory] enabled = false`.** This is the single
+    /// chokepoint for the opt-out, and it is here rather than at each writer
+    /// because every durable write the engine performs goes through this one
+    /// handle: `dream_now` and `kg_ingest_facts` at session end,
+    /// `record_episode` from `write_smart_handoff` (which persists a verbatim
+    /// pre-compaction transcript), `rebind_session`, and `assert_fact` from
+    /// auto-memorize. Gating them individually would be four conditions that a
+    /// fifth writer could later forget; gating the handle covers the writers
+    /// that exist and the ones that do not yet.
+    ///
+    /// A cross-audit found this: bootstrap never installs a real backend for
+    /// an opted-out user, so the gate looked complete — but this method is
+    /// public API, and a host that calls it after construction reinstated
+    /// every one of those writes.
+    ///
+    /// Refusing rather than accepting-and-ignoring keeps `memory_api()`
+    /// honest: what a caller reads back is what the engine will actually
+    /// write through.
     pub fn set_memory_api(&mut self, api: Arc<dyn wcore_memory::MemoryApi>) {
+        if !self.memory_enabled {
+            tracing::warn!(
+                target: "wcore_agent::memory",
+                "refused to install a memory backend: `[memory] enabled = false`; \
+                 the session keeps NullMemory and records nothing"
+            );
+            return;
+        }
         self.memory_api = api;
     }
 
@@ -14814,13 +14843,12 @@ impl AgentEngine {
         use wcore_memory::fact_extractor::FactExtractor;
 
         // #170 — `[memory] enabled = false` is the opt-out the docs advertise,
-        // and this path used to consult no config field at all. Config
-        // resolution now also forces `NullMemory` in that case (which would
-        // make the writes below no-ops), but a host can install a real
-        // `MemoryApi` through `set_memory_api()` after construction, so the
-        // refusal is stated here too rather than inferred from the handle.
-        // Returning before extraction also means an opted-out session does no
-        // fact-extraction work at all.
+        // and this path used to consult no config field at all. Bootstrap now
+        // binds `NullMemory` for an opted-out user and `set_memory_api`
+        // refuses to replace it, so the writes below could not land anyway.
+        // Stated here regardless: returning before extraction means an
+        // opted-out session does no fact-extraction work at all, and it gives
+        // the refusal a name at the site that would otherwise do the writing.
         if !self.memory_enabled {
             tracing::debug!(
                 target: "wcore_agent::memory",
@@ -20498,6 +20526,9 @@ mod hook_integration_tests {
     #[derive(Default)]
     struct FactCountingMem {
         fact_writes: std::sync::atomic::AtomicU64,
+        /// #170: episode writes, so the opt-out test can observe the
+        /// `write_smart_handoff` / verbatim-transcript path too, not just facts.
+        episode_writes: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait::async_trait]
@@ -20507,6 +20538,8 @@ mod hook_integration_tests {
             _: wcore_memory::v2_types::Episode,
             _: wcore_memory::AccessToken,
         ) -> wcore_memory::error::Result<wcore_memory::v2_types::EpisodeId> {
+            self.episode_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(wcore_memory::v2_types::EpisodeId::default())
         }
         async fn assert_fact(
@@ -20739,11 +20772,16 @@ mod hook_integration_tests {
             }],
         )];
 
-        // Opted OUT.
+        // Opted OUT. Note the ORDER: the backend is installed while memory is
+        // still on, and the opt-out is applied afterwards. `set_memory_api`
+        // now refuses a durable backend outright (see the test above), which
+        // would make this pass without `fire_auto_memorize` doing anything —
+        // and then the early return could be deleted with the suite still
+        // green. Installing first keeps the two gates independently covered.
         let opted_out_counter = Arc::new(FactCountingMem::default());
         let mut engine = make_engine("m");
-        engine.memory_enabled = false;
         engine.set_memory_api(opted_out_counter.clone());
+        engine.memory_enabled = false;
         engine.messages = messages.clone();
         engine.fire_auto_memorize().await;
         let opted_out_writes = opted_out_counter
@@ -20783,6 +20821,95 @@ mod hook_integration_tests {
             opted_in_writes, 1,
             "and the control must still record: if this half goes to 0 the \
              refusal above proves nothing"
+        );
+    }
+
+    /// #170 — the host bypass. `set_memory_api()` must refuse to install a
+    /// durable backend on an engine whose config says memory is off.
+    ///
+    /// This is the gap a four-way cross audit found, unanimously, in the
+    /// first version of this fix: bootstrap never hands an opted-out user a
+    /// real backend, so every test passed — but `set_memory_api` is public
+    /// API, and a host calling it after construction reinstated EVERY durable
+    /// write the engine performs. All of them go through this one handle:
+    /// `dream_now` and `kg_ingest_facts` at session end, `record_episode` from
+    /// `write_smart_handoff` (a verbatim pre-compaction transcript),
+    /// `rebind_session`, and `assert_fact`. Gating the handle closes all of
+    /// them at once.
+    ///
+    /// The assertion is on OBSERVED WRITES through the engine's own handle,
+    /// not on pointer identity — a refusal that installed the backend but
+    /// happened to write nothing today would be indistinguishable from one
+    /// that never installed it, and the first regresses silently.
+    #[tokio::test]
+    async fn set_memory_api_refuses_a_durable_backend_when_memory_is_off() {
+        async fn writes_through(memory_enabled: bool) -> (u64, u64) {
+            let counter = Arc::new(FactCountingMem::default());
+            let mut engine = make_engine("m");
+            engine.memory_enabled = memory_enabled;
+            engine.set_memory_api(counter.clone());
+
+            // Drive the handle the way every session-end writer does.
+            let episode = wcore_memory::v2_types::Episode {
+                id: wcore_memory::v2_types::EpisodeId::new(),
+                tier: wcore_memory::v2_types::Tier::Project,
+                ts: 1_700_000_000,
+                episode_type: "compaction_handoff".into(),
+                summary: "verbatim transcript".into(),
+                atomic_facts: Vec::new(),
+                source: "test".into(),
+                source_product: "wcore-agent-test".into(),
+                session_id: None,
+                project_root: None,
+                decay_score: 1.0,
+                status: wcore_memory::v2_types::EpisodeStatus::Active,
+            };
+            let _ = engine
+                .memory_api()
+                .record_episode(episode, wcore_memory::AccessToken::MainAgent)
+                .await;
+            let _ = engine
+                .memory_api()
+                .assert_fact(
+                    wcore_memory::v2_types::Fact {
+                        id: wcore_memory::v2_types::FactId::new(),
+                        tier: wcore_memory::v2_types::Tier::Project,
+                        ts: 1_700_000_000,
+                        subject: "wayland".into(),
+                        predicate: "uses".into(),
+                        object: "tokio".into(),
+                        confidence: 0.7,
+                        source_episode: None,
+                        superseded_by: None,
+                    },
+                    wcore_memory::AccessToken::System,
+                )
+                .await;
+            (
+                counter
+                    .episode_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                counter
+                    .fact_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+
+        let (episodes, facts) = writes_through(false).await;
+        assert_eq!(
+            (episodes, facts),
+            (0, 0),
+            "a host must not be able to reinstate durable writes for a user \
+             who set `[memory] enabled = false`"
+        );
+
+        let (episodes, facts) = writes_through(true).await;
+        assert_eq!(
+            (episodes, facts),
+            (1, 1),
+            "and a host MUST still be able to install a real backend when \
+             memory is on — without this half the refusal above is satisfied \
+             by `set_memory_api` being broken outright"
         );
     }
 
