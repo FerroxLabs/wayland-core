@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -137,6 +137,40 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
     let path = input["path"].as_str().unwrap_or(".");
     let glob_pattern = input["glob"].as_str();
     let case_insensitive = input["case_insensitive"].as_bool().unwrap_or(false);
+
+    // #661, Windows half. The exit-code discipline in `try_ripgrep`/`try_grep`
+    // is what stops an unreadable or absent target being reported as a clean
+    // "No matches found" — the failure that let a model conclude a symbol was
+    // undefined and safe to delete. POSIX `grep` and `rg` support it by exiting
+    // 2 on a target they cannot open. `findstr` does NOT: measured on Windows
+    // (`findstr /S /N /R /C:needle "..\escape\*"`) it exits 1 with EMPTY
+    // stderr, byte-for-byte indistinguishable from a genuine no-match, so no
+    // amount of exit-code or stderr inspection downstream can recover the
+    // difference. The `#[cfg(unix)]` gate on `try_grep_reports_real_error_not_
+    // no_matches` recorded that gap rather than closing it.
+    //
+    // Prove the target exists here instead, before any backend is chosen, so
+    // the answer is the same on all three platforms and does not depend on
+    // which of the three search binaries happens to be installed.
+    let resolved = match search_root {
+        Some(root) => root.join(path),
+        None => PathBuf::from(path),
+    };
+    match tokio::fs::try_exists(&resolved).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ToolResult {
+                content: format!("grep error: no such file or directory: {path}"),
+                is_error: true,
+            };
+        }
+        Err(error) => {
+            return ToolResult {
+                content: format!("grep error: cannot access {path}: {error}"),
+                is_error: true,
+            };
+        }
+    }
 
     // Try ripgrep first, fallback to grep.
     match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {
@@ -481,6 +515,38 @@ mod tests {
             result.content.contains(marker),
             "relative '.' grep must find the marker inside the jail root, got: {}",
             result.content
+        );
+    }
+
+    /// #661 mutation-kill. The `try_exists` pre-check in `run_grep` is the only
+    /// thing that makes a missing target an error *identically on all three
+    /// platforms*: `rg`/POSIX `grep` exit >=2, but `findstr` exits 1 with empty
+    /// stderr, indistinguishable from a clean no-match.
+    ///
+    /// The lane's mutation run reported `grep-target-exists` as SURVIVED —
+    /// deleting the pre-check failed no test, because the backend tests call
+    /// `try_grep` directly and on Unix the backend still errors on its own. So
+    /// this asserts the exact message ONLY the pre-check emits. Assert on
+    /// `is_error` alone and the mutant survives again.
+    #[tokio::test]
+    async fn run_grep_pre_check_rejects_missing_target_on_every_platform() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = json!({
+            "pattern": "anything",
+            "path": "this_path_does_not_exist_4c81de.txt",
+        });
+        let out = run_grep(&input, Some(dir.path())).await;
+
+        assert!(
+            out.is_error,
+            "a missing target must be an error: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("no such file or directory"),
+            "the pre-check must own this refusal on every platform, not the \
+             backend's exit code (which findstr cannot provide); got: {}",
+            out.content
         );
     }
 }

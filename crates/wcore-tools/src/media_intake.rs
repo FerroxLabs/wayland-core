@@ -529,12 +529,26 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
         for parent in path.ancestors().skip(1) {
-            let metadata =
-                std::fs::symlink_metadata(parent).map_err(|e| IntakeError::OpenComponent {
+            let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
+                // Same rule the unix walk states above, and it was missing
+                // here: a missing ancestor is "not found" as the user means
+                // it, not a component-open failure. Without this branch a
+                // simply absent file reported `Cannot open audio path
+                // component in C:\nonexistent\path: ... (os error 3)` on
+                // Windows while every other media surface — and unix — says
+                // `File not found: <path>`. That is exactly the wording
+                // regression `IntakeError::NotFound` exists to prevent, and it
+                // also named the PARENT rather than the path the caller asked
+                // for.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return IntakeError::NotFound(path.to_path_buf());
+                }
+                IntakeError::OpenComponent {
                     noun,
                     path: parent.to_path_buf(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(IntakeError::Symlink(parent.to_path_buf()));
             }

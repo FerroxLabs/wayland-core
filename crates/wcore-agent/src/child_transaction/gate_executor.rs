@@ -477,8 +477,23 @@ mod tests {
             env,
             "rustc:1.999.0",
             inputs,
-            vec![PathBuf::from("/srv/wayland/private/scratch")],
+            // Platform-shaped for the same reason as the candidate root in
+            // `fails_closed_at_each_gate_execution_stage`: every writable root
+            // must be absolute, and `Path::is_absolute` demands a drive or UNC
+            // prefix on Windows. Never created on disk.
+            vec![private_scratch_root()],
         )
+    }
+
+    /// Absolute, non-denied private writable root for these fixtures, in one
+    /// place so no case re-derives it. Mirrors `wcore_sandbox`'s
+    /// `hard_fixture_root`.
+    fn private_scratch_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\srv\wayland\private\scratch")
+        } else {
+            PathBuf::from("/srv/wayland/private/scratch")
+        }
     }
 
     fn requirement(gate_id: &str, closure_digest: &str) -> ChildGateRequirement {
@@ -638,8 +653,20 @@ mod tests {
         // Stage 5 — containment mint refuses on a non-containing backend, using a
         // real absolute candidate root outside any denied location so stages 3/4
         // pass and the mint stage is the one that refuses.
+        //
+        // Absoluteness is platform-defined: `/srv/...` is absolute on unix but
+        // NOT on Windows, where `Path::is_absolute` demands a drive or UNC
+        // prefix. A unix-shaped literal here makes `HardContainmentFilesystem`
+        // refuse at stage 3, so the assertion below would pass on unix and fail
+        // on Windows against a stage-5 guard that is in fact correct on both.
+        // Same fixture defect, same fix, as `wcore_sandbox`'s
+        // `hard_fixture_root`. The path is never created on disk.
         let live = FakeCandidate {
-            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
+            root: Ok(if cfg!(windows) {
+                PathBuf::from(r"C:\srv\wayland\candidate\checkout")
+            } else {
+                PathBuf::from("/srv/wayland/candidate/checkout")
+            }),
         };
         let error = executor
             .execute_gate(

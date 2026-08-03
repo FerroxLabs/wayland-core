@@ -1526,6 +1526,22 @@ mod tests {
         ));
     }
 
+    /// A receipt path that is ABSOLUTE on the platform the test runs on.
+    ///
+    /// `FilesystemEffectReceiptV1::validate` routes its path through
+    /// `validate_user_path`, which refuses a non-absolute path — and `/workspace`
+    /// is absolute on unix but NOT on Windows, where `Path::is_absolute` demands
+    /// a drive or UNC prefix. A unix-shaped literal therefore made the receipt
+    /// fail validation on Windows for a reason that has nothing to do with the
+    /// durability property under test.
+    fn workspace_file() -> &'static str {
+        if cfg!(windows) {
+            r"C:\workspace\file.txt"
+        } else {
+            "/workspace/file.txt"
+        }
+    }
+
     #[test]
     fn filesystem_receipt_is_durable_and_unknown_can_reconcile_not_started() {
         let fixture = fixture();
@@ -1534,13 +1550,14 @@ mod tests {
             reconciler: Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into()),
         };
         let intended = b"new";
+        let path = workspace_file();
         let receipt = json!({
             "version": 1,
             "reconciler": wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER,
-            "path": "/workspace/file.txt",
+            "path": path,
             "preparation_object": {
                 "authority": "in-memory:test",
-                "path": "/workspace/file.txt",
+                "path": path,
                 "parent": "in-memory-parent:/workspace"
             },
             "precondition": { "state": "absent" },
@@ -1555,8 +1572,8 @@ mod tests {
                 "provider-call-fs",
                 8,
                 "Write",
-                json!({"file_path":"/workspace/file.txt","content":"new"}),
-                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                json!({"file_path": path, "content":"new"}),
+                json!({"file_path": path, "content":"new"}),
                 contract.clone(),
                 receipt.clone(),
             )

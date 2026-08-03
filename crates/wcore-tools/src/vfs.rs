@@ -28,8 +28,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(unix)]
-use std::ffi::{CString, OsStr};
-#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(any(unix, windows))]
+use std::ffi::OsStr;
+#[cfg(any(unix, windows))]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -408,7 +410,11 @@ fn observe_real_file(path: &Path) -> Result<IdentifiedFileObservation, VfsError>
     {
         observe_real_file_unix(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        observe_real_file_windows(path)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Err(VfsError::Io(io::Error::new(
@@ -487,7 +493,7 @@ fn observe_real_file_unix(path: &Path) -> Result<IdentifiedFileObservation, VfsE
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn canonical_existing_ancestor<'a>(
     requested: &'a Path,
     original: &Path,
@@ -537,7 +543,7 @@ fn openat_file(parent: &fs::File, name: &OsStr, flags: i32, mode: u32) -> io::Re
     Ok(unsafe { fs::File::from_raw_fd(descriptor) })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn ensure_directory(metadata: &fs::Metadata, path: &Path) -> io::Result<()> {
     if metadata.is_dir() {
         Ok(())
@@ -616,6 +622,549 @@ fn observe_unix_file(
             path: object_path,
             parent: parent_identity,
             file: Some(unix_identity_token(&metadata)),
+        },
+        contents: Some(bytes),
+    })
+}
+
+/// Windows half of [`observe_real_file`].
+///
+/// Structurally identical to [`observe_real_file_unix`], including its refusal
+/// set: the parent directory is canonicalized and retained as a handle, the
+/// leaf is opened RELATIVE to that retained handle, reparse points are opened
+/// rather than followed, and a directory, a reparse point, or a multiply-linked
+/// file is refused outright.
+///
+/// The relative open is `NtCreateFile` with `RootDirectory` set to the retained
+/// parent handle — the only `openat` equivalent Windows offers, and the same
+/// primitive `wcore_sandbox::DirectoryAuthority` already uses for its
+/// handle-rooted child operations. Re-opening `canonical_parent.join(leaf)` by
+/// pathname would have been shorter, but it would leave the parent-directory
+/// substitution window that the recorded parent identity exists to close: the
+/// bytes would come from one directory object and the parent token from
+/// another. A receipt whose two halves can disagree is exactly the "matching
+/// bytes alone resolved an uncertain effect" failure this module forbids.
+#[cfg(windows)]
+fn observe_real_file_windows(path: &Path) -> Result<IdentifiedFileObservation, VfsError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let normalized = lex_normalize(&absolute, Path::new(""));
+    let leaf = normalized.file_name().ok_or_else(|| {
+        VfsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("file observation requires a file name: {path:?}"),
+        ))
+    })?;
+    let requested_parent = normalized.parent().ok_or_else(|| {
+        VfsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("file observation requires a parent directory: {path:?}"),
+        ))
+    })?;
+
+    match fs::canonicalize(requested_parent) {
+        Ok(parent_path) => {
+            let parent = open_windows_directory(&parent_path)?;
+            let metadata = parent.metadata()?;
+            ensure_directory(&metadata, &parent_path)?;
+            observe_windows_file(&parent, &parent_path, leaf)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let (anchor_path, suffix) = canonical_existing_ancestor(requested_parent, path)?;
+            let anchor = open_windows_directory(&anchor_path)?;
+            let metadata = anchor.metadata()?;
+            ensure_directory(&metadata, &anchor_path)?;
+            let resolved_parent = anchor_path.join(suffix);
+            Ok(IdentifiedFileObservation {
+                observation: FileObservation::Absent,
+                object: FileObjectIdentity {
+                    authority: windows_authority(&windows_object_identity(&anchor)?),
+                    path: resolved_parent.join(leaf),
+                    parent: None,
+                    file: None,
+                },
+                contents: None,
+            })
+        }
+        Err(error) => Err(VfsError::Io(error)),
+    }
+}
+
+/// Open an already-canonical directory as a retained handle.
+///
+/// `FILE_FLAG_BACKUP_SEMANTICS` is what makes a directory openable at all on
+/// Windows. `FILE_FLAG_OPEN_REPARSE_POINT` is defence in depth: `canonicalize`
+/// has already resolved every reparse point, so a reparse point observed here
+/// means one was planted between the two calls — opening the link itself turns
+/// that into a refusal (the `is_dir` check below fails) instead of a silent
+/// traversal.
+#[cfg(windows)]
+fn open_windows_directory(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Everything the identity token and the type refusals are derived from, read
+/// once from a single retained handle.
+#[cfg(windows)]
+struct WindowsObjectIdentity {
+    volume_serial: u32,
+    file_index: u64,
+    /// 128-bit `FILE_ID_INFO` identity. `None` where the volume cannot serve it
+    /// (`GetFileInformationByHandleEx(FileIdInfo)` is not universal); the token
+    /// records that explicitly so a receipt written with one is never silently
+    /// compared against a receipt written without.
+    file_id: Option<[u8; 16]>,
+    attributes: u32,
+    links: u32,
+}
+
+#[cfg(windows)]
+fn windows_object_identity(handle: &fs::File) -> Result<WindowsObjectIdentity, VfsError> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx,
+    };
+
+    // SAFETY: `BY_HANDLE_FILE_INFORMATION` is plain-old-data with no invalid
+    // bit patterns, and it is fully written by the call below before it is read.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: `handle` keeps the OS handle valid for the call and `information`
+    // is a writable, correctly sized output buffer.
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut information) } == 0 {
+        return Err(VfsError::Io(io::Error::last_os_error()));
+    }
+
+    // SAFETY: `FILE_ID_INFO` is plain-old-data with no invalid bit patterns.
+    let mut id_information = unsafe { std::mem::zeroed::<FILE_ID_INFO>() };
+    // SAFETY: `handle` stays valid for the call; the pointer/length pair
+    // describes exactly the `FILE_ID_INFO` the kernel writes.
+    let has_file_id = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::addr_of_mut!(id_information).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+
+    Ok(WindowsObjectIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+        file_id: has_file_id.then_some(id_information.FileId.Identifier),
+        attributes: information.dwFileAttributes,
+        links: information.nNumberOfLinks,
+    })
+}
+
+/// The Windows analogue of `real_fs_authority`.
+///
+/// Unix anchors the authority to the root filesystem's `dev`/`ino`. Windows has
+/// no single root, so the volume the observation was taken on plays that role:
+/// a receipt prepared on one volume can never be reconciled against a same-named
+/// path on another.
+#[cfg(windows)]
+fn windows_authority(identity: &WindowsObjectIdentity) -> String {
+    format!("realfs:windows:{}", identity.volume_serial)
+}
+
+/// Windows analogue of `unix_identity_token`.
+///
+/// `FILE_ATTRIBUTE_ARCHIVE` and `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` are masked
+/// out deliberately. Unix folds `mode`/`uid`/`gid` into its token because those
+/// are stable, security-relevant properties of the object. The two Windows bits
+/// masked here are neither: `ARCHIVE` is set by any ordinary write and cleared
+/// by any backup agent, and `NOT_CONTENT_INDEXED` is toggled by the search
+/// indexer — both flip on a file no user or agent touched, which would turn
+/// routine background activity into spurious `Conflict` reconciliations.
+#[cfg(windows)]
+fn windows_identity_token(identity: &WindowsObjectIdentity) -> String {
+    const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x0000_0020;
+    const FILE_ATTRIBUTE_NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+
+    let file_id = match identity.file_id {
+        Some(bytes) => format!("{:032x}", u128::from_be_bytes(bytes)),
+        None => "none".to_owned(),
+    };
+    format!(
+        "windows-v1:{}:{}:{}:{}:{:x}",
+        identity.volume_serial,
+        identity.file_index,
+        file_id,
+        identity.links,
+        identity.attributes & !(FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED),
+    )
+}
+
+/// Direct proof for [`windows_identity_token`], which no filesystem-level test
+/// can force.
+///
+/// Two of the five inputs to the token are attribute bits that flip on a file
+/// nobody touched, and the token is not allowed to notice them; every other
+/// input IS an identity and the token must notice all of them. A test that
+/// only writes real files cannot force `ARCHIVE` off, cannot choose a volume
+/// serial, and cannot make a volume decline `FILE_ID_INFO` — so a token that
+/// masked the wrong bits, or that collapsed the "this volume has no file id"
+/// case onto a real all-zero id, would pass everything else in this crate.
+#[cfg(all(windows, test))]
+mod windows_identity_token_tests {
+    use super::{WindowsObjectIdentity, windows_authority, windows_identity_token};
+
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+    const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x0000_0020;
+    const FILE_ATTRIBUTE_NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+
+    fn identity() -> WindowsObjectIdentity {
+        WindowsObjectIdentity {
+            volume_serial: 0xDEAD_BEEF,
+            file_index: 0x0000_1234_5678_9ABC,
+            file_id: Some([7_u8; 16]),
+            attributes: FILE_ATTRIBUTE_ARCHIVE,
+            links: 1,
+        }
+    }
+
+    #[test]
+    fn token_ignores_only_the_two_incidental_attribute_bits() {
+        let base = identity();
+        let mut quiesced = identity();
+        quiesced.attributes = 0;
+        let mut indexed = identity();
+        indexed.attributes = FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+
+        assert_eq!(
+            windows_identity_token(&base),
+            windows_identity_token(&quiesced),
+            "a backup agent clearing FILE_ATTRIBUTE_ARCHIVE must not read as a \
+             different object"
+        );
+        assert_eq!(
+            windows_identity_token(&base),
+            windows_identity_token(&indexed),
+            "the search indexer toggling FILE_ATTRIBUTE_NOT_CONTENT_INDEXED \
+             must not read as a different object"
+        );
+    }
+
+    #[test]
+    fn token_notices_every_attribute_bit_that_is_not_masked() {
+        let base = identity();
+        let mut readonly = identity();
+        readonly.attributes |= FILE_ATTRIBUTE_READONLY;
+
+        assert_ne!(
+            windows_identity_token(&base),
+            windows_identity_token(&readonly),
+            "READONLY is a real, security-relevant property of the object and \
+             must not be masked away with the incidental bits"
+        );
+    }
+
+    #[test]
+    fn token_notices_each_identity_input_independently() {
+        let base = identity();
+        let base_token = windows_identity_token(&base);
+
+        let mut other_volume = identity();
+        other_volume.volume_serial = 0x1234_5678;
+        let mut other_index = identity();
+        other_index.file_index = 0x0000_1234_5678_9ABD;
+        let mut other_file_id = identity();
+        other_file_id.file_id = Some([8_u8; 16]);
+        let mut other_links = identity();
+        other_links.links = 2;
+
+        for (name, changed) in [
+            ("volume serial", other_volume),
+            ("file index", other_index),
+            ("file id", other_file_id),
+            ("link count", other_links),
+        ] {
+            assert_ne!(
+                base_token,
+                windows_identity_token(&changed),
+                "the token must distinguish objects differing only in {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_file_id_never_collides_with_a_real_one() {
+        let mut unavailable = identity();
+        unavailable.file_id = None;
+        let mut zeroed = identity();
+        zeroed.file_id = Some([0_u8; 16]);
+
+        assert_ne!(
+            windows_identity_token(&unavailable),
+            windows_identity_token(&zeroed),
+            "\"this volume cannot serve FILE_ID_INFO\" must be recorded \
+             explicitly; folding it onto an all-zero id would let a receipt \
+             written without a file id be compared against one written with"
+        );
+    }
+
+    /// The counted name handed to `NtCreateFile` with a `RootDirectory` must
+    /// be exactly one ordinary component. Anything else would reintroduce the
+    /// ambient pathname walk the retained handle exists to avoid, so it has to
+    /// be refused BEFORE the kernel sees it.
+    #[test]
+    fn relative_open_refuses_anything_that_is_not_one_plain_component() {
+        use super::{open_windows_child_no_follow, open_windows_directory};
+        use std::ffi::OsStr;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("leaf.txt"), b"reachable").unwrap();
+        std::fs::write(root.join("plain.txt"), b"plain").unwrap();
+        let directory = open_windows_directory(&root).unwrap();
+
+        for escaping in [
+            r"sub\leaf.txt",
+            "sub/leaf.txt",
+            "..",
+            r"..\plain.txt",
+            ".",
+            r"C:\Windows\System32\drivers\etc\hosts",
+            "",
+        ] {
+            let error = open_windows_child_no_follow(&directory, OsStr::new(escaping))
+                .err()
+                .unwrap_or_else(|| panic!("{escaping:?} must be refused, not opened"));
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{escaping:?} must be refused as malformed input, not passed to the kernel"
+            );
+        }
+
+        // Positive control: the same call opens an ordinary single component,
+        // so the refusals above are the guard talking and not a broken open.
+        open_windows_child_no_follow(&directory, OsStr::new("plain.txt"))
+            .expect("a plain single-component name must still open");
+    }
+
+    #[test]
+    fn authority_is_volume_scoped() {
+        let base = identity();
+        let mut other_volume = identity();
+        other_volume.volume_serial = 0x1234_5678;
+
+        assert_ne!(
+            windows_authority(&base),
+            windows_authority(&other_volume),
+            "Windows has no single filesystem root, so the volume plays the \
+             role unix gives the root device: a receipt prepared on one volume \
+             must never reconcile against a same-named path on another"
+        );
+        assert_eq!(windows_authority(&base), windows_authority(&identity()));
+    }
+}
+
+/// Open one direct child of a RETAINED directory handle without following a
+/// reparse point and without re-walking any pathname.
+///
+/// `NtCreateFile` resolves `ObjectName` inside `RootDirectory` only, which is
+/// what makes this the `openat` equivalent. `FILE_NON_DIRECTORY_FILE` makes the
+/// kernel refuse a directory at open time and `FILE_OPEN_REPARSE_POINT` opens a
+/// symlink/junction as itself so the caller's attribute check can refuse it.
+#[cfg(windows)]
+fn open_windows_child_no_follow(parent: &fs::File, leaf: &OsStr) -> io::Result<fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, RtlNtStatusToDosError, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+
+    // A counted name handed to `NtCreateFile` with a `RootDirectory` must be
+    // exactly one ordinary component. A separator, a drive prefix or a `..`
+    // would reintroduce the ambient walk this function exists to avoid, so
+    // refuse rather than pass it to the kernel.
+    let mut components = Path::new(leaf).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("file observation requires a single-component file name: {leaf:?}"),
+        ));
+    }
+
+    let mut wide: Vec<u16> = leaf.encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "filesystem name contains an embedded NUL",
+        ));
+    }
+    let byte_len = wide
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file name is too long"))?;
+    let unicode_name = UNICODE_STRING {
+        Length: byte_len,
+        MaximumLength: byte_len,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &unicode_name,
+        // Matching the volume's own rule is load-bearing in BOTH directions: on
+        // an ordinary NTFS directory, omitting the flag would fail to find a
+        // differently-cased name the Win32 layer resolves fine; on a
+        // per-directory case-sensitive one (WSL), setting it would let a
+        // differently-cased sibling answer for the requested name.
+        Attributes: if windows_directory_is_case_sensitive(parent) {
+            0
+        } else {
+            OBJ_CASE_INSENSITIVE
+        },
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    // SAFETY: an out-parameter fully written by `NtCreateFile` before it is read.
+    let mut status_block = unsafe { std::mem::zeroed::<IO_STATUS_BLOCK>() };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: the retained parent handle, the counted name buffer (`wide` is
+    // still owned and alive) and every out-parameter stay valid for the call.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_GENERIC_READ | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: translating an NTSTATUS has no pointer preconditions. The DOS
+        // mapping is what gives the caller a real `ErrorKind::NotFound` for an
+        // absent child rather than an opaque negative status.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    if handle.is_null() {
+        return Err(io::Error::other(
+            "NtCreateFile succeeded without returning a handle",
+        ));
+    }
+    // SAFETY: a successful `NtCreateFile` transfers ownership of exactly one
+    // handle, which `File` now solely owns and closes.
+    Ok(unsafe { fs::File::from_raw_handle(handle) })
+}
+
+/// Whether per-directory case sensitivity is enabled on this directory.
+///
+/// A volume that cannot answer (`FileCaseSensitiveInfo` predates neither every
+/// Windows build nor every filesystem) is reported as case-INSENSITIVE, which
+/// is both the Windows default and exactly what a `Win32` path open would have
+/// done — so an unanswerable probe never resolves a name the ordinary API would
+/// have refused.
+#[cfg(windows)]
+fn windows_directory_is_case_sensitive(directory: &fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileCaseSensitiveInfo, GetFileInformationByHandleEx,
+    };
+
+    const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x1;
+
+    #[repr(C)]
+    struct FileCaseSensitiveInformation {
+        flags: u32,
+    }
+
+    let mut information = FileCaseSensitiveInformation { flags: 0 };
+    // SAFETY: `directory` keeps the handle valid for the call; the pointer and
+    // length describe exactly the structure the kernel writes.
+    let answered = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle(),
+            FileCaseSensitiveInfo,
+            std::ptr::addr_of_mut!(information).cast(),
+            std::mem::size_of::<FileCaseSensitiveInformation>() as u32,
+        )
+    } != 0;
+    answered && information.flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
+}
+
+#[cfg(windows)]
+fn observe_windows_file(
+    parent: &fs::File,
+    parent_path: &Path,
+    leaf: &OsStr,
+) -> Result<IdentifiedFileObservation, VfsError> {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    let parent_identity = windows_object_identity(parent)?;
+    let object_path = parent_path.join(leaf);
+    let authority = windows_authority(&parent_identity);
+    let parent_token = Some(windows_identity_token(&parent_identity));
+
+    let mut file = match open_windows_child_no_follow(parent, leaf) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(IdentifiedFileObservation {
+                observation: FileObservation::Absent,
+                object: FileObjectIdentity {
+                    authority,
+                    path: object_path,
+                    parent: parent_token,
+                    file: None,
+                },
+                contents: None,
+            });
+        }
+        Err(error) => return Err(VfsError::Io(error)),
+    };
+    let identity = windows_object_identity(&file)?;
+    if identity.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || identity.links != 1
+    {
+        return Err(VfsError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CAS target must be a singly-linked regular file",
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(IdentifiedFileObservation {
+        observation: FileObservation::Present(FileContentIdentity::from_bytes(&bytes)),
+        object: FileObjectIdentity {
+            authority,
+            path: object_path,
+            parent: parent_token,
+            file: Some(windows_identity_token(&identity)),
         },
         contents: Some(bytes),
     })

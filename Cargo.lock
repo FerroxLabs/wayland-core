@@ -10406,6 +10406,7 @@ dependencies = [
  "wcore-repomap",
  "wcore-sandbox",
  "wcore-types",
+ "windows-sys 0.59.0",
  "workspace-hack",
  "zip 2.4.2",
 ]
