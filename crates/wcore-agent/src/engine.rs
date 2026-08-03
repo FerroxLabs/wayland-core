@@ -3183,6 +3183,10 @@ impl AgentEngine {
         // tune session-end dream cadence via `[memory] dream_cycle_throttle_secs`.
         let dream_throttle_window =
             std::time::Duration::from_secs(config.memory.dream_cycle_throttle_secs);
+        // #170 — read the EFFECTIVE lifecycle gate (`[memory] enabled = false`
+        // dominates) before `config` is partially moved into the literal below.
+        let skills_lifecycle_effective = config.skills_lifecycle_enabled();
+        let memory_enabled = config.memory.enabled;
 
         Self {
             provider,
@@ -3262,12 +3266,13 @@ impl AgentEngine {
             // construction. The flag is operator-controlled and never
             // flips at runtime; caching here saves a per-turn config
             // dereference on the hot path.
-            // #170 — via the accessor, NOT the raw field: `[memory] enabled =
+            // #170 — the EFFECTIVE gate, not the raw
+            // `observability.skills_lifecycle` field: `[memory] enabled =
             // false` dominates, and this engine may be built from a `Config`
             // that never went through resolution.
-            skills_lifecycle: config.skills_lifecycle_enabled(),
+            skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
-            memory_enabled: config.memory.enabled,
+            memory_enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
@@ -3454,6 +3459,10 @@ impl AgentEngine {
         // `new_with_provider` does. Was previously hardcoded to 1800s.
         let dream_throttle_window =
             std::time::Duration::from_secs(config.memory.dream_cycle_throttle_secs);
+        // #170 — read the EFFECTIVE lifecycle gate (`[memory] enabled = false`
+        // dominates) before `config` is partially moved into the literal below.
+        let skills_lifecycle_effective = config.skills_lifecycle_enabled();
+        let memory_enabled = config.memory.enabled;
 
         Self {
             provider,
@@ -3529,12 +3538,13 @@ impl AgentEngine {
             #[cfg(any(test, feature = "test-utils"))]
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): cache the gate; see new_with_provider note.
-            // #170 — via the accessor, NOT the raw field: `[memory] enabled =
+            // #170 — the EFFECTIVE gate, not the raw
+            // `observability.skills_lifecycle` field: `[memory] enabled =
             // false` dominates, and this engine may be built from a `Config`
             // that never went through resolution.
-            skills_lifecycle: config.skills_lifecycle_enabled(),
+            skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
-            memory_enabled: config.memory.enabled,
+            memory_enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
