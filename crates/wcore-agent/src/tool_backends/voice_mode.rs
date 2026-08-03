@@ -1082,9 +1082,13 @@ mod tests {
     /// grandchild that outlives it.
     fn delayed_marker_command(secs: u32, marker: &Path) -> (String, Vec<String>) {
         let m = marker.display().to_string();
+        // No `return`: after cfg-stripping this block IS the tail expression
+        // on Windows, exactly as the `not(windows)` arm below is on Unix.
+        // Writing it as an early return tripped `clippy::needless_return`,
+        // which only a Windows clippy can see.
         #[cfg(windows)]
         {
-            return (
+            (
                 "powershell".to_string(),
                 vec![
                     "-NoProfile".to_string(),
@@ -1093,7 +1097,7 @@ mod tests {
                         "Start-Sleep -Seconds {secs}; Set-Content -LiteralPath '{m}' -Value done"
                     ),
                 ],
-            );
+            )
         }
         #[cfg(not(windows))]
         {
