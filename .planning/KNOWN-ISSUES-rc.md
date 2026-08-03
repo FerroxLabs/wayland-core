@@ -134,12 +134,30 @@ diverged on **every** run. It could not pass.
 
 - **The credential ladder is unproven against a real OS keyring.** It landed
   2026-08-01 with test coverage but no live keyring exercise on any platform.
-- **OAuth tokens are stored in plaintext**, despite documentation describing them
-  as encrypted. On Windows the permission hardening is a no-op. **[PENDING WAVE —
-  still open at `b8d51309`.]** A repair lane exists and was **rejected**, not merged:
-  it missed a third consumer that would render a signed-in user "Not configured", and
-  it carried a one-way migration cliff that signs the user out with the cleartext file
-  already consumed. Do not read the marker as "fixed shortly".
+- ~~OAuth tokens are stored in plaintext, despite documentation describing them
+  as encrypted.~~ **FIXED — verified in the tree, not inferred from a branch name.**
+  `OAuthStorage::store_serialized` (`crates/wcore-agent/src/oauth/storage.rs:131`)
+  runs **write-secure → verify-readback → remove-cleartext**, in that order: it
+  puts through the credential ladder, fails closed with
+  `NoSecureBackend` if neither keyring nor vault is available (it does **not**
+  fall back to a file), reads the value back from the store rather than trusting
+  `put` returning `Ok` — a keyring that silently truncates an oversized blob
+  returns `Ok` and hands back something else — and only then deletes the legacy
+  cleartext copy. `docs/advanced.md` ("there is no cleartext rung") is accurate.
+
+  **This entry previously said the opposite, and it was wrong.** The rejected
+  repair lane it described was superseded by one that landed. A known-issues
+  file that invents a credential-security failure is the same defect class as
+  the product hiding one — it is disclosure that cannot be trusted either way.
+  Verified by reading the merged source, because the branch-ancestry check that
+  first raised the alarm is the wrong instrument: work can land under a
+  different branch than the one a plan named.
+
+  Residual, genuinely open: migration off the legacy file is **one-way**. Run
+  once with the vault unlocked and the token moves and the cleartext copy is
+  deleted; run again without the passphrase and neither tier can return it. The
+  code refuses rather than presenting a signed-in user as signed-out, but keep
+  your vault passphrase available the first time you run v0.12.26.
 - ~~`plugins.toml` is never loaded from disk, though docs and error strings instruct
   you to edit it.~~ **FIXED — `7075e6f8`.** `bootstrap.rs` constructed
   `PluginsConfig::default()` and never opened the file, so `enabled = false` did not
