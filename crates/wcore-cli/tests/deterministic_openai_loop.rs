@@ -823,6 +823,24 @@ fn workspace_stable_artifact(value: &impl Serialize, workspace: &Path) -> Vec<u8
     serde_json::to_vec(&value).expect("normalized fixture artifact serialization")
 }
 
+/// Does a recorded tool `input`/`output` field still carry the real workspace
+/// path?
+///
+/// A tool call's `input` is a JSON document, so a Windows path's backslashes
+/// arrive escaped (`C:\\Users\\...`) and a plain `contains` of the raw path
+/// (`C:\Users\...`) can never match — the assertion failed for the encoding, not
+/// for a missing path. `output` is plain text, so the raw form has to keep
+/// matching too. Accept either encoding of the SAME path; on Unix the two forms
+/// are identical, so this is a no-op there and cannot weaken the check on any
+/// platform: an absent path matches neither.
+fn retains_path(haystack: &str, path: &str) -> bool {
+    if haystack.contains(path) {
+        return true;
+    }
+    let encoded = serde_json::Value::String(path.to_owned()).to_string();
+    haystack.contains(&encoded[1..encoded.len() - 1])
+}
+
 async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     let artifact = sealed_f04_binary();
     let repository = SeededRepository::new([
@@ -940,19 +958,19 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     let edit = &result.trace.entries[1];
     let mcp_call = &result.trace.entries[2];
     assert!(
-        read.input.contains(workspace_text.as_ref()),
+        retains_path(&read.input, workspace_text.as_ref()),
         "Read input did not retain {}: {}",
         workspace.display(),
         read.input
     );
     assert!(
-        edit.input.contains(workspace_text.as_ref()),
+        retains_path(&edit.input, workspace_text.as_ref()),
         "Edit input did not retain {}: {}",
         workspace.display(),
         edit.input
     );
     assert!(
-        edit.output.contains(workspace_text.as_ref()),
+        retains_path(&edit.output, workspace_text.as_ref()),
         "Edit output did not retain {}: {}",
         workspace.display(),
         edit.output

@@ -1,0 +1,91 @@
+RETRY-MASKING CENSUS — every `FLAKY` line in two consecutive full CI runs
+=========================================================================
+
+Question: is `[profile.ci] retries = 2` turning red into green anywhere other
+than the six Windows tests this lane was sent to re-measure?
+
+Answer: YES. Twelve retried-away failures across two runs, on TWO platforms,
+and not one of them left a diagnostic behind.
+
+Method: `gh run view -R FerroxLabs/wayland-core --job <id> --log`, then grep for
+`FLAKY` and the `Summary [` line. All six job logs pulled in full; counts below
+are from those logs, not from any dashboard.
+
+`FLAKY n/3` reads: passed on attempt n of a maximum of 3. So `FLAKY 2/3` is one
+failure, `FLAKY 3/3` is TWO consecutive failures. The summary line counts every
+one of them in the PASSED total.
+
+
+RUN A — 30698794888 @ 2280e205
+------------------------------
+job 91366049013  CI (Array) = self-hosted Windows msvc
+    2 flaky
+    FLAKY 2/3  wcore-swarm::dispatch_smoke dispatches_4_noop_workers_in_parallel
+    FLAKY 3/3  wcore-swarm::worker_runtime_limits
+               multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+job 91366049004  CI (linux-containerized)
+    0 flaky
+    Summary [672.559s] 13775 tests run: 13774 passed (2 slow, 2 leaky), 1 failed
+    Summary [655.249s] 13775 tests run: 13774 passed (2 slow, 1 leaky), 1 failed
+
+job 91366049041  CI (macos-latest)
+    4 flaky
+    Summary [807.846s] 13718 tests run: 13700 passed (4 flaky, 1 leaky), 18 failed
+    FLAKY 3/3  wcore-cli::child_authority_corpus corpus_egress
+    FLAKY 2/3  wcore-cli::child_authority_corpus corpus_filesystem
+    FLAKY 3/3  wcore-cli::child_authority_corpus corpus_fan_out
+    FLAKY 2/3  wcore-cli::child_authority_corpus corpus_secret
+
+
+RUN B — 30699019736 @ 02575b6f
+------------------------------
+job 91372229704  CI (Array) = self-hosted Windows msvc
+    6 flaky
+    Summary [374.824s] 13379 tests run: 13346 passed (2 slow, 6 flaky, 2 leaky), 33 failed
+    FLAKY 2/3  wcore-cli::deterministic_openai_loop
+               packaged_core_recovers_after_two_503_responses
+    FLAKY 2/3  wcore-swarm::dispatch_smoke
+               required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state
+    FLAKY 2/3  wcore-swarm::dispatch_smoke
+               malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+    FLAKY 2/3  wcore-swarm::dispatch_smoke
+               public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state
+    FLAKY 3/3  wcore-swarm::dispatch_smoke dispatches_4_noop_workers_in_parallel
+    FLAKY 3/3  wcore-swarm::worker_runtime_limits
+               multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+job 91372229623  CI (linux-containerized)
+    0 flaky
+    Summary [666.169s] 13775 tests run: 13775 passed (3 slow, 2 leaky), 74 skipped
+
+job 91372229627  CI (macos-latest)
+    0 flaky
+    Summary [850.303s] 13718 tests run: 13700 passed (1 leaky), 18 failed
+
+
+THE DIAGNOSTIC IS GONE
+----------------------
+Counted directly in job 91372229704's log:
+
+    grep -c 'FLAKY'   ->  6
+    grep -c 'TRY 3'   -> 66      (final failures, printed)
+    grep -c 'TRY 1'   ->  0
+    grep -c 'TRY 2'   ->  0
+
+Those six FLAKY lines account for at least eight failed attempts (four of them
+from the two `3/3` rows). Not one printed a TRY line, a panic message, or any
+captured stdout/stderr. Cause: `[profile.ci] status-level = "fail"` prints only
+a test's FINAL status. Fixed in this lane by moving it to `"retry"`; the
+`default` ("pass") and `eval` ("all") profiles were already above that level.
+
+
+THE TWO ROWS THAT ARE NOT FLAKY AT ALL
+--------------------------------------
+`multi_worker_output_exhaustion_fails_without_retaining_buffers` was FLAKY 3/3
+in BOTH runs: four consecutive failed attempts, reported as passed twice.
+
+`wcore-cli::child_authority_corpus corpus_egress` and `corpus_fan_out` were
+FLAKY 3/3 on macOS in run A — same shape, different platform, and nobody has
+looked at them either. They are NOT in this lane's six and are recorded here so
+the next reader does not have to rediscover them.

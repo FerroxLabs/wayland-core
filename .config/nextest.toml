@@ -190,7 +190,46 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # In CI: always show output for failed tests, machine-readable JUnit
 failure-output = "immediate-final"
 success-output = "never"
-status-level = "fail"
+# `"retry"`, NOT `"fail"`. This is the profile every CI leg runs under, so it is
+# the only nextest output anyone ever reads — and with `"fail"` a retried-away
+# failure left NO trace of itself at all.
+#
+# MEASURED on Windows CI run 30699019736, job 91372229704 (the `CI (Array)`
+# leg). Its log contains:
+#     6  `FLAKY` lines
+#    66  `TRY 3 FAIL` lines
+#     0  `TRY 1` lines
+#     0  `TRY 2` lines
+# `FLAKY 3/3` means the test failed TWICE and passed on the third attempt, so
+# those six lines account for at least eight failed attempts whose panic
+# message, stdout and stderr were all discarded. One of them,
+# `wcore-swarm::worker_runtime_limits
+# multi_worker_output_exhaustion_fails_without_retaining_buffers`, was
+# `FLAKY 3/3` in that run AND in run 30698794888 before it — four consecutive
+# failed attempts, no diagnostic surviving from any of them, and the summary
+# line counted it as passed both times.
+#
+# nextest's status levels are ordered
+#   none < fail < retry < slow < leak < pass < skip < all
+# so `"fail"` prints only the FINAL status. `"retry"` adds every intermediate
+# attempt with its captured output. REPRODUCED BOTH DIRECTIONS on hetzner-dsm
+# against a purpose-built test that fails on attempt 1 and passes on attempt 2,
+# same binary, same `retries = 2`, only this key changed:
+#   status-level = "fail"   -> `Summary ... 1 passed (1 flaky)` and
+#                              `FLAKY 2/3`. Nothing else. No TRY line, no panic
+#                              message, no stderr.
+#   status-level = "retry"  -> `TRY 1 FAIL`, the captured stdout/stderr, the
+#                              `deliberate failure on attempt 1` panic, then
+#                              `TRY 2 PASS`.
+# The other two retrying profiles were checked and are already safe: `default`
+# is at `"pass"` and `eval` at `"all"`, both of which sit above `"retry"` in
+# that order (verified by running the same probe under `"pass"` -- TRY 1 FAIL
+# printed).
+#
+# This changes ONLY what is printed. No test, timeout, retry count or selector
+# moves. It costs some log volume on a run with retries in it; a run with no
+# retries prints exactly what it printed before.
+status-level = "retry"
 final-status-level = "all"
 # Retry flaky tests up to 2 times in CI
 retries = 2
