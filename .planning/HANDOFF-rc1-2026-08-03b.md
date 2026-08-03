@@ -57,9 +57,20 @@ rtk proxy gh run view --job 91642878748 -R FerroxLabs/wayland-core --log-failed
 into something that demands a run ID and fails with `rtk: Run ID required`.
 Cost me two attempts.
 
-A 1m04s failure in a job whose first act is a docker image build is far more
-likely to be setup than tests — the same shape as the SBOM one. Do not assume
-it is a product defect until the log says so.
+**Narrowed, before you even open it.** That job's first real step builds its CI
+image from an inline Dockerfile (`ci.yml:1119`) which does `apt-get update`,
+installs nine packages, then `cargo install cargo-nextest` **and**
+`cargo install cargo-audit` from source. On a cold runner with no layer cache
+those two installs alone are several minutes. **The job died at 1m04s — before
+the image could possibly have finished building.** So the failure is in the
+host free-space cleanup, the checkout, or the `docker build` itself. It is
+almost certainly not a test and not a product defect. Look at the first two or
+three steps, not the bottom of the log.
+
+(Verified while writing this: the container image explicitly installs
+`libdbus-1-dev … pkg-config`, which is why the SBOM job running bare on
+`ubuntu-latest` is the only Linux job that hits the dbus gap. Same root
+cause family, different job, different fix.)
 
 ---
 
