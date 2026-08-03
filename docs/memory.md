@@ -112,6 +112,23 @@ Note that a present `[memory]` table that omits `enabled` also leaves memory
 impl so the two cannot disagree (`config.rs:518-523`). Writing `[memory]` on its
 own does not disable anything.
 
+`enabled = false` also switches off `[observability] skills_lifecycle`, which
+otherwise defaults **on**. That switch drives the learn-and-evolve pipeline, and
+every one of its effects is a durable artifact derived from your session — the
+skill drafter writes candidate skills under `$WAYLAND_HOME/skills/`, and the
+curator, the procedural telemetry sink and the user-model inferencer all write
+through memory. So the memory opt-out is an opt-out of all of it; you do not
+have to find a second switch. (The reverse does not hold: turning the lifecycle
+off on its own leaves ordinary memory working — see
+[advanced.md](advanced.md).)
+
+Until v0.12.26 that was not true. `enabled = false` was ORed with the
+lifecycle default, so the opt-out opened a real store anyway, registered the
+`record_episode` and `assert_fact` write tools, and ran auto-memorize at every
+session end. If you set it before v0.12.26 and expected nothing to be written,
+check `~/.wayland` and your project's memory directory for content recorded in
+that window.
+
 ### Where files live
 
 | Path                                                       | Contents                                  |

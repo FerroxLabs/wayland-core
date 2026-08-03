@@ -20785,6 +20785,56 @@ mod hook_integration_tests {
              refusal above proves nothing"
         );
     }
+
+    /// #170 — the engine's cached skills-lifecycle gate must come from the
+    /// EFFECTIVE value (`Config::skills_lifecycle_enabled()`), not the raw
+    /// `observability.skills_lifecycle` field.
+    ///
+    /// This is the path the bootstrap test cannot reach. Bootstrap forces
+    /// `skills_lifecycle = false` on its own config when memory ends up
+    /// unconstructed (the F05 fail-closed block), so a bootstrapped engine is
+    /// correct either way. An engine built DIRECTLY from a `Config` — which is
+    /// public API, and what a programmatic host does — gets no such
+    /// correction: with the raw field it would cache `true` and keep running
+    /// the per-turn skill-draft path and the session-end `Curator`, both of
+    /// which write durable artifacts derived from the user's session, for a
+    /// user who set `[memory] enabled = false`.
+    ///
+    /// A mutation run is what surfaced this. Dropping `&& self.memory.enabled`
+    /// from the accessor left every other test in this change green, because
+    /// none of them read the accessor — the gate had no coverage at all. This
+    /// test exists to kill that mutant.
+    #[test]
+    fn engine_caches_the_effective_lifecycle_gate_not_the_raw_field() {
+        fn build(memory_enabled: bool) -> super::AgentEngine {
+            let mut config = wcore_config::config::Config {
+                api_key: "sk-test".into(),
+                ..Default::default()
+            };
+            config.memory.enabled = memory_enabled;
+            // The stock default, restated so the test fails loudly if it ever
+            // changes rather than silently proving nothing.
+            config.observability.skills_lifecycle = true;
+            super::AgentEngine::new_with_provider(
+                Arc::new(NullProvider),
+                config,
+                ToolRegistry::new(),
+                Arc::new(NullSink),
+            )
+        }
+
+        assert!(
+            !build(false).skills_lifecycle,
+            "`[memory] enabled = false` must switch the lifecycle gate off \
+             even when the engine is built straight from a Config that never \
+             went through resolution or bootstrap"
+        );
+        assert!(
+            build(true).skills_lifecycle,
+            "and a stock config must keep it on — otherwise the assertion \
+             above is satisfied by a gate that is simply always closed"
+        );
+    }
 }
 
 #[derive(Debug)]
