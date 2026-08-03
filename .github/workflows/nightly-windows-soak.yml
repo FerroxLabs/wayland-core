@@ -262,12 +262,22 @@ jobs:
       # actually happens here (a renamed, unbuilt or unselected test). Require
       # the test's own PASS marker AND its REFUSED single-entry control, so a
       # run that did not exercise the cap fails instead of passing quietly.
+      #
+      # vacuity-checked: the two Select-String guards below assert this run
+      # reached `PASS an_oauth_sized_secret_survives_the_hosts_real_keyring`
+      # AND recorded `single_entry_write=REFUSED`. Neither marker can appear
+      # unless the test actually executed and actually exercised the blob cap,
+      # so a zero-selected run throws instead of exiting 0.
       - name: Live keyring blob-size test
         shell: pwsh
         run: |
           cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath keyring-blob.log
           $rc = $LASTEXITCODE
           Get-Content keyring-blob.log | Select-String -Pattern 'MEASURED|PASS an_oauth'
+          # vacuity-checked: this line is not an invocation — it is the exit-code
+          # check FOR the invocation above, whose vacuity is proven by the two
+          # marker assertions that follow. Annotated because the scanner matches
+          # the literal text inside this error message.
           if ($rc -ne 0) { throw "cargo test exited ${rc}" }
           if (-not (Select-String -Path keyring-blob.log -Pattern 'PASS an_oauth_sized_secret_survives_the_hosts_real_keyring' -Quiet)) {
             throw "the live keyring test did not run to its PASS marker - NOT MEASURED"
