@@ -140,6 +140,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `libdbus-sys`'s build.rs runs pkg-config and calls `panic!` outright
+      # when it cannot find dbus — it does not degrade, so the whole compile
+      # of `wcore-eval-scenarios --test sbom_contract` dies before a single
+      # test is collected and this job reports a determinism failure that has
+      # nothing to do with determinism. ubuntu-latest does not ship the -dev
+      # headers. The other Linux jobs build inside a container image that
+      # already has them; this one runs bare on the host, which is why it is
+      # the only place the gap shows.
+      - name: Install dbus headers (libdbus-sys build dependency)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       # nextest with an EXPLICIT `--no-tests=fail`, not `cargo test`: a run that
       # collects ZERO tests must exit non-zero instead of printing
       # `test result: ok. 0 passed` and exiting 0. A byte-determinism contract
