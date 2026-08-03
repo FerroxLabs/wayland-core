@@ -6231,12 +6231,17 @@ mod tests {
     #[test]
     fn memory_opt_out_dominates_skills_lifecycle_at_resolution() {
         fn resolve(memory_enabled: bool, skills_lifecycle: Option<bool>) -> Config {
-            let mut merged = ConfigFile::default();
-            merged.memory = Some(MemoryConfig {
-                enabled: memory_enabled,
-                ..MemoryConfig::default()
-            });
-            merged.observability.skills_lifecycle = skills_lifecycle;
+            let merged = ConfigFile {
+                memory: Some(MemoryConfig {
+                    enabled: memory_enabled,
+                    ..MemoryConfig::default()
+                }),
+                observability: ObservabilityFileConfig {
+                    skills_lifecycle,
+                    ..ObservabilityFileConfig::default()
+                },
+                ..ConfigFile::default()
+            };
             let files = ResolvedConfigFiles {
                 merged,
                 workspace_trust: wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
