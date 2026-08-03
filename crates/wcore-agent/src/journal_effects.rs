@@ -1061,6 +1061,26 @@ mod tests {
         }
     }
 
+    /// The absolute target a filesystem effect receipt names.
+    ///
+    /// `FilesystemEffectReceiptV1::validate` routes the receipt path through
+    /// `validate_user_path`, which requires an ABSOLUTE path — and absoluteness
+    /// is platform-defined: `/workspace/file.txt` is absolute on unix but NOT on
+    /// Windows, where `Path::is_absolute` demands a drive or UNC prefix. The
+    /// literal was unix-shaped, so on Windows the reducer refused the fixture as
+    /// an invalid receipt and the durability/reconciliation property this case
+    /// exists to prove was never reached. The path is never created on disk —
+    /// the receipt is content-free and nothing here touches the filesystem — so
+    /// this only spells the same fixture the way each platform defines
+    /// "absolute" and leaves the validator and every assertion intact.
+    fn receipt_target() -> &'static str {
+        if cfg!(windows) {
+            r"C:\workspace\file.txt"
+        } else {
+            "/workspace/file.txt"
+        }
+    }
+
     fn retry_event(prior_id: &str, new_id: &str, prior: &ToolState) -> SessionEvent {
         SessionEvent::ToolIntentRecordedV2 {
             tool_execution_id: new_id.to_owned(),
@@ -1537,10 +1557,10 @@ mod tests {
         let receipt = json!({
             "version": 1,
             "reconciler": wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER,
-            "path": "/workspace/file.txt",
+            "path": receipt_target(),
             "preparation_object": {
                 "authority": "in-memory:test",
-                "path": "/workspace/file.txt",
+                "path": receipt_target(),
                 "parent": "in-memory-parent:/workspace"
             },
             "precondition": { "state": "absent" },
@@ -1555,8 +1575,8 @@ mod tests {
                 "provider-call-fs",
                 8,
                 "Write",
-                json!({"file_path":"/workspace/file.txt","content":"new"}),
-                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                json!({"file_path":receipt_target(),"content":"new"}),
+                json!({"file_path":receipt_target(),"content":"new"}),
                 contract.clone(),
                 receipt.clone(),
             )

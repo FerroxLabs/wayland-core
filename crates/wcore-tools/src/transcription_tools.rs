@@ -821,22 +821,39 @@ mod tests {
     /// "not found" now gets one answer from every media surface instead of
     /// three. The assertion now additionally requires that the refusal names
     /// the offending path, which the old message did not carry.
+    ///
+    /// The fixture path is platform-spelled. `admit_path` refuses a
+    /// non-absolute path FIRST, with `Invalid path: path must be absolute`, and
+    /// absoluteness is platform-defined: `/nonexistent/...` is absolute on unix
+    /// but NOT on Windows, where `Path::is_absolute` demands a drive prefix. On
+    /// Windows the old literal therefore proved the absoluteness guard — a
+    /// different refusal — and never reached the missing-file refusal this case
+    /// is named for. Spelling the fixture per platform makes both platforms
+    /// exercise the SAME refusal; nothing is created on disk either way.
     #[test]
     fn missing_local_path_rejected() {
         let backend = Arc::new(CapturingTranscriptionBackend::new("never called"));
         let tool = TranscribeAudioTool::new(backend.clone(), Arc::new(NullAudioFetcher));
-        let r = must_exec(
-            &tool,
-            json!({ "audio_path": "/nonexistent/path/audio.mp3" }),
-        );
+        let missing = if cfg!(windows) {
+            r"C:\nonexistent\path\audio.mp3"
+        } else {
+            "/nonexistent/path/audio.mp3"
+        };
+        let r = must_exec(&tool, json!({ "audio_path": missing }));
         assert!(r.is_error);
         assert!(
             r.content.contains("not found") || r.content.contains("not a regular file"),
             "got: {}",
             r.content
         );
+        // `r.content` is a JSON document, so a Windows path's separators appear
+        // escaped inside it. Compare against the JSON encoding of the fixture
+        // rather than its raw form, so "the refusal names the path" is checked
+        // the same way on both platforms.
+        let encoded = serde_json::to_string(missing).expect("path encodes as JSON");
+        let encoded = encoded.trim_matches('"');
         assert!(
-            r.content.contains("/nonexistent/path/audio.mp3"),
+            r.content.contains(encoded),
             "the refusal must name the path it refused; got: {}",
             r.content
         );

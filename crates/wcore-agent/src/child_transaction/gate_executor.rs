@@ -465,6 +465,38 @@ mod tests {
     use std::sync::Arc;
     use wcore_sandbox::FailClosedBackend;
 
+    /// Absolute containment-policy fixture paths, in one place so no case
+    /// re-derives them.
+    ///
+    /// `HardContainmentFilesystem::new` requires an ABSOLUTE candidate AND an
+    /// absolute writable root, and absoluteness is platform-defined: a
+    /// `/srv/...` literal is absolute on unix but NOT on Windows, where
+    /// `Path::is_absolute` demands a drive or UNC prefix. The literals here were
+    /// unix-shaped because these targets had never compiled on Windows, so the
+    /// stage-5 case had never executed there and refused at stage 3 instead.
+    /// Neither path is ever created on disk — every assertion below is pure
+    /// policy validation — so this spells the same fixture the way each platform
+    /// defines "absolute" and leaves the guard and every assertion intact.
+    /// Mirrors `wcore_sandbox`'s own `hard_fixture_root`, which is crate-private
+    /// there and so cannot be reused from here.
+    fn fixture_candidate_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\srv\wayland\candidate\checkout")
+        } else {
+            PathBuf::from("/srv/wayland/candidate/checkout")
+        }
+    }
+
+    /// The transaction-private writable root, disjoint from
+    /// [`fixture_candidate_root`] on both platforms.
+    fn fixture_writable_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\srv\wayland\private\scratch")
+        } else {
+            PathBuf::from("/srv/wayland/private/scratch")
+        }
+    }
+
     fn closure(gate_id: &str, argv: &[&str]) -> AuthorizedGateClosure {
         let mut env = BTreeMap::new();
         env.insert("PATH".to_owned(), "/usr/bin".to_owned());
@@ -477,7 +509,7 @@ mod tests {
             env,
             "rustc:1.999.0",
             inputs,
-            vec![PathBuf::from("/srv/wayland/private/scratch")],
+            vec![fixture_writable_root()],
         )
     }
 
@@ -639,7 +671,7 @@ mod tests {
         // real absolute candidate root outside any denied location so stages 3/4
         // pass and the mint stage is the one that refuses.
         let live = FakeCandidate {
-            root: Ok(PathBuf::from("/srv/wayland/candidate/checkout")),
+            root: Ok(fixture_candidate_root()),
         };
         let error = executor
             .execute_gate(

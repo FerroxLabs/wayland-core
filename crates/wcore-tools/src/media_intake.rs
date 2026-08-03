@@ -529,12 +529,28 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
         for parent in path.ancestors().skip(1) {
-            let metadata =
-                std::fs::symlink_metadata(parent).map_err(|e| IntakeError::OpenComponent {
-                    noun,
-                    path: parent.to_path_buf(),
-                    reason: e.to_string(),
-                })?;
+            let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
+                // A missing ANCESTOR is "not found" as the user means it, and
+                // the path they asked about is the one they named — exactly the
+                // rule the unix walk states above. Windows reported it as a
+                // component-open failure naming the PARENT instead, so the same
+                // missing file produced `File not found: <path>` on unix and
+                // `Cannot open <noun> path component in <parent>: ...` here.
+                // That divergence reaches users: `doc_tool` matches on
+                // `IntakeError::NotFound` to render "not found or not a regular
+                // file", so on Windows a missing directory fell through to the
+                // generic refusal arm instead. Same refusal, same guard — only
+                // the reported reason and subject are corrected.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    IntakeError::NotFound(path.to_path_buf())
+                } else {
+                    IntakeError::OpenComponent {
+                        noun,
+                        path: parent.to_path_buf(),
+                        reason: e.to_string(),
+                    }
+                }
+            })?;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(IntakeError::Symlink(parent.to_path_buf()));
             }
