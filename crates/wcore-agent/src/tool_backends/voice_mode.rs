@@ -1062,23 +1062,52 @@ mod tests {
 
     /// Build a command that sleeps `secs` and THEN creates `marker`, so
     /// the marker's absence is evidence the process was actually killed
-    /// rather than merely detached. Goes through the centralized shell
-    /// helper — never `Command::new("sh")` (AGENTS.md §Forbidden).
+    /// rather than merely detached.
+    ///
+    /// Unix goes through the centralized shell helper — never
+    /// `Command::new("sh")` (AGENTS.md §Forbidden).
+    ///
+    /// Windows deliberately does NOT. `spawn_and_wait` is an argv-mode
+    /// spawner, and the Windows arm previously handed it a `cmd /C` payload
+    /// containing double quotes. `Command::args` then applies
+    /// `CommandLineToArgvW` quoting on top (inner `"` becomes `\"`), which
+    /// cmd.exe does not understand: the redirect target arrived as literal
+    /// backslash-quotes and the child died with "The filename, directory
+    /// name, or volume label syntax is incorrect" without ever writing the
+    /// control marker. So the Windows arm mirrors the production Windows
+    /// player in `os_shell_command` instead — same program, same flags, same
+    /// single-quote convention — which is argv-safe and, unlike the cmd form,
+    /// also survives a path containing spaces. `Start-Sleep` is in-process,
+    /// so killing the child really does cut the delay rather than orphaning a
+    /// grandchild that outlives it.
     fn delayed_marker_command(secs: u32, marker: &Path) -> (String, Vec<String>) {
         let m = marker.display().to_string();
-        #[cfg(unix)]
-        let script = format!("sleep {secs}; : > \"{m}\"");
         #[cfg(windows)]
-        let script = format!("ping -n {} 127.0.0.1 >nul & echo done > \"{m}\"", secs + 1);
-        let cmd = wcore_config::shell::shell_command_builder(&script);
-        let std_cmd = cmd.as_std();
-        (
-            std_cmd.get_program().to_string_lossy().into_owned(),
-            std_cmd
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect(),
-        )
+        {
+            return (
+                "powershell".to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    format!(
+                        "Start-Sleep -Seconds {secs}; Set-Content -LiteralPath '{m}' -Value done"
+                    ),
+                ],
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let script = format!("sleep {secs}; : > \"{m}\"");
+            let cmd = wcore_config::shell::shell_command_builder(&script);
+            let std_cmd = cmd.as_std();
+            (
+                std_cmd.get_program().to_string_lossy().into_owned(),
+                std_cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        }
     }
 
     #[tokio::test]

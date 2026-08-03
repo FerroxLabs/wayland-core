@@ -44,9 +44,48 @@ fn status_json() -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("status emits a JSON object")
 }
 
-/// `touch <escape>; echo <RAN>` — one shell command, identical inside and out.
+/// Create `<escape>`, ignore any failure, then print `<RAN>` — one shell
+/// command, identical inside and out.
+///
+/// The Windows spelling is not a translation for tidiness: `touch` does not
+/// exist under `cmd.exe` and `;` is not a command separator there, so the
+/// previous single Unix spelling made cmd reject the whole line. The child
+/// printed nothing, the baseline arm failed on "the uncontained baseline did
+/// not run", and `sandbox exec` was never reached — the containment
+/// differential was never taken on Windows at all.
 fn probe(escape: &Path) -> String {
-    format!("touch {} 2>/dev/null; echo {RAN}", escape.display())
+    let escape = escape.display();
+    #[cfg(windows)]
+    let script = format!("copy /y nul \"{escape}\" >nul 2>nul & echo {RAN}");
+    #[cfg(not(windows))]
+    let script = format!("touch {escape} 2>/dev/null; echo {RAN}");
+    script
+}
+
+/// Run `probe` uncontained, from `cwd`, and return the child's output.
+///
+/// On Windows the payload must reach `cmd.exe` VERBATIM. `Command::arg`
+/// applies `CommandLineToArgvW` quoting on top of it (an inner `"` becomes
+/// `\"`), and cmd does not understand that escaping — the redirect target
+/// arrives as literal backslash-quotes and the write fails before it can
+/// demonstrate anything. The product's own sandboxed path already avoids this
+/// (see `quote_cmd_payload` in `wcore-sandbox`), so handing the payload over
+/// raw here is what makes both arms of the differential execute the identical
+/// command text.
+fn run_uncontained(probe: &str, cwd: &Path) -> std::process::Output {
+    let mut command = Command::new(shell());
+    command.arg(shell_flag());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(probe);
+    }
+    #[cfg(not(windows))]
+    command.arg(probe);
+    command
+        .current_dir(cwd)
+        .output()
+        .expect("run the uncontained baseline")
 }
 
 /// Pick a path the contained workspace policy does NOT grant.
@@ -58,7 +97,9 @@ fn probe(escape: &Path) -> String {
 /// failure. The home directory is granted by neither the `contained` writable
 /// set (workspace + temp) nor the macOS profile's read allowlist (`/usr`,
 /// `/System`, `/Library`, `/bin`, `/sbin`), so a write landing there really is
-/// an escape.
+/// an escape. The same holds on Windows: the user profile is outside the
+/// AppContainer profile's granted ACLs and is a medium-integrity object, which
+/// a Low-IL contained child cannot write regardless of ACL.
 fn escape_target() -> std::path::PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -94,11 +135,7 @@ fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
     // of producing the violation at all — without this, "no escape file"
     // could just mean the command never could have written there.
     // ---------------------------------------------------------------
-    let baseline = Command::new(shell())
-        .args([shell_flag(), &probe(&escape)])
-        .current_dir(workspace.path())
-        .output()
-        .expect("run the uncontained baseline");
+    let baseline = run_uncontained(&probe(&escape), workspace.path());
     let baseline_out = String::from_utf8_lossy(&baseline.stdout).into_owned();
     assert!(
         baseline_out.contains(RAN),

@@ -718,23 +718,29 @@ async fn native_windows_command_shell_resolves_cmd_and_bat_from_effective_cwd() 
         )
         .await
         .unwrap();
-        // Case-INSENSITIVE, because that is what Windows path equality is and
-        // it is all the resolver can promise. The candidate is built by
-        // appending a PATHEXT entry to the stem, so a `.COM;.EXE;.BAT;.CMD`
-        // PATHEXT — the spelling Windows itself ships — resolves the on-disk
-        // `native-cmd.cmd` as `native-cmd.CMD`. `assert_eq!` on the raw strings
-        // was asserting an extension case the resolver never claimed to
-        // preserve (it would have to read the directory entry to know it, and
-        // this probe path is deliberately bounded to stat-only I/O), so this
-        // case could not pass on any Windows host. Found red on hosted
-        // `windows-latest`.
-        let (got, want) = (
-            resolved.as_path().to_string_lossy().into_owned(),
-            temp.path().join(program).to_string_lossy().into_owned(),
-        );
+        // The resolver appends the extension in the case PATHEXT supplied
+        // (`.CMD` here), which is what `cmd /C` itself does; it never re-reads
+        // the directory to recover the on-disk case, and it deliberately does
+        // not canonicalize — that would produce a `\\?\` verbatim path this
+        // module rejects as unsupported. So the byte-exact comparison this
+        // assertion used to make was wrong on Windows for any PATHEXT whose
+        // case differs from the file's. Compare the way the filesystem does.
+        let expected = temp.path().join(program);
         assert!(
-            got.eq_ignore_ascii_case(&want),
-            "resolved {got} but expected {want} (modulo extension case)"
+            resolved
+                .as_path()
+                .as_os_str()
+                .eq_ignore_ascii_case(expected.as_os_str()),
+            "resolved {} does not name {}",
+            resolved.as_path().display(),
+            expected.display()
+        );
+        // …and it must name a file that is really there, so the comparison
+        // above cannot be satisfied by a path the resolver merely constructed.
+        assert!(
+            resolved.as_path().is_file(),
+            "resolved {} is not a file on disk",
+            resolved.as_path().display()
         );
     }
 }

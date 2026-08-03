@@ -544,10 +544,16 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
+        // The budget must exceed how long the HOST takes to refuse, not how
+        // long refusal "ought" to take. Measured on Windows 11 (10.0.26200),
+        // a connect to a closed IPv4 loopback port returns WSAECONNREFUSED
+        // after ~2.0s, not immediately as it does on Unix. With the previous
+        // 1s connect budget the client's own timeout fired first, so the test
+        // never observed a refusal at all and recorded `Timeout`.
         let recorder = Arc::new(BoundedEgressRecorder::new(4));
         let client = EgressClient::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(2))
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(30))
             .observer(recorder.clone())
             .build()
             .expect("client builds");
@@ -556,7 +562,23 @@ mod tests {
             .send()
             .await
             .expect_err("closed listener must refuse the connection");
-        assert!(matches!(error, EgressError::Transport(_)));
+        // `is_timeout()` is checked FIRST by `classify_transport_error`, so a
+        // connect that outran its budget would be recorded as `Timeout` and the
+        // class assertion below would report a budget problem as a
+        // classification problem. Rule that out here, where the message can say
+        // so, and keep the class assertion exact.
+        match &error {
+            EgressError::Transport(inner) => {
+                assert!(
+                    !inner.is_timeout(),
+                    "the connect outran its budget instead of being refused; \
+                     this host is slower to refuse than the budget allows and \
+                     the class assertion below would be vacuous: {inner}"
+                );
+                assert!(inner.is_connect(), "expected a connect failure: {inner}");
+            }
+            other => panic!("expected a transport error, got {other:?}"),
+        }
 
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.events.len(), 1);
