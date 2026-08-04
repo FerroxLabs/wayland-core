@@ -40,62 +40,95 @@ the timeout arm is exactly the one that fires. I fixed the arm that was not
 failing. The retry code is still correct and worth keeping for genuine fast
 Win32 failures; it is simply not this bug.
 
-### ROOT CAUSE — found, and it is O(N²) under a global lock
+### CORRECTION — the O(N²) sweep theory was WRONG. Measured, not inferred.
 
-**Do NOT add a named mutex. Every AppContainer spawn is ALREADY globally
-serialized, and that is the problem.**
+The previous revision of this file claimed the cause was `recover_dead_leases_locked`
+doing an O(N) directory scan inside the lock, giving O(N²). That was arithmetic
+that happened to match (24 × ~150ms ≈ 3.4s), not a measurement. **It is false.**
 
-`ExecutionIdentity::start_with_apply` (`acl_lease.rs:250`) runs on every
-sandboxed spawn and holds ONE machine-wide mutex
-(`MutationLock::acquire()`, `acl_lease.rs:256`, itself a 15s-timeout named
-mutex in `acl_lease/mutation_lock.rs`) across all of:
+Direct measurement of the sweep against lease count (SEANDESKTOP, 32 cores):
 
-1. `recover_dead_leases_locked` — **a full `read_dir` + a `file_type()` stat per
-   entry** (`acl_lease.rs:614`)
-2. `allocate_unique_profile` → `CreateAppContainerProfile` (profile-service RPC)
-3. an fsync'd lease-file write
-4. `apply_intents` — ACL application
+| leases | 0 | 8 | 16 | 24 | 48 | 96 |
+|---|---|---|---|---|---|---|
+| sweep | 0.09ms | 4.3ms | 8.0ms | 11.7ms | 23.5ms | 44.8ms |
 
-Step 1 is the killer. The lease directory holds **one .toml per LIVE lease**, so
-with N concurrent spawns each spawn scans ~N files: **O(N²) work, serialized**.
+Linear at ~0.47ms/lease. At 24 concurrent that is **11.7ms of a ~141ms critical
+section — 8%.** The sweep is real O(N²) and completely irrelevant. Do not "fix" it.
 
-**Measured on SEANDESKTOP (32 logical cores), probe wall-time:**
+### The real distribution, per lifecycle, all under one machine-wide mutex
 
-| concurrency | mean | note |
+| step | cost |
+|---|---|
+| `CreateAppContainerProfile` (AppX profile-service RPC) | **14.5ms** |
+| `DeleteAppContainerProfile` | **~40ms** |
+| lease write + fsync | 1.4ms |
+| `apply_intents` | 0.3ms |
+| recovery sweep | 0.1ms |
+| `MutationLock::acquire` | 0.05ms |
+
+~60ms of profile-service RPC serialized machine-wide, per sandboxed command.
+
+### What was FIXED (commit `4d46ee0f`)
+
+Both RPCs moved out of the lock. They need no cross-process exclusion — profile
+names are unique per (pid, creation-time, counter). Results:
+
+| metric, 24-way | before | after |
 |---|---|---|
-| 1 (idle) | ~200ms | 577/202/180ms over three runs |
-| 24 | **3381ms** (min 2656, max 3807) | ~17× |
+| whole lifecycle, median/op | 140ms | **68ms** (103ms under 32 CPU burners) |
+| cold cross-process probe, median | 3381ms | **1188ms** |
 
-24 × ~150ms critical section ≈ 3.6s — the measurement matches the mechanism.
-Extrapolating, ~100 concurrent spawns crosses BOTH the mutex's own 15s acquire
-timeout AND the probe's 15s wall-clock guard. CI runs 13,547 tests on 32 cores
-with swarm tests dispatching 4 workers each, so 100 concurrent is reachable.
+Windows `cargo clippy` clean; `cargo nextest run -p wcore-sandbox` 172/172.
 
-**This is a genuine product defect, not a CI artifact.** Any user running many
-parallel agents on Windows hits the same O(N²) serialized stall.
+### What is STILL OPEN — read this before doing anything else
 
-### The fix
+**The reproducer still fails.** Under 32 CPU burners, `cargo nextest run -p
+wcore-swarm --test-threads 16` still produces `sandbox UNAVAILABLE … the probe
+exceeded its 15s hard wall-clock guard`.
 
-Take the directory sweep OFF the per-spawn hot path. `allocate_unique_profile`
-does NOT depend on it — profile names are unique per (process-creation-time,
-counter), so a stale lease does not block allocation. The sweep is hygiene
-(reclaiming leaked profiles from dead processes, the F-28-02-002 DoS fix), not
-a precondition.
+Two hypotheses were tested and REFUTED tonight:
+- *CPU starvation.* Under 32 burners the raw profile RPC goes 14.3ms → 15.6ms
+  per op. Not it.
+- *Queueing alone reaching 15s.* Cold probe scales at ~50ms per additional
+  concurrent probe; 15s would need ~300 concurrent. Not obviously reachable.
 
-Plan: gate the sweep on a **cross-process** TTL marker (~30s) so a spawn pays
-one `stat` instead of an O(N) scan. Process-local suppression is NOT enough —
-nextest gives every test its own process, so N processes would still sweep N
-times.
+**The remaining lead, and it is a good one: the probe runs once PER PROCESS.**
+`probe_cache()` / `probe_gate()` are `OnceLock` statics, so #754's single-flight
+collapses probes only *within* a process — and every sandboxed child is its own
+process, as is every nextest test. A full nextest run therefore performs
+hundreds of redundant real AppContainer spawns. Each one both lengthens the
+queue and, per this file's own comment at `process.rs:541-547`, is another
+chance to hit an AV process-creation callback that "can stall ~120s".
 
-**Trap to avoid:** the scan treats any non-`.toml` entry as a HARD ERROR that
-aborts recovery (`acl_lease.rs:640`), with only `QUARANTINE_DIRECTORY`
-allow-listed. A marker file placed INSIDE the lease directory must be
-allow-listed — and doing so wedges any older build that meets it. **Put the
-marker outside the lease directory** to avoid the downgrade hazard.
+**Proposed fix: cache the probe verdict CROSS-process, short TTL.** Clean seam
+already exists — `availability()` (`process.rs:140`) passes
+`probe_appcontainer_available` into `probe_single_flight`; wrap that one
+function. Put the file OUTSIDE the lease directory (the sweep hard-errors on
+unknown entries). Write atomically (temp + `MoveFileEx`). Fail open on any
+cache I/O error — never worse than today.
 
-Keep: the sweep still runs under the lock when it does run; fail-closed
-unchanged; F-28-02-002 recovery preserved (consider also sweeping on demand if
-allocation ever fails).
+Security argument, stated so the next reader can check it: a forged *positive*
+cannot cause unsandboxed execution, because the real execution still builds its
+own AppContainer and fails closed. A forged *negative* causes refusal, which is
+fail-closed and already bounded by `NEGATIVE_PROBE_TTL`. The honest cost is
+detection latency: a host that loses sandbox capability mid-window is not
+noticed until the TTL expires — but the real spawn still fails closed.
+
+**Do NOT move the fsync'd lease rewrites out of the lock** to chase the last
+~28ms. They are atomic (temp + `MoveFileEx`), but an unlocked rewrite races the
+recovery sweep's `read_validated_lease` on file replacement, and an
+`ERROR_SHARING_VIOLATION` there hard-fails the spawn — reintroducing exactly the
+F-28-02-002 wedge class. Not worth 28ms.
+
+### The instrument
+
+`measure_concurrent_lifecycles` (`acl_lease/tests.rs`, `#[ignore]`d, no
+assertions on purpose) is the harness that settled this. Run it before
+theorising:
+
+```
+cargo test -p wcore-sandbox --lib measure_concurrent_lifecycles -- --ignored --nocapture
+```
 
 ---
 
