@@ -130,6 +130,53 @@ theorising:
 cargo test -p wcore-sandbox --lib measure_concurrent_lifecycles -- --ignored --nocapture
 ```
 
+### ADDENDUM 2026-08-05 — CI's Windows failures do NOT reproduce on Windows
+
+This is the most important finding of the night and it reframes the whole leg.
+
+CI run 30910027962's Windows final-4 were `wcore-cli::tool_formatter_real_payloads`
+x3 plus one swarm test. On SEANDESKTOP, real hardware, the whole
+`tool_formatter_real_payloads` binary is **7/7 PASS — both idle and under 32 CPU
+burners.** They are not a Windows product defect, and they are not the sandbox
+stall. They are specific to the CI runner environment (service account /
+session 0 / container-less step), or they were transient and retry-masked.
+
+Note they call `BashTool` DIRECTLY through `render_real`, not through the engine,
+so they are also NOT the known engine-path stdout defect (task #162). Do not
+conflate them.
+
+Equally: the one test that finally fails in the local reproducer
+(`multi_worker_output_exhaustion_fails_without_retaining_buffers`) is **not in
+CI's failure set at all** — it was retry-masked there. And alone it PASSES:
+14.3s idle, 24.1s under 32 burners. It only fails inside the full suite at
+`--test-threads 16`.
+
+**So the local reproducer and the CI failure are different problems.** A night
+was spent optimising the sandbox against a harness that is both harsher than CI
+and pointed at other tests. The two landed fixes are real and measured, but
+neither was aimed at what CI actually reports.
+
+**Do this next, in this order:**
+1. Get the Windows CI log for the CURRENT run and read the failure list fresh.
+   Do not assume it matches the b854775b list.
+2. For each failure, first ask "does this reproduce on SEANDESKTOP?" before
+   touching product code. Three of four did not.
+3. Only then decide whether anything in the sandbox path is implicated.
+
+### Trap: do not tar from the Mac without `COPYFILE_DISABLE=1`
+
+Shipping source to `D:\wincheck` with a plain macOS `tar -czf` deposited **4381
+AppleDouble `._*` files** into the tree. They are invisible to most builds but
+break `wcore-plugin-wasm`: `wasmtime::component::bindgen!` scans the whole `wit`
+directory and dies on `._hook.wit` with "stream did not contain valid UTF-8".
+That looks exactly like a real build regression and is not one. Use:
+
+```
+COPYFILE_DISABLE=1 tar -czf ... && scp ...
+```
+
+and on the box, `Get-ChildItem -Recurse -Force -Filter "._*" | Remove-Item`.
+
 ---
 
 ## 2. Exact CI state — run 30910027962 on `b854775b`
