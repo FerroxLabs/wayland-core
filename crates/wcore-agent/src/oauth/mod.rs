@@ -24,6 +24,7 @@
 pub mod chatgpt;
 pub mod flow;
 pub mod pkce;
+pub mod refresh_lock;
 pub mod storage;
 pub mod xai;
 

@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
+use crate::oauth::refresh_lock;
 use crate::oauth::{
     OAuthFlow, OAuthStorage, OAuthTokens, RedirectStrategy, RefreshError, SingleFlightRefresh,
 };
@@ -471,97 +472,26 @@ impl ChatGptTokenManager {
 
     /// Refresh `current` via the rotating-refresh-token grant.
     ///
+    /// Two gates, in this order (#172):
+    ///
+    /// 1. the in-process [`SingleFlightRefresh`], so N concurrent tool calls in
+    ///    THIS process coalesce into one attempt without touching the disk;
+    /// 2. the cross-process refresh lock, so N concurrent PROCESSES on one
+    ///    profile produce one POST. ChatGPT's refresh token rotates and is
+    ///    single-use; a replayed one is treated as theft and can cost the whole
+    ///    authorization grant.
+    ///
     /// C3: on a `429` (rate limit), if `current` is not hard-expired we return
     /// it unchanged instead of failing the turn. C4: a successful refresh that
     /// ROTATED the refresh token but failed to persist is a HARD error.
     async fn refresh(&self, current: OAuthTokens) -> Result<OAuthTokens, String> {
-        let refresh_token = current
-            .refresh_token
-            .clone()
-            .ok_or("no refresh_token — run `wayland auth login chatgpt`")?;
-        let client = self.client.clone();
-        let token_url = self.flow.token_url.clone();
-        let client_id = self.flow.client_id.clone();
-
         let refreshed = self
             .single_flight
-            .refresh(move || async move {
-                let form: Vec<(&str, String)> = vec![
-                    ("grant_type", "refresh_token".into()),
-                    ("refresh_token", refresh_token),
-                    ("client_id", client_id),
-                ];
-                let res = tokio::time::timeout(
-                    PER_CALL_TIMEOUT,
-                    client.post(&token_url).form(&form).send(),
-                )
-                .await
-                .map_err(|_| RefreshError::Transport("refresh timed out".into()))?
-                .map_err(|e| RefreshError::Transport(e.to_string()))?;
-
-                let status = res.status();
-                let body = res
-                    .text()
-                    .await
-                    .map_err(|e| RefreshError::Transport(e.to_string()))?;
-
-                // A 429 is a rate limit, NOT an auth failure — surface it as a
-                // recognizable sentinel so the caller can keep using the still
-                // -valid current token (C3). Do NOT include the response body
-                // (C7 — token-endpoint bodies are never logged).
-                if status.as_u16() == 429 {
-                    return Err(RefreshError::Transport(RATE_LIMIT_SENTINEL.into()));
-                }
-                if !status.is_success() {
-                    // C7: cap + scrub — surface only the status, never the body.
-                    return Err(RefreshError::ProviderRejected(format!(
-                        "token endpoint rejected refresh: HTTP {}",
-                        status.as_u16()
-                    )));
-                }
-                let raw: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| RefreshError::Transport(format!("malformed token JSON: {e}")))?;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Ok(OAuthTokens {
-                    access_token: raw
-                        .get("access_token")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            RefreshError::ProviderRejected("missing access_token".into())
-                        })?
-                        .to_string(),
-                    // ROTATES — single-use. None here means the server omitted
-                    // it (genuine non-rotation); merged forward below.
-                    refresh_token: raw
-                        .get("refresh_token")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    expires_at_unix_secs: raw
-                        .get("expires_in")
-                        .and_then(|v| v.as_u64())
-                        .map(|s| now + s),
-                    token_type: raw
-                        .get("token_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Bearer")
-                        .to_string(),
-                    scope: raw
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    id_token: raw
-                        .get("id_token")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                })
-            })
+            .refresh(|| self.refresh_cross_process(&current))
             .await;
 
-        let refreshed = match refreshed {
-            Ok(t) => t,
+        match refreshed {
+            Ok(tokens) => Ok(tokens),
             Err(RefreshError::Transport(msg)) if msg == RATE_LIMIT_SENTINEL => {
                 // C3: rate limited. Keep using the current token if it has not
                 // actually expired; only error when it's truly dead.
@@ -573,35 +503,331 @@ impl ChatGptTokenManager {
                     );
                 }
                 *self.cached.lock().await = Some(current.clone());
-                return Ok(current);
+                Ok(current)
             }
-            Err(e) => return Err(format!("refresh failed: {e}")),
+            // A retryable failure carries its own complete message; wrapping it
+            // in "refresh failed" would read as the auth failure it is not.
+            Err(RefreshError::Retryable(msg)) => Err(msg),
+            Err(e) => Err(format!("refresh failed: {e}")),
+        }
+    }
+
+    /// The cross-process critical section: acquire → gate → POST → store.
+    ///
+    /// Lock order, and it is the same at every acquisition site:
+    /// `in-process single-flight → refresh file lock → credential store lock`.
+    /// Nesting is expected — [`OAuthStorage::store`] takes the store's own lock
+    /// inside this section. What matters is that the order never inverts, and
+    /// it structurally cannot: the store lock lives in `wcore-config`, which
+    /// does not depend on `wcore-agent`.
+    async fn refresh_cross_process(
+        &self,
+        entry: &OAuthTokens,
+    ) -> Result<OAuthTokens, RefreshError> {
+        let path = self.storage.refresh_lock_path(PROVIDER);
+        match refresh_lock::acquire(path, "ChatGPT OAuth refresh").await {
+            refresh_lock::Acquisition::Held(lock) => {
+                let outcome = self.gated_refresh(entry, true).await;
+                // Explicit, not end-of-scope: the lock must outlive the store
+                // write and be released the moment it does.
+                drop(lock);
+                outcome
+            }
+            refresh_lock::Acquisition::Busy(why) => {
+                tracing::debug!(target: "wcore_oauth", reason = %why, "refresh lock unavailable");
+                self.gated_refresh(entry, false).await
+            }
+        }
+    }
+
+    /// The universal pre-POST gate.
+    ///
+    /// **Every** path that could POST runs this, and it always re-reads the
+    /// pair first. Two rules make it work:
+    ///
+    /// * **Acceptance is "changed", not "fresh".** Judging the reloaded pair by
+    ///   freshness would reintroduce clock skew and a margin mismatch against
+    ///   [`Self::token_is_fresh`]: a loser could decide a perfectly good new
+    ///   token was stale and POST a second rotation, burning the winner's.
+    ///   Reloaded ≠ entry → take it, full stop.
+    /// * **The form is built from the RELOADED pair.** This method reads the
+    ///   pair itself rather than receiving a token cloned by its caller. The
+    ///   old code cloned `refresh_token` into the single-flight closure before
+    ///   anything ran, so adding a reload without moving the form construction
+    ///   would have changed nothing.
+    ///
+    /// `may_post` is false when the refresh lock was unavailable. In that case
+    /// a reload that finds a winner's pair still SUCCEEDS; anything else fails
+    /// retryably. It never falls through to an unlocked POST, not even as a
+    /// last resort: an unlocked POST risks the whole grant, which is
+    /// unrecoverable without a fresh sign-in, while a retryable failure costs a
+    /// retry. Those are not comparable.
+    async fn gated_refresh(
+        &self,
+        entry: &OAuthTokens,
+        may_post: bool,
+    ) -> Result<OAuthTokens, RefreshError> {
+        let reloaded = self.reload_pair();
+
+        if let Some(winner) = reloaded.as_ref().filter(|r| pairs_differ(entry, r)) {
+            // Another writer moved the pair while we were getting here. Adopt
+            // it and perform ZERO POSTs.
+            self.adopt(winner.clone()).await;
+            return Ok(winner.clone());
+        }
+
+        if !may_post {
+            return Err(RefreshError::Retryable(
+                "another Wayland process is refreshing the ChatGPT token and did not finish in \
+                 time. Nothing was changed and you are still signed in — retry the request."
+                    .into(),
+            ));
+        }
+
+        // Only ever POST a pair we just re-read from the authoritative source.
+        let pair = reloaded.unwrap_or_else(|| entry.clone());
+        let refresh_token = pair.refresh_token.clone().ok_or_else(|| {
+            RefreshError::ProviderRejected(
+                "no refresh_token — run `wayland auth login chatgpt`".into(),
+            )
+        })?;
+
+        let refreshed = match self.post_refresh(refresh_token).await {
+            Ok(tokens) => tokens,
+            Err(RefreshError::ProviderRejected(msg)) if msg == INVALID_GRANT_SENTINEL => {
+                // The pair we POSTed was already spent. Re-read once more: a
+                // writer that landed a new pair after our gate ran makes this
+                // recoverable without any further POST.
+                if let Some(winner) = self.reload_pair().filter(|r| pairs_differ(&pair, r)) {
+                    self.adopt(winner.clone()).await;
+                    return Ok(winner);
+                }
+                return Err(RefreshError::ProviderRejected(
+                    "the stored ChatGPT refresh token was rejected as already used. That \
+                     happens when a refresh was interrupted after the token endpoint accepted \
+                     it but before the new token could be saved. Run \
+                     `wayland auth login chatgpt` to sign in again."
+                        .into(),
+                ));
+            }
+            Err(other) => return Err(other),
         };
 
-        // C4: distinguish "server omitted refresh_token" (non-rotation, keep
-        // old, safe) from "got a new one, persist failed" (hard error).
+        self.persist(refreshed, &pair).await
+    }
+
+    /// Re-read the pair from its authoritative source, bypassing the in-memory
+    /// cache. Same source order as [`Self::load_cached`]: the engine store
+    /// first, then the Codex CLI file — which is authoritative too, and which
+    /// the Codex CLI can rotate under us.
+    fn reload_pair(&self) -> Option<OAuthTokens> {
+        match self.storage.load(PROVIDER) {
+            Ok(Some(tokens)) => Some(tokens),
+            Ok(None) => import_codex_cli_tokens().ok(),
+            Err(error) => {
+                // A store that cannot be read is not evidence that the pair did
+                // not move, so this must NOT be treated as "unchanged". The
+                // caller falls back to the entry pair; a POST of a token a
+                // sibling already rotated is caught by the invalid_grant path.
+                tracing::warn!(
+                    target: "wcore_oauth",
+                    error = %error,
+                    "could not re-read the ChatGPT token pair before refreshing"
+                );
+                None
+            }
+        }
+    }
+
+    /// Take a pair some other writer produced. The in-memory cache MUST move
+    /// with it: leaving the old pair cached means the next call in this process
+    /// refreshes against a token that has already been rotated away.
+    async fn adopt(&self, tokens: OAuthTokens) {
+        *self.cached.lock().await = Some(tokens);
+    }
+
+    /// Persist a freshly refreshed pair, then cache it.
+    ///
+    /// C4: distinguish "the server omitted `refresh_token`" (genuine
+    /// non-rotation — the stored token is unchanged and still valid, so a
+    /// persist failure is a warning) from "we received a new one and could not
+    /// save it" (the old token is burned server-side; fail loudly).
+    ///
+    /// The write is retried before that verdict is reached. Inside this
+    /// section we are the only writer of this pair, so a failure is either
+    /// transient — including the credential store refusing on ITS lock, which
+    /// another provider's write can cause — or permanent, and a bounded retry
+    /// separates the two cheaply. Without it, a transient refusal composes with
+    /// C4 into the exact corruption both rules exist to prevent: the POST
+    /// succeeded, the store still holds the burned pair, and every other
+    /// process would go on to read and POST it.
+    async fn persist(
+        &self,
+        refreshed: OAuthTokens,
+        previous: &OAuthTokens,
+    ) -> Result<OAuthTokens, RefreshError> {
         let rotated = refreshed.refresh_token.is_some();
         let mut to_store = refreshed;
         if to_store.refresh_token.is_none() {
-            to_store.refresh_token = current.refresh_token.clone();
+            to_store.refresh_token = previous.refresh_token.clone();
         }
-        if let Err(e) = self.storage.store(PROVIDER, &to_store) {
+
+        // Bounded by wall clock, not just by attempt count. `storage.store`
+        // reaches `chunked_put`, which takes the credential store's own lock
+        // with a 65 s ceiling — six times the store budget this loop is
+        // supposed to fit inside. Counting attempts alone let the refresh lock
+        // be held far past `MAX_HOLD_SECS`, which undersized every ceiling
+        // derived from it. Cross-audit finding (Kimi K3).
+        //
+        // The deadline never cancels a store MID-WRITE: it is only consulted
+        // between attempts. A half-written credential is the one thing worse
+        // than a slow one.
+        let mut last_error = None;
+        let persist_deadline = tokio::time::Instant::now() + refresh_lock::PERSIST_TOTAL_BUDGET;
+        for attempt in 0..refresh_lock::PERSIST_ATTEMPTS {
+            match self.storage.store(PROVIDER, &to_store) {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if attempt + 1 < refresh_lock::PERSIST_ATTEMPTS {
+                        if tokio::time::Instant::now() >= persist_deadline {
+                            last_error = Some(format!(
+                                "{error} (gave up after {:?}: retrying further would hold the \
+                                 refresh lock past its budget)",
+                                refresh_lock::PERSIST_TOTAL_BUDGET
+                            ));
+                            break;
+                        }
+                        tokio::time::sleep(refresh_lock::PERSIST_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = last_error {
             if rotated {
-                // The old refresh token is now burned server-side and the new
-                // one was NOT saved — fail loudly so the user re-logs in now
-                // rather than hitting a dead token next process start.
-                return Err(format!(
+                return Err(RefreshError::ProviderRejected(format!(
                     "ChatGPT refresh rotated the refresh token but persisting it failed \
-                     ({e}); run `wayland auth login chatgpt` to re-authenticate"
-                ));
+                     ({error}); run `wayland auth login chatgpt` to re-authenticate"
+                )));
             }
             // Non-rotation: the on-disk token is unchanged and still valid;
             // a persist failure of identical data is not fatal.
-            tracing::warn!(error = %e, "failed to persist refreshed ChatGPT access token");
+            tracing::warn!(error = %error, "failed to persist refreshed ChatGPT access token");
         }
-        *self.cached.lock().await = Some(to_store.clone());
+
+        self.adopt(to_store.clone()).await;
         Ok(to_store)
     }
+
+    /// The token-endpoint round-trip, and nothing else. Takes the refresh token
+    /// as an argument so it cannot be captured before the gate has run.
+    async fn post_refresh(&self, refresh_token: String) -> Result<OAuthTokens, RefreshError> {
+        let form: Vec<(&str, String)> = vec![
+            ("grant_type", "refresh_token".into()),
+            ("refresh_token", refresh_token),
+            ("client_id", self.flow.client_id.clone()),
+        ];
+        let res = tokio::time::timeout(
+            PER_CALL_TIMEOUT,
+            self.client.post(&self.flow.token_url).form(&form).send(),
+        )
+        .await
+        .map_err(|_| RefreshError::Transport("refresh timed out".into()))?
+        .map_err(|e| RefreshError::Transport(e.to_string()))?;
+
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .map_err(|e| RefreshError::Transport(e.to_string()))?;
+
+        // A 429 is a rate limit, NOT an auth failure — surface it as a
+        // recognizable sentinel so the caller can keep using the still
+        // -valid current token (C3). Do NOT include the response body
+        // (C7 — token-endpoint bodies are never logged).
+        if status.as_u16() == 429 {
+            return Err(RefreshError::Transport(RATE_LIMIT_SENTINEL.into()));
+        }
+        if !status.is_success() {
+            // `invalid_grant` means this specific token was already spent, and
+            // that is recoverable in a way a generic rejection is not. Read the
+            // discriminator out of the body WITHOUT ever surfacing the body
+            // itself (C7).
+            if is_invalid_grant(&body) {
+                return Err(RefreshError::ProviderRejected(
+                    INVALID_GRANT_SENTINEL.into(),
+                ));
+            }
+            // C7: cap + scrub — surface only the status, never the body.
+            return Err(RefreshError::ProviderRejected(format!(
+                "token endpoint rejected refresh: HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let raw: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| RefreshError::Transport(format!("malformed token JSON: {e}")))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(OAuthTokens {
+            access_token: raw
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RefreshError::ProviderRejected("missing access_token".into()))?
+                .to_string(),
+            // ROTATES — single-use. None here means the server omitted
+            // it (genuine non-rotation); merged forward by `persist`.
+            refresh_token: raw
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            expires_at_unix_secs: raw
+                .get("expires_in")
+                .and_then(|v| v.as_u64())
+                .map(|s| now + s),
+            token_type: raw
+                .get("token_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Bearer")
+                .to_string(),
+            scope: raw
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            id_token: raw
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+}
+
+/// Whether two pairs are the same credential.
+///
+/// Compares the access token as well as the refresh token: a server that does
+/// not rotate returns a NEW access token against the SAME refresh token, so
+/// comparing only the refresh token would read a sibling's successful refresh
+/// as "nothing changed" and POST again.
+fn pairs_differ(entry: &OAuthTokens, reloaded: &OAuthTokens) -> bool {
+    entry.access_token != reloaded.access_token
+        || entry.refresh_token != reloaded.refresh_token
+        || entry.expires_at_unix_secs != reloaded.expires_at_unix_secs
+}
+
+/// RFC 6749 §5.2 error body discriminator. Only the `error` field is read; the
+/// body is never logged or surfaced (C7).
+fn is_invalid_grant(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|v| v.as_str())
+        == Some("invalid_grant")
 }
 
 /// Parsed Step-1 response from [`DEVICEAUTH_USERCODE_URL`]: the user-facing
