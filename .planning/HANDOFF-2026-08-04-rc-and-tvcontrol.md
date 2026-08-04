@@ -149,6 +149,24 @@ real Windows** — the Array leg gets through lint and runs all 13,537 tests.
 | `CI (macos-latest)` | RED | 3× `voice_live_capture_mac` — identical before and after the merges. Almost certainly needs real audio hardware on the runner. |
 | `CI (linux-containerized)` | was RED | 3 failures that were **newly VISIBLE, not new**: the baseline died at a vacuity gate and never ran a test at all. Fixing the gate revealed them. |
 
+**PLATFORM VERDICT ON `1a07ce0b` — the cross-process proof PASSES EVERYWHERE.**
+`refresh_cross_process::p1_two_processes_issue_exactly_one_refresh_post` is
+GREEN on hosted Windows (2.194 s — a real process spawn, not a short-circuit),
+macOS (0.183 s) and Linux. All four CI legs are red, and **none of the failures
+is the new test**:
+
+| leg | failing |
+|---|---|
+| Windows hosted | `packaged_f04`, `matching_assistant_dials_scoped_deferred_server`, `every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not`, and FOUR `wcore-swarm` tests (`dispatches_4_noop_workers_in_parallel`, `multi_worker_output_exhaustion_fails_without_retaining_buffers`, `timeout_releases_workspace_and_capacity_before_return`, + heartbeat) |
+| macOS | 3× `voice_live_capture_mac` + `corpus_filesystem` |
+| linux-containerized | `packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine` |
+| Array | `packaged_f04` |
+
+**Two things got WORSE and are unexplained:** `wcore-swarm` on Windows went from
+1 failing (baseline) to FOUR, and `every_reference_backend_...` regressed back
+after the merge wave had fixed it. This wave touches no file in `wcore-swarm`.
+"Does not touch it" is not a diagnosis — treat both as open.
+
 **Windows verdict from the merge wave, measured:** 4 failures FIXED
 (`bash_stderr_is_surfaced`, `bash_success_renders_the_real_exit_code_and_byte_count`,
 `every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not`,
