@@ -2320,6 +2320,18 @@ pub struct ExclusiveFileLock {
     heartbeat: Option<Heartbeat>,
 }
 
+impl std::fmt::Debug for ExclusiveFileLock {
+    /// Path only. The nonce is deliberately omitted: it is the token that
+    /// decides whether `drop` may remove the lockfile, and a `{:?}` in a log
+    /// line is not where that belongs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExclusiveFileLock")
+            .field("path", &self.path)
+            .field("heartbeat", &self.heartbeat.is_some())
+            .finish()
+    }
+}
+
 impl ExclusiveFileLock {
     /// `label` names the lock in the busy error, so a caller can tell a wedged
     /// migration from a wedged refresh.
@@ -5882,6 +5894,7 @@ mod chunk_write_lock_verification {
         let policy = LockPolicy {
             stale_after: std::time::Duration::from_millis(50),
             wait_ceiling: std::time::Duration::from_secs(5),
+            heartbeat: None,
         };
         let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), policy);
 
@@ -5921,6 +5934,7 @@ mod chunk_write_lock_verification {
             // Long enough that the live holder below is never judged stale.
             stale_after: std::time::Duration::from_secs(60),
             wait_ceiling: std::time::Duration::from_millis(120),
+            heartbeat: None,
         };
         let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), policy);
         let shared = Arc::new(Shared::default());
@@ -6354,6 +6368,7 @@ mod chunk_crash_injection {
             LockPolicy {
                 stale_after: std::time::Duration::from_millis(20),
                 wait_ceiling: std::time::Duration::from_secs(10),
+                heartbeat: None,
             },
         )
     }
