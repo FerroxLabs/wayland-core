@@ -53,7 +53,9 @@ All three are fixed; each was a measurement I should have taken sooner.
    `appcontainer` label (`1b5aaa66`) on the belief that `ferrox-win-msvc` could
    sandbox and `SEANDESKTOP` could not.
 
-   > ### ⚠ THAT PIN IS WRONG. UNDO IT FIRST. ⚠
+   > ### ⚠ THAT PIN WAS WRONG. IT IS NOW REVERTED (`df2f81ae`). ⚠
+   >
+   > Kept here because the reasoning matters, not because action is pending.
    >
    > **`ferrox-win-msvc` fails the AppContainer probe too — 7 occurrences of
    > the same `sandbox UNAVAILABLE` refusal in its own run (30887202242).**
@@ -83,42 +85,67 @@ twice as reasons to route Windows to the hosted pool. Corrected in the tracker.
 
 ---
 
-## 2b. FIRST TWO ACTIONS NEXT SESSION
+## 2b. BOTH ACTIONS ARE DONE — and the Windows story changed again
 
-Agreed with Sean 2026-08-04, deferred to the next session on purpose.
+Executed 2026-08-04. Two commits: `df2f81ae` (revert) and `a4e0e144` (probe).
 
-**1. Revert the `appcontainer` runner pin.** Undo `1b5aaa66` in `ci.yml` (drop
-`"appcontainer"` from the three matrix label sets) and remove the label from
-runner id **22** (`ferrox-win-msvc`):
+**1. The `appcontainer` pin is reverted.** `1b5aaa66` is undone in `ci.yml` and
+both runners are back in the pool. The inline comment was REPLACED rather than
+deleted — it asserted the false capability difference as fact, and a repo
+comment that lies is worse than no comment. It now carries the refutation.
+
+Remaining cleanup, after the push lands: remove the now-unused label from
+runner id **22**. Order matters — push the workflow first, because an extra
+runner label is harmless while a required-but-absent one strands every job.
 
 ```
 gh api -X DELETE repos/FerroxLabs/wayland-core/actions/runners/22/labels/appcontainer
 ```
 
-It rests on a false premise and costs a runner. Do this before anything else so
-nobody inherits it as intentional.
+**2. The probe now reports its own cause.** All four failure arms record why
+(thread-spawn refusal, non-zero child exit, `execute_blocking` error, wall-clock
+timeout) and the refusal quotes it verbatim instead of pointing at a
+`tracing::error!` no CI harness ever emits. Success clears the record, so a host
+that recovers cannot keep quoting a stale cause. The no-cause arm deliberately
+reads as OUR defect, not the operator's.
 
-**2. Make the AppContainer probe self-reporting.** This is the actual blocker to
-diagnosing Windows, and it is a product defect in its own right:
+### The measurement that changes the picture
 
-> the refusal says *"the cause was logged by `probe_appcontainer_available` at
-> the first execution"* — **and that log never reaches CI output.** The product
-> asserts a cause exists, then does not show it. Nobody can act on it.
+Ran the real production path on SEANDESKTOP, as user `SeanD`:
 
-`probe_appcontainer_available` is at
-`crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs:391`.
-It does a REAL spawn: `CreateAppContainerProfile` (profile-service RPC) then
-`CreateProcessAsUserW`. Carry the Win32 error from whichever call failed into
-the refusal MESSAGE rather than a `tracing::error!` the harness swallows.
+```
+OBSERVED: AppContainer settled verdict on this host: Some(true)
+OBSERVED: AppContainer executed normally, exit_code=0
+```
 
-Only after that does anyone know why both Windows boxes refuse to sandbox — and
-it may well be one environment setting rather than code. **Do not send Sean to
-change service accounts or policy on a hunch before the probe says what failed.**
+**SEANDESKTOP sandboxes fine.** The box was never broken. Two theories are now
+dead: "one sick machine" (§2 killed that) and "the Windows fleet cannot
+AppContainer" (this kills that).
 
-*Note for whoever picks this up:* this is the fourth time in one session that a
-conclusion drawn from a proxy — a stale ticket, a log line from the wrong job, a
-crate I did not test — turned out wrong when finally measured. Measure the
-specific thing. It is faster than being wrong twice.
+What is left is the difference between that run and a CI run: the **account**.
+Both runners execute as `NT AUTHORITY\NetworkService`, which is consistent with
+both failing identically while an interactive user succeeds on the same
+hardware. `CreateAppContainerProfile` wanting a loaded user profile would fit.
+
+**State that as a hypothesis, not a finding.** What is measured is
+SEANDESKTOP-as-SeanD available, and ferrox-win-msvc-as-NetworkService failing
+seven times. Nobody has yet measured SEANDESKTOP-as-NetworkService with the new
+probe — which is exactly what the next Windows CI run does. Read its
+`Cause, verbatim from the probe:` line before acting.
+
+**Still do not send Sean to change a service account until that line exists.**
+It is one CI run away and it names the Win32 call and status code.
+
+Verification carried by these commits: clippy clean on
+`x86_64-pc-windows-msvc` AND Linux, both `--all-targets`; both new tests pass on
+real Windows (`NEXTEST_EXIT=0`); and the cause-carrying assertion is
+**mutant-verified** — replacing the two `push_str` lines with `let _ = cause;`
+fails exactly that test, on the message it prints.
+
+*Note for whoever picks this up:* the proxy-vs-measurement trap caught me four
+times in the prior session and the fix each time was the same — go run the
+specific thing on the specific host. Doing that here took ~20 minutes and
+overturned the standing explanation twice in one day.
 
 ---
 
@@ -126,7 +153,7 @@ specific thing. It is faster than being wrong twice.
 
 | item | state |
 |---|---|
-| AppContainer probe fails on **BOTH** Windows runners | common-mode, cause UNKNOWN. Blocked on making the probe self-reporting — see §2b |
+| AppContainer probe fails on both runners **under CI**, but PASSES on SEANDESKTOP as an interactive user | no longer "the hosts are broken". Leading hypothesis is the `NT AUTHORITY\NetworkService` account. The self-reporting probe ships in `a4e0e144`; the next Windows CI run prints the Win32 cause — read it before acting. See §2b |
 | `mcp_assistant_scoping_e2e` (Windows) | swarm finding, **unlanded**, self-declared partial |
 | `exec-backend conformance_matrix` | swarm root cause **REFUTED** by the adversarial verifier; do not build on it |
 | `RC-READINESS.md` re-grade | drafted by swarm, **not applied**; five of seven verified closed, two stale in our favour |
