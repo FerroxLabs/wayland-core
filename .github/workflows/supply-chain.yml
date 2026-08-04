@@ -140,6 +140,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Without these the job never COMPILES: `libdbus-sys`'s build script
+      # panics ("Package dbus-1 was not found in the pkg-config search path"),
+      # cargo exits 101, and the determinism contract below is never reached.
+      # This gate has been red for that reason alone — a gate that cannot run
+      # is not a gate. Same package list the CI workflow already installs
+      # (ci.yml) and bench-regression uses; kept in sync deliberately.
+      - name: Install Linux system deps (libdbus + friends)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev pkg-config mold
+
       # nextest with an EXPLICIT `--no-tests=fail`, not `cargo test`: a run that
       # collects ZERO tests must exit non-zero instead of printing
       # `test result: ok. 0 passed` and exiting 0. A byte-determinism contract
