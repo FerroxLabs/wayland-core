@@ -163,7 +163,7 @@ jobs:
       fail-fast: false
       # Selects between three literals (see the admission-control note at the top
       # of `jobs:`). Full value is
-      #   ["macos-latest",["self-hosted","Windows","X64","msvc"]]
+      #   ["macos-latest",["self-hosted","Windows","X64","msvc","appcontainer"]]
       # — byte-identical to the literal list this replaced, so the job names
       # `CI (macos-latest)` and `CI (Array)` are unchanged. `main`, every PR and
       # the integration branch always get both entries.
@@ -191,7 +191,28 @@ jobs:
       # hosted-`windows-latest` workflows remain the cheaper route for a
       # narrow proof.
       matrix:
-        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc","appcontainer"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc","appcontainer"]]')) }}
+        # 2026-08-04 — the label set now REQUIRES `appcontainer`.
+        #
+        # There are two self-hosted Windows runners and they were label
+        # -identical, so a job landed on whichever was free. They are not
+        # interchangeable: `ferrox-win-msvc` probes the AppContainer sandbox
+        # `available`, and on `SEANDESKTOP` the real-spawn probe FAILS, so any
+        # sandbox-dependent test there dies with "sandbox UNAVAILABLE and
+        # unsandboxed execution is not permitted — refusing to run with host
+        # permissions". Correct fail-closed behaviour, wrong host.
+        #
+        # This is the explanation for the "failure set churns between runs on
+        # the same commit" that was being written off as flakiness: it was
+        # never flaky, it was WHICH BOX served the job. Same tree, two verdicts.
+        #
+        # `appcontainer` is a custom label carried only by `ferrox-win-msvc`.
+        # Pinning to it makes the Windows leg deterministic without weakening a
+        # gate — nothing is skipped, and a host that cannot sandbox can no
+        # longer produce a red for a capability it does not have. Remove the
+        # label requirement once SEANDESKTOP's AppContainer probe passes, or add
+        # the label to that box, and the pool is two again.
+        #
         # Windows runs on a self-hosted runner (Sean's box, labels:
         # self-hosted,Windows,X64,msvc). Switched off windows-latest
         # during v0.8.6 round 18 — GHA's hosted Windows runner has
