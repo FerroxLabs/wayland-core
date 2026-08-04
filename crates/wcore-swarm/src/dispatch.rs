@@ -539,28 +539,48 @@ fn mirror_heartbeat(workspace: &TransactionWorkspace) -> Result<(), String> {
 }
 
 /// Whether a worker descendant still holds a duplicate of the retained checkout
-/// directory descriptor (inherited across the sandbox spawn boundary). Rebuilds
-/// the owner-bound retained authority to query the shared loan counter.
+/// directory descriptor (inherited across the sandbox spawn boundary).
 ///
-/// The two failure arms are deliberately asymmetric. A root-authority failure is
-/// a PROVEN identity failure, so it returns `false` and the caller falls through
-/// to `release_transaction`, which independently re-validates and fails closed on
-/// the same condition — flipping it would strand every already-drifted
-/// transaction. A refused `RetainedWorkspaceAuthority::new` proves nothing: the
-/// absence of a loan could not be established, so it returns `true` and the
-/// caller quarantines the transaction with its reservation held for retry.
-fn checkout_loan_outstanding(workspace: &TransactionWorkspace, worker_id: &str) -> bool {
-    let Ok(root_authority) = workspace.root_authority() else {
-        return false;
-    };
-    let Ok(retained) = RetainedWorkspaceAuthority::new(
-        root_authority,
-        workspace.checkout_authority(),
-        format!("{worker_id}:{}", workspace.reserved_bytes),
-    ) else {
-        return true;
-    };
-    retained.checkout_has_outstanding_loans()
+/// This reads the retained checkout authority's own shared loan counter and
+/// NOTHING else. That counter is this crate's single definition of an
+/// outstanding descendant loan: every loan site increments the counter of the
+/// authority the loan is taken against, `TransactionCleanup::release` consults
+/// exactly the same counter through `has_outstanding_loans`, and the counter is
+/// shared by every clone of an authority, so reading it through a clone reads
+/// the original.
+///
+/// IT NO LONGER REBUILDS A `RetainedWorkspaceAuthority` TO ASK, and that is the
+/// repair rather than a simplification. The rebuild answered a DIFFERENT
+/// question — "can the owner still OPEN its named child?" — and treated an
+/// unprovable answer as a loan. On Windows that question is DESTRUCTIVE:
+/// `DirectoryAuthority::open_child_directory` requested `FILE_GENERIC_READ |
+/// FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE` where the unix form is
+/// `openat(O_RDONLY | O_DIRECTORY | O_NOFOLLOW)`, and Windows share arbitration
+/// refuses a delete-bearing open while ANY handle already on the object omits
+/// `FILE_SHARE_DELETE` — which is exactly what a process holding that directory
+/// as its CURRENT DIRECTORY holds. MEASURED on Windows 10.0.26200 (NTFS): with
+/// a live process whose cwd is the directory, the read-only open succeeds and
+/// the delete-bearing open fails with ERROR_SHARING_VIOLATION (win32 = 32);
+/// after that process has been waited for, the delete-bearing open succeeds
+/// again within 0-2 ms.
+///
+/// Since NO Windows path ever takes a loan against the checkout authority
+/// (`try_clone_inheritable_handle` is `#[cfg(target_os = "linux")]`, and the
+/// crate's other loan sites are the swarm control directory and the transaction
+/// root's lease file), that refusal was the ONLY way this predicate could
+/// return `true` on Windows: a verdict about share arbitration, reported as a
+/// verdict about loans, over a worker that had already succeeded — and it held
+/// the worker's capacity reservation while doing so.
+///
+/// NOTHING IS LOST BY NOT FAILING CLOSED HERE. `release_transaction` re-proves
+/// every authority itself and, on ANY failure, restores the transaction root
+/// AND re-inserts the capacity reservation before returning the error, so
+/// "reservation held for retry" is enforced by `TransactionCleanup::release` —
+/// which applies this same loan test as its own first guard.
+fn checkout_loan_outstanding(workspace: &TransactionWorkspace) -> bool {
+    workspace
+        .checkout_authority()
+        .has_outstanding_handle_loans()
 }
 
 fn release_terminal(
@@ -587,7 +607,7 @@ fn release_terminal(
     // descriptor. Quarantine the transaction (keep it reserved) instead of
     // releasing, so a live child cannot lose its working directory and a
     // same-path replacement cannot be substituted before the loan drops.
-    if checkout_loan_outstanding(&workspace, &terminal.worker_id) {
+    if checkout_loan_outstanding(&workspace) {
         let diagnostic = "worker descendant still holds the retained checkout descriptor; \
              transaction quarantined and its reservation held for retry"
             .to_owned();

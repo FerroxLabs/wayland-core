@@ -83,8 +83,14 @@ async fn workspace_aware_identity_is_root_independent_and_collision_free() {
     // `workspace_forms`, whose first guard is `!workspace.is_absolute()`. These are
     // synthetic identity roots — never created, never opened — so a drive prefix on
     // Windows preserves the test exactly while making the literal absolute there.
+    //
+    // The Windows roots use NATIVE `\` separators. They were `C:/…` until
+    // 2026-08-04, and that is precisely why this contract stayed green on
+    // Windows while the F04 repeatability gate diverged: a `/`-spelled root has
+    // nothing for JSON to escape, so the escaped-spelling case below could
+    // never arise here.
     let (first_root, second_root) = if cfg!(windows) {
-        ("C:/private/openai-run-a", "C:/private/openai-run-b")
+        ("C:\\private\\openai-run-a", "C:\\private\\openai-run-b")
     } else {
         ("/private/openai-run-a", "/private/openai-run-b")
     };
@@ -113,6 +119,37 @@ async fn workspace_aware_identity_is_root_independent_and_collision_free() {
     let mut second_request = request("fixture-chat-v1");
     second_request["messages"][0]["content"] =
         json!(format!("Edit {second_root}/src/settings.toml"));
+    // From the SECOND request of a real turn onward, OpenAI carries the tool
+    // call's input as `function.arguments` — a whole JSON document stored as a
+    // JSON *string*, so every separator inside it is escaped. Recording only
+    // the plain spelling is what let the F04 repeatability gate diverge on
+    // Windows while every per-leaf digest agreed. On `/`-separated platforms
+    // this adds no discrimination (nothing to escape); on Windows it fails
+    // unless `push_spellings` recognises the escaped form.
+    let assistant_tool_call = |root: &str| {
+        json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call-edit",
+                "type": "function",
+                "function": {
+                    "name": "Edit",
+                    "arguments": serde_json::to_string(
+                        &json!({"file_path": format!("{root}/src/settings.toml")}),
+                    )
+                    .expect("encode tool-call arguments"),
+                },
+            }],
+        })
+    };
+    first_request["messages"]
+        .as_array_mut()
+        .expect("first messages array")
+        .push(assistant_tool_call(first_root));
+    second_request["messages"]
+        .as_array_mut()
+        .expect("second messages array")
+        .push(assistant_tool_call(second_root));
     assert!(
         post(first.base_url(), first_request)
             .await

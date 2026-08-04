@@ -71,16 +71,35 @@ fn workspace_forms(workspace: &Path) -> Result<Vec<Vec<u8>>, WorkspaceEvidenceEr
 /// Append every spelling of one pathname the platform can produce, skipping
 /// duplicates so `next_workspace` never scans the same bytes twice.
 fn push_spellings(forms: &mut Vec<Vec<u8>>, path: &str) {
-    let native = path.as_bytes().to_vec();
-    if !forms.contains(&native) {
-        forms.push(native);
-    }
+    push_form(forms, path.as_bytes().to_vec());
+    // The workspace also reaches evidence from INSIDE a JSON-encoded string,
+    // where every `\` is doubled. That is not hypothetical: an OpenAI request
+    // carries a tool call's input as `function.arguments` — a whole JSON
+    // document stored as a JSON *string*, built by
+    // `serde_json::to_string(input)` in `crates/wcore-providers/src/openai.rs`
+    // — so from the SECOND request of a turn onward the body embeds
+    // `C:\\Users\\…\\.tmpXXXX` while the harness holds `C:\Users\…\.tmpXXXX`.
+    //
+    // Left unmatched, the random per-run directory name survives into
+    // `semantic_body_sha256` and no two runs of the F04 repeatability gate can
+    // agree — while every per-LEAF digest still agrees, because
+    // `insert_semantic_leaf_hash` re-parses that leaf as JSON and therefore
+    // sees the UNescaped path. That asymmetry is exactly the shape the failure
+    // took on Windows: request 1 identical, requests 2..n divergent, and
+    // `assert_request_leaves_equal` silent throughout.
+    //
+    // `/`-separated platforms have nothing to escape, so this spelling
+    // deduplicates away there and their digests are byte-for-byte unchanged.
+    push_form(forms, path.replace('\\', "\\\\").into_bytes());
     #[cfg(windows)]
     {
-        let slash = path.replace('\\', "/").into_bytes();
-        if !forms.contains(&slash) {
-            forms.push(slash);
-        }
+        push_form(forms, path.replace('\\', "/").into_bytes());
+    }
+}
+
+fn push_form(forms: &mut Vec<Vec<u8>>, form: Vec<u8>) {
+    if !forms.contains(&form) {
+        forms.push(form);
     }
 }
 
@@ -179,6 +198,8 @@ pub(crate) enum WorkspaceEvidenceError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::semantic_sha256;
 
     #[test]
@@ -246,6 +267,81 @@ mod tests {
         assert_ne!(
             semantic_sha256(b"test", evidence(0).as_bytes(), &links[0]).unwrap(),
             semantic_sha256(b"test", deeper.as_bytes(), &links[0]).unwrap()
+        );
+    }
+
+    /// The workspace reaches an OpenAI request body under a spelling the
+    /// harness never holds: JSON-ESCAPED, because `function.arguments` is a
+    /// whole JSON document stored as a JSON *string*. On Windows that doubles
+    /// every separator, the plain spelling stops matching, and the random
+    /// per-run directory name survives into `semantic_body_sha256` — the F04
+    /// repeatability gate then diverges from its SECOND request onward while
+    /// its per-leaf assertion stays silent (leaves are re-parsed as JSON, so
+    /// they see the unescaped path).
+    ///
+    /// JSON escapes only `\`, so on `/`-separated platforms the workspace
+    /// directory is given a name that CONTAINS one — legal on unix, and the
+    /// same code path Windows takes for every path it produces. Without that
+    /// this test would be green on Linux whether or not the bug is fixed.
+    #[test]
+    fn a_json_encoded_workspace_path_normalizes() {
+        #[cfg(unix)]
+        const NAMES: [&str; 2] = ["run\\a", "run\\b"];
+        #[cfg(not(unix))]
+        const NAMES: [&str; 2] = ["run-a", "run-b"];
+
+        let root = tempfile::tempdir().unwrap();
+        let workspaces = NAMES.map(|name| {
+            let directory = root.path().join(name);
+            std::fs::create_dir(&directory).unwrap();
+            directory
+        });
+
+        // Positive control on the setup: the escaped spelling must actually
+        // differ from the plain one, or nothing below exercises the escaped
+        // form and the assertions pass unfixed.
+        let native = workspaces[0].to_str().unwrap();
+        assert_ne!(
+            native,
+            native.replace('\\', "\\\\"),
+            "this platform's workspace path has no escapable separator; the \
+             assertions below would prove nothing"
+        );
+
+        // Exactly the shape an OpenAI request carries from its second call
+        // onward: an assistant tool call whose `arguments` is a JSON document
+        // encoded into a string.
+        let body = |workspace: &Path, file: &str| {
+            let arguments = serde_json::to_string(&serde_json::json!({
+                "file_path": workspace.join("src").join(file),
+            }))
+            .unwrap();
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [{
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-edit",
+                        "type": "function",
+                        "function": {"name": "Edit", "arguments": arguments},
+                    }],
+                }],
+            }))
+            .unwrap()
+        };
+
+        let first = body(&workspaces[0], "settings.toml");
+        let second = body(&workspaces[1], "settings.toml");
+        assert_ne!(first, second, "the two runs must differ on the wire");
+        assert_eq!(
+            semantic_sha256(b"test", &first, &workspaces[0]).unwrap(),
+            semantic_sha256(b"test", &second, &workspaces[1]).unwrap()
+        );
+
+        // Known-negative: recognising the escaped spelling must not swallow the
+        // rest of the encoded document, or the gate could no longer fail.
+        assert_ne!(
+            semantic_sha256(b"test", &first, &workspaces[0]).unwrap(),
+            semantic_sha256(b"test", &body(&workspaces[0], "other.toml"), &workspaces[0]).unwrap()
         );
     }
 

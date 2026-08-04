@@ -42,9 +42,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -61,6 +62,11 @@ use windows_sys::Win32::System::Threading::{
 /// `SE_GROUP_INTEGRITY` from `winnt.h`. Not re-exported by windows-sys
 /// (versions ≤ 0.59); defined locally per the Windows SDK header.
 const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+
+/// How long the post-`TerminateJobObject` drain waits for the job to reach zero
+/// active processes. Measured teardown is 0-2 ms; this is a hang guard, not a
+/// budget, and it is bounded so a wedged member cannot stall the caller.
+const JOB_DRAIN_LIMIT_SECS: u64 = 5;
 
 pub struct AppContainerBackend;
 
@@ -1130,6 +1136,57 @@ pub(super) fn execute_blocking(
                 },
             );
             WaitForSingleObject(process.as_raw(), 2_000);
+
+            // ---- 12a. Drain the job to ZERO active processes. ----
+            //
+            // `TerminateJobObject` only REQUESTS termination of every member; it
+            // does not wait, and the wait above covers the DIRECT CHILD ONLY. Any
+            // other member — a grandchild, a console host — can still be alive
+            // when this returns, and on Windows that is not cosmetic: a live
+            // process whose current directory is the worker checkout holds a
+            // handle whose share mode omits `FILE_SHARE_DELETE`, so every
+            // delete-bearing open of that directory is refused by the kernel with
+            // ERROR_SHARING_VIOLATION for as long as it lives. The swarm's
+            // terminal-release path then reports the refusal as "worker
+            // descendant still holds the retained checkout descriptor" and
+            // quarantines a transaction whose worker actually succeeded.
+            //
+            // MEASURED (Windows 10.0.26200, NTFS): with a live process whose cwd
+            // is the directory, the delete-bearing open fails with win32 = 32 for
+            // as long as it lives; once it has been waited for, the same open
+            // succeeds within 0-2 ms. So the only thing needed here is to WAIT.
+            // Breakaway is denied on this job (see the LimitFlags block above),
+            // so job membership is the complete descendant set.
+            //
+            // Bounded, so a member wedged in the kernel cannot hang the caller.
+            {
+                let drain_deadline =
+                    std::time::Instant::now() + Duration::from_secs(JOB_DRAIN_LIMIT_SECS);
+                loop {
+                    let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = mem::zeroed();
+                    let queried = QueryInformationJobObject(
+                        job.as_raw(),
+                        JobObjectBasicAccountingInformation,
+                        ptr::addr_of_mut!(accounting).cast(),
+                        mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                        ptr::null_mut(),
+                    );
+                    if queried == 0 || accounting.ActiveProcesses == 0 {
+                        break;
+                    }
+                    if std::time::Instant::now() >= drain_deadline {
+                        tracing::warn!(
+                            target: "wcore_sandbox",
+                            active_processes = accounting.ActiveProcesses,
+                            drain_limit_secs = JOB_DRAIN_LIMIT_SECS,
+                            "terminated job still has active members after its drain bound; \
+                             a descendant may still hold the workspace directory"
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
 
             // Now that every write-end is closed the reader threads reach EOF;
             // join them to collect the fully-drained output. This MUST run before

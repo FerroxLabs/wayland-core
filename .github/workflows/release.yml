@@ -52,6 +52,29 @@ jobs:
           version="${RELEASE_TAG#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+          # The tag is the ONLY input to everything downstream — the manifest,
+          # the signed digests, the asset names. Nothing ever asked the tree
+          # whether it agreed. On 2026-08-04 the workspace still read 0.12.25
+          # while the RC was to be tagged v0.12.26-rc.1, so tagging would have
+          # published a binary whose own `--version` contradicted the signed
+          # manifest shipped beside it, and no gate anywhere would have said so.
+          #
+          # Compares the RELEASE core (X.Y.Z with any -rc.N / -wayland-<suffix>
+          # stripped) against `[workspace.package] version`. A pre-release tag
+          # is expected to share its base version with the tree; a MISMATCHED
+          # base is a packaging error that must not reach a signature.
+          core="${version%%-*}"
+          workspace="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "${workspace}" ]; then
+            echo "::error::could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "${core}" != "${workspace}" ]; then
+            echo "::error::tag/tree version mismatch — tag '${RELEASE_TAG}' implies ${core} but Cargo.toml declares ${workspace}. Bump [workspace.package] version (and refresh Cargo.lock) before tagging." >&2
+            exit 1
+          fi
+          echo "tag ${RELEASE_TAG} agrees with workspace version ${workspace}"
+
       # ── The Desktop wire contract, published as a release asset ─────────────
       # `contracts/desktop/v1` is what a host implements against: 52 event
       # fixtures, 23 command fixtures, three JSON Schemas, the adversarial

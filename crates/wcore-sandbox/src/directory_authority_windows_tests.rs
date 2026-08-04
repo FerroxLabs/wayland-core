@@ -632,3 +632,35 @@ fn windows_command_cwd_stays_bound_to_renamed_directory_object() {
     assert!(moved.is_dir());
     assert!(original.is_dir());
 }
+
+/// A retained workspace must still BIND while a share-delete-denying handle is
+/// open on the checkout, because that is exactly what a live worker descendant
+/// holds: Windows opens a process's current directory without
+/// `FILE_SHARE_DELETE`.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS. Point either identity proof in
+/// `RetainedWorkspaceAuthority` back at the mutating `open_child_directory` and
+/// the proof's open is refused by the kernel with ERROR_SHARING_VIOLATION (os
+/// error 32) while the lease below is held, so `new` returns Err. That Err is
+/// the state the swarm dispatch path reported as "worker descendant still holds
+/// the retained checkout descriptor", quarantining a successful worker and
+/// holding its capacity reservation.
+#[test]
+fn windows_retained_workspace_binds_under_a_share_delete_denying_handle() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner_path = temp.path().join("transaction");
+    let checkout_path = owner_path.join("checkout");
+    std::fs::create_dir_all(&checkout_path).unwrap();
+
+    let owner = DirectoryAuthority::open(&owner_path).unwrap();
+    // Observational, exactly as the delegated dispatch path retains a checkout:
+    // a delete-bearing authority cannot be name-leased at all.
+    let checkout = DirectoryAuthority::open_observational(&checkout_path).unwrap();
+
+    // `acquire_name_lease` omits FILE_SHARE_DELETE — the same share arbitration
+    // a process standing in the directory imposes.
+    let pin = acquire_name_lease(&checkout).unwrap();
+    RetainedWorkspaceAuthority::new(owner, checkout, "share-arbitration-probe")
+        .expect("identity re-proof must not demand delete access on the checkout");
+    drop(pin);
+}

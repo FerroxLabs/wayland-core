@@ -132,8 +132,14 @@ fn verify_binary_proves_identity_without_provider_credentials() {
         "{}",
         output_context(&output)
     );
+    // Derived from the workspace, never spelled out. A literal here rots on
+    // every version bump: this assertion read `version=0.12.25` and failed the
+    // moment the tree moved to 0.12.26 for the RC — reporting a version bump as
+    // a broken identity proof. The claim under test is "the emitted version is
+    // the version we built", which a literal cannot express and this can.
     assert!(
-        stdout.contains("version=0.12.25") && stdout.contains(&format!("source={COMMIT}")),
+        stdout.contains(&format!("version={}", env!("CARGO_PKG_VERSION")))
+            && stdout.contains(&format!("source={COMMIT}")),
         "{}",
         output_context(&output)
     );

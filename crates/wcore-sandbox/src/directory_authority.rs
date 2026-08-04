@@ -302,6 +302,41 @@ impl DirectoryAuthority {
         ))
     }
 
+    /// Identity-witness open of ONE direct child directory: it proves the child
+    /// is the object this retained parent currently names, and asks the kernel
+    /// for nothing else.
+    ///
+    /// On unix this IS [`Self::open_child_directory`] — that open is already
+    /// `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`. On Windows it is strictly weaker:
+    /// `FILE_GENERIC_READ | SYNCHRONIZE` in place of `FILE_GENERIC_READ |
+    /// FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE`.
+    ///
+    /// THE DELETE RIGHT IS WHY THIS EXISTS. Windows share arbitration refuses a
+    /// delete-bearing open while any handle already on the object omits
+    /// `FILE_SHARE_DELETE` — which is exactly what a process holding that
+    /// directory as its CURRENT DIRECTORY holds. Measured on Windows 10.0.26200
+    /// (NTFS): with such a process live, the read-only open succeeds and the
+    /// delete-bearing one fails with ERROR_SHARING_VIOLATION (win32 = 32); once
+    /// that process has been waited for, the delete-bearing open succeeds again
+    /// within 0-2 ms. An IDENTITY PROOF must not fail merely because somebody is
+    /// standing in the directory, so proofs use this and only genuinely
+    /// destructive callers use the mutating form.
+    ///
+    /// The result is an IDENTITY WITNESS ONLY, with the same contract as
+    /// [`Self::open_observational`]: destructive and relative-child operations
+    /// on it are outside its contract and fail closed with an OS access error.
+    pub fn open_child_directory_observational(&self, name: &str) -> Result<Self> {
+        validate_child_name(name)?;
+        #[cfg(windows)]
+        {
+            windows::open_child_directory_observational(self, name)
+        }
+        #[cfg(not(windows))]
+        {
+            self.open_child_directory(name)
+        }
+    }
+
     /// Enumerate direct child names beneath the retained directory. Names are
     /// observations only; callers must open each child through this authority
     /// before trusting its type, metadata, or contents.
@@ -916,7 +951,7 @@ impl RetainedWorkspaceAuthority {
         }
         owner.validate_path(owner.display_path())?;
         workspace.validate_path(display)?;
-        let observed = owner.open_child_directory(&child_name)?;
+        let observed = owner.open_child_directory_observational(&child_name)?;
         if observed.identity_token() != workspace.identity_token() {
             return Err(SandboxError::PathDenied(
                 "retained workspace child identity contradicts owner authority".to_owned(),
@@ -956,7 +991,9 @@ impl RetainedWorkspaceAuthority {
         self.owner.validate_path(self.owner.display_path())?;
         self.workspace
             .validate_path(self.workspace.display_path())?;
-        let observed = self.owner.open_child_directory(&self.child_name)?;
+        let observed = self
+            .owner
+            .open_child_directory_observational(&self.child_name)?;
         if observed.identity_token() != self.workspace.identity_token() {
             return Err(SandboxError::PathDenied(
                 "retained workspace identity changed beneath its owner".to_owned(),

@@ -266,6 +266,31 @@ pub(super) fn open_child_directory(
     Ok(directory_authority(parent, name, handle, identity))
 }
 
+/// Read-only sibling of [`open_child_directory`], for IDENTITY PROOFS.
+///
+/// The ONLY difference is the desired access: `FILE_GENERIC_READ | SYNCHRONIZE`
+/// instead of the mutating mask's added `FILE_GENERIC_WRITE | DELETE`. The
+/// DELETE right is share-arbitrated, so the mutating form is refused with
+/// ERROR_SHARING_VIOLATION while any handle on the child omits
+/// `FILE_SHARE_DELETE` — a live process whose current directory is that child
+/// being the everyday case, not an edge case. Identity is FileId/volume based
+/// and needs only read access, so a proof should pay no share-arbitration cost.
+pub(super) fn open_child_directory_observational(
+    parent: &DirectoryAuthority,
+    name: &str,
+) -> Result<DirectoryAuthority> {
+    let handle = open_relative(
+        parent,
+        name,
+        RelativeKind::Directory,
+        RelativeIntent::ReadOnly,
+    )?;
+    let metadata = handle.metadata()?;
+    validate_real_directory(Path::new("<retained child>"), &metadata)?;
+    let identity = handle_directory_identity(&handle, &metadata)?;
+    Ok(directory_authority(parent, name, handle, identity))
+}
+
 /// Name-only projection of `child_entries`.
 ///
 /// Kept as a projection rather than a second `NtQueryDirectoryFile` loop so the
