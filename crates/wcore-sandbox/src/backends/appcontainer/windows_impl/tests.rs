@@ -854,6 +854,94 @@ fn the_refusal_names_the_failing_call_instead_of_pointing_at_a_log() {
     );
 }
 
+/// A transient probe failure must NOT hard-refuse the user's command.
+///
+/// This is the RC defect. Every self-hosted Windows CI failure was one
+/// sentence — "sandbox UNAVAILABLE … the AppContainer real-spawn probe failed"
+/// — across `wcore-cli` and `wcore-swarm` alike, and it was never the host:
+/// the same box probes available as a user, as NetworkService, from `C:`, and
+/// across 40 concurrent separate-process cold probes. CI's own retries then
+/// passed, which is what a lost profile-creation race looks like.
+#[test]
+fn a_transient_probe_failure_is_retried_rather_than_refusing_the_command() {
+    let mut calls = 0;
+    let mut slept = Vec::new();
+    let available = probe_with_retry(
+        || {
+            calls += 1;
+            if calls < 3 {
+                ProbeAttempt::Failed {
+                    reason: "CreateAppContainerProfile: 0x800705aa".to_owned(),
+                    retryable: true,
+                }
+            } else {
+                ProbeAttempt::Available
+            }
+        },
+        |d| slept.push(d),
+    );
+    assert!(
+        available,
+        "two transient failures then success must resolve to AVAILABLE — refusing here \
+         is precisely the CI defect"
+    );
+    assert_eq!(calls, 3, "it must actually re-attempt, not return the first answer");
+    assert_eq!(slept.len(), 2, "each retry must back off before re-attempting");
+    assert!(
+        slept[1] > slept[0],
+        "backoff must grow, so a busy host is not hammered: {slept:?}"
+    );
+}
+
+/// Fail-closed is preserved: retries do not invent availability.
+#[test]
+fn a_persistent_failure_still_refuses_after_the_attempts_are_spent() {
+    let mut calls = 0;
+    let available = probe_with_retry(
+        || {
+            calls += 1;
+            ProbeAttempt::Failed {
+                reason: "CreateProcessAsUserW: 0x5".to_owned(),
+                retryable: true,
+            }
+        },
+        |_| {},
+    );
+    assert!(
+        !available,
+        "a host that genuinely cannot sandbox must still be refused — retry must never \
+         become a bypass"
+    );
+    assert_eq!(calls, PROBE_ATTEMPTS, "it must spend exactly the budgeted attempts");
+    let refusal = compose_unavailable_refusal(Some("CreateProcessAsUserW: 0x5"));
+    assert!(refusal.contains("CreateProcessAsUserW: 0x5"));
+}
+
+/// A STALL must not be retried — #125 was a ~120s hang per command, and three
+/// stacked 15s guards would triple it while curing nothing.
+#[test]
+fn a_stalled_probe_is_not_retried_because_that_multiplies_the_hang() {
+    let mut calls = 0;
+    let mut slept = Vec::new();
+    let available = probe_with_retry(
+        || {
+            calls += 1;
+            ProbeAttempt::Failed {
+                reason: "the probe exceeded its 15s hard wall-clock guard".to_owned(),
+                retryable: false,
+            }
+        },
+        |d| slept.push(d),
+    );
+    assert!(!available);
+    assert_eq!(
+        calls, 1,
+        "a wall-clock stall must be answered once, not re-attempted — retrying a wedged \
+         host is the #125 hang multiplied"
+    );
+    assert!(slept.is_empty(), "a non-retryable outcome must not sleep at all");
+}
+
 /// Drives the REAL production probe and prints whatever this host reports.
 ///
 /// This is the diagnostic that closes the open Windows question. It is not a

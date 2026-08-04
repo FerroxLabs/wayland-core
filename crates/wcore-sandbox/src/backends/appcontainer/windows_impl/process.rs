@@ -447,7 +447,97 @@ pub(super) fn bind_retained_cwd(
     Ok((lease, bound))
 }
 
+/// Outcome of ONE real-spawn attempt.
+///
+/// `retryable` is the whole point of this type. A probe that FAILED FAST (a
+/// Win32 error, a non-zero child exit) is very likely losing a race with
+/// another process creating an AppContainer profile at the same instant, and
+/// re-attempting costs milliseconds. A probe that STALLED past the wall-clock
+/// guard is the opposite: something is wedged, and re-attempting multiplies the
+/// #125 hang instead of curing it. Never retry a stall.
+pub(super) enum ProbeAttempt {
+    Available,
+    Failed { reason: String, retryable: bool },
+}
+
+/// Availability, with bounded retry for transient contention.
+///
+/// WHY THIS EXISTS. Every self-hosted Windows CI failure on this branch was one
+/// sentence — "sandbox UNAVAILABLE … the AppContainer real-spawn probe failed
+/// on this host" — and it was NOT a host defect: the same box probes
+/// `available` as an interactive user, as `NT AUTHORITY\NetworkService`, from
+/// `C:`, and across 40 concurrent separate-process cold probes. What it does
+/// not survive is the FULL workspace test load, where many independent
+/// processes each create an AppContainer profile at once. CI's own retries then
+/// pass, which is the signature of a transient race, and is exactly why the
+/// failure set appeared to "churn between runs".
+///
+/// The single-flight added in #754 cannot help here: `probe_cache` and
+/// `probe_gate` are `OnceLock` statics, so they collapse concurrent probes
+/// WITHIN a process, and every sandboxed child is its own process.
+///
+/// Fail-closed is preserved exactly. After the attempts are spent this still
+/// returns `false` and the caller still refuses to run unsandboxed. The change
+/// is only that one unlucky millisecond no longer hard-refuses a user's
+/// command.
 pub(super) fn probe_appcontainer_available() -> bool {
+    probe_with_retry(probe_appcontainer_once, std::thread::sleep)
+}
+
+/// Deliberately small. Contention resolves in milliseconds; anything larger
+/// just delays an honest refusal.
+pub(super) const PROBE_ATTEMPTS: u32 = 3;
+const BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
+
+/// The retry policy, separated from the Win32 spawn so it is provable.
+///
+/// Taking the attempt and the sleep as parameters is the whole reason this is a
+/// function: the real prober needs a real AppContainer, and a test that needs a
+/// real AppContainer cannot assert "a stall is NOT retried" — the interesting
+/// case is the one you cannot conjure on a healthy host.
+pub(super) fn probe_with_retry(
+    mut attempt: impl FnMut() -> ProbeAttempt,
+    mut sleep: impl FnMut(Duration),
+) -> bool {
+    let mut last: Option<String> = None;
+    for n in 1..=PROBE_ATTEMPTS {
+        match attempt() {
+            ProbeAttempt::Available => {
+                record_probe_outcome(None);
+                return true;
+            }
+            ProbeAttempt::Failed { reason, retryable } => {
+                if !retryable {
+                    record_probe_outcome(Some(reason));
+                    return false;
+                }
+                if n == PROBE_ATTEMPTS {
+                    record_probe_outcome(Some(format!(
+                        "{reason} (still failing after {PROBE_ATTEMPTS} attempts, so this is \
+                         not a transient race)"
+                    )));
+                    return false;
+                }
+                tracing::warn!(
+                    target: "wcore_sandbox",
+                    attempt = n,
+                    reason = %reason,
+                    "AppContainer probe failed; retrying, this is usually contention with \
+                     another process creating a profile."
+                );
+                last = Some(reason);
+                sleep(BACKOFF[(n - 1) as usize]);
+            }
+        }
+    }
+    // Unreachable in practice: the loop returns on every path. Kept fail-closed
+    // rather than `unreachable!()` so a future edit cannot turn a logic slip
+    // into a panic that the caller reads as a sandbox bypass.
+    record_probe_outcome(last);
+    false
+}
+
+fn probe_appcontainer_once() -> ProbeAttempt {
     // Inner `manifest.timeout` bounds ONLY `WaitForSingleObject` (the wait
     // for the child to exit). It does NOT bound the Win32 setup calls
     // before that wait — `CreateAppContainerProfile` (profile-service RPC)
@@ -488,19 +578,17 @@ pub(super) fn probe_appcontainer_available() -> bool {
             target: "wcore_sandbox",
             "could not spawn AppContainer probe thread; sandbox disabled."
         );
-        record_probe_outcome(Some(
-            "could not spawn the `appcontainer-probe` thread at all (OS refused \
-             thread creation); the AppContainer pipeline was never reached"
+        // Thread creation failing is a resource ceiling, not a profile race.
+        return ProbeAttempt::Failed {
+            reason: "could not spawn the `appcontainer-probe` thread at all (OS refused \
+                     thread creation); the AppContainer pipeline was never reached"
                 .to_owned(),
-        ));
-        return false;
+            retryable: false,
+        };
     }
 
     match rx.recv_timeout(PROBE_WALL_CLOCK) {
-        Ok(Ok(out)) if out.exit_code == 0 => {
-            record_probe_outcome(None);
-            true
-        }
+        Ok(Ok(out)) if out.exit_code == 0 => ProbeAttempt::Available,
         Ok(Ok(out)) => {
             tracing::error!(
                 target: "wcore_sandbox",
@@ -508,16 +596,20 @@ pub(super) fn probe_appcontainer_available() -> bool {
                 "AppContainer real-spawn probe completed but exit code non-zero; \
                  sandbox disabled. WAYLAND_SANDBOX_LIVE_WINDOWS spawn may also fail."
             );
-            record_probe_outcome(Some(format!(
-                "the probe spawned successfully but `cmd.exe /c exit 0` returned \
-                 exit code {} instead of 0 — the sandbox pipeline works and the \
-                 child itself misbehaved",
-                out.exit_code
-            )));
-            false
+            ProbeAttempt::Failed {
+                reason: format!(
+                    "the probe spawned successfully but `cmd.exe /c exit 0` returned \
+                     exit code {} instead of 0 — the sandbox pipeline works and the \
+                     child itself misbehaved",
+                    out.exit_code
+                ),
+                // The pipeline demonstrably works; a different exit code is a real
+                // answer, not a race to re-run.
+                retryable: false,
+            }
         }
         Ok(Err(e)) => {
-            record_probe_outcome(Some(format!("{e}")));
+            let reason = format!("{e}");
             tracing::error!(
                 target: "wcore_sandbox",
                 error = %e,
@@ -531,17 +623,15 @@ pub(super) fn probe_appcontainer_available() -> bool {
                  negative-cache TTL, ONLY when the error names no persistent on-disk \
                  state."
             );
-            false
+            // A fast Win32 failure is the shape a lost profile-creation race
+            // takes, so this is the one arm worth re-attempting.
+            ProbeAttempt::Failed {
+                reason,
+                retryable: true,
+            }
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             control.cancel();
-            record_probe_outcome(Some(format!(
-                "the probe exceeded its {}s hard wall-clock guard — a Win32 setup \
-                 call (CreateAppContainerProfile / CreateProcessAsUserW) stalled \
-                 rather than returning an error, most often an AV image scan or a \
-                 slow profile-service RPC",
-                PROBE_WALL_CLOCK.as_secs()
-            )));
             tracing::error!(
                 target: "wcore_sandbox",
                 guard_secs = PROBE_WALL_CLOCK.as_secs(),
@@ -551,7 +641,18 @@ pub(super) fn probe_appcontainer_available() -> bool {
                  Treating the sandbox as unavailable for this probe; it re-runs \
                  after the negative-cache TTL (#125)."
             );
-            false
+            ProbeAttempt::Failed {
+                reason: format!(
+                    "the probe exceeded its {}s hard wall-clock guard — a Win32 setup \
+                     call (CreateAppContainerProfile / CreateProcessAsUserW) stalled \
+                     rather than returning an error, most often an AV image scan or a \
+                     slow profile-service RPC",
+                    PROBE_WALL_CLOCK.as_secs()
+                ),
+                // NEVER retry a stall. #125 was a ~120s hang per command; three
+                // stacked 15s guards would triple it and cure nothing.
+                retryable: false,
+            }
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             control.cancel();
@@ -559,13 +660,14 @@ pub(super) fn probe_appcontainer_available() -> bool {
                 target: "wcore_sandbox",
                 "AppContainer probe thread ended without a result; sandbox disabled."
             );
-            record_probe_outcome(Some(
-                "the `appcontainer-probe` thread ended without sending a result — \
-                 it panicked inside the Win32 FFI path; the panic message is on \
-                 stderr, not here"
+            ProbeAttempt::Failed {
+                reason: "the `appcontainer-probe` thread ended without sending a result — \
+                         it panicked inside the Win32 FFI path; the panic message is on \
+                         stderr, not here"
                     .to_owned(),
-            ));
-            false
+                // A panic in the FFI path reproduces; retrying just panics again.
+                retryable: false,
+            }
         }
     }
 }
