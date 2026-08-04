@@ -122,30 +122,73 @@ OBSERVED: AppContainer executed normally, exit_code=0
 dead: "one sick machine" (§2 killed that) and "the Windows fleet cannot
 AppContainer" (this kills that).
 
-Three explanations are now dead, each killed by a direct measurement on
-SEANDESKTOP with the new probe:
+### FIRST: `ferrox-win-msvc` is not a second machine
+
+`C:\actions-runner-ferrox\.runner` on SEANDESKTOP has
+`agentName=ferrox-win-msvc`. There are THREE runner services on that one box:
+
+| directory | agentName |
+|---|---|
+| `C:\actions-runner-core` | SEANDESKTOP |
+| `C:\actions-runner-ferrox` | **ferrox-win-msvc** |
+| `C:\actions-runner-wayland` | SEANDESKTOP |
+
+All three run as `NT AUTHORITY\NetworkService`. So the entire "two runners, pin
+to the good one" premise was void — **there was never another machine to move
+work to.** Any future "route it to the other Windows box" idea starts here.
+
+### The host is healthy. Six theories dead.
 
 | theory | test | verdict |
 |---|---|---|
-| one sick machine | ferrox-win-msvc run 30887202242 | **dead** — 7 refusals there too |
-| the Windows fleet cannot AppContainer | ran as `SeanD` | **dead** — `Some(true)`, exit 0 |
-| the `NT AUTHORITY\NetworkService` account | ran the same test AS NetworkService via a scheduled task | **dead** — `Some(true)`, exit 0 |
-| parallel-nextest contention on profile creation | full `wcore-sandbox` suite, `--test-threads 16` | **not reproduced** — 153/153 passed, zero refusals |
+| one sick machine | ferrox-win-msvc run 30887202242 | dead — 7 refusals there too |
+| the fleet cannot AppContainer | ran as `SeanD` | dead — `Some(true)`, exit 0 |
+| the `NetworkService` account | ran it AS NetworkService via a scheduled task | dead — `Some(true)`, exit 0 |
+| `C:` vs `D:` working directory | ran the probe with cwd on `C:` | dead — exit 0 |
+| disk pressure | `Get-CimInstance Win32_LogicalDisk` | dead — C: 597GB free, D: 5.0TB |
+| in-crate parallelism | `wcore-sandbox` suite `--test-threads 16` | not reproduced — 153/153 |
+| cross-process probe stampede | **40 concurrent separate processes**, each a cold real AppContainer spawn | not reproduced — 40/40 available |
+| same, under CPU saturation | 48 busy processes pinning all 32 logical cores, then the 40-way stampede | not reproduced — 40/40 available |
 
-**So the cause is still unknown, and I could not reproduce the CI failure on
-SEANDESKTOP at all.** Do not write this up as solved. What remains different
-between my runs and a CI run: a different physical box (`ferrox-win-msvc`, which
-I did not test directly), the FULL workspace suite rather than one crate, a `C:`
-working directory rather than `D:`, and the runner's own environment. The
-original 7 refusals were in other crates' tests, not `wcore-sandbox`'s.
+### REPRODUCED — and it is a product concurrency defect
 
-**This is exactly what the self-reporting probe is for.** The next Windows CI
-run prints `Cause, verbatim from the probe: <Win32 call>: 0x…`. Read that line
-first — it is one run away and it names the failing call and status code.
+`cargo nextest run -p wcore-swarm --test-threads 16` with 32 CPU burners:
+
+```
+Summary [39.592s] 95 tests run: 94 passed, 1 failed
+worker_runtime_limits multi_worker_output_exhaustion_fails_without_retaining_buffers
+  worker process: sandbox child execution failed: workspace accounting:
+  dispatch admission refused: workspace accounting refused ".git":
+  io: The process cannot access the file because it is being used by
+  another process. (os error 32)
+```
+
+That is **the same test that fails in CI**, and `os error 32` is
+`ERROR_SHARING_VIOLATION` — concurrent workers contending on one `.git`. Same
+family as the retained-checkout-descriptor repair earlier today. It passes
+cleanly in isolation and fails under concurrency, which is exactly the "failure
+set churns between runs" signature, and CI's own log shows it being
+retry-masked (`TRY 1 FAIL` → later pass).
+
+**Note the failure mode differs from CI's.** Locally it surfaced as a
+workspace-accounting sharing violation; in CI it surfaced as the AppContainer
+refusal. Either there are two concurrency defects in this path or one with two
+faces. Do not assume they are the same bug without evidence.
+
+CI's own numbers for the record: **13,542 tests, 4 failed, 7 flaky, 10 sandbox
+refusals**, and every sandbox refusal was in a MULTI-WORKER swarm test
+(`dispatches_4_noop_workers_in_parallel`, `multi_worker_output_exhaustion`,
+`swarm_reports_failed_worker_status`, `public_dispatch_owns_git_authority`).
+
+Mechanism to check first: `probe_cache()` (`process.rs:92`) and `probe_gate()`
+(`:118`) are `OnceLock` statics, so #754's single-flight is **process-local**.
+Every swarm worker is a separate process with its own cold cache. That is the
+same defect class as the open refresh-token item ("in-process single-flighted,
+two processes can both POST") — worth auditing as a pattern, not a one-off.
 
 **Do not send Sean to change a service account, a policy, or a runner
-configuration.** Two of the four theories above would have produced exactly that
-instruction, and both were wrong.
+configuration.** Six theories above would have produced exactly that
+instruction; all six were wrong. The box is a healthy 32-core/4090 machine.
 
 Verification carried by these commits: clippy clean on
 `x86_64-pc-windows-msvc` AND Linux, both `--all-targets`; both new tests pass on
