@@ -280,6 +280,62 @@ Status: a real, characterised, reproducible defect with a known fix shape
 hands back), NOT gating the RC. The two design decisions it needs are still the
 ones listed above.
 
+### OPEN — the ONLY remaining red. macOS, deterministic, NOT diagnosed.
+
+`wcore-config credentials::tests::exclusive_lock_steals_a_stale_holder_but_never_a_heartbeating_one`
+
+Failed **6 consecutive tries across 2 independent runs** (30934350294 attempts
+1 and 2), always at the same assertion:
+
+```
+crates/wcore-config/src/credentials.rs:4729:
+a heartbeating holder must never be judged stale:
+ExclusiveFileLock { path: ".../live.lock", heartbeat: false }
+```
+
+Each retry used a FRESH temp dir (`.tmpGQXL3r`, `.tmpEThShI`, `.tmp6vYO7X`), so
+this is not leaked state. It passed on runs 30923295755 and 30929030076, and
+the only source change since is `wcore-eval-scenarios`, which cannot reach
+`wcore-config` — on macOS that change is a provable no-op (both the old and new
+predicates are false there). Test count is identical, 13870, so the binary set
+did not move either.
+
+**Do not read `heartbeat: false` as the smoking gun.** That is the Debug of the
+lock the WAITER obtained, and the waiter's policy has no heartbeat, so `false`
+is expected and says nothing about the holder.
+
+**The mechanism, and why two causes are indistinguishable from the log.** The
+holder heartbeats every 20ms; the waiter judges stale at 100ms. To steal, the
+holder must miss five consecutive re-stamps. Two different things produce that,
+and the log cannot tell them apart:
+
+1. **Scheduling.** The heartbeat thread is not scheduled for >100ms on a hosted
+   runner executing 13870 tests. Then the test's absolute margins are simply
+   unrealistic for loaded CI and the product is fine.
+2. **A silent product degradation.** `Heartbeat::start`
+   (`credentials.rs:2442-2461`) ends in `.spawn(...).ok()`. **If the thread
+   fails to spawn, the error is discarded and the lock has NO heartbeat at
+   all** — while `ExclusiveFileLock` still reports itself as heartbeated to its
+   holder. A caller then believes it holds protection it does not have, and a
+   waiter steals a genuinely live lock. That is the product not providing an
+   advertised guarantee, silently.
+
+**Do this before anything else, because it is cheap and it discriminates:**
+replace the `.ok()` with something that records the spawn failure (log at
+minimum; arguably `acquire` should FAIL rather than hand back a lock whose
+advertised heartbeat does not exist). Re-run. If the failure is cause 2 the log
+now names it; if it stays silent, it is cause 1 and the fix is the test's
+margins.
+
+**Do NOT simply widen the test's margins to clear the red.** That makes the
+symptom go away without establishing which cause is real, and if it is cause 2
+it buries a genuine silent-failure defect in a credential lock. Widening is the
+correct fix ONLY once cause 1 is established.
+
+Was NOT investigated further tonight, deliberately: this is the last red before
+a taggable RC, which is exactly the circumstance in which a
+make-the-red-go-away change is most tempting and least trustworthy.
+
 ---
 
 ## 2. Exact CI state — run 30910027962 on `b854775b`
