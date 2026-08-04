@@ -72,6 +72,8 @@ on:
       - 'crates/wcore-sandbox/src/**'
       - 'crates/wcore-sandbox/tests/hard_process_containment_macos.rs'
       - 'crates/wcore-sandbox/tests/live_integrity_macos.rs'
+      - 'crates/wcore-agent/tests/voice_live_capture_mac.rs'
+      - 'crates/wcore-agent/src/tool_backends/voice_mode.rs'
 
 permissions:
   contents: read
@@ -194,4 +196,105 @@ jobs:
             /tmp/integrity.log
             /tmp/containment.rc
             /tmp/integrity.rc
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # The acoustic voice suite. Separate job, and workflow_dispatch ONLY.
+  #
+  # These three cases play a 1 kHz tone out of the speaker and require the
+  # microphone to hear it. That is unreproducible on any hosted runner: a
+  # GitHub macOS VM enumerates a default input device and streams at the full
+  # sample rate, but every sample it delivers is zero (run 30910027962 —
+  # both arms rms=0.0, tone_ratio=0.00), because there is no physical mic, no
+  # speaker, and no GUI session to grant TCC consent. Leaving them in the
+  # ordinary matrix produced three permanent reds that said nothing about the
+  # product.
+  #
+  # Dispatch-only rather than on push, because the only host that CAN run them
+  # is Sean's own Mac and a push trigger would play a tone out of his laptop for
+  # ~90s on every merge. The `#[ignore]` is therefore NOT a silent skip: this
+  # job is the thing that makes it runnable, and the gate below fails if it
+  # certifies nothing.
+  # ---------------------------------------------------------------------------
+  voice-live-capture-mac:
+    name: wcore-agent live mic capture (acoustic)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
+    concurrency:
+      group: darwin-selfhosted-voice-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Declares intent, which also arms this suite's zero_execution_guard.
+      WAYLAND_VOICE_LIVE_MAC: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # Record what the host offers before trusting any result. A box with no
+      # input device would produce the same digital silence the hosted runner
+      # does, and we want that visible as data rather than as a mystery red.
+      - name: Probe the host audio facility
+        run: |
+          set -euo pipefail
+          echo "sw_vers:"; sw_vers
+          echo "--- input devices ---"
+          system_profiler SPAudioDataType 2>/dev/null | sed -n '1,80p' || echo "(SPAudioDataType unavailable)"
+
+      # --test-threads=1 is mandatory, not stylistic: all three arms contend for
+      # the single microphone device, and overlapping starts corrupt each other.
+      - name: Run voice_live_capture_mac
+        id: voice
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-agent --features voice --test voice_live_capture_mac \
+            -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/voice.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/voice.rc
+
+      - name: Assert the acoustic suite executed all three cases
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          log=/tmp/voice.log
+          if [ ! -s "${log}" ]; then
+            echo "FAIL: no log produced — the suite never ran"
+            fail=1
+          else
+            if ! grep -q "running 3 tests" "${log}"; then
+              echo "FAIL: expected 'running 3 tests' — zero or wrong count collected"
+              grep -E "running [0-9]+ test|test result" "${log}" || true
+              fail=1
+            fi
+            if ! grep -qE "test result: ok\. 3 passed; 0 failed" "${log}"; then
+              echo "FAIL: expected '3 passed; 0 failed'"
+              grep -E "test result" "${log}" || true
+              fail=1
+            fi
+            echo "--- verdict lines ---"
+            grep -E "running [0-9]+ test|test result|ARM |OVERFLOW" "${log}" || true
+          fi
+          cat /tmp/voice.rc 2>/dev/null || echo "(no exit code recorded)"
+          if [ "${fail}" -ne 0 ]; then
+            echo "GATE: FAILED"
+            exit 1
+          fi
+          echo "GATE: PASSED — all three acoustic cases executed on real audio hardware"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-live-capture-mac-logs
+          path: |
+            /tmp/voice.log
+            /tmp/voice.rc
           if-no-files-found: warn

@@ -387,6 +387,14 @@ async fn capture_arm(label: &str, tone_wav: Option<&Path>) -> Arm {
 
 /// **The capture-liveness control.** Two arms on the same device, same
 /// duration, differing only in whether a known tone was injected.
+#[ignore = "live acoustic capture: needs a real speaker->mic path. Proven green on \
+                    sean-mac-arm64 (HyperX QuadCast 2): tone arm 116.66 vs control 1.15, \
+                    101.7x separation. A GitHub-hosted macOS VM enumerates a default input \
+                    device and streams at the full sample rate but every delivered sample is \
+                    zero (run 30910027962: both arms rms=0.0, tone_ratio=0.00) - it has no \
+                    microphone, no speaker and no GUI session to grant TCC consent, so the \
+                    acoustic loop cannot exist there at any setting. Run it with \
+                    WAYLAND_VOICE_LIVE_MAC=1 and --ignored."]
 #[tokio::test(flavor = "multi_thread")]
 async fn live_capture_contains_known_tone_and_control_arm_does_not() {
     let dir = std::env::temp_dir();
@@ -459,6 +467,14 @@ async fn live_capture_contains_known_tone_and_control_arm_does_not() {
 /// The discriminating trick: the tone is played **only during the final
 /// seconds**, i.e. deep into the overflow regime. If the callback has stalled
 /// or is dropping buffers, the retained tail will not contain the tone.
+#[ignore = "live acoustic capture: needs a real speaker->mic path. Proven green on \
+                    sean-mac-arm64 (HyperX QuadCast 2): tone arm 116.66 vs control 1.15, \
+                    101.7x separation. A GitHub-hosted macOS VM enumerates a default input \
+                    device and streams at the full sample rate but every delivered sample is \
+                    zero (run 30910027962: both arms rms=0.0, tone_ratio=0.00) - it has no \
+                    microphone, no speaker and no GUI session to grant TCC consent, so the \
+                    acoustic loop cannot exist there at any setting. Run it with \
+                    WAYLAND_VOICE_LIVE_MAC=1 and --ignored."]
 #[tokio::test(flavor = "multi_thread")]
 async fn capture_survives_ring_buffer_overflow_past_60s() {
     const TOTAL_SECS: u64 = 70;
@@ -626,6 +642,14 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
 
 /// C4 `cancellation`. Proves the stream was flowing *before* the cancel, so
 /// "it stopped" is not free.
+#[ignore = "live acoustic capture: needs a real speaker->mic path. Proven green on \
+                    sean-mac-arm64 (HyperX QuadCast 2): tone arm 116.66 vs control 1.15, \
+                    101.7x separation. A GitHub-hosted macOS VM enumerates a default input \
+                    device and streams at the full sample rate but every delivered sample is \
+                    zero (run 30910027962: both arms rms=0.0, tone_ratio=0.00) - it has no \
+                    microphone, no speaker and no GUI session to grant TCC consent, so the \
+                    acoustic loop cannot exist there at any setting. Run it with \
+                    WAYLAND_VOICE_LIVE_MAC=1 and --ignored."]
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_discards_a_stream_proven_to_be_flowing() {
     let rec = CpalAudioRecorder::try_default().expect("no default input device");
@@ -664,4 +688,36 @@ async fn cancel_discards_a_stream_proven_to_be_flowing() {
         "stop after cancel produced a recording — audio survived cancellation"
     );
     eprintln!("POST-CANCEL: is_recording=false rms=0 stop=Empty");
+}
+
+/// Refuse to report a green run that executed none of the acoustic cases.
+///
+/// The three tests above are `#[ignore]`d because a hosted macOS runner can
+/// only ever produce a false negative on them. That makes them worthless
+/// UNLESS something proves they were actually run somewhere - a gate that
+/// cannot fail is exactly as useless as one that cannot pass. This is the
+/// house pattern (`wcore-sandbox/tests/live_integrity_macos.rs`,
+/// `hard_process_containment_macos.rs`, `live_personas.rs`): declare intent by
+/// environment, then fail loudly if intent was declared and zero cases could
+/// possibly have executed.
+#[test]
+fn zero_execution_guard() {
+    // Skipped under nextest, whose `no-tests = "fail"` policy covers the same
+    // ground at the invocation site — matching the sibling guards.
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    let declared = std::env::var("WAYLAND_REQUIRE_IGNORED").as_deref() == Ok("1")
+        || std::env::var("WAYLAND_VOICE_LIVE_MAC").as_deref() == Ok("1");
+    if !declared {
+        return;
+    }
+    let asked = std::env::args().any(|arg| arg == "--ignored" || arg == "--include-ignored");
+    assert!(
+        asked,
+        "declared intent to run this suite's three #[ignore]d acoustic cases, but neither \
+         --ignored nor --include-ignored was passed, so zero of them can execute. Re-run with: \
+         cargo test -p wcore-agent --features voice --test voice_live_capture_mac -- --ignored \
+         --test-threads=1 --nocapture"
+    );
 }
