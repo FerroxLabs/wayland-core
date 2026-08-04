@@ -251,6 +251,18 @@ jobs:
 
       # --test-threads=1 is mandatory, not stylistic: all three arms contend for
       # the single microphone device, and overlapping starts corrupt each other.
+      #
+      # `cargo test` is retained rather than nextest for the same reason the two
+      # sibling suites in this file retain it: every case is `#[ignore]`d, so the
+      # run needs `-- --ignored`, and the gate step below is STRONGER than
+      # `--no-tests=fail` — it pins the exact expected count rather than merely
+      # rejecting zero.
+      #
+      # vacuity-checked: the "Assert the acoustic suite executed all three
+      # cases" step below greps /tmp/voice.log for `running 3 tests` and for
+      # `test result: ok. 3 passed; 0 failed`, and fails the job if either is
+      # absent. Exit status here is ignored on purpose; PIPESTATUS[0] is
+      # recorded to a file that step reads back separately.
       - name: Run voice_live_capture_mac
         id: voice
         run: |
