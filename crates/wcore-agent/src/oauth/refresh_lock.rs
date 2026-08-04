@@ -51,7 +51,7 @@ use wcore_config::credentials::{ExclusiveFileLock, LockPolicy, oauth_tokens_key}
 /// Outer wall-clock cap on one refresh round-trip. The providers' own
 /// `PER_CALL_TIMEOUT` values are this value; the lock timing is derived from
 /// it, so the two cannot drift apart silently.
-pub(crate) const PER_CALL_TIMEOUT: Duration = Duration::from_secs(POST_TIMEOUT_SECS);
+pub(super) const PER_CALL_TIMEOUT: Duration = Duration::from_secs(POST_TIMEOUT_SECS);
 
 const POST_TIMEOUT_SECS: u64 = 20;
 

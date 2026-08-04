@@ -58,7 +58,13 @@ pub const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callba
 /// Refresh this many seconds before expiry to absorb clock skew.
 const REFRESH_LEAD_SECS: u64 = 120;
 /// Outer wall-clock cap on the refresh round-trip.
-const PER_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// The refresh POST's wall-clock cap. Re-exported from `refresh_lock` rather
+/// than duplicated: the cross-process lock's wait ceiling and staleness are
+/// DERIVED from this number, so a local copy that drifted would silently
+/// undersize them. There were three independent `20`s before this — the
+/// shared constant's own doc claimed they could not drift apart, and nothing
+/// enforced it (the shared one was dead code).
+use super::refresh_lock::PER_CALL_TIMEOUT;
 
 /// Per-request cap on each device-code HTTP round-trip (usercode + poll).
 const DEVICE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);

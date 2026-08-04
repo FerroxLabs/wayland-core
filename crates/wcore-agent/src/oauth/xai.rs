@@ -61,7 +61,13 @@ const XAI_SCOPES: &str = "openid profile email offline_access grok-cli:access ap
 const REFRESH_LEAD_SECS: u64 = 120;
 
 /// Per network call ceiling for the refresh round-trip.
-const PER_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// The refresh POST's wall-clock cap. Re-exported from `refresh_lock` rather
+/// than duplicated: the cross-process lock's wait ceiling and staleness are
+/// DERIVED from this number, so a local copy that drifted would silently
+/// undersize them. There were three independent `20`s before this — the
+/// shared constant's own doc claimed they could not drift apart, and nothing
+/// enforced it (the shared one was dead code).
+use super::refresh_lock::PER_CALL_TIMEOUT;
 
 /// Sentinel marking a `429` refresh (rate limit, not auth failure) so the
 /// caller can keep using a still-valid current token (C3).
