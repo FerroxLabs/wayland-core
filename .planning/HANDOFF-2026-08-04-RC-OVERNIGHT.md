@@ -177,6 +177,79 @@ COPYFILE_DISABLE=1 tar -czf ... && scp ...
 
 and on the box, `Get-ChildItem -Recurse -Force -Filter "._*" | Remove-Item`.
 
+### CORRECTION + CURRENT STATE — run 30923295755 on `a0bbc235` (Windows)
+
+**Windows went 4 final failures -> 1.** `13547 tests run: 13546 passed
+(3 slow, 9 flaky, 1 leaky), 1 failed, 132 skipped`.
+
+**I was wrong in the addendum above, and it matters.** I wrote that the three
+`tool_formatter_real_payloads` tests are "not the sandbox stall" because they
+pass 7/7 on SEANDESKTOP idle and under load. The CI log refutes that:
+
+```
+TRY 1 FAIL [ 15.067s] wcore-cli::tool_formatter_real_payloads bash_failure_never_reports_exit_zero
+  panicked at crates\wcore-cli\tests\tool_formatter_real_payloads.rs:192:5:
+  real non-zero exit code missing: Failed to execute command: sandbox child execution failed: ...
+```
+
+`15.067s`, `15.058s`, `15.067s` — that is the probe's 15s wall-clock guard, to
+three decimal places. These tests DO go through the sandbox and they ARE probe
+victims. They pass locally because the probe does not stall locally; the local
+run could not reproduce the CI condition, and I over-concluded from its absence.
+**Absence of a local repro is not evidence of a different cause.** They now
+recover on TRY 3 rather than failing finally, which is where the 4 -> 1 came
+from.
+
+The probe stall is therefore still live on Windows CI. It is no longer
+*fatal* (retries absorb it) but it costs 15s per affected test and is one
+unlucky retry away from red again.
+
+### THE ONE REMAINING WINDOWS FAILURE — well-evidenced, unverified fix
+
+`wcore-swarm::dispatch_smoke::malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic`,
+failing all three tries:
+
+```
+panicked at crates\wcore-swarm\tests\dispatch_smoke.rs:425:5:
+transaction cleanup: worktree io: io: The process cannot access the file
+because it is being used by another process. (os error 32)
+```
+
+`os error 32` is `ERROR_SHARING_VIOLATION` — the canonical Windows transient,
+raised when another process (AV scan, a just-exited child still closing
+handles, the search indexer) briefly holds a file inside the directory being
+removed. It clears in milliseconds.
+
+**The lead, and it is a good one: the design anticipates a retry that the
+caller never performs.**
+
+- `crates/wcore-swarm/src/dispatch.rs:623` calls `manager.release_transaction(&workspace)`
+  EXACTLY ONCE and converts any error into `WorkerHandle::failed("transaction
+  cleanup: {error}")`.
+- `crates/wcore-swarm/src/worktree.rs:236` already words its own refusal as
+  "transaction cleanup refused and its reservation held **for retry**".
+- `DirectoryAuthority::remove_open_dir_all`
+  (`crates/wcore-sandbox/src/directory_authority.rs:791`) deliberately returns
+  the authority BACK inside the error — `Err(Box<(SandboxError, Self)>)` —
+  which is the shape you choose precisely so a caller CAN try again.
+
+Every piece of the retry machinery exists. Nobody calls it twice.
+
+**Why I did not just write the retry:** it cannot be verified from here. This
+failure does not reproduce on SEANDESKTOP on demand — it is CI-environment
+specific — so the fix would ship unproven into an RC, in a security-hardened
+subsystem (retained handles, handle-loan accounting, strong-count assertions),
+after a night in which three of my Windows root causes were wrong. "Live
+testing outranks green code" applies most exactly when the change looks easy.
+
+**When implementing it, decide these two explicitly:**
+1. Which errors are retryable. `SwarmError::WorktreeIo(String)` flattens the OS
+   code into text, so matching on the errno is not currently possible without
+   widening the error type. Retrying the security refusals ("refused cleanup
+   outside owned transaction root") would be wrong even if harmless.
+2. Backoff and bound. The violation clears in ms; something like 3 attempts at
+   50/150ms. After the attempts are spent it must fail EXACTLY as it does today.
+
 ---
 
 ## 2. Exact CI state — run 30910027962 on `b854775b`
