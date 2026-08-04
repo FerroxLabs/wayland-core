@@ -996,7 +996,24 @@ async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
                     .with_api_key("packaged-lifecycle-fixture-key")
                     .with_known_free_cost()
                     .with_base_url(fixture.base_url());
-                let lifecycle_enabled = global_lifecycle && project_lifecycle;
+                // The memory opt-out DOMINATES the lifecycle switch. Issue #170
+                // (`35510975`) made `[memory] enabled = false` stop recording
+                // for real, and skills-lifecycle drafting is a memory writer:
+                // `Config::skills_lifecycle_enabled` is `observability
+                // .skills_lifecycle && memory.enabled`, and resolve() forces
+                // `skills_lifecycle = false` whenever memory is off.
+                //
+                // This gate still encoded the PRE-#170 semantics and so failed
+                // the first cell where the two diverge (g=T, p=T, m=F): it
+                // demanded a full Ready -> Reached -> OutcomeChanged -> Observed
+                // cycle for `LegacyAutoSkillDrafting`, which the product now
+                // correctly refuses to produce (Unavailable(DisabledByConfig)).
+                // Adding the `memory_enabled` term routes that cell into the
+                // `else` arm below, which POSITIVELY asserts the capability is
+                // disabled and that no draft reached disk — so the gate gets
+                // stronger here, not weaker: it becomes a live proof that the
+                // memory opt-out actually kills drafting.
+                let lifecycle_enabled = global_lifecycle && project_lifecycle && memory_enabled;
                 let generated = run_with_binary_in_paths(
                     &lifecycle_generation_scenario(lifecycle_enabled),
                     &provider,
@@ -1013,7 +1030,13 @@ async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
                     generated.failures
                 );
                 assert!(observation.complete(), "fixture incomplete for {cell}");
-                let expected_memory_backend = memory_enabled || lifecycle_enabled;
+                // Was `memory_enabled || lifecycle_enabled`, i.e. it asserted
+                // that enabling the lifecycle force-opens a memory backend
+                // behind the operator's opt-out. That is exactly the defect
+                // #170 closed: `Bootstrap` now builds `user_model_backend` only
+                // when `memory.enabled`, and the ready event derives this flag
+                // from that backend. The operator's setting is the whole answer.
+                let expected_memory_backend = memory_enabled;
                 assert!(
                     generated.info_events.iter().any(|event| {
                         event == &format!("ready: memory_enabled={expected_memory_backend}")
