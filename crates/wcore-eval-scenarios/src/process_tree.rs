@@ -117,6 +117,22 @@ impl ProcessTree {
         false
     }
 
+    /// True only for the backend that actually SAMPLES kernel resource usage.
+    ///
+    /// Deliberately distinct from [`Self::is_authoritative`]. Authoritative
+    /// containment and resource sampling are different properties, and
+    /// conflating them produced a gate that could never pass on Windows:
+    /// `Backend::WindowsJob` is authoritative (a Job Object really does contain
+    /// the tree) but records no samples, because `finish_cleanup` populates
+    /// `peak_memory_bytes` / `peak_cpu_millis` in the `Backend::Cgroup` arm
+    /// alone. Every other backend reports `resource_sampler_not_enabled`.
+    pub(crate) fn samples_kernel_resources(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return matches!(&self.backend, Backend::Cgroup(_));
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
     pub(crate) fn peak_memory_bytes(&self) -> Option<u64> {
         self.peak_memory_bytes
     }

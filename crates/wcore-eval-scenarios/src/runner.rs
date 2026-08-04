@@ -894,15 +894,34 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     // is the one that ran, the peak memory and CPU samples it exists to produce
     // have to be there, and a silent sampling gap is a failure.
     //
-    // `containment_authoritative` is part of the condition, and that is the
-    // repair. This used to read `authority_evidence_required` alone, which
-    // demanded cgroup samples from every run that asked for authenticated
-    // evidence — a demand nothing in this repository can satisfy and two of the
-    // three supported platforms cannot satisfy at all:
+    // The predicate is `samples_kernel_resources()` — "the sampler actually
+    // ran" — and NOT `is_authoritative()`. That distinction is the second half
+    // of this repair, and it was learned the hard way.
+    //
+    // The first half added `containment_authoritative` to a condition that had
+    // read `authority_evidence_required` alone. That removed the unreachable
+    // pass state on macOS (`Backend::ProcessGroup` is not authoritative) and
+    // the comment here duly recorded that "on macOS and Windows the assertion
+    // could never pass". The Windows half of that claim was false, and the fix
+    // left Windows in exactly the state it was written to abolish:
+    // `Backend::WindowsJob` IS authoritative — a Job Object genuinely contains
+    // the tree — but it samples nothing, because `finish_cleanup` populates
+    // `peak_memory_bytes`/`peak_cpu_millis` in the `Backend::Cgroup` arm alone.
+    // So on Windows all three conjuncts were permanently true and this gate
+    // could never pass. Identified from CI run 30929030076 by matching the
+    // receipt's `detail_sha256` against
+    // `sha256('{"RunnerError":"authoritative kernel resource evidence unavailable"}')`.
+    //
+    // Authoritative containment and resource sampling are simply different
+    // properties. Keying on the one we actually mean keeps Linux behaviour
+    // identical (there the cgroup backend is both) and stops the implication
+    // "authoritative therefore sampled" from mis-firing on any future backend.
+    //
     //   * the samples exist only on `Backend::Cgroup`, which is
-    //     `#[cfg(target_os = "linux")]`, so on macOS and Windows the assertion
-    //     could never pass — and `packaged_driver_gate.rs` sets
-    //     `WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE=1` itself, on every platform;
+    //     `#[cfg(target_os = "linux")]` — and `packaged_driver_gate.rs` sets
+    //     `WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE=1` itself, on every platform,
+    //     while its own comments state that the samples "come from the cgroup
+    //     backend alone and therefore exist on no macOS or Windows host";
     //   * even on Linux, `Cgroup::create` needs euid 0 AND
     //     `WCORE_EVAL_CANDIDATE_UID`/`_GID` naming a distinct unprivileged
     //     identity (process_tree.rs). Those two variables are READ in exactly
@@ -919,7 +938,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     // "process-group-observed-nonauthoritative"` and `resources: Unavailable`
     // in the receipt, which is the honest surface for what it measured.
     if authority_evidence_required
-        && containment_authoritative
+        && process_tree.samples_kernel_resources()
         && (process_tree.peak_memory_bytes().is_none() || process_tree.peak_cpu_millis().is_none())
     {
         failures.push(Failure::RunnerError(
