@@ -142,8 +142,33 @@ fn availability() -> bool {
         probe_cache(),
         probe_gate(),
         NEGATIVE_PROBE_TTL,
-        probe_appcontainer_available,
+        probe_honouring_shared_verdict,
     )
+}
+
+/// The real probe, skipped when another process on this host already proved the
+/// answer recently.
+///
+/// The in-process cache and gate above collapse probes within ONE process, but
+/// every sandboxed child is its own process and under `cargo nextest` so is
+/// every test, so without this a single run re-answers the same question about
+/// the host hundreds of times. Each repeat both queues on the serialized AppX
+/// profile service and takes another draw at the AV-stall failure mode
+/// documented in `probe_appcontainer_once`, which is how a 15s guard gets
+/// tripped on a healthy machine.
+///
+/// Only SUCCESS is shared. See [`shared_verdict`] for why caching a negative
+/// verdict across processes would be unsafe in a way caching a positive one is
+/// not.
+fn probe_honouring_shared_verdict() -> bool {
+    if super::shared_verdict::cached_success() {
+        return true;
+    }
+    let available = probe_appcontainer_available();
+    if available {
+        super::shared_verdict::record_success();
+    }
+    available
 }
 
 /// Whether a backend admitted WITHOUT a startup probe may still claim its

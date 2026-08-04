@@ -520,6 +520,7 @@ mod windows_impl {
     mod command;
     mod handles;
     mod process;
+    mod shared_verdict;
     #[cfg(test)]
     mod tests;
 
