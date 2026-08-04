@@ -78,6 +78,33 @@ impl Tool for ToolSearchTool {
         }
 
         let query_lower = query.to_lowercase();
+
+        // TOKENS, not one substring. `contains(&query_lower)` required the
+        // ENTIRE query to appear verbatim in a single name or description, so
+        // any natural multi-word query could only ever miss: "tvcontrol
+        // TradingView chart" has to be present literally, and no tool
+        // description will ever contain it. Measured in this repo's own live
+        // runs: `tiny_ping` matched, `tiny_ping tool` returned "No deferred
+        // tools matching" — same tool, one extra word.
+        //
+        // AND over tokens (every token must appear somewhere in name or
+        // description) rather than OR, because OR over a chatty query matches
+        // most of the catalogue and buries the tool the caller meant. A
+        // single-token query behaves exactly as before, so existing callers and
+        // their expectations are unchanged.
+        //
+        // Credited to the Wayland Desktop lane, which found and proved this
+        // independently.
+        let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+        if tokens.is_empty() {
+            // Whitespace-only: non-empty by the guard above, but no token to
+            // match on. Matching everything here would be worse than useless.
+            return ToolResult {
+                content: "Error: query is required".to_string(),
+                is_error: true,
+            };
+        }
+
         let mut matches: Vec<Value> = Vec::new();
 
         for (idx, def) in self.tool_defs.iter().enumerate() {
@@ -92,7 +119,10 @@ impl Tool for ToolSearchTool {
             }
             let name_l = def.name.to_lowercase();
             let desc_l = def.description.to_lowercase();
-            if name_l.contains(&query_lower) || desc_l.contains(&query_lower) {
+            if tokens
+                .iter()
+                .all(|t| name_l.contains(t) || desc_l.contains(t))
+            {
                 // `status` is the repair for a MEASURED no-progress loop, not
                 // decoration. A match hydrates the tool engine-side and it is
                 // genuinely callable on the next turn (measured: after one
@@ -225,6 +255,47 @@ mod tests {
             first.get("name").and_then(|n| n.as_str()),
             Some("SpawnTool"),
             "the array shape `record_hydrated_tools` parses must be preserved"
+        );
+    }
+
+    /// TEST B from the Wayland Desktop handoff, 2026-08-04. Their defect,
+    /// their call, reproduced here.
+    ///
+    /// A multi-word query must match a tool whose description contains those
+    /// words. It could not: the matcher asked whether the WHOLE query appeared
+    /// verbatim as one substring, so "sub agents parallel" had to be present
+    /// letter-for-letter in a single description. Real callers write queries
+    /// like "tvcontrol TradingView chart"; none of them could ever match.
+    ///
+    /// MUTANT: restore `name_l.contains(&query_lower) ||
+    /// desc_l.contains(&query_lower)` and this fails while every other test in
+    /// this module stays green — which is exactly what happened in production.
+    #[tokio::test]
+    async fn a_multi_word_query_matches_words_scattered_through_a_description() {
+        let tool = ToolSearchTool::new(build_tool_defs());
+
+        // SpawnTool's description is "Spawn sub-agents". Both words are present
+        // but REVERSED relative to the description, so the phrase "agents spawn"
+        // appears nowhere verbatim — which is precisely what the old
+        // whole-query substring compare demanded.
+        let result = tool.execute(json!({"query": "agents spawn"})).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("SpawnTool"),
+            "a multi-word query whose words all appear must match; got: {}",
+            result.content
+        );
+
+        // AND, not OR: a query carrying a token that matches nothing must not
+        // drag the tool back in, or a chatty query returns the whole catalogue.
+        let result = tool
+            .execute(json!({"query": "agents spawn zzzznotpresent"}))
+            .await;
+        assert!(!result.is_error);
+        assert!(
+            !result.content.contains("SpawnTool"),
+            "every token must match; got: {}",
+            result.content
         );
     }
 

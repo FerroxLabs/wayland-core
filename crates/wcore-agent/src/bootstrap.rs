@@ -1671,6 +1671,7 @@ impl AgentBootstrap {
                         &mgr,
                         &builtin_names,
                         &resolved_servers,
+                        &self.config.builtin_tools.defer_cold,
                     );
                     mcp_managers.push(mgr.clone());
                     Some(mgr)
@@ -1702,6 +1703,7 @@ impl AgentBootstrap {
                 &mut registry,
                 &builtin_names,
                 plugin_egress_policy,
+                &self.config.builtin_tools.defer_cold,
             )
             .await;
         let plugin_mcp_declarations = applied

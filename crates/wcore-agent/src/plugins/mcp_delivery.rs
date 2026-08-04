@@ -101,12 +101,14 @@ pub async fn connect_plugin_mcp_servers(
     specs: &[McpServerSpec],
     tool_registry: &mut wcore_tools::registry::ToolRegistry,
     builtin_names: &[String],
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) -> Option<Arc<wcore_mcp::manager::McpManager>> {
     connect_plugin_mcp_servers_with_policy(
         specs,
         tool_registry,
         builtin_names,
         wcore_egress::default_policy(),
+        defer_cold,
     )
     .await
 }
@@ -119,6 +121,7 @@ pub async fn connect_plugin_mcp_servers_with_policy(
     tool_registry: &mut wcore_tools::registry::ToolRegistry,
     builtin_names: &[String],
     egress_policy: wcore_egress::SharedPolicy,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) -> Option<Arc<wcore_mcp::manager::McpManager>> {
     if specs.is_empty() {
         return None;
@@ -146,7 +149,13 @@ pub async fn connect_plugin_mcp_servers_with_policy(
     {
         Ok(mgr) => {
             let mgr = Arc::new(mgr);
-            wcore_mcp::tool_proxy::register_mcp_tools(tool_registry, &mgr, builtin_names, &configs);
+            wcore_mcp::tool_proxy::register_mcp_tools(
+                tool_registry,
+                &mgr,
+                builtin_names,
+                &configs,
+                defer_cold,
+            );
             Some(mgr)
         }
         Err(e) => {

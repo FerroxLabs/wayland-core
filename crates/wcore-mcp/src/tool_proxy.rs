@@ -199,11 +199,35 @@ impl Tool for McpToolProxy {
 ///
 /// Each tool's deferred flag is read from the server's config:
 /// `McpServerConfig::deferred` — defaults to `true` when absent.
+/// Refreshing the `ToolSearch` catalog is part of registration, not a courtesy
+/// the caller owes afterwards.
+///
+/// `ToolSearchTool` owns a snapshot taken when it was constructed, and deferred
+/// MCP defs are folded out of the outbound `tools[]`, so `ToolSearch` is the
+/// model's ONLY route to an MCP tool. Registering tools without rebuilding that
+/// snapshot therefore produces a server that connects, logs its full tool count,
+/// and is invisible to the model for the life of the session.
+///
+/// That is not hypothetical. The refresh used to be the caller's job and the
+/// callers disagreed: `wcore-cli` pairs it by hand
+/// (`register_mcp_tools(...); reg.refresh_tool_search_catalog(...)`), bootstrap
+/// happens to refresh again later for its own reasons, and the plugin
+/// second-pass in `plugins/mcp_delivery.rs` did not refresh at all. The
+/// single-server `/mcp add` seam already did this internally and carried a
+/// comment about not advertising undiscoverable tools; the bulk path — the one
+/// every config-declared server takes — was simply missed.
+///
+/// Reported from the Wayland Desktop lane 2026-08-04: an MCP server connected
+/// with 101 tools while `ToolSearch` answered `No deferred tools matching
+/// "TradingView"` for a query that had 22 valid candidates. A single-word query
+/// rules out the substring-matching defect fixed alongside this, and points at
+/// exactly this: tools that never reached the snapshot.
 pub fn register_mcp_tools(
     registry: &mut wcore_tools::registry::ToolRegistry,
     manager: &Arc<McpManager>,
     builtin_names: &[String],
     server_configs: &HashMap<String, McpServerConfig>,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) {
     let all_tools = manager.all_tools();
 
@@ -249,6 +273,12 @@ pub fn register_mcp_tools(
 
         registry.register(Box::new(proxy));
     }
+
+    // Rebuild the ToolSearch snapshot HERE, so no caller can register a server
+    // and leave it undiscoverable. Idempotent — callers that already refresh
+    // afterwards (wcore-cli's deferred-connect path, bootstrap) simply rebuild
+    // an identical catalogue.
+    registry.refresh_tool_search_catalog(defer_cold);
 }
 
 /// Register tools from a single newly-connected MCP server.
@@ -392,7 +422,13 @@ mod tests {
         // Empty server configs — deferred field absent
         let configs = HashMap::new();
 
-        register_mcp_tools(&mut registry, &manager, &[], &configs);
+        register_mcp_tools(
+            &mut registry,
+            &manager,
+            &[],
+            &configs,
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
         // No tools registered because manager has no tools, but the logic
         // is tested via the deferred default path. Test with a real config below.
@@ -709,7 +745,13 @@ mod tests {
         let mut registry = wcore_tools::registry::ToolRegistry::new();
         let builtins = vec!["read".to_string()];
         let configs = HashMap::new();
-        register_mcp_tools(&mut registry, &manager, &builtins, &configs);
+        register_mcp_tools(
+            &mut registry,
+            &manager,
+            &builtins,
+            &configs,
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
         let mut names = registry.tool_names();
         names.sort();

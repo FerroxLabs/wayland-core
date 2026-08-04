@@ -3462,7 +3462,13 @@ fn integrate_deferred_mcp(
     let Some(reg) = engine.registry_mut() else {
         return false;
     };
-    wcore_mcp::tool_proxy::register_mcp_tools(reg, &mgr, &builtin_names, resolved_servers);
+    wcore_mcp::tool_proxy::register_mcp_tools(
+        reg,
+        &mgr,
+        &builtin_names,
+        resolved_servers,
+        &defer_cold,
+    );
     reg.refresh_tool_search_catalog(&defer_cold);
     for (name, reservation) in reservations.drain() {
         match mgr.health().get(&name).and_then(mcp_server_failure_reason) {
@@ -7205,7 +7211,13 @@ mod tests {
             ),
         ]));
         let mut registry = wcore_tools::registry::ToolRegistry::new();
-        wcore_mcp::tool_proxy::register_mcp_tools(&mut registry, &mgr, &[], &HashMap::new());
+        wcore_mcp::tool_proxy::register_mcp_tools(
+            &mut registry,
+            &mgr,
+            &[],
+            &HashMap::new(),
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
         let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 2, "expected one McpReady per server");

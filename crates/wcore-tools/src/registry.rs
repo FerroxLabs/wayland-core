@@ -1206,6 +1206,78 @@ mod tests {
         assert_eq!(result.content, "ok");
     }
 
+    /// TEST A from the Wayland Desktop handoff, 2026-08-04. It asked whether
+    /// `ToolSearchTool`'s construction-time snapshot is why MCP tools could not
+    /// be found. This settles it: the snapshot IS frozen, and that is NOT the
+    /// outage, because production rebuilds it.
+    ///
+    /// The handoff flagged an apparent contradiction — `bootstrap.rs` says
+    /// "Late tool REGISTRATION is fully supported" while ToolSearch owns a
+    /// private `Vec<ToolDef>` copy. Both are true. Late registration is
+    /// supported BECAUSE `refresh_tool_search_catalog` exists to rebuild that
+    /// copy, and every late-registration path calls it: bootstrap, the MCP tool
+    /// proxy, `/mcp add`, and the TUI engine bridge.
+    ///
+    /// Corroborated live on this build: a config-declared stdio MCP server's
+    /// tools ARE returned by ToolSearch. So discovery was never the failure —
+    /// the real defects were the whole-query substring match (see
+    /// `a_multi_word_query_matches_words_scattered_through_a_description`) and
+    /// the absent callability signal.
+    ///
+    /// Pinned so the answer cannot rot: skip the refresh and a late tool goes
+    /// silently undiscoverable, which is a real way to break every MCP server.
+    #[tokio::test]
+    async fn a_late_registered_tool_is_invisible_until_the_catalog_is_refreshed() {
+        let defer_cold = wcore_config::tools::DeferColdConfig {
+            enabled: true,
+            hot_allowlist: vec!["Read".to_string()],
+            catalog: false,
+            catalog_max_chars: 4096,
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "read files"));
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        // Arrives AFTER the snapshot was taken — the shape of every config MCP
+        // proxy and every `/mcp add`.
+        registry.register(make_tool(
+            "late_mcp_tool",
+            "a tool registered after ToolSearch was built",
+        ));
+
+        let before = registry
+            .get("ToolSearch")
+            .expect("ToolSearch registered")
+            .execute(serde_json::json!({"query": "late_mcp_tool"}))
+            .await;
+        // Assert on the not-found SENTINEL, not on absence of the name: the
+        // miss message echoes the query back ("No deferred tools matching
+        // \"late_mcp_tool\" found."), so a `contains(name)` check is true on
+        // both branches and can never fail.
+        assert!(
+            before.content.starts_with("No deferred tools matching"),
+            "the snapshot is taken at construction, so a later tool is invisible \
+             until refreshed — got: {}",
+            before.content
+        );
+
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        let after = registry
+            .get("ToolSearch")
+            .expect("ToolSearch still registered")
+            .execute(serde_json::json!({"query": "late_mcp_tool"}))
+            .await;
+        assert!(
+            after.content.contains("late_mcp_tool"),
+            "refresh_tool_search_catalog must make a late tool discoverable — \
+             every production late-registration path relies on exactly this; \
+             got: {}",
+            after.content
+        );
+    }
+
     /// v0.9.1.1 F8 — the catalog the LLM sees must use the exact
     /// string each backend reports from `Tool::name()`. A mismatch
     /// here means the model is taught the tool is called X, the
