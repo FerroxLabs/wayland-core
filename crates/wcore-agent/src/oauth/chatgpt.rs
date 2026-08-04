@@ -821,6 +821,17 @@ fn pairs_differ(entry: &OAuthTokens, reloaded: &OAuthTokens) -> bool {
 
 /// RFC 6749 §5.2 error body discriminator. Only the `error` field is read; the
 /// body is never logged or surfaced (C7).
+/// Internal marker for "the provider said `invalid_grant`", carried inside a
+/// [`RefreshError::ProviderRejected`].
+///
+/// A sentinel rather than the provider's body because C7 forbids surfacing the
+/// body at all — it can carry the token back to the user. But `invalid_grant`
+/// is the ONE rejection that is recoverable (this exact token was already
+/// spent, so a sibling that rotated it makes us whole after a reload), and the
+/// recovery path at the call site has to be able to tell it apart from a
+/// generic rejection without ever seeing the body.
+const INVALID_GRANT_SENTINEL: &str = "the refresh token was already spent (invalid_grant)";
+
 fn is_invalid_grant(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
