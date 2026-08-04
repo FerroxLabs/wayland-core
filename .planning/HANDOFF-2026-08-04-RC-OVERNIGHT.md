@@ -250,6 +250,36 @@ testing outranks green code" applies most exactly when the change looks easy.
 2. Backoff and bound. The violation clears in ms; something like 3 attempts at
    50/150ms. After the attempts are spent it must fail EXACTLY as it does today.
 
+### CORRECTION — the ERROR_SHARING_VIOLATION IS reproducible, and it is no longer a blocker
+
+Two updates to the section above, both important.
+
+**1. It reproduces.** I wrote that the worktree-cleanup `ERROR_SHARING_VIOLATION`
+"does not reproduce on SEANDESKTOP on demand" and used that to justify not
+writing the retry. That was wrong — I had not actually tried. Running the
+failing test in a loop under 32 CPU burners:
+
+```
+for 20 iterations: cargo nextest run -p wcore-swarm \
+  -E 'test(malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic)'
+ITER 1 : SHARING_VIOLATION
+ITER 2..16 : pass          (ssh dropped at 16)
+```
+
+**~1 hit in 16 under load.** So the retry fix CAN be verified here. Do it with a
+much larger N than 16 in each arm — at that base rate, 0/30 after a change is
+weak evidence on its own; aim for a few hundred iterations, or drive the
+contention harder to raise the rate first.
+
+**2. It is no longer a release blocker.** On CI run 30934350294 the Windows leg
+went fully green — `13552 tests run: 13552 passed` — with this failure absent.
+It is a rare load-correlated flake that retries absorb, not a hard failure.
+
+Status: a real, characterised, reproducible defect with a known fix shape
+(bounded retry at `dispatch.rs:623`, using the authority the error already
+hands back), NOT gating the RC. The two design decisions it needs are still the
+ones listed above.
+
 ---
 
 ## 2. Exact CI state — run 30910027962 on `b854775b`
