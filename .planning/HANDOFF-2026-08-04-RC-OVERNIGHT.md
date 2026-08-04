@@ -40,19 +40,62 @@ the timeout arm is exactly the one that fires. I fixed the arm that was not
 failing. The retry code is still correct and worth keeping for genuine fast
 Win32 failures; it is simply not this bug.
 
-### The fix to build
+### ROOT CAUSE — found, and it is O(N²) under a global lock
 
-**Cross-process serialization of AppContainer profile creation** — a Windows
-named mutex, so N processes queue instead of thrashing. #754's intent, extended
-past the process boundary. Requirements:
-- bounded acquire (never trade a 15s stall for an unbounded wait)
-- handle `WAIT_ABANDONED` (a process dying mid-creation must not wedge the rest)
-- fail-closed preserved: if it still cannot sandbox, still refuse
-- do NOT simply raise the 15s guard — that reimports the #125 ~120s-per-command hang
+**Do NOT add a named mutex. Every AppContainer spawn is ALREADY globally
+serialized, and that is the problem.**
 
-Consider also: the probe does a REAL `cmd.exe /c exit 0` spawn per process just
-to answer "is the sandbox available". Serializing is the minimum; a
-cross-process cached verdict would be better but is a bigger change.
+`ExecutionIdentity::start_with_apply` (`acl_lease.rs:250`) runs on every
+sandboxed spawn and holds ONE machine-wide mutex
+(`MutationLock::acquire()`, `acl_lease.rs:256`, itself a 15s-timeout named
+mutex in `acl_lease/mutation_lock.rs`) across all of:
+
+1. `recover_dead_leases_locked` — **a full `read_dir` + a `file_type()` stat per
+   entry** (`acl_lease.rs:614`)
+2. `allocate_unique_profile` → `CreateAppContainerProfile` (profile-service RPC)
+3. an fsync'd lease-file write
+4. `apply_intents` — ACL application
+
+Step 1 is the killer. The lease directory holds **one .toml per LIVE lease**, so
+with N concurrent spawns each spawn scans ~N files: **O(N²) work, serialized**.
+
+**Measured on SEANDESKTOP (32 logical cores), probe wall-time:**
+
+| concurrency | mean | note |
+|---|---|---|
+| 1 (idle) | ~200ms | 577/202/180ms over three runs |
+| 24 | **3381ms** (min 2656, max 3807) | ~17× |
+
+24 × ~150ms critical section ≈ 3.6s — the measurement matches the mechanism.
+Extrapolating, ~100 concurrent spawns crosses BOTH the mutex's own 15s acquire
+timeout AND the probe's 15s wall-clock guard. CI runs 13,547 tests on 32 cores
+with swarm tests dispatching 4 workers each, so 100 concurrent is reachable.
+
+**This is a genuine product defect, not a CI artifact.** Any user running many
+parallel agents on Windows hits the same O(N²) serialized stall.
+
+### The fix
+
+Take the directory sweep OFF the per-spawn hot path. `allocate_unique_profile`
+does NOT depend on it — profile names are unique per (process-creation-time,
+counter), so a stale lease does not block allocation. The sweep is hygiene
+(reclaiming leaked profiles from dead processes, the F-28-02-002 DoS fix), not
+a precondition.
+
+Plan: gate the sweep on a **cross-process** TTL marker (~30s) so a spawn pays
+one `stat` instead of an O(N) scan. Process-local suppression is NOT enough —
+nextest gives every test its own process, so N processes would still sweep N
+times.
+
+**Trap to avoid:** the scan treats any non-`.toml` entry as a HARD ERROR that
+aborts recovery (`acl_lease.rs:640`), with only `QUARANTINE_DIRECTORY`
+allow-listed. A marker file placed INSIDE the lease directory must be
+allow-listed — and doing so wedges any older build that meets it. **Put the
+marker outside the lease directory** to avoid the downgrade hazard.
+
+Keep: the sweep still runs under the lock when it does run; fail-closed
+unchanged; F-28-02-002 recovery preserved (consider also sweeping on demand if
+allocation ever fails).
 
 ---
 
