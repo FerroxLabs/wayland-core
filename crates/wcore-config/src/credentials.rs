@@ -2367,9 +2367,27 @@ impl ExclusiveFileLock {
                     // on drop and will conservatively leave the file.
                     let _ = f.write_all(nonce.as_bytes());
                     drop(f);
-                    let heartbeat = policy
-                        .heartbeat
-                        .map(|every| Heartbeat::start(path.clone(), nonce.clone(), every));
+                    // A caller that asked for a heartbeat sized `stale_after`
+                    // against it. If we cannot start one we must NOT hand back
+                    // a lock that claims it — release the file we just created
+                    // (it is ours, the nonce matches) and fail honestly.
+                    let heartbeat = match policy.heartbeat {
+                        None => None,
+                        Some(every) => match Heartbeat::start(path.clone(), nonce.clone(), every) {
+                            Ok(started) => Some(started),
+                            Err(error) => {
+                                let _ = std::fs::remove_file(&path);
+                                return Err(CredentialsError::BackendUnavailable(format!(
+                                    "the {label} lock at {} could not start its liveness \
+                                         heartbeat ({error}); refusing to hold a lock that \
+                                         reports itself heartbeated while nothing refreshes \
+                                         it, because a waiter would then judge this live \
+                                         holder stale and steal the lock",
+                                    path.display()
+                                )));
+                            }
+                        },
+                    };
                     return Ok(Self {
                         path,
                         nonce,
@@ -2435,7 +2453,19 @@ struct Heartbeat {
 }
 
 impl Heartbeat {
-    fn start(path: PathBuf, nonce: String, every: std::time::Duration) -> Self {
+    /// Fallible ON PURPOSE.
+    ///
+    /// This used to end in `.spawn(...).ok()`, which turned an OS refusal to
+    /// create the thread into `handle: None` — a lock that reports itself
+    /// heartbeated to its holder while nothing is refreshing its mtime. The
+    /// holder then believes it is protected, the next waiter correctly judges
+    /// the lockfile stale, and a LIVE credential lock is stolen with no error
+    /// raised anywhere. A protection that can silently not exist is worse than
+    /// one that is absent, because callers size `stale_after` against it.
+    ///
+    /// Thread creation fails under exactly the conditions that also make the
+    /// heartbeat matter — resource pressure — so this is not a theoretical arm.
+    fn start(path: PathBuf, nonce: String, every: std::time::Duration) -> std::io::Result<Self> {
         let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let signal = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
@@ -2458,9 +2488,11 @@ impl Heartbeat {
                         let _ = std::fs::write(&path, nonce.as_bytes());
                     }
                 }
-            })
-            .ok();
-        Self { stop, handle }
+            })?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
     }
 }
 
