@@ -122,19 +122,30 @@ OBSERVED: AppContainer executed normally, exit_code=0
 dead: "one sick machine" (§2 killed that) and "the Windows fleet cannot
 AppContainer" (this kills that).
 
-What is left is the difference between that run and a CI run: the **account**.
-Both runners execute as `NT AUTHORITY\NetworkService`, which is consistent with
-both failing identically while an interactive user succeeds on the same
-hardware. `CreateAppContainerProfile` wanting a loaded user profile would fit.
+Three explanations are now dead, each killed by a direct measurement on
+SEANDESKTOP with the new probe:
 
-**State that as a hypothesis, not a finding.** What is measured is
-SEANDESKTOP-as-SeanD available, and ferrox-win-msvc-as-NetworkService failing
-seven times. Nobody has yet measured SEANDESKTOP-as-NetworkService with the new
-probe — which is exactly what the next Windows CI run does. Read its
-`Cause, verbatim from the probe:` line before acting.
+| theory | test | verdict |
+|---|---|---|
+| one sick machine | ferrox-win-msvc run 30887202242 | **dead** — 7 refusals there too |
+| the Windows fleet cannot AppContainer | ran as `SeanD` | **dead** — `Some(true)`, exit 0 |
+| the `NT AUTHORITY\NetworkService` account | ran the same test AS NetworkService via a scheduled task | **dead** — `Some(true)`, exit 0 |
+| parallel-nextest contention on profile creation | full `wcore-sandbox` suite, `--test-threads 16` | **not reproduced** — 153/153 passed, zero refusals |
 
-**Still do not send Sean to change a service account until that line exists.**
-It is one CI run away and it names the Win32 call and status code.
+**So the cause is still unknown, and I could not reproduce the CI failure on
+SEANDESKTOP at all.** Do not write this up as solved. What remains different
+between my runs and a CI run: a different physical box (`ferrox-win-msvc`, which
+I did not test directly), the FULL workspace suite rather than one crate, a `C:`
+working directory rather than `D:`, and the runner's own environment. The
+original 7 refusals were in other crates' tests, not `wcore-sandbox`'s.
+
+**This is exactly what the self-reporting probe is for.** The next Windows CI
+run prints `Cause, verbatim from the probe: <Win32 call>: 0x…`. Read that line
+first — it is one run away and it names the failing call and status code.
+
+**Do not send Sean to change a service account, a policy, or a runner
+configuration.** Two of the four theories above would have produced exactly that
+instruction, and both were wrong.
 
 Verification carried by these commits: clippy clean on
 `x86_64-pc-windows-msvc` AND Linux, both `--all-targets`; both new tests pass on
@@ -153,7 +164,7 @@ overturned the standing explanation twice in one day.
 
 | item | state |
 |---|---|
-| AppContainer probe fails on both runners **under CI**, but PASSES on SEANDESKTOP as an interactive user | no longer "the hosts are broken". Leading hypothesis is the `NT AUTHORITY\NetworkService` account. The self-reporting probe ships in `a4e0e144`; the next Windows CI run prints the Win32 cause — read it before acting. See §2b |
+| AppContainer refuses under Windows CI, but PASSES on SEANDESKTOP every way I could run it | cause UNKNOWN and **not reproducible locally**. Four theories tested and dead — see the table in §2b. No leading hypothesis; do not invent one. The self-reporting probe ships in `a4e0e144` and the next Windows CI run prints the Win32 cause. Read that line before touching any host config |
 | `mcp_assistant_scoping_e2e` (Windows) | swarm finding, **unlanded**, self-declared partial |
 | `exec-backend conformance_matrix` | swarm root cause **REFUTED** by the adversarial verifier; do not build on it |
 | `RC-READINESS.md` re-grade | drafted by swarm, **not applied**; five of seven verified closed, two stale in our favour |
