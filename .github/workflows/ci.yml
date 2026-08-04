@@ -24,7 +24,17 @@ on:
       #
       # Transient: drop this entry when the branch merges. The job matrix,
       # runner labels, concurrency group and test commands are untouched.
-      - plan/f20-unified-audit-repair
+      #
+      # REMOVED 2026-08-04 — it had become a DOUBLE-RUN, not coverage. The
+      # premise above ("no open PR, so CI fires zero times") stopped holding
+      # when PR #257 opened on 2026-08-03: from then on every push to this
+      # branch fired BOTH `push` and `pull_request`, and the concurrency group
+      # (`workflow-github.ref`) differs between them — `refs/heads/plan/...`
+      # vs `refs/pull/257/merge` — so neither cancels the other. Measured: two
+      # full matrices per commit, each 91-146 minutes, on every push all day.
+      # The open PR provides exactly the coverage this entry was added for.
+      # Restore this line only if the PR closes while the branch stays alive.
+      # - plan/f20-unified-audit-repair
       # 2026-07-27. Lane branches, so a lane can obtain a CI-built binary for
       # its OWN changes. Without this, `gh run download` only ever yields
       # artifacts from the integration branch, and a lane needing macOS or
