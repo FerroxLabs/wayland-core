@@ -575,3 +575,53 @@ fn require_live_acceptance() {
         "native acceptance must be invoked explicitly with WAYLAND_SANDBOX_LIVE_WINDOWS=1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Instrument, not a gate.
+//
+// Deliberately `#[ignore]`d and deliberately assertion-free: it MEASURES, and a
+// timing threshold here would either be so loose it proves nothing or so tight
+// it flakes on a busy host. It exists because the Windows sandbox stall was
+// diagnosed wrong twice from arithmetic that merely happened to match, and the
+// only thing that settled it was running this.
+//
+// Recorded on SEANDESKTOP (32 logical cores, NVMe), whole ExecutionIdentity
+// lifecycle through the real entry points, median per op:
+//
+//   BEFORE the profile RPCs were moved out of MutationLock : ~140 ms
+//   AFTER                                                  :  ~68 ms  (idle)
+//                                                            ~103 ms (32 CPU burners)
+//
+// The floor is the AppX profile service itself: the same 24 threads doing ONLY
+// CreateAppContainerProfile + DeleteAppContainerProfile with no lock of ours
+// cost 350 ms total (~15 ms/op), and that part is Windows', not ours.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "measurement instrument; run explicitly with --ignored --nocapture"]
+fn measure_concurrent_lifecycles() {
+    require_live_acceptance();
+    let workspace = tempfile::tempdir().unwrap();
+    fs::write(workspace.path().join("a.txt"), b"x").unwrap();
+    let manifest = SandboxManifest {
+        fs_write_allow: vec![workspace.path().to_path_buf()],
+        ..SandboxManifest::default()
+    };
+    for threads in [1usize, 4, 8, 16, 24] {
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    let mut identity = ExecutionIdentity::start(&manifest).unwrap();
+                    identity.mark_process_exited().unwrap();
+                    identity.cleanup().unwrap();
+                });
+            }
+        });
+        let total_ms = started.elapsed().as_millis();
+        println!(
+            "MEASURE concurrent threads={threads} total_ms={total_ms} per_op_ms={:.1}",
+            total_ms as f64 / threads as f64
+        );
+    }
+}

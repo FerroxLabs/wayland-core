@@ -253,22 +253,42 @@ impl ExecutionIdentity {
     ) -> Result<Self> {
         let intents = canonical_intents(manifest)?;
         let lease_dir = lease_directory()?;
+
+        // Profile allocation runs OUTSIDE the machine-wide mutation lock, and
+        // that placement is the whole of `F-RC-WIN-001`.
+        //
+        // `CreateAppContainerProfile` is an RPC to the AppX profile service and
+        // costs ~14.5ms on a 32-core/NVMe box (measured on SEANDESKTOP:
+        // alloc_us=14223..18491 over five idle rounds). Holding a `Global\`
+        // mutex across it serialised that cost machine-wide, so N concurrent
+        // sandboxed commands cost ~N x 14.5ms of pure queueing before any of
+        // them could start. Together with the ~40ms `DeleteAppContainerProfile`
+        // on the teardown path that put ~60ms of profile-service RPC under one
+        // lock per command, which is what pushed the sandbox probe past its 15s
+        // wall-clock guard under a saturated CI matrix and made the backend
+        // refuse to run at all.
+        //
+        // It needs no cross-process exclusion. Names are unique per
+        // (pid, process-creation-time, counter) — see `profile_name` — so two
+        // processes cannot select the same name, and the ERROR_ALREADY_EXISTS
+        // arm below already covers pid reuse inside one creation time. Nothing
+        // here touches the lease directory or any shared DACL, which are the
+        // two things the lock actually protects.
+        let start = PROFILE_COUNTER.fetch_add(MAX_PROFILE_ATTEMPTS, Ordering::Relaxed);
+        let (profile_name, sid) = unsafe { allocate_unique_profile(start)? };
+        // Moving allocation out of the lock lengthens the window in which a
+        // profile exists with no durable lease naming it, so that window is now
+        // guarded rather than open-coded per return. See [`UnrecordedProfile`].
+        let mut unrecorded = UnrecordedProfile::holding(profile_name.clone(), sid);
+
         let _lock = MutationLock::acquire()?;
         unsafe { recover_dead_leases_locked(&lease_dir)? };
 
-        let start = PROFILE_COUNTER.fetch_add(MAX_PROFILE_ATTEMPTS, Ordering::Relaxed);
-        let (profile_name, sid) = unsafe { allocate_unique_profile(start)? };
         let sid_bytes = unsafe { sid_bytes(sid)? };
         let lease = LeaseFile::new(profile_name.clone(), &sid_bytes, intents)?;
         let lease_path = lease_dir.join(format!("{profile_name}.toml"));
-
-        if let Err(error) = write_new_synced_lease(&lease_path, &lease) {
-            unsafe {
-                let _ = DeleteAppContainerProfile(widen(&profile_name).as_ptr());
-                FreeSid(sid as _);
-            }
-            return Err(error);
-        }
+        write_new_synced_lease(&lease_path, &lease)?;
+        unrecorded.recorded();
 
         if let Err(setup_error) = apply(&lease.intents, sid) {
             let cleanup = unsafe { cleanup_locked(&lease_path, &lease, sid) };
@@ -326,8 +346,30 @@ impl ExecutionIdentity {
                 self.lease.state
             )));
         }
+        // Deliberately TWO lock acquisitions with the profile deletion between
+        // them, rather than one acquisition spanning the lot.
+        //
+        // `DeleteAppContainerProfile` is ~40ms of profile-service RPC; holding
+        // the machine-wide mutex across it made every concurrent sandboxed
+        // command queue behind every other command's teardown.
+        //
+        // The gap is safe because the protocol was already built to be
+        // interruptible at exactly this point. The lease is durably in
+        // `ProfileDeletionPending` before the lock is released, so:
+        //   - a concurrent recovery sweep sees a LIVE owner and skips it
+        //     (`owner_is_live` is checked before any state is acted on); and
+        //   - if this process dies in the gap, recovery finds a dead owner in
+        //     `ProfileDeletionPending` and completes exactly these remaining
+        //     steps — that arm already exists and is what the state is for.
+        let pending = {
+            let _lock = MutationLock::acquire()?;
+            unsafe { revoke_and_mark_pending_locked(&self.lease_path, &self.lease, self.sid)? }
+        };
+
+        unsafe { delete_owned_profile(&pending.profile_name)? };
+
         let _lock = MutationLock::acquire()?;
-        unsafe { cleanup_locked(&self.lease_path, &self.lease, self.sid)? };
+        finalize_cleaned_locked(&self.lease_path, pending)?;
         self.cleaned = true;
         Ok(())
     }
@@ -371,6 +413,60 @@ impl Drop for ExecutionIdentity {
                 FreeSid(self.sid as _);
                 self.sid = ptr::null_mut();
             }
+        }
+    }
+}
+
+/// Deletes a freshly created AppContainer profile unless the lease that records
+/// it reached disk.
+///
+/// The guarded window opens when `CreateAppContainerProfile` returns and closes
+/// when `write_new_synced_lease` succeeds. Inside it the profile exists with NO
+/// durable record, so an early return that failed to delete it would leak a
+/// profile that recovery can never reclaim — recovery works from lease files,
+/// and there is no lease naming this one.
+///
+/// The window was always present; it used to sit between two statements inside
+/// the mutation lock. Moving `allocate_unique_profile` outside that lock widened
+/// it by a lock acquisition, which is why it is now closed by a guard on every
+/// path instead of by a cleanup block on the three paths somebody remembered.
+struct UnrecordedProfile {
+    name: String,
+    sid: *mut core::ffi::c_void,
+    recorded: bool,
+}
+
+impl UnrecordedProfile {
+    fn holding(name: String, sid: *mut core::ffi::c_void) -> Self {
+        Self {
+            name,
+            sid,
+            recorded: false,
+        }
+    }
+
+    /// The durable lease naming this profile is on disk; recovery owns it now.
+    fn recorded(&mut self) {
+        self.recorded = true;
+    }
+}
+
+impl Drop for UnrecordedProfile {
+    fn drop(&mut self) {
+        if self.recorded {
+            return;
+        }
+        unsafe {
+            let hr = DeleteAppContainerProfile(widen(&self.name).as_ptr());
+            if !profile_delete_succeeded(hr) {
+                tracing::error!(
+                    target: "wcore_sandbox",
+                    profile = %self.name,
+                    hresult = format!("{hr:#x}"),
+                    "leaked an AppContainer profile that no lease records"
+                );
+            }
+            FreeSid(self.sid as _);
         }
     }
 }
@@ -577,6 +673,19 @@ unsafe fn cleanup_locked(
     lease: &LeaseFile,
     sid: *mut core::ffi::c_void,
 ) -> Result<()> {
+    let pending = unsafe { revoke_and_mark_pending_locked(lease_path, lease, sid)? };
+    unsafe { delete_owned_profile(&pending.profile_name)? };
+    finalize_cleaned_locked(lease_path, pending)
+}
+
+/// Revoke the granted ACLs and durably record that only profile deletion is
+/// left. MUST run under [`MutationLock`]: it rewrites the lease file and
+/// mutates DACLs that concurrent executions also read-modify-write.
+unsafe fn revoke_and_mark_pending_locked(
+    lease_path: &Path,
+    lease: &LeaseFile,
+    sid: *mut core::ffi::c_void,
+) -> Result<LeaseFile> {
     let intents: Vec<&AclIntent> = lease.intents.iter().collect();
     unsafe { revoke_intents(&intents, sid)? };
 
@@ -588,16 +697,30 @@ unsafe fn cleanup_locked(
     cleanup.state = LeaseState::ProfileDeletionPending;
     cleanup.refresh_digest();
     rewrite_synced_lease(lease_path, &cleanup)?;
+    Ok(cleanup)
+}
 
-    let profile = widen(&lease.profile_name);
+/// Delete the AppContainer profile this execution exclusively owns.
+///
+/// Needs NO lock, for the same reason `allocate_unique_profile` does not: the
+/// name is unique per (pid, process-creation-time, counter), so no other
+/// process can name this profile. It is the single most expensive step in the
+/// whole lifecycle — ~40ms of AppX profile-service RPC, measured on SEANDESKTOP
+/// at cleanup_us=39785..53863 — which is precisely why it must not be holding a
+/// machine-wide mutex while it runs.
+unsafe fn delete_owned_profile(profile_name: &str) -> Result<()> {
+    let profile = widen(profile_name);
     let delete_hr = unsafe { DeleteAppContainerProfile(profile.as_ptr()) };
     if !profile_delete_succeeded(delete_hr) {
         return Err(exec_error(format!(
-            "DeleteAppContainerProfile({}) failed: {delete_hr:#x}",
-            lease.profile_name
+            "DeleteAppContainerProfile({profile_name}) failed: {delete_hr:#x}"
         )));
     }
+    Ok(())
+}
 
+/// Retire the lease once its profile is gone. MUST run under [`MutationLock`].
+fn finalize_cleaned_locked(lease_path: &Path, mut cleanup: LeaseFile) -> Result<()> {
     cleanup.state = LeaseState::Cleaned;
     cleanup.refresh_digest();
     rewrite_synced_lease(lease_path, &cleanup)?;
