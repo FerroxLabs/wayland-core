@@ -278,7 +278,19 @@ pub fn register_mcp_tools(
     // and leave it undiscoverable. Idempotent — callers that already refresh
     // afterwards (wcore-cli's deferred-connect path, bootstrap) simply rebuild
     // an identical catalogue.
-    registry.refresh_tool_search_catalog(defer_cold);
+    //
+    // Guarded on having registered something. `refresh_tool_search_catalog`
+    // INSERTS a ToolSearch tool when the registry lacks one, so calling it
+    // unconditionally made "register zero MCP tools" leave a registry holding
+    // one tool. Harmless in production, where ToolSearch is always already
+    // present and this is a replace — but it is a real behaviour change for a
+    // caller that registers no servers, and it broke
+    // `register_defaults_to_deferred_when_config_omits_field`, which asserts an
+    // empty registry stays empty. Nothing new is discoverable when nothing was
+    // registered, so there is nothing to refresh.
+    if !all_tools.is_empty() {
+        registry.refresh_tool_search_catalog(defer_cold);
+    }
 }
 
 /// Register tools from a single newly-connected MCP server.
