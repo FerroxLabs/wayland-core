@@ -885,8 +885,15 @@ fn a_transient_probe_failure_is_retried_rather_than_refusing_the_command() {
         "two transient failures then success must resolve to AVAILABLE — refusing here \
          is precisely the CI defect"
     );
-    assert_eq!(calls, 3, "it must actually re-attempt, not return the first answer");
-    assert_eq!(slept.len(), 2, "each retry must back off before re-attempting");
+    assert_eq!(
+        calls, 3,
+        "it must actually re-attempt, not return the first answer"
+    );
+    assert_eq!(
+        slept.len(),
+        2,
+        "each retry must back off before re-attempting"
+    );
     assert!(
         slept[1] > slept[0],
         "backoff must grow, so a busy host is not hammered: {slept:?}"
@@ -912,7 +919,10 @@ fn a_persistent_failure_still_refuses_after_the_attempts_are_spent() {
         "a host that genuinely cannot sandbox must still be refused — retry must never \
          become a bypass"
     );
-    assert_eq!(calls, PROBE_ATTEMPTS, "it must spend exactly the budgeted attempts");
+    assert_eq!(
+        calls, PROBE_ATTEMPTS,
+        "it must spend exactly the budgeted attempts"
+    );
     let refusal = compose_unavailable_refusal(Some("CreateProcessAsUserW: 0x5"));
     assert!(refusal.contains("CreateProcessAsUserW: 0x5"));
 }
@@ -939,7 +949,10 @@ fn a_stalled_probe_is_not_retried_because_that_multiplies_the_hang() {
         "a wall-clock stall must be answered once, not re-attempted — retrying a wedged \
          host is the #125 hang multiplied"
     );
-    assert!(slept.is_empty(), "a non-retryable outcome must not sleep at all");
+    assert!(
+        slept.is_empty(),
+        "a non-retryable outcome must not sleep at all"
+    );
 }
 
 /// Drives the REAL production probe and prints whatever this host reports.
@@ -963,7 +976,11 @@ async fn a_failed_probe_records_a_cause_the_operator_can_actually_read() {
         .execute(
             &SandboxManifest::default(),
             SandboxCommand {
-                argv: vec!["cmd.exe".to_string(), "/c".to_string(), "exit 0".to_string()],
+                argv: vec![
+                    "cmd.exe".to_string(),
+                    "/c".to_string(),
+                    "exit 0".to_string(),
+                ],
                 cwd: None,
             },
         )
@@ -976,7 +993,10 @@ async fn a_failed_probe_records_a_cause_the_operator_can_actually_read() {
         Ok(out) => {
             // This host sandboxes fine. Nothing to diagnose; assert only that
             // we did not somehow refuse-and-succeed.
-            println!("OBSERVED: AppContainer executed normally, exit_code={}", out.exit_code);
+            println!(
+                "OBSERVED: AppContainer executed normally, exit_code={}",
+                out.exit_code
+            );
         }
         Err(err) => {
             let text = err.to_string();
