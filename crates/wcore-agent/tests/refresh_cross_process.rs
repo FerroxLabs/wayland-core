@@ -29,6 +29,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use wcore_agent::oauth::{ChatGptTokenManager, OAuthFlow, OAuthStorage, OAuthTokens};
 use wcore_config::credentials::PlaintextCredentialsStore;
 use wiremock::matchers::{method, path};
@@ -50,13 +52,25 @@ fn now_secs() -> u64 {
 /// make the test depend on how long the child took to start.
 fn expired_pair() -> OAuthTokens {
     OAuthTokens {
-        access_token: "expired-access".into(),
+        access_token: jwt_access_token(),
         refresh_token: Some("the-single-use-refresh-token".into()),
         expires_at_unix_secs: Some(now_secs().saturating_sub(3_600)),
         token_type: "Bearer".into(),
         scope: None,
         id_token: None,
     }
+}
+
+/// A 3-segment JWT carrying a ChatGPT account id. `get()` decodes the access
+/// token to extract the account, so a plain opaque string fails with
+/// "not a JWT" — a test-harness defect that reads exactly like a refresh
+/// failure. Signatures are not verified; only claims are read.
+fn jwt_access_token() -> String {
+    let payload = serde_json::json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct-172" }
+    });
+    let seg = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("payload"));
+    format!("hdr.{seg}.sig")
 }
 
 fn storage_at(root: PathBuf) -> OAuthStorage {
@@ -141,7 +155,7 @@ async fn p1_two_processes_issue_exactly_one_refresh_post() {
     Mock::given(method("POST"))
         .and(path("/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "access_token": "rotated-access",
+            "access_token": jwt_access_token(),
             "refresh_token": "rotated-refresh",
             "expires_in": 3600,
             "token_type": "Bearer",
