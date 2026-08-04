@@ -257,15 +257,32 @@ mod tests {
         assert_eq!(chatgpt, lock_path(dir, "chatgpt"), "must be deterministic");
     }
 
+    /// The regression this guards: reusing the migration lock's 10 s wait
+    /// against a 20 s POST timeout, which fires the contention path on a merely
+    /// slow network.
+    ///
+    /// The ORDERING of the constants is asserted at compile time above
+    /// (`const _: () = assert!(...)`), which is strictly stronger than a
+    /// runtime check and is what clippy's `assertions_on_constants` was
+    /// pointing at. What a runtime test can add, and what this now does, is
+    /// prove the constants actually reach the `LockPolicy` that gets used —
+    /// the derivation being right is worth nothing if `policy()` hands the
+    /// lock something else.
     #[test]
-    fn wait_ceiling_out_waits_the_maximum_hold() {
-        // The regression this guards: reusing the migration lock's 10 s wait
-        // against a 20 s POST timeout, which fires the contention path on a
-        // merely slow network.
+    fn policy_carries_the_derived_timings_and_a_heartbeat() {
         let policy = policy();
-        assert!(WAIT_CEILING_SECS > POST_TIMEOUT_SECS);
-        assert!(WAIT_CEILING_SECS > MAX_HOLD_SECS);
-        let _ = policy;
+        let expected = LockPolicy::new(
+            Duration::from_secs(STALE_AFTER_SECS),
+            Duration::from_secs(WAIT_CEILING_SECS),
+        )
+        .with_heartbeat(Duration::from_secs(HEARTBEAT_SECS));
+        assert_eq!(
+            format!("{policy:?}"),
+            format!("{expected:?}"),
+            "policy() must hand the lock the DERIVED timings; a hard-coded or \
+             stale set here silently undoes the derivation the constants above \
+             are checked for"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
