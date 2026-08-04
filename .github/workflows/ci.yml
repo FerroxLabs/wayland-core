@@ -647,14 +647,31 @@ jobs:
   ci-windows-hosted:
     name: CI (windows-latest, hosted)
     runs-on: windows-latest
-    # Byte-compatible with the `ci` job's `if:` minus the two Darwin tokens:
-    # Windows work is requested by `[ci-windows]`, and `[ci-darwin]` must not
-    # drag a Windows leg along with it.
+    # OPT-IN ONLY as of 2026-08-04. This used to mirror the `ci` job's `if:`,
+    # so it ran on every PR, every push to main and every push to the
+    # integration branch — i.e. a SECOND full Windows compile+test on top of
+    # the self-hosted one, on every commit.
+    #
+    # It was added under #164 on the premise that self-hosted Windows was down.
+    # That premise is false and was never re-checked. Measured 2026-08-04
+    # against the live API: `ferrox-win-msvc` and `SEANDESKTOP` are both online
+    # and both serve jobs, load-balancing across runs.
+    #
+    # The duplication is not symmetric. Same run, same commit:
+    #   CI (Array)                  self-hosted   32.1 min   FINISHED
+    #   CI (windows-latest, hosted) GHA pool      39+ min    still running
+    # The self-hosted box keeps `target/` warm between runs; the hosted image
+    # is cold every time. The hosted leg was the slowest Windows path AND the
+    # redundant one, and is a first-order cause of 91-146 minute CI runs.
+    #
+    # Coverage is unaffected: `CI (Array)` is a REQUIRED status check on `main`
+    # (branch protection lists it; this job is deliberately NOT listed), so
+    # Windows remains gated by the runner that is actually fast. If both
+    # self-hosted boxes ever die, Windows work QUEUES rather than passing
+    # vacuously — visible as a pending required check, never a false green —
+    # and this leg is one `[ci-windows]` commit tag away from covering it.
     if: >-
-      github.event_name == 'pull_request'
-      || github.ref_name == 'main'
-      || github.ref_name == 'plan/f20-unified-audit-repair'
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
