@@ -1,6 +1,6 @@
 # HANDOFF — wayland-core, 2026-08-04 — MCP closed, CI made honest
 
-Integration `plan/f20-unified-audit-repair` @ **`1b5aaa66`**. PR #257 → main.
+Integration `plan/f20-unified-audit-repair` @ **`2e2fb8d3`** (or later). PR #257 → main.
 Workspace version **0.12.26**. Nothing tagged. Tagging is Sean's.
 
 ---
@@ -71,10 +71,12 @@ All three are fixed; each was a measurement I should have taken sooner.
    > Which box served the job is still a real variable, but it is not the
    > AppContainer difference I claimed, because there is no such difference.
 
-> **This is the explanation for the "failure set churns between runs" that was
-> being written off as flakiness.** It was never flaky. It was which box served
-> the job. Same tree, two verdicts. Anyone re-opening a "flaky Windows test"
-> should check the runner first.
+**On the "failure set churns between runs", stated carefully.** Which box
+served a job IS a real variable and worth checking before calling a Windows test
+flaky — the two runners are not guaranteed equivalent. But the specific
+AppContainer explanation above is RETRACTED: both runners fail that probe, so it
+cannot be what differed. The churn is still not fully explained. Do not close it
+as "flaky" and do not close it as "runner difference" either.
 
 **#138 and #164 were both STALE and actively misleading** — they were cited
 twice as reasons to route Windows to the hosted pool. Corrected in the tracker.
