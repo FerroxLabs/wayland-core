@@ -275,3 +275,101 @@ that family to recur.
    regression that did not exist.
 6. **Kill every mutant.** Two proofs this session (§4.10 cancellation, and the
    cross-process POST count) were only trustworthy after being watched to fail.
+
+---
+
+## TVCONTROL LIVE VERDICT — 2026-08-04, driven on the Mac against real TradingView
+
+Everything below was **run**, not read.
+
+### 1. The masterclass blocker is on npm, not in the code
+
+`npm dist-tags` for `@ferroxlabs/tvcontrol` → **`latest = 2.2.0`**, published
+2026-07-16. That version answers `tools/list` with
+`-32603 "Cannot read properties of undefined (reading '_zod')"`, so **every MCP
+client — Claude Code, Codex, Cursor, Wayland — sees ZERO tools**. The CLI is
+unaffected, which is why it went unnoticed.
+
+`d0cacca` (2.2.1) fixes it (`z.record()` one-arg form is Zod-3-valid,
+Zod-4-invalid; zod was imported in 17 files and declared in none, so the SDK's
+range picked the major). **2.2.1 is committed and pushed but NOT published.**
+
+> **SEAN ACTION, credential-gated, highest priority for the masterclass:**
+> publish 2.2.1 to npm. Until then `npx @ferroxlabs/tvcontrol` hands every
+> paying customer a server with no tools.
+
+Verified locally over real stdio (initialize + tools/list, bare env):
+**101 tools, `strategy_sweep` present, serverInfo 2.2.1.**
+
+### 2. tvcontrol against live TradingView — PASS
+
+TradingView Desktop launched via `scripts/launch_tv_debug_mac.sh 9222`;
+CDP answered (`TradingView/3.3.0 … Electron/38.2.2`). `tv status`:
+
+```
+healthy: true, cdp_connected: true, chart_symbol: "SPCFD:SPX",
+datafeed.state: "connected", compatibility.compatible: true
+```
+
+The tvcontrol side is **live-proven**. Nothing is wrong with it.
+
+### 3. Wayland Core CONNECTS but cannot CALL — the real integration blocker
+
+Binary: RC `wayland-core 0.12.25`, the `wayland-core-aarch64-apple-darwin` CI
+artifact from lane commit `9007c2c6` — downloaded and run on the Mac, **no cargo
+on the Mac**. Isolated `WAYLAND_HOME`; Sean's real config never touched.
+
+Connection works:
+
+```
+[mcp] Connected to 'tvcontrol': 101 tools, resources=false
+```
+
+**Not one of the 101 tools can be invoked.** Every attempt ends the same way —
+the model calls `ToolSearch`, gets the schema back, and the tool still is not in
+`tools[]`, so it searches again until Core's own guard kills the run:
+
+```
+error: Run stopped: the `ToolSearch` tool was called with the same arguments and
+produced the same result 10 times in a row — this is a no-progress loop.
+```
+
+Asked to enumerate its callable tools, the model returns only
+`functions.{Bash,Edit,Forge,Glob,Grep,Read,ToolSearch,Write}` — exactly
+`DeferColdConfig::default_hot_allowlist()`. Everything else, including all 101
+tvcontrol tools, is catalog text folded into ToolSearch's description
+(`wcore-config/src/tools.rs`, `enabled: true, catalog: true`).
+
+The design intends `ToolSearch` → `record_hydrated_tools` →
+`hydrated_tool_names` → force-admit into `tools[]` next turn
+(`engine.rs:12266`, `15327`, `15448`). The doc comment claims the hydrated tool
+is "genuinely callable". **Observed behaviour contradicts it**: the identical
+ToolSearch result recurs 10 turns running, and `tool_search.rs:87` skips
+non-deferred tools — so if hydration had landed, the second search would have
+returned "No deferred tools matching". It returns the same hit every time.
+
+Three config knobs tried, none made `tv_health_check` callable:
+
+| Knob | Result |
+|---|---|
+| `[mcp.servers.tvcontrol] deferred = false` | no observable change |
+| `[mcp.curation] kind = "off"` | exposure changed, still uncallable |
+| `[builtin_tools.defer_cold] enabled = false` | no observable change |
+
+**Honest limits on this finding.** Two of those three knobs produced *no*
+observable change, and I did not confirm whether they were honoured at all —
+"config ignored" and "hydration broken" are still both live explanations, and I
+did not separate them. Only `openai` / `gpt-5` was exercised: the macOS keyring
+is not readable from a non-interactive shell, so the Anthropic path — the
+default in Sean's config, and the one with no 128-tool provider cap — is
+**untested**. It may well behave differently.
+
+### 4. Next actions
+
+1. **Sean:** publish tvcontrol 2.2.1 to npm.
+2. **Core:** file the MCP-uncallable defect. A server can connect, advertise 101
+   tools, and deliver none — the product reports capability it does not have.
+   Masterclass blocker.
+3. Re-run this on Anthropic before concluding it is provider-independent.
+4. Windows leg (`npx`/PATHEXT) still undriven; that is where most masterclass
+   customers will be.
