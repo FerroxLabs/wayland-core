@@ -807,3 +807,110 @@ fn the_containment_claim_is_withdrawn_only_by_a_settled_negative_verdict() {
         "a settled-unavailable backend must withdraw the containment claim"
     );
 }
+
+// ---------- the refusal must say WHY ----------
+
+/// The refusal has to carry the probe's own cause, not point at a log.
+///
+/// It used to read "the cause was logged by `probe_appcontainer_available`".
+/// That log is a `tracing::error!`, and CI installs no subscriber at that
+/// level, so the sentence was an assertion that evidence existed followed by a
+/// refusal to produce it. Both self-hosted Windows runners refuse to sandbox
+/// and this is why nobody could say what either of them actually hit.
+///
+/// Pure in the cause, so both arms are reachable from a host whose AppContainer
+/// works fine.
+#[test]
+fn the_refusal_names_the_failing_call_instead_of_pointing_at_a_log() {
+    let with_cause = compose_unavailable_refusal(Some("CreateProcessAsUserW: 0x5"));
+    assert!(
+        with_cause.contains("CreateProcessAsUserW: 0x5"),
+        "the refusal dropped the one string that identifies the failure: {with_cause}"
+    );
+    assert!(
+        with_cause.contains("sandbox UNAVAILABLE and unsandboxed execution is not permitted"),
+        "the fail-closed sentence other surfaces assert on must survive: {with_cause}"
+    );
+    assert!(
+        !with_cause.contains("the cause was logged"),
+        "the refusal still defers to a log the reader cannot see: {with_cause}"
+    );
+
+    // The no-cause arm must read as a bug in our bookkeeping, NOT as a fact
+    // about the operator's machine — the distinction decides whether they go
+    // change Windows policy or file against us.
+    let without = compose_unavailable_refusal(None);
+    assert!(
+        without.contains("No cause was recorded"),
+        "the unrecorded-cause arm must say so plainly: {without}"
+    );
+    assert!(
+        without.contains("defect in the probe"),
+        "an unrecorded cause must be attributed to us, not to the host: {without}"
+    );
+    assert_ne!(
+        with_cause, without,
+        "the two arms must be distinguishable, otherwise the cause is decorative"
+    );
+}
+
+/// Drives the REAL production probe and prints whatever this host reports.
+///
+/// This is the diagnostic that closes the open Windows question. It is not a
+/// pass/fail gate on the sandbox working — a host that cannot sandbox is
+/// allowed, and this test still passes there. What it does NOT allow is a
+/// failure with no recorded cause, which is the state that left both runners
+/// undiagnosable.
+///
+/// The `OBSERVED:` line follows the convention above so the cause lands in the
+/// CI log of every Windows leg, on every runner, without anyone attaching a
+/// debugger or installing a tracing subscriber.
+#[tokio::test]
+async fn a_failed_probe_records_a_cause_the_operator_can_actually_read() {
+    // Drive the PRODUCTION path. `execute` runs the guarded probe through
+    // `spawn_blocking` itself, so this is what an operator's first command does
+    // — not a hand-rolled probe call that could diverge from it.
+    let backend = AppContainerBackend::new();
+    let outcome = backend
+        .execute(
+            &SandboxManifest::default(),
+            SandboxCommand {
+                argv: vec!["cmd.exe".to_string(), "/c".to_string(), "exit 0".to_string()],
+                cwd: None,
+            },
+        )
+        .await;
+
+    let available = settled_verdict();
+    println!("OBSERVED: AppContainer settled verdict on this host: {available:?}");
+
+    match outcome {
+        Ok(out) => {
+            // This host sandboxes fine. Nothing to diagnose; assert only that
+            // we did not somehow refuse-and-succeed.
+            println!("OBSERVED: AppContainer executed normally, exit_code={}", out.exit_code);
+        }
+        Err(err) => {
+            let text = err.to_string();
+            println!("OBSERVED: AppContainer refusal text: {text}");
+
+            // Only the availability refusal carries a probe cause; a different
+            // execution error (bad path, denied cwd) is not this contract.
+            if text.contains("sandbox UNAVAILABLE") {
+                assert!(
+                    !text.contains("No cause was recorded"),
+                    "the probe failed but recorded no cause — exactly the undiagnosable \
+                     state this change exists to remove: {text}"
+                );
+                assert!(
+                    text.contains("Cause, verbatim from the probe:"),
+                    "a failed probe must hand the operator its cause: {text}"
+                );
+                assert!(
+                    !text.contains("the cause was logged"),
+                    "the refusal still defers to a log CI never emits: {text}"
+                );
+            }
+        }
+    }
+}

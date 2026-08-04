@@ -166,19 +166,78 @@ fn containment_withdrawn() -> bool {
     !containment_claim(settled_verdict())
 }
 
+/// Why the most recent AppContainer probe failed, verbatim, for the operator.
+///
+/// The probe's failure detail used to exist ONLY as a `tracing::error!`, and
+/// the refusal told the reader "the cause was logged". Under CI — and under
+/// any host that does not install a subscriber at that level — no such line is
+/// ever emitted, so the product asserted a cause existed and then declined to
+/// show it. Both Windows runners refuse to sandbox and nobody could say why.
+///
+/// This is the diagnosis path, not decoration: the recorded string is the
+/// failing Win32 call and its status code (`CreateProcessAsUserW: 0x…`), which
+/// is what distinguishes a policy/environment refusal from a product defect.
+/// The tracing calls are kept — this is additive, for readers who DO have a
+/// subscriber.
+fn last_probe_failure() -> &'static Mutex<Option<String>> {
+    static LAST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// Record why a probe failed, or clear the record on success.
+///
+/// Cleared on success so a host that recovers (the negative TTL expires and the
+/// re-probe passes) cannot keep quoting a stale cause at the operator.
+pub(super) fn record_probe_outcome(failure: Option<String>) {
+    if let Ok(mut slot) = last_probe_failure().lock() {
+        *slot = failure;
+    }
+}
+
+/// Compose the refusal text from the recorded cause.
+///
+/// Pure, and separated from [`unavailable_refusal`] so both arms — cause known
+/// and cause genuinely unrecorded — are assertable without needing a host whose
+/// AppContainer is broken.
+pub(super) fn compose_unavailable_refusal(cause: Option<&str>) -> String {
+    let mut s = String::from(
+        "sandbox UNAVAILABLE and unsandboxed execution is not permitted — \
+         refusing to run with host permissions. The AppContainer real-spawn \
+         probe failed on this host. ",
+    );
+    match cause {
+        Some(cause) => {
+            s.push_str("Cause, verbatim from the probe: ");
+            s.push_str(cause);
+            s.push_str(
+                ". A status code on a named Win32 call is the thing to search \
+                 for — it distinguishes host policy (AppContainer disabled, \
+                 profile-service RPC refused, the service account cannot create \
+                 a profile) from a defect in this backend. ",
+            );
+        }
+        None => {
+            s.push_str(
+                "No cause was recorded, which means the refusal was reached \
+                 without a probe result — report this, it is a defect in the \
+                 probe's own bookkeeping and not a fact about the host. ",
+            );
+        }
+    }
+    s.push_str("Set WAYLAND_ALLOW_NO_SANDBOX=1 only to accept running with NO isolation.");
+    s
+}
+
 /// The refusal a deferred-selection backend returns when its probe has settled
 /// unavailable. Deliberately the same sentence `FailClosedBackend` uses, so
 /// deferring selection does not change what the operator is told or what they
 /// are told to do about it.
 fn unavailable_refusal() -> SandboxError {
-    SandboxError::ExecFailed(
-        "sandbox UNAVAILABLE and unsandboxed execution is not permitted — \
-         refusing to run with host permissions. The AppContainer real-spawn \
-         probe failed on this host; the cause was logged by \
-         `probe_appcontainer_available` at the first execution. Set \
-         WAYLAND_ALLOW_NO_SANDBOX=1 only to accept running with NO isolation."
-            .to_owned(),
-    )
+    let cause = last_probe_failure()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
+    SandboxError::ExecFailed(compose_unavailable_refusal(cause.as_deref()))
 }
 
 #[async_trait]
@@ -429,11 +488,19 @@ pub(super) fn probe_appcontainer_available() -> bool {
             target: "wcore_sandbox",
             "could not spawn AppContainer probe thread; sandbox disabled."
         );
+        record_probe_outcome(Some(
+            "could not spawn the `appcontainer-probe` thread at all (OS refused \
+             thread creation); the AppContainer pipeline was never reached"
+                .to_owned(),
+        ));
         return false;
     }
 
     match rx.recv_timeout(PROBE_WALL_CLOCK) {
-        Ok(Ok(out)) if out.exit_code == 0 => true,
+        Ok(Ok(out)) if out.exit_code == 0 => {
+            record_probe_outcome(None);
+            true
+        }
         Ok(Ok(out)) => {
             tracing::error!(
                 target: "wcore_sandbox",
@@ -441,9 +508,16 @@ pub(super) fn probe_appcontainer_available() -> bool {
                 "AppContainer real-spawn probe completed but exit code non-zero; \
                  sandbox disabled. WAYLAND_SANDBOX_LIVE_WINDOWS spawn may also fail."
             );
+            record_probe_outcome(Some(format!(
+                "the probe spawned successfully but `cmd.exe /c exit 0` returned \
+                 exit code {} instead of 0 — the sandbox pipeline works and the \
+                 child itself misbehaved",
+                out.exit_code
+            )));
             false
         }
         Ok(Err(e)) => {
+            record_probe_outcome(Some(format!("{e}")));
             tracing::error!(
                 target: "wcore_sandbox",
                 error = %e,
@@ -461,6 +535,13 @@ pub(super) fn probe_appcontainer_available() -> bool {
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             control.cancel();
+            record_probe_outcome(Some(format!(
+                "the probe exceeded its {}s hard wall-clock guard — a Win32 setup \
+                 call (CreateAppContainerProfile / CreateProcessAsUserW) stalled \
+                 rather than returning an error, most often an AV image scan or a \
+                 slow profile-service RPC",
+                PROBE_WALL_CLOCK.as_secs()
+            )));
             tracing::error!(
                 target: "wcore_sandbox",
                 guard_secs = PROBE_WALL_CLOCK.as_secs(),
@@ -478,6 +559,12 @@ pub(super) fn probe_appcontainer_available() -> bool {
                 target: "wcore_sandbox",
                 "AppContainer probe thread ended without a result; sandbox disabled."
             );
+            record_probe_outcome(Some(
+                "the `appcontainer-probe` thread ended without sending a result — \
+                 it panicked inside the Win32 FFI path; the panic message is on \
+                 stderr, not here"
+                    .to_owned(),
+            ));
             false
         }
     }
