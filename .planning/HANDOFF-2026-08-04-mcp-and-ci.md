@@ -49,10 +49,27 @@ All three are fixed; each was a measurement I should have taken sooner.
    premise that self-hosted Windows was down. Now **opt-in via `[ci-windows]`**
    (`7357db3e`). Measured same-run: self-hosted **32.1 min DONE** vs hosted
    **39+ min still running**.
-3. **The two Windows runners were label-identical but NOT interchangeable.**
-   `ferrox-win-msvc` probes AppContainer available; **SEANDESKTOP's real-spawn
-   probe FAILS**. Jobs landed on whichever was free. Pinned to a new
-   `appcontainer` label (`1b5aaa66`).
+3. **The two Windows runners were label-identical.** Pinned to a new
+   `appcontainer` label (`1b5aaa66`) on the belief that `ferrox-win-msvc` could
+   sandbox and `SEANDESKTOP` could not.
+
+   > ### ⚠ THAT PIN IS WRONG. UNDO IT FIRST. ⚠
+   >
+   > **`ferrox-win-msvc` fails the AppContainer probe too — 7 occurrences of
+   > the same `sandbox UNAVAILABLE` refusal in its own run (30887202242).**
+   >
+   > The "probed available" lines I based the pin on came from
+   > `CI (windows-latest, hosted)`, NOT from the Array leg. I attributed a
+   > hosted-runner result to Sean's box and never checked it. The pin therefore
+   > sorts jobs onto one runner, **fixes nothing**, and halves the Windows pool.
+   >
+   > Both runners also run as the SAME account — `NT AUTHORITY\NetworkService`
+   > — so the earlier "one sick machine" story is dead. This is common-mode:
+   > Windows build, policy, or that service account, or a real product defect.
+   >
+   > It also means the "churn between runs" explanation is only PARTLY right.
+   > Which box served the job is still a real variable, but it is not the
+   > AppContainer difference I claimed, because there is no such difference.
 
 > **This is the explanation for the "failure set churns between runs" that was
 > being written off as flakiness.** It was never flaky. It was which box served
@@ -64,11 +81,50 @@ twice as reasons to route Windows to the hosted pool. Corrected in the tracker.
 
 ---
 
+## 2b. FIRST TWO ACTIONS NEXT SESSION
+
+Agreed with Sean 2026-08-04, deferred to the next session on purpose.
+
+**1. Revert the `appcontainer` runner pin.** Undo `1b5aaa66` in `ci.yml` (drop
+`"appcontainer"` from the three matrix label sets) and remove the label from
+runner id **22** (`ferrox-win-msvc`):
+
+```
+gh api -X DELETE repos/FerroxLabs/wayland-core/actions/runners/22/labels/appcontainer
+```
+
+It rests on a false premise and costs a runner. Do this before anything else so
+nobody inherits it as intentional.
+
+**2. Make the AppContainer probe self-reporting.** This is the actual blocker to
+diagnosing Windows, and it is a product defect in its own right:
+
+> the refusal says *"the cause was logged by `probe_appcontainer_available` at
+> the first execution"* — **and that log never reaches CI output.** The product
+> asserts a cause exists, then does not show it. Nobody can act on it.
+
+`probe_appcontainer_available` is at
+`crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs:391`.
+It does a REAL spawn: `CreateAppContainerProfile` (profile-service RPC) then
+`CreateProcessAsUserW`. Carry the Win32 error from whichever call failed into
+the refusal MESSAGE rather than a `tracing::error!` the harness swallows.
+
+Only after that does anyone know why both Windows boxes refuse to sandbox — and
+it may well be one environment setting rather than code. **Do not send Sean to
+change service accounts or policy on a hunch before the probe says what failed.**
+
+*Note for whoever picks this up:* this is the fourth time in one session that a
+conclusion drawn from a proxy — a stale ticket, a log line from the wrong job, a
+crate I did not test — turned out wrong when finally measured. Measure the
+specific thing. It is faster than being wrong twice.
+
+---
+
 ## 3. Open before a tag
 
 | item | state |
 |---|---|
-| `SEANDESKTOP` AppContainer probe fails | **host config, Sean's box.** Off the critical path now, but the Windows pool is ONE runner until it's fixed or given the `appcontainer` label |
+| AppContainer probe fails on **BOTH** Windows runners | common-mode, cause UNKNOWN. Blocked on making the probe self-reporting — see §2b |
 | `mcp_assistant_scoping_e2e` (Windows) | swarm finding, **unlanded**, self-declared partial |
 | `exec-backend conformance_matrix` | swarm root cause **REFUTED** by the adversarial verifier; do not build on it |
 | `RC-READINESS.md` re-grade | drafted by swarm, **not applied**; five of seven verified closed, two stale in our favour |
